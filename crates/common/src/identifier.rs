@@ -43,3 +43,6 @@ macro_rules! uuid_identifier {
 uuid_identifier!(CatalogItemId);
 uuid_identifier!(MediaSourceId);
 uuid_identifier!(PresentationKey);
+uuid_identifier!(StorageObjectRecordId);
+uuid_identifier!(StorageRootId);
+uuid_identifier!(UserId);

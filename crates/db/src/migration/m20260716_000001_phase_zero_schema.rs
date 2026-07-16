@@ -1,8 +1,7 @@
 use sea_orm_migration::{
     prelude::{
-        Alias, ColumnDef, DbErr, DeriveMigrationName, ForeignKey, ForeignKeyAction,
-        ForeignKeyCreateStatement, Index, IndexCreateStatement, MigrationTrait, SchemaManager,
-        Table, TableCreateStatement,
+        Alias, ColumnDef, DbErr, DeriveMigrationName, ForeignKey, ForeignKeyCreateStatement, Index,
+        IndexCreateStatement, MigrationTrait, SchemaManager, Table, TableCreateStatement,
     },
     schema::{
         big_integer, big_integer_null, boolean, integer, integer_null, json, string,
@@ -120,7 +119,6 @@ fn fk(
         .name(name)
         .from(Alias::new(from_table), Alias::new(from_column))
         .to(Alias::new(to_table), Alias::new("id"))
-        .on_delete(ForeignKeyAction::Cascade)
         .to_owned()
 }
 
@@ -575,10 +573,6 @@ fn work_jobs() -> TableCreateStatement {
             "lease_expires_at",
         )))
         .col(text_null(Alias::new("last_error")))
-        .index(&mut unique(
-            "uq_work_job_revision",
-            &["scope_id", "task_kind", "expected_revision", "state"],
-        ))
         .to_owned()
 }
 

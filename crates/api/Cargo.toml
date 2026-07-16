@@ -9,10 +9,10 @@ rust-version.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tjxy-common = { path = "../common" }
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true

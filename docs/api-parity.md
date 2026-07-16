@@ -4,7 +4,8 @@
 > 契约：钉扎 Jellyfin OpenAPI 12.0.0
 > 图例：`✅` 计划内 · `⚠️` 最小/待客户端验证 · `⬜` 未实现 · `❌` 非目标
 
-当前实测级别：Phase 0 契约与 FilesystemBackend 基础；尚无可运行服务端。
+当前实测级别：Phase 0 schema/事务契约、FilesystemBackend 基础，以及可运行的
+System Info/Ping/health Axum 骨架；认证、catalog 查询和播放 HTTP 链路尚未实现。
 门禁客户端：Findroid；Swiftfin 辅测。
 
 ---
@@ -13,7 +14,7 @@
 
 | # | 行为 | 路由 | v2.6 语义 | 状态 |
 |---|------|------|-----------|------|
-| 1 | 发现 | `GET /System/Info/Public` | 诚实 ProductName/Version | ⬜ |
+| 1 | 发现 | `GET /System/Info/Public` | 诚实 ProductName/Version | ⚠️ 最小 DTO 已实现，待真实客户端验证 |
 | 2 | 登录 | `POST /Users/AuthenticateByName` | canonical MediaBrowser header + aliases | ⬜ |
 | 3 | 当前用户 | `GET /Users/Me` | SQL SoT | ⬜ |
 | 4 | 能力 | `POST /Sessions/Capabilities/Full` | DeviceProfile 参与 Direct Play 判断 | ⬜ |
@@ -34,7 +35,7 @@
 
 | 能力 | 计划 | 状态 |
 |------|------|------|
-| System Info / Public / Ping / Endpoint | ✅ | ⬜ |
+| System Info / Public / Ping / Endpoint | ✅ | ⚠️ Public、Ping 与 health 已实现；Endpoint 尚未实现 |
 | Branding | ✅ | ⬜ |
 | Startup Wizard | ✅ 最小 | ⬜ |
 | AuthenticateByName | ✅ | ⬜ |
@@ -61,7 +62,7 @@
 | Storage presence | Present / TemporarilyUnavailable / ConfirmedAbsent | ⬜ |
 | Google 初始对象同步 | **Strict Lazy**：标题层 inventory；访问时 scoped sync；禁止默认全树 Inventory First | ⬜ |
 | Scoped Storage Sync | Strict Lazy 先物化 SQL 子树，Media Scan 不直连 backend | ⬜ |
-| Storage change reconcile | 列级 outbox、dedupe/lease/重放；连续 reconciled sync watermark | ⬜ |
+| Storage change reconcile | 列级 outbox、dedupe/lease/重放；连续 reconciled sync watermark | ⚠️ lease fencing、退避和连续水位已实现；catalog projector 尚未实现 |
 | Filesystem events/additions | 稳定 file ID 配对 move；弱路径只生成 relink 候选 | ⬜ |
 | Full / Lazy / Hybrid / Manual | effective policy 写 SQL，Admin/调度器/重启后一致 | ⬜ |
 | Storage Tasks | Inventory/Changes/Delta/Auth/Validate | ⬜ |

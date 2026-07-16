@@ -2,4 +2,6 @@
 
 mod identifier;
 
-pub use identifier::{CatalogItemId, MediaSourceId, PresentationKey};
+pub use identifier::{
+    CatalogItemId, MediaSourceId, PresentationKey, StorageObjectRecordId, StorageRootId, UserId,
+};
