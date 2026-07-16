@@ -5,7 +5,9 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, UserId, Username};
-use tjxy_db::{AuthRepository, BrowseParent, CatalogPageRequest, CatalogQueryRepository};
+use tjxy_db::{
+    AuthRepository, BrowseParent, CatalogItemType, CatalogPageRequest, CatalogQueryRepository,
+};
 use tjxy_db::{UserDataPatch, UserDataRepository};
 use uuid::Uuid;
 
@@ -174,7 +176,10 @@ async fn user_views_are_enabled_and_sorted_by_portable_key() {
         .unwrap();
 
     assert_eq!(
-        views.iter().map(|view| view.name()).collect::<Vec<_>>(),
+        views
+            .iter()
+            .map(tjxy_db::LibraryViewRecord::name)
+            .collect::<Vec<_>>(),
         ["Alpha", "Ｚeta"]
     );
     assert_eq!(views[0].collection_type(), "movies");
@@ -372,6 +377,70 @@ async fn user_data_is_scoped_to_the_requesting_user_and_defaults_when_absent() {
     assert!(bob_item.is_played());
     assert_eq!(bob_item.play_count(), 3);
     assert_eq!(bob_item.playback_position_ticks(), 42_000);
+}
+
+#[tokio::test]
+async fn parent_resolution_only_returns_visible_enabled_catalog_roots() {
+    let database = database().await;
+    let enabled_library = seed_library(&database, "Movies", "movies", true).await;
+    let disabled_library = seed_library(&database, "Disabled", "movies", false).await;
+    let visible_item = seed_item(&database, "Visible", "Series", None, true, "Matched").await;
+    let hidden_item = seed_item(&database, "Hidden", "Series", None, false, "Matched").await;
+    add_to_library(&database, enabled_library, visible_item).await;
+    add_to_library(&database, enabled_library, hidden_item).await;
+    let repository = CatalogQueryRepository::new(&database);
+
+    assert_eq!(
+        repository.resolve_parent(enabled_library).await.unwrap(),
+        Some(BrowseParent::Library(enabled_library))
+    );
+    assert_eq!(
+        repository
+            .resolve_parent(visible_item.as_uuid())
+            .await
+            .unwrap(),
+        Some(BrowseParent::Item(visible_item))
+    );
+    assert_eq!(
+        repository.resolve_parent(disabled_library).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .resolve_parent(hidden_item.as_uuid())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repository.resolve_parent(Uuid::new_v4()).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn item_type_filter_is_applied_before_count_and_pagination() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Mixed", "folders", true).await;
+    let movie = seed_item(&database, "Arrival", "Movie", None, true, "Matched").await;
+    let series = seed_item(&database, "Dark", "Series", None, true, "Matched").await;
+    add_to_library(&database, library, movie).await;
+    add_to_library(&database, library, series).await;
+
+    let page = CatalogQueryRepository::new(&database)
+        .items(
+            user_id,
+            BrowseParent::Library(library),
+            CatalogPageRequest::new(0, 20)
+                .unwrap()
+                .with_item_types(vec![CatalogItemType::Movie]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.total_record_count(), 1);
+    assert_eq!(page.items()[0].name(), "Arrival");
 }
 
 #[test]

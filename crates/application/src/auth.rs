@@ -10,7 +10,7 @@ use thiserror::Error;
 use tjxy_common::Username;
 use tjxy_db::{
     AuthRepository, AuthRepositoryError, AuthUser, AuthenticatedPrincipal, CredentialSnapshot,
-    SessionDraft,
+    SessionCapabilitiesDraft, SessionDraft,
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -36,6 +36,17 @@ pub struct ClientIdentity {
     device_name: String,
     device_id: String,
     client_version: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionCapabilities {
+    pub playable_media_types: Vec<String>,
+    pub supported_commands: Vec<String>,
+    pub supports_media_control: bool,
+    pub supports_persistent_identifier: bool,
+    pub device_profile: Option<serde_json::Value>,
+    pub app_store_url: Option<String>,
+    pub icon_url: Option<String>,
 }
 
 impl ClientIdentity {
@@ -337,6 +348,42 @@ where
             return Err(AuthError::Forbidden);
         }
         Ok(principal)
+    }
+
+    /// Persists capabilities for the authenticated session only.
+    ///
+    /// An explicit session id is treated as an assertion and cannot select a
+    /// different session, including another session owned by the same user.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when persistence fails. `Ok(false)` means the
+    /// requested session was not the authenticated session.
+    pub async fn update_session_capabilities(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        requested_session: Option<Uuid>,
+        capabilities: SessionCapabilities,
+    ) -> Result<bool, AuthError> {
+        if requested_session.is_some_and(|session| session != principal.session_id()) {
+            return Ok(false);
+        }
+        AuthRepository::new(&self.database)
+            .update_session_capabilities(
+                principal.user().id(),
+                principal.session_id(),
+                SessionCapabilitiesDraft {
+                    playable_media_types: capabilities.playable_media_types,
+                    supported_commands: capabilities.supported_commands,
+                    supports_media_control: capabilities.supports_media_control,
+                    supports_persistent_identifier: capabilities.supports_persistent_identifier,
+                    device_profile: capabilities.device_profile,
+                    app_store_url: capabilities.app_store_url,
+                    icon_url: capabilities.icon_url,
+                },
+            )
+            .await
+            .map_err(Into::into)
     }
 
     /// Reports whether startup has at least one configured local user.

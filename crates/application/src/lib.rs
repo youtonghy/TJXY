@@ -5,7 +5,7 @@ mod catalog;
 
 pub use auth::{
     AuthClock, AuthError, AuthService, ClientIdentity, IssuedAuthentication, SecretSessionToken,
-    SystemClock,
+    SessionCapabilities, SystemClock,
 };
 pub use catalog::{CatalogQueryService, CatalogServiceError};
-pub use tjxy_db::AuthenticatedPrincipal;
+pub use tjxy_db::{AuthenticatedPrincipal, CatalogItemType, CatalogPageRequest};

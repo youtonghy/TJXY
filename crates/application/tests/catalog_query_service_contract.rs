@@ -92,3 +92,21 @@ async fn omitted_or_matching_user_reads_the_principals_catalog() {
     assert_eq!(omitted.len(), 1);
     assert_eq!(omitted[0].name(), "Movies");
 }
+
+#[tokio::test]
+async fn unknown_parent_is_distinct_from_a_known_empty_parent() {
+    let service = service().await;
+    let principal = UserId::new();
+
+    let page = service
+        .items_by_parent_id(
+            principal,
+            None,
+            Uuid::new_v4(),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(page.is_none());
+}

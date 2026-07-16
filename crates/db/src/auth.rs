@@ -7,6 +7,17 @@ use thiserror::Error;
 use tjxy_common::{UserId, Username};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionCapabilitiesDraft {
+    pub playable_media_types: Vec<String>,
+    pub supported_commands: Vec<String>,
+    pub supports_media_control: bool,
+    pub supports_persistent_identifier: bool,
+    pub device_profile: Option<serde_json::Value>,
+    pub app_store_url: Option<String>,
+    pub icon_url: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthUser {
     id: UserId,
@@ -327,6 +338,70 @@ impl<'connection> AuthRepository<'connection> {
     /// Returns [`AuthRepositoryError`] when the query fails.
     pub async fn has_enabled_admin(&self) -> Result<bool, AuthRepositoryError> {
         has_enabled_admin_on(self.database).await
+    }
+
+    /// Replaces the capabilities reported by one active session owned by the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthRepositoryError`] when the atomic update fails.
+    pub async fn update_session_capabilities(
+        &self,
+        user_id: UserId,
+        session_id: Uuid,
+        capabilities: SessionCapabilitiesDraft,
+    ) -> Result<bool, AuthRepositoryError> {
+        let playable_media_types = serde_json::Value::Array(
+            capabilities
+                .playable_media_types
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        let supported_commands = serde_json::Value::Array(
+            capabilities
+                .supported_commands
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        let statement = Query::update()
+            .table(Alias::new("auth_sessions"))
+            .values([
+                (
+                    Alias::new("playable_media_types"),
+                    playable_media_types.into(),
+                ),
+                (Alias::new("supported_commands"), supported_commands.into()),
+                (
+                    Alias::new("supports_media_control"),
+                    capabilities.supports_media_control.into(),
+                ),
+                (
+                    Alias::new("supports_persistent_identifier"),
+                    capabilities.supports_persistent_identifier.into(),
+                ),
+                (
+                    Alias::new("device_profile"),
+                    capabilities.device_profile.into(),
+                ),
+                (
+                    Alias::new("app_store_url"),
+                    capabilities.app_store_url.into(),
+                ),
+                (Alias::new("icon_url"), capabilities.icon_url.into()),
+            ])
+            .and_where(Expr::col(Alias::new("id")).eq(session_id))
+            .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+            .and_where(Expr::col(Alias::new("revoked_at")).is_null())
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        Ok(self
+            .database
+            .execute(backend.build(&statement))
+            .await?
+            .rows_affected()
+            == 1)
     }
 }
 

@@ -8,11 +8,11 @@ mod user_data;
 
 pub use auth::{
     AuthRepository, AuthRepositoryError, AuthUser, AuthenticatedPrincipal, CredentialSnapshot,
-    IssuedSession, SessionDraft,
+    IssuedSession, SessionCapabilitiesDraft, SessionDraft,
 };
 pub use catalog_query::{
-    BrowseParent, CatalogItemRecord, CatalogPage, CatalogPageRequest, CatalogQueryError,
-    CatalogQueryRepository, LibraryViewRecord,
+    BrowseParent, CatalogItemRecord, CatalogItemType, CatalogPage, CatalogPageRequest,
+    CatalogQueryError, CatalogQueryRepository, LibraryViewRecord,
 };
 pub use migration::Migrator;
 pub use outbox::{

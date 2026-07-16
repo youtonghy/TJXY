@@ -15,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tjxy-api = { path = "../api" }
 tjxy-application = { path = "../application" }
+tjxy-common = { path = "../common" }
 tjxy-db = { path = "../db" }
 tokio.workspace = true
 uuid.workspace = true

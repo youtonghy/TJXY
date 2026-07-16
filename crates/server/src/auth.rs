@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Serialize;
 use tjxy_api::{AuthenticateUserByName, AuthenticationResult, SessionInfoDto, UserDto, UserPolicy};
+use tjxy_application::AuthenticatedPrincipal;
 use tjxy_application::{AuthError, ClientIdentity};
 use tjxy_db::AuthUser;
 
@@ -65,17 +66,32 @@ pub(crate) async fn current_user(
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Response {
-    let token = match access_token(&headers, query.as_deref(), state.legacy_auth_enabled) {
-        Ok(token) => token,
-        Err(error) => return error.into_response(),
-    };
-    let Some(auth) = state.auth.as_ref() else {
-        return HttpAuthError::Unavailable.into_response();
-    };
-    match auth.authenticate_token(&token).await {
+    match authenticated_principal(&state, &headers, query.as_deref()).await {
         Ok(principal) => Json(user_dto(principal.user(), state.identity.id)).into_response(),
-        Err(error) => HttpAuthError::from(error).into_response(),
+        Err(response) => response,
     }
+}
+
+pub(crate) async fn authenticated_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<AuthenticatedPrincipal, Response> {
+    let token = access_token(headers, query, state.legacy_auth_enabled)
+        .map_err(IntoResponse::into_response)?;
+    let auth = state
+        .auth
+        .as_ref()
+        .ok_or_else(|| HttpAuthError::Unavailable.into_response())?;
+    auth.authenticate_token(&token)
+        .await
+        .map_err(|error| HttpAuthError::from(error).into_response())
+}
+
+pub(crate) fn request_query(query: Option<&str>) -> Result<HashMap<String, String>, ()> {
+    query
+        .map_or_else(|| Ok(HashMap::new()), parse_query)
+        .map_err(|_| ())
 }
 
 fn user_dto(user: &AuthUser, server_id: uuid::Uuid) -> UserDto {
@@ -150,7 +166,7 @@ fn access_token(
     Err(HttpAuthError::Unauthorized)
 }
 
-fn is_json_content_type(headers: &HeaderMap) -> bool {
+pub(crate) fn is_json_content_type(headers: &HeaderMap) -> bool {
     let Ok(value) = headers
         .get(header::CONTENT_TYPE)
         .ok_or(())
@@ -231,7 +247,9 @@ fn parse_query(input: &str) -> Result<HashMap<String, String>, HttpAuthError> {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key, true)?;
         let value = percent_decode(value, true)?;
-        output.entry(key).or_insert(value);
+        if output.insert(key, value).is_some() {
+            return Err(HttpAuthError::BadRequest);
+        }
     }
     Ok(output)
 }

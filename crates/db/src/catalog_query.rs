@@ -15,9 +15,31 @@ pub enum BrowseParent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogItemType {
+    Movie,
+    Series,
+    Season,
+    Episode,
+    Folder,
+}
+
+impl CatalogItemType {
+    const fn as_database_value(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie",
+            Self::Series => "Series",
+            Self::Season => "Season",
+            Self::Episode => "Episode",
+            Self::Folder => "Folder",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogPageRequest {
     start_index: u64,
     limit: u64,
+    item_types: Vec<CatalogItemType>,
 }
 
 impl CatalogPageRequest {
@@ -30,7 +52,17 @@ impl CatalogPageRequest {
         if limit == 0 || limit > MAX_PAGE_SIZE {
             return Err(CatalogQueryError::InvalidPage);
         }
-        Ok(Self { start_index, limit })
+        Ok(Self {
+            start_index,
+            limit,
+            item_types: Vec::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn with_item_types(mut self, item_types: Vec<CatalogItemType>) -> Self {
+        self.item_types = item_types;
+        self
     }
 }
 
@@ -184,6 +216,71 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .collect()
     }
 
+    /// Resolves a Jellyfin parent UUID without exposing disabled libraries or
+    /// catalog items outside an enabled library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError::AmbiguousParent`] if corrupt data uses the
+    /// same UUID for both namespaces, or a database error if resolution fails.
+    pub async fn resolve_parent(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<BrowseParent>, CatalogQueryError> {
+        let backend = self.database.get_database_backend();
+        let library = Query::select()
+            .expr(Expr::val(1_i32))
+            .from(Alias::new("libraries"))
+            .and_where(Expr::col(Alias::new("id")).eq(id))
+            .and_where(Expr::col(Alias::new("is_enabled")).eq(true))
+            .limit(1)
+            .to_owned();
+        let is_library = self
+            .database
+            .query_one(backend.build(&library))
+            .await?
+            .is_some();
+
+        let item = Alias::new("item");
+        let membership = Alias::new("membership");
+        let library = Alias::new("library");
+        let visible_item = Query::select()
+            .expr(Expr::val(1_i32))
+            .from_as(Alias::new("catalog_items"), item.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("library_catalog_items"),
+                membership.clone(),
+                Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                    .equals((item.clone(), Alias::new("id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("libraries"),
+                library.clone(),
+                Expr::col((library.clone(), Alias::new("id")))
+                    .equals((membership, Alias::new("library_id"))),
+            )
+            .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(id))
+            .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
+            .and_where(Expr::col((item, Alias::new("classification_state"))).eq("Matched"))
+            .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+            .limit(1)
+            .to_owned();
+        let is_item = self
+            .database
+            .query_one(backend.build(&visible_item))
+            .await?
+            .is_some();
+
+        match (is_library, is_item) {
+            (true, true) => Err(CatalogQueryError::AmbiguousParent(id)),
+            (true, false) => Ok(Some(BrowseParent::Library(id))),
+            (false, true) => Ok(Some(BrowseParent::Item(CatalogItemId::from_uuid(id)))),
+            (false, false) => Ok(None),
+        }
+    }
+
     /// Returns a membership-filtered, stable page and its pre-pagination count.
     ///
     /// # Errors
@@ -195,7 +292,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         parent: BrowseParent,
         page: CatalogPageRequest,
     ) -> Result<CatalogPage, CatalogQueryError> {
-        let mut count = item_query(user_id, parent);
+        let mut count = item_query(user_id, parent, &page.item_types);
         count.expr_as(
             Expr::col((Alias::new("ci"), Alias::new("id"))).count(),
             Alias::new("count"),
@@ -210,7 +307,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let total_record_count =
             u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
 
-        let mut query = item_query(user_id, parent);
+        let mut query = item_query(user_id, parent, &page.item_types);
         select_item_columns(&mut query);
         query
             .order_by((Alias::new("ci"), Alias::new("sort_key")), Order::Asc)
@@ -240,11 +337,17 @@ pub enum CatalogQueryError {
     MissingCount,
     #[error("catalog count is outside the supported range")]
     InvalidCount,
+    #[error("parent UUID exists in both library and catalog item namespaces: {0}")]
+    AmbiguousParent(Uuid),
     #[error("catalog query failed: {0}")]
     Database(#[from] DbErr),
 }
 
-fn item_query(user_id: UserId, parent: BrowseParent) -> SelectStatement {
+fn item_query(
+    user_id: UserId,
+    parent: BrowseParent,
+    item_types: &[CatalogItemType],
+) -> SelectStatement {
     let ci = Alias::new("ci");
     let ud = Alias::new("ud");
     let mut query = Query::select();
@@ -263,8 +366,17 @@ fn item_query(user_id: UserId, parent: BrowseParent) -> SelectStatement {
         )
         .and_where(Expr::col((ci.clone(), Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"));
+    if !item_types.is_empty() {
+        query.and_where(
+            Expr::col((ci.clone(), Alias::new("item_type"))).is_in(
+                item_types
+                    .iter()
+                    .map(|item_type| item_type.as_database_value()),
+            ),
+        );
+    }
     apply_parent(&mut query, &ci, parent);
-    query.to_owned()
+    query.clone()
 }
 
 fn apply_parent(query: &mut SelectStatement, ci: &Alias, parent: BrowseParent) {

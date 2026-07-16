@@ -206,5 +206,5 @@ fn index(
     for column in columns {
         statement.col(Alias::new(*column));
     }
-    statement.to_owned()
+    statement.clone()
 }

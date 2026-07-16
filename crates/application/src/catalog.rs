@@ -5,6 +5,7 @@ use tjxy_db::{
     BrowseParent, CatalogPage, CatalogPageRequest, CatalogQueryError, CatalogQueryRepository,
     LibraryViewRecord,
 };
+use uuid::Uuid;
 
 /// Authenticated read boundary for the published catalog.
 #[derive(Clone)]
@@ -57,6 +58,34 @@ impl CatalogQueryService {
         CatalogQueryRepository::new(&self.database)
             .items(principal, parent, page)
             .await
+            .map_err(Into::into)
+    }
+
+    /// Resolves a wire-level parent UUID and returns its catalog page.
+    ///
+    /// `None` deliberately combines unknown and inaccessible parents so callers
+    /// cannot use this boundary to enumerate disabled catalog data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for a mismatched user or
+    /// propagates a catalog query failure.
+    pub async fn items_by_parent_id(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        parent_id: Uuid,
+        page: CatalogPageRequest,
+    ) -> Result<Option<CatalogPage>, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
+        let repository = CatalogQueryRepository::new(&self.database);
+        let Some(parent) = repository.resolve_parent(parent_id).await? else {
+            return Ok(None);
+        };
+        repository
+            .items(principal, parent, page)
+            .await
+            .map(Some)
             .map_err(Into::into)
     }
 }

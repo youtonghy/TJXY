@@ -71,7 +71,7 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
                         "IsFavorite": true,
                         "Played": false,
                         "PlayCount": 1,
-                        "PlaybackPositionTicks": 900000
+                        "PlaybackPositionTicks": 900_000
                     }
                 }
             ],

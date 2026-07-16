@@ -1,6 +1,7 @@
 //! Axum composition root, system discovery, and Jellyfin-compatible authentication.
 
 mod auth;
+mod browse;
 mod startup;
 
 use std::sync::{
@@ -16,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use tjxy_api::PublicSystemInfo;
-use tjxy_application::{AuthService, SystemClock};
+use tjxy_application::{AuthService, CatalogQueryService, SystemClock};
 use uuid::Uuid;
 
 pub use startup::{BootstrapAdmin, InitializationError, StartupOptions, initialize};
@@ -76,6 +77,7 @@ pub struct AppState {
     identity: Arc<ServerIdentity>,
     ready: Arc<AtomicBool>,
     auth: Option<Arc<AuthService<SystemClock>>>,
+    catalog: Option<Arc<CatalogQueryService>>,
     legacy_auth_enabled: bool,
 }
 
@@ -86,6 +88,7 @@ impl AppState {
             identity: Arc::new(identity),
             ready: Arc::new(AtomicBool::new(false)),
             auth: None,
+            catalog: None,
             legacy_auth_enabled: true,
         }
     }
@@ -99,6 +102,12 @@ impl AppState {
     #[must_use]
     pub fn with_auth(mut self, auth: Arc<AuthService<SystemClock>>) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: Arc<CatalogQueryService>) -> Self {
+        self.catalog = Some(catalog);
         self
     }
 
@@ -122,6 +131,13 @@ pub fn build_router(state: AppState) -> Router {
             post(auth::authenticate_by_name),
         )
         .route("/Users/Me", get(auth::current_user))
+        .route("/UserViews", get(browse::user_views))
+        .route("/Items", get(browse::items))
+        .route(
+            "/Sessions/Capabilities/Full",
+            post(browse::full_capabilities),
+        )
+        .route("/Sessions/Capabilities", post(browse::legacy_capabilities))
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .with_state(state)

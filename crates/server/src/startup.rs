@@ -4,7 +4,7 @@ use chrono::Duration;
 use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
 use sea_orm_migration::MigratorTrait;
 use thiserror::Error;
-use tjxy_application::{AuthError, AuthService, SystemClock};
+use tjxy_application::{AuthError, AuthService, CatalogQueryService, SystemClock};
 
 use crate::{AppState, ServerIdentity};
 
@@ -89,7 +89,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     tjxy_db::Migrator::up(&database, None).await?;
     let auth = Arc::new(
         AuthService::new(
-            database,
+            database.clone(),
             SystemClock,
             options.session_lifetime,
             options.max_concurrent_password_hashes,
@@ -107,12 +107,14 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .await?;
     }
     let has_enabled_admin = auth.has_enabled_admin().await?;
+    let catalog = Arc::new(CatalogQueryService::new(database));
     Ok(AppState::new(
         options
             .identity
             .with_startup_wizard_completed(has_enabled_admin),
     )
     .with_auth(auth)
+    .with_catalog(catalog)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_ready(true))
 }

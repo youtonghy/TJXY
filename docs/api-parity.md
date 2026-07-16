@@ -4,8 +4,9 @@
 > 契约：钉扎 Jellyfin OpenAPI 12.0.0
 > 图例：`✅` 计划内 · `⚠️` 最小/待客户端验证 · `⬜` 未实现 · `❌` 非目标
 
-当前实测级别：Phase 0 schema/事务契约、FilesystemBackend 基础，以及可运行的
-L0 发现与 L1 登录/当前用户链路；catalog 查询和播放 HTTP 链路尚未实现。
+当前实测级别：Phase 0 schema/事务契约、FilesystemBackend 基础、可运行的
+L0 发现与 L1 登录/当前用户链路，以及 SQL-only 的 L2 能力上报与基础目录浏览。
+L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体库；尚无细粒度媒体库 ACL。
 门禁客户端：Findroid；Swiftfin 辅测。
 
 ---
@@ -17,9 +18,9 @@ L0 发现与 L1 登录/当前用户链路；catalog 查询和播放 HTTP 链路�
 | 1 | 发现 | `GET /System/Info/Public` | 诚实 ProductName/Version | ⚠️ 最小 DTO 已实现，待真实客户端验证 |
 | 2 | 登录 | `POST /Users/AuthenticateByName` | canonical MediaBrowser header + aliases | ⚠️ Argon2id 与持久到撤销的 session 已实现，待真实客户端验证 |
 | 3 | 当前用户 | `GET /Users/Me` | SQL SoT | ⚠️ token digest 查询已实现，待真实客户端验证 |
-| 4 | 能力 | `POST /Sessions/Capabilities/Full` | DeviceProfile 参与 Direct Play 判断 | ⬜ |
-| 5 | 首页 | `GET /UserViews` | Redis 预热，miss 回源 SQL | ⬜ |
-| 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⬜ |
+| 4 | 能力 | `POST /Sessions/Capabilities/Full` | DeviceProfile 参与 Direct Play 判断 | ⚠️ Full 与 Findroid legacy adapter 已持久化当前 session；尚未接入 PlaybackInfo 判断 |
+| 5 | 首页 | `GET /UserViews` | Redis 预热，miss 回源 SQL | ⚠️ SQL SoT 已实现；Redis 预热/ACL 未实现 |
+| 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⚠️ 根视图、父项、类型过滤、稳定分页已实现；递归/Lazy Expand/Redis 未实现 |
 | 7 | 主页行 | Latest / Resume / NextUp | SQL + Redis user revision | ⬜ |
 | 8 | 详情 | `GET /Items/{id}` | 不触发 Media Probe | ⬜ |
 | 9 | 图片 | `GET /Items/{id}/Images/{type}` | 内容寻址 AssetBlob | ⬜ |
@@ -42,7 +43,7 @@ L0 发现与 L1 登录/当前用户链路；catalog 查询和播放 HTTP 链路�
 | canonical `Authorization: MediaBrowser` | ✅ 发布门禁 | ⚠️ Client/Device/DeviceId/Version、Token 与 `ApiKey` query 已实现；待客户端验证 |
 | legacy X-Emby/X-MediaBrowser aliases | ✅ | ⚠️ X-Emby-Authorization、X-Emby-Token、X-MediaBrowser-Token、`api_key` 已实现，可配置关闭 |
 | Users / Me / Admin CRUD | ✅ | ⚠️ Me 与启动时首管理员已实现；Admin CRUD 未实现 |
-| API Keys / Devices / Sessions | ✅ 最小 | ⚠️ 登录 session 已持久化；API Keys 与管理路由未实现 |
+| API Keys / Devices / Sessions | ✅ 最小 | ⚠️ 登录 session 与 capabilities 已持久化；API Keys 与管理路由未实现 |
 | Quick Connect | ❌ v1 | ❌ |
 
 ---
@@ -75,14 +76,14 @@ L0 发现与 L1 登录/当前用户链路；catalog 查询和播放 HTTP 链路�
 
 | 能力 | v2.6 语义 | 状态 |
 |------|-----------|------|
-| CatalogItem 与路径解耦 | ItemId 不由路径决定 | ⚠️ 领域类型与 schema 已实现；查询/API 未实现 |
-| 跨库 CatalogItem 复用 | `library_catalog_items` 多对多 | ⬜ |
+| CatalogItem 与路径解耦 | ItemId 不由路径决定 | ⚠️ 领域类型、schema 与基础查询/API 已实现；详情/播放未实现 |
+| 跨库 CatalogItem 复用 | `library_catalog_items` 多对多 | ⚠️ 查询以 membership `EXISTS` 校验并防止跨库子项泄漏；写侧尚未实现 |
 | 多 MediaSource | 完整多源 DTO + §4.4 正式默认排序；客户端版本 UI 非门禁 | ⬜ |
 | MediaSource re-index | 稳定对象/content identity/legacy mapping 保留对外 ID | ⬜ |
 | 多 MediaLocation | 一个版本多个镜像 | ⬜ |
 | StorageObject 稳定身份 | provider ID/可靠 file ID；Filesystem 路径 fallback 标为 weak | ⬜ |
-| Items query/filter/sort/page | 索引 SQL + Redis cache-aside | ⬜ |
-| UserViews / Latest / Resume / NextUp | 首页预热 | ⬜ |
+| Items query/filter/sort/page | 索引 SQL + Redis cache-aside | ⚠️ SQL 类型过滤、`SortName` 升序和 1..=200 分页已实现；递归、其他排序、Redis 未实现 |
+| UserViews / Latest / Resume / NextUp | 首页预热 | ⚠️ UserViews SQL 已实现；Latest / Resume / NextUp 与预热未实现 |
 | Lazy 初始基础 metadata | title/year/overview/provider/Primary | ⬜ |
 | Lazy Movie 首次展开 | 详情触发 Source Index；PlaybackInfo 可等待同一任务；成功 bump generation | ⬜ |
 | Lazy Series 首次展开 | publication staging 后一次切换全部 Season/Episode；子 Episode source 已 Indexed | ⬜ |

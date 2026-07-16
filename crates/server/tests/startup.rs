@@ -46,6 +46,7 @@ async fn initialization_migrates_bootstraps_auth_and_only_then_reports_ready() {
     assert_eq!(info["StartupWizardCompleted"], true);
 
     let login = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -63,6 +64,27 @@ async fn initialization_migrates_bootstraps_auth_and_only_then_reports_ready() {
         .await
         .unwrap();
     assert_eq!(login.status(), StatusCode::OK);
+    let body = login.into_body().collect().await.unwrap().to_bytes();
+    let authentication: Value = serde_json::from_slice(&body).unwrap();
+    let token = authentication["AccessToken"].as_str().unwrap();
+    let browse = app
+        .oneshot(
+            Request::builder()
+                .uri("/UserViews")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(browse.status(), StatusCode::OK);
+    let body = browse.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["Items"], json!([]));
+    assert_eq!(result["TotalRecordCount"], 0);
 }
 
 #[tokio::test]
