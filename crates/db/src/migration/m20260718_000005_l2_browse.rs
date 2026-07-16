@@ -136,25 +136,35 @@ async fn backfill_table(
     table: &str,
     source_column: &str,
 ) -> Result<(), DbErr> {
+    const BATCH_SIZE: u64 = 500;
     let connection = manager.get_connection();
     let backend = connection.get_database_backend();
-    let select = Query::select()
-        .columns([Alias::new("id"), Alias::new(source_column)])
-        .from(Alias::new(table))
-        .to_owned();
-    for row in connection.query_all(backend.build(&select)).await? {
-        let (id, value) = row_identity(&row, source_column)?;
-        let update = Query::update()
-            .table(Alias::new(table))
-            .value(
-                Alias::new("sort_key"),
-                SortKey::from_text(&value).into_bytes(),
+    loop {
+        let select = Query::select()
+            .columns([Alias::new("id"), Alias::new(source_column)])
+            .from(Alias::new(table))
+            .and_where(
+                sea_orm_migration::prelude::Expr::col(Alias::new("sort_key")).eq(Vec::<u8>::new()),
             )
-            .and_where(sea_orm_migration::prelude::Expr::col(Alias::new("id")).eq(id))
+            .limit(BATCH_SIZE)
             .to_owned();
-        connection.execute(backend.build(&update)).await?;
+        let rows = connection.query_all(backend.build(&select)).await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for row in rows {
+            let (id, value) = row_identity(&row, source_column)?;
+            let update = Query::update()
+                .table(Alias::new(table))
+                .value(
+                    Alias::new("sort_key"),
+                    SortKey::from_text(&value).into_bytes(),
+                )
+                .and_where(sea_orm_migration::prelude::Expr::col(Alias::new("id")).eq(id))
+                .to_owned();
+            connection.execute(backend.build(&update)).await?;
+        }
     }
-    Ok(())
 }
 
 fn row_identity(row: &QueryResult, source_column: &str) -> Result<(Uuid, String), DbErr> {

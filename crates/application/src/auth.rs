@@ -16,6 +16,10 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 const MAX_PASSWORD_BYTES: usize = 1_024;
+const MAX_CAPABILITY_VALUES: usize = 128;
+const MAX_CAPABILITY_VALUE_CHARS: usize = 128;
+const MAX_CAPABILITY_URL_CHARS: usize = 255;
+const MAX_DEVICE_PROFILE_BYTES: usize = 64 * 1_024;
 
 pub trait AuthClock: Clone + Send + Sync + 'static {
     fn now(&self) -> DateTime<Utc>;
@@ -365,6 +369,7 @@ where
         requested_session: Option<Uuid>,
         capabilities: SessionCapabilities,
     ) -> Result<bool, AuthError> {
+        validate_capabilities(&capabilities)?;
         if requested_session.is_some_and(|session| session != principal.session_id()) {
             return Ok(false);
         }
@@ -434,6 +439,8 @@ pub enum AuthError {
     PasswordRequired,
     #[error("client identity is invalid")]
     InvalidClientIdentity,
+    #[error("session capabilities are invalid")]
+    InvalidCapabilities,
     #[error("invalid username or password")]
     InvalidCredentials,
     #[error("session token is invalid or expired")]
@@ -465,6 +472,42 @@ impl PartialEq for AuthError {
 fn validate_password(password: &str) -> Result<(), AuthError> {
     if password.len() > MAX_PASSWORD_BYTES {
         return Err(AuthError::InvalidPassword);
+    }
+    Ok(())
+}
+
+fn validate_capabilities(capabilities: &SessionCapabilities) -> Result<(), AuthError> {
+    for values in [
+        &capabilities.playable_media_types,
+        &capabilities.supported_commands,
+    ] {
+        if values.len() > MAX_CAPABILITY_VALUES
+            || values.iter().any(|value| {
+                value.is_empty()
+                    || value.chars().count() > MAX_CAPABILITY_VALUE_CHARS
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(AuthError::InvalidCapabilities);
+        }
+    }
+    for value in [
+        capabilities.app_store_url.as_deref(),
+        capabilities.icon_url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.chars().count() > MAX_CAPABILITY_URL_CHARS || value.chars().any(char::is_control) {
+            return Err(AuthError::InvalidCapabilities);
+        }
+    }
+    if capabilities
+        .device_profile
+        .as_ref()
+        .is_some_and(|profile| profile.to_string().len() > MAX_DEVICE_PROFILE_BYTES)
+    {
+        return Err(AuthError::InvalidCapabilities);
     }
     Ok(())
 }

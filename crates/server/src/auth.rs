@@ -329,6 +329,7 @@ impl From<AuthError> for HttpAuthError {
             | AuthError::InvalidPassword
             | AuthError::PasswordRequired
             | AuthError::InvalidClientIdentity
+            | AuthError::InvalidCapabilities
             | AuthError::InvalidSessionLifetime
             | AuthError::InvalidPasswordConcurrency => Self::BadRequest,
             AuthError::TimestampOverflow

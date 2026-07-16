@@ -64,6 +64,21 @@ impl CatalogPageRequest {
         self.item_types = item_types;
         self
     }
+
+    #[must_use]
+    pub const fn start_index(&self) -> u64 {
+        self.start_index
+    }
+
+    #[must_use]
+    pub const fn limit(&self) -> u64 {
+        self.limit
+    }
+
+    #[must_use]
+    pub fn has_item_type_filter(&self) -> bool {
+        !self.item_types.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -12,7 +12,7 @@ use tjxy_api::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, CollectionType, UserItemDataDto,
 };
 use tjxy_application::{
-    CatalogItemType, CatalogPageRequest, CatalogServiceError, SessionCapabilities,
+    AuthError, CatalogItemType, CatalogPageRequest, CatalogServiceError, SessionCapabilities,
 };
 use tjxy_common::UserId;
 use tjxy_db::{CatalogItemRecord, CatalogPage, LibraryViewRecord};
@@ -157,6 +157,9 @@ async fn persist_capabilities(
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, "session was not found"),
+        Err(AuthError::InvalidCapabilities) => {
+            error(StatusCode::BAD_REQUEST, "invalid capabilities request")
+        }
         Err(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,
             "authentication is unavailable",
@@ -185,7 +188,7 @@ pub(crate) async fn user_views(
         .user_views(principal.user().id(), query.user_id)
         .await
     {
-        Ok(views) => match library_result(&state, views) {
+        Ok(views) => match library_result(&state, views, None) {
             Ok(result) => Json(result).into_response(),
             Err(error) => error.into_response(),
         },
@@ -215,7 +218,7 @@ pub(crate) async fn items(
             .items_by_parent_id(principal.user().id(), query.user_id, parent_id, query.page)
             .await
         {
-            Ok(Some(page)) => match item_result(state.identity.id, &page) {
+            Ok(Some(page)) => match item_result(state.identity.id, parent_id, &page) {
                 Ok(result) => Json(result).into_response(),
                 Err(error) => error.into_response(),
             },
@@ -224,11 +227,18 @@ pub(crate) async fn items(
         };
     }
 
+    if query.page.has_item_type_filter() {
+        return HttpBrowseError::new(
+            StatusCode::BAD_REQUEST,
+            "item type filters require a catalog parent",
+        )
+        .into_response();
+    }
     match catalog
         .user_views(principal.user().id(), query.user_id)
         .await
     {
-        Ok(views) => match library_result(&state, views) {
+        Ok(views) => match library_result(&state, views, Some(&query.page)) {
             Ok(result) => Json(result).into_response(),
             Err(error) => error.into_response(),
         },
@@ -463,16 +473,23 @@ fn reject_remaining(parameters: &HashMap<String, String>) -> Result<(), HttpBrow
 fn library_result(
     state: &AppState,
     views: Vec<LibraryViewRecord>,
+    page: Option<&CatalogPageRequest>,
 ) -> Result<BaseItemDtoQueryResult, HttpBrowseError> {
     let total = views.len() as u64;
+    let start_index = page.map_or(0, CatalogPageRequest::start_index);
+    let limit = page.map_or(total, CatalogPageRequest::limit);
+    let skip = usize::try_from(start_index).unwrap_or(usize::MAX);
+    let take = usize::try_from(limit).unwrap_or(usize::MAX);
     let items = views
         .into_iter()
+        .skip(skip)
+        .take(take)
         .map(|view| library_dto(state.identity.id, &view))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|()| {
             HttpBrowseError::new(StatusCode::INTERNAL_SERVER_ERROR, "catalog data is invalid")
         })?;
-    Ok(BaseItemDtoQueryResult::new(items, 0, total))
+    Ok(BaseItemDtoQueryResult::new(items, start_index, total))
 }
 
 fn library_dto(server_id: Uuid, view: &LibraryViewRecord) -> Result<BaseItemDto, ()> {
@@ -493,12 +510,13 @@ fn library_dto(server_id: Uuid, view: &LibraryViewRecord) -> Result<BaseItemDto,
 
 fn item_result(
     server_id: Uuid,
+    parent_id: Uuid,
     page: &CatalogPage,
 ) -> Result<BaseItemDtoQueryResult, HttpBrowseError> {
     let items = page
         .items()
         .iter()
-        .map(|item| item_dto(server_id, item))
+        .map(|item| item_dto(server_id, parent_id, item))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(BaseItemDtoQueryResult::new(
         items,
@@ -507,7 +525,11 @@ fn item_result(
     ))
 }
 
-fn item_dto(server_id: Uuid, item: &CatalogItemRecord) -> Result<BaseItemDto, HttpBrowseError> {
+fn item_dto(
+    server_id: Uuid,
+    parent_id: Uuid,
+    item: &CatalogItemRecord,
+) -> Result<BaseItemDto, HttpBrowseError> {
     let item_type = match item.item_type() {
         "Movie" => BaseItemKind::Movie,
         "Series" => BaseItemKind::Series,
@@ -526,7 +548,7 @@ fn item_dto(server_id: Uuid, item: &CatalogItemRecord) -> Result<BaseItemDto, Ht
         item.name(),
         server_id,
         item_type,
-        item.parent_id().map(tjxy_common::CatalogItemId::as_uuid),
+        Some(parent_id),
         item.production_year(),
         item.overview().map(str::to_owned),
         Some(UserItemDataDto::new(

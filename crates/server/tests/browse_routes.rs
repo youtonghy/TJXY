@@ -260,6 +260,15 @@ async fn user_views_and_root_items_return_enabled_libraries_in_the_query_wrapper
         assert_eq!(result["Items"][0]["CollectionType"], "movies");
         assert_eq!(result["Items"][1]["Name"], "Zeta");
     }
+
+    let response = get(&app.router, "/Items?startIndex=1&limit=1", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 2);
+    assert_eq!(result["StartIndex"], 1);
+    assert_eq!(result["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["Items"][0]["Name"], "Zeta");
 }
 
 #[tokio::test]
@@ -284,6 +293,7 @@ async fn items_apply_parent_paging_and_findroid_type_filter() {
     assert_eq!(result["Items"][0]["Name"], "Blade Runner");
     assert_eq!(result["Items"][0]["Type"], "Movie");
     assert_eq!(result["Items"][0]["MediaType"], "Video");
+    assert_eq!(result["Items"][0]["ParentId"], library.to_string());
 }
 
 #[tokio::test]
@@ -298,6 +308,7 @@ async fn browse_queries_reject_impersonation_unknown_keys_and_invalid_pages() {
         "/Items?limit=0".to_owned(),
         "/Items?limit=201".to_owned(),
         "/Items?limit=1&limit=2".to_owned(),
+        "/Items?includeItemTypes=Movie".to_owned(),
     ] {
         let response = get(&app.router, &path, Some(&token)).await;
         let expected = if path.contains("userId=") && !path.contains("bad") {
@@ -455,6 +466,16 @@ async fn legacy_capabilities_and_full_query_boundaries_are_explicit() {
         "/Sessions/Capabilities/Full?unexpected=1",
         &token,
         "{}",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_url = "x".repeat(256);
+    let response = post(
+        &app.router,
+        "/Sessions/Capabilities/Full",
+        &token,
+        json!({"AppStoreUrl": invalid_url}).to_string(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
