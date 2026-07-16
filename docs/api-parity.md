@@ -5,7 +5,7 @@
 > 图例：`✅` 计划内 · `⚠️` 最小/待客户端验证 · `⬜` 未实现 · `❌` 非目标
 
 当前实测级别：Phase 0 schema/事务契约、FilesystemBackend 基础，以及可运行的
-System Info/Ping/health Axum 骨架；认证、catalog 查询和播放 HTTP 链路尚未实现。
+L0 发现与 L1 登录/当前用户链路；catalog 查询和播放 HTTP 链路尚未实现。
 门禁客户端：Findroid；Swiftfin 辅测。
 
 ---
@@ -15,8 +15,8 @@ System Info/Ping/health Axum 骨架；认证、catalog 查询和播放 HTTP 链�
 | # | 行为 | 路由 | v2.6 语义 | 状态 |
 |---|------|------|-----------|------|
 | 1 | 发现 | `GET /System/Info/Public` | 诚实 ProductName/Version | ⚠️ 最小 DTO 已实现，待真实客户端验证 |
-| 2 | 登录 | `POST /Users/AuthenticateByName` | canonical MediaBrowser header + aliases | ⬜ |
-| 3 | 当前用户 | `GET /Users/Me` | SQL SoT | ⬜ |
+| 2 | 登录 | `POST /Users/AuthenticateByName` | canonical MediaBrowser header + aliases | ⚠️ Argon2id 与持久到撤销的 session 已实现，待真实客户端验证 |
+| 3 | 当前用户 | `GET /Users/Me` | SQL SoT | ⚠️ token digest 查询已实现，待真实客户端验证 |
 | 4 | 能力 | `POST /Sessions/Capabilities/Full` | DeviceProfile 参与 Direct Play 判断 | ⬜ |
 | 5 | 首页 | `GET /UserViews` | Redis 预热，miss 回源 SQL | ⬜ |
 | 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⬜ |
@@ -37,12 +37,12 @@ System Info/Ping/health Axum 骨架；认证、catalog 查询和播放 HTTP 链�
 |------|------|------|
 | System Info / Public / Ping / Endpoint | ✅ | ⚠️ Public、Ping 与 health 已实现；Endpoint 尚未实现 |
 | Branding | ✅ | ⬜ |
-| Startup Wizard | ✅ 最小 | ⬜ |
-| AuthenticateByName | ✅ | ⬜ |
-| canonical `Authorization: MediaBrowser` | ✅ 发布门禁 | ⬜ |
-| legacy X-Emby/X-MediaBrowser aliases | ✅ | ⬜ |
-| Users / Me / Admin CRUD | ✅ | ⬜ |
-| API Keys / Devices / Sessions | ✅ 最小 | ⬜ |
+| Startup Wizard | ✅ 最小 | ⚠️ 是否已有用户已反映到 Public DTO；交互式向导未实现 |
+| AuthenticateByName | ✅ | ⚠️ Username/Pw、统一 401、持久 session 已实现；待客户端验证 |
+| canonical `Authorization: MediaBrowser` | ✅ 发布门禁 | ⚠️ Client/Device/DeviceId/Version、Token 与 `ApiKey` query 已实现；待客户端验证 |
+| legacy X-Emby/X-MediaBrowser aliases | ✅ | ⚠️ X-Emby-Authorization、X-Emby-Token、X-MediaBrowser-Token、`api_key` 已实现，可配置关闭 |
+| Users / Me / Admin CRUD | ✅ | ⚠️ Me 与启动时首管理员已实现；Admin CRUD 未实现 |
+| API Keys / Devices / Sessions | ✅ 最小 | ⚠️ 登录 session 已持久化；API Keys 与管理路由未实现 |
 | Quick Connect | ❌ v1 | ❌ |
 
 ---

@@ -1,13 +1,25 @@
-//! Axum composition root and unauthenticated system discovery routes.
+//! Axum composition root, system discovery, and Jellyfin-compatible authentication.
+
+mod auth;
+mod startup;
 
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use tjxy_api::PublicSystemInfo;
+use tjxy_application::{AuthService, SystemClock};
 use uuid::Uuid;
+
+pub use startup::{BootstrapAdmin, InitializationError, StartupOptions, initialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerIdentity {
@@ -59,10 +71,12 @@ impl ServerIdentity {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
     identity: Arc<ServerIdentity>,
     ready: Arc<AtomicBool>,
+    auth: Option<Arc<AuthService<SystemClock>>>,
+    legacy_auth_enabled: bool,
 }
 
 impl AppState {
@@ -71,12 +85,26 @@ impl AppState {
         Self {
             identity: Arc::new(identity),
             ready: Arc::new(AtomicBool::new(false)),
+            auth: None,
+            legacy_auth_enabled: true,
         }
     }
 
     #[must_use]
     pub fn with_ready(self, ready: bool) -> Self {
         self.set_ready(ready);
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth(mut self, auth: Arc<AuthService<SystemClock>>) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
+        self.legacy_auth_enabled = enabled;
         self
     }
 
@@ -89,6 +117,11 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/System/Info/Public", get(public_system_info))
         .route("/System/Ping", get(system_ping))
+        .route(
+            "/Users/AuthenticateByName",
+            post(auth::authenticate_by_name),
+        )
+        .route("/Users/Me", get(auth::current_user))
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .with_state(state)
@@ -107,7 +140,11 @@ async fn liveness() -> &'static str {
 }
 
 async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
-    if state.ready.load(Ordering::Acquire) {
+    let dependencies_ready = match state.auth.as_ref() {
+        Some(auth) => auth.check_health().await.is_ok(),
+        None => true,
+    };
+    if state.ready.load(Ordering::Acquire) && dependencies_ready {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")

@@ -1,7 +1,9 @@
 use std::{env, net::SocketAddr};
 
 use thiserror::Error;
-use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_server::{
+    BootstrapAdmin, InitializationError, ServerIdentity, StartupOptions, build_router, initialize,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -12,6 +14,12 @@ enum StartupError {
     InvalidServerId(#[source] uuid::Error),
     #[error("TJXY_BIND is not a valid socket address: {0}")]
     InvalidBindAddress(#[source] std::net::AddrParseError),
+    #[error("TJXY_BOOTSTRAP_ADMIN_USERNAME and TJXY_BOOTSTRAP_ADMIN_PASSWORD must be set together")]
+    IncompleteBootstrapAdmin,
+    #[error("TJXY_LEGACY_AUTH must be true or false")]
+    InvalidLegacyAuth,
+    #[error("service initialization failed: {0}")]
+    Initialization(#[from] InitializationError),
     #[error("failed to bind or serve HTTP: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -30,7 +38,27 @@ async fn main() -> Result<(), StartupError> {
     if let Ok(local_address) = env::var("TJXY_PUBLIC_ADDRESS") {
         identity = identity.with_local_address(local_address);
     }
+    let database_url =
+        env::var("TJXY_DATABASE_URL").unwrap_or_else(|_| "sqlite://tjxy.db?mode=rwc".to_owned());
+    let mut startup = StartupOptions::new(database_url, identity);
+    if let Ok(value) = env::var("TJXY_LEGACY_AUTH") {
+        let enabled = value
+            .parse::<bool>()
+            .map_err(|_| StartupError::InvalidLegacyAuth)?;
+        startup = startup.with_legacy_auth_enabled(enabled);
+    }
+    match (
+        env::var("TJXY_BOOTSTRAP_ADMIN_USERNAME").ok(),
+        env::var("TJXY_BOOTSTRAP_ADMIN_PASSWORD").ok(),
+    ) {
+        (Some(username), Some(password)) => {
+            startup = startup.with_bootstrap_admin(BootstrapAdmin::new(username, password));
+        }
+        (None, None) => {}
+        _ => return Err(StartupError::IncompleteBootstrapAdmin),
+    }
+    let state = initialize(startup).await?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
-    axum::serve(listener, build_router(AppState::new(identity))).await?;
+    axum::serve(listener, build_router(state)).await?;
     Ok(())
 }

@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+use sea_orm::{
+    ConnectionTrait, Database, DbBackend, Statement,
+    sea_query::{Alias, Query},
+};
 use sea_orm_migration::MigratorTrait;
 use tjxy_db::Migrator;
 
@@ -44,6 +47,8 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "studios",
         "item_studios",
         "user_data",
+        "auth_state",
+        "auth_sessions",
         "storage_accounts",
         "storage_credentials",
         "storage_roots",
@@ -119,6 +124,36 @@ async fn schema_keeps_effective_policy_and_revisions_in_sql() {
         (
             "user_catalog_state",
             vec!["user_id", "revision", "updated_at"],
+        ),
+        (
+            "users",
+            vec![
+                "username_key",
+                "has_password",
+                "auth_revision",
+                "disabled_at",
+                "created_at",
+                "updated_at",
+                "last_login_at",
+                "last_activity_at",
+            ],
+        ),
+        ("auth_state", vec!["id", "bootstrap_revision"]),
+        (
+            "auth_sessions",
+            vec![
+                "user_id",
+                "token_digest",
+                "auth_revision",
+                "device_id",
+                "device_name",
+                "client_name",
+                "client_version",
+                "created_at",
+                "expires_at",
+                "last_seen_at",
+                "revoked_at",
+            ],
         ),
         (
             "storage_roots",
@@ -231,4 +266,72 @@ async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight(
         .collect::<BTreeSet<_>>();
     assert!(outbox_indexes.contains("idx_outbox_root_claim"));
     assert!(outbox_indexes.contains("idx_outbox_root_revision_state"));
+
+    let auth_indexes = database
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('users', 'auth_sessions')"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "name").unwrap())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "uq_users_username_key",
+        "uq_auth_sessions_token_digest",
+        "idx_auth_sessions_user_state",
+        "idx_auth_sessions_expiry",
+    ] {
+        assert!(auth_indexes.contains(required), "missing index {required}");
+    }
+}
+
+#[tokio::test]
+async fn sqlite_auth_migration_backfills_portable_username_keys() {
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&database, Some(3)).await.unwrap();
+    let user_id = uuid::Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("users"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("username"),
+                        Alias::new("password_hash"),
+                        Alias::new("is_admin"),
+                    ])
+                    .values_panic([
+                        user_id.into(),
+                        "Ａlice".into(),
+                        "legacy-hash".into(),
+                        false.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    Migrator::up(&database, None).await.unwrap();
+
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("username_key"))
+                    .from(Alias::new("users"))
+                    .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(user_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<Vec<u8>>("", "username_key").unwrap(),
+        b"alice"
+    );
 }
