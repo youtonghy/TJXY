@@ -1,0 +1,31 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "Http",
+      "Id": "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11",
+      "Path": null,
+      "Container": "mkv",
+      "IsRemote": false,
+      "SupportsTranscoding": false,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": true,
+      "MediaStreams": [
+        {
+          "Codec": "srt",
+          "Language": "eng",
+          "Type": "Subtitle",
+          "Index": 3,
+          "IsExternal": true,
+          "DeliveryMethod": "External",
+          "DeliveryUrl": "/Videos/41/018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11/Subtitles/3/Stream.srt",
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": true,
+          "SupportsExternalStream": true
+        }
+      ],
+      "TranscodingUrl": null,
+      "DirectStreamUrl": "/Videos/41/stream?static=true&mediaSourceId=018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11"
+    }
+  ],
+  "PlaySessionId": "session-1"
+}

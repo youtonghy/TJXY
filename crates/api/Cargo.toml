@@ -1,0 +1,18 @@
+[package]
+name = "tjxy-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tjxy-common = { path = "../common" }
+
+[dev-dependencies]
+serde_json.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "tjxy-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
