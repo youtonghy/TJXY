@@ -11,6 +11,17 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       emptyOutDir: true,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              { name: 'mui', test: /node_modules[\\/](@mui|@emotion)[\\/]/ },
+              { name: 'react-admin', test: /node_modules[\\/](react-admin|ra-core|ra-ui-materialui|ra-i18n-polyglot|@tanstack)[\\/]/ },
+              { name: 'react', test: /node_modules[\\/](react|react-dom|react-router)[\\/]/ },
+            ],
+          },
+        },
+      },
     },
     server: {
       proxy: {
