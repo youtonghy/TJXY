@@ -3,3 +3,7 @@
 *.db-shm
 *.db-wal
 .env
+/admin/node_modules/
+/admin/dist/
+/admin/test-results/
+/admin/playwright-report/
