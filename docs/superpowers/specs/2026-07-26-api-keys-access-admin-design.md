@@ -113,8 +113,10 @@ AuthenticationOrigin
 Both origins carry the resolved current user. A session remains valid only when its
 stored `auth_revision` matches the user. An API key additionally requires the creator to
 exist, remain enabled, remain an administrator, and retain the captured
-`creator_auth_revision`. Password, name, policy, disablement, or other user mutations that
-advance the revision therefore invalidate existing keys without a cache or delayed job.
+`creator_auth_revision`. Every password, name, policy, disablement, or other user mutation
+that advances the revision physically deletes that user's API keys in the same transaction.
+The revision comparison remains a race fence, so a key selected concurrently with the
+mutation cannot authenticate after commit. No cache or delayed revocation job is involved.
 
 `authenticate_token` first performs the existing indexed session lookup. On a miss it
 performs an indexed API-key digest lookup; authentication never decrypts the token. API-key
@@ -159,6 +161,11 @@ key lists are forbidden.
 Delete validates the raw-token bound, computes its digest, revalidates administrator
 status in the transaction, and physically deletes the matching row. It does not decrypt
 the target and returns success when no row matches.
+
+Existing user name, password, policy, and delete transactions remove every API key owned
+by the affected user before advancing the authorization revision or deleting the user.
+Because the operation is atomic, a committed user mutation never leaves an inactive API
+key row for the canonical list to misrepresent as active.
 
 ## Startup And Keyring Behavior
 
