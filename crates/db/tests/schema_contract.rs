@@ -233,11 +233,19 @@ async fn api_key_schema_is_bounded_binary_and_restrictive() {
         DbBackend::Postgres => assert_eq!(token_digest_type, "bytea"),
         DbBackend::Sqlite => assert!(token_digest_type.to_ascii_uppercase().contains("BLOB")),
     }
-    let delete_rules = foreign_key_delete_rules(&database, "api_keys").await;
-    assert!(!delete_rules.is_empty(), "missing creator FK for api_keys");
+    let creator_fk = api_key_foreign_keys(&database)
+        .await
+        .into_iter()
+        .find(|foreign_key| {
+            foreign_key.source_column == "creator_user_id"
+                && foreign_key.target_table == "users"
+                && foreign_key.target_column == "id"
+        })
+        .unwrap_or_else(|| panic!("missing creator FK creator_user_id -> users(id)"));
     assert!(
-        delete_rules.iter().all(|rule| rule != "CASCADE"),
-        "api_keys creator FK must not cascade"
+        creator_fk.delete_rule.eq_ignore_ascii_case("RESTRICT"),
+        "api_keys creator FK must use RESTRICT, got {}",
+        creator_fk.delete_rule
     );
 }
 
@@ -298,44 +306,57 @@ async fn column_type_name(
     }
 }
 
-async fn foreign_key_delete_rules(
-    database: &sea_orm::DatabaseConnection,
-    table: &str,
-) -> Vec<String> {
-    let (statement, column) = match database.get_database_backend() {
-        DbBackend::Sqlite => (
-            Statement::from_string(
-                DbBackend::Sqlite,
-                format!("PRAGMA foreign_key_list('{table}')"),
-            ),
-            "on_delete",
+#[derive(Debug)]
+struct ApiKeyForeignKey {
+    source_column: String,
+    target_table: String,
+    target_column: String,
+    delete_rule: String,
+}
+
+async fn api_key_foreign_keys(database: &sea_orm::DatabaseConnection) -> Vec<ApiKeyForeignKey> {
+    let statement = match database.get_database_backend() {
+        DbBackend::Sqlite => Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_key_list('api_keys')".to_owned(),
         ),
-        DbBackend::Postgres => (
-            Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT rc.delete_rule FROM information_schema.referential_constraints rc \
-                 JOIN information_schema.table_constraints tc \
-                   ON tc.constraint_catalog = rc.constraint_catalog \
-                  AND tc.constraint_schema = rc.constraint_schema \
-                  AND tc.constraint_name = rc.constraint_name \
-                 WHERE tc.table_schema = current_schema() AND tc.table_name = $1"
-                    .to_owned(),
-                [table.into()],
-            ),
-            "delete_rule",
+        DbBackend::Postgres => Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT kcu.column_name AS source_column, \
+                    ccu.table_name AS target_table, \
+                    ccu.column_name AS target_column, \
+                    rc.delete_rule AS delete_rule \
+             FROM information_schema.referential_constraints rc \
+             JOIN information_schema.table_constraints tc \
+               ON tc.constraint_catalog = rc.constraint_catalog \
+              AND tc.constraint_schema = rc.constraint_schema \
+              AND tc.constraint_name = rc.constraint_name \
+             JOIN information_schema.key_column_usage kcu \
+               ON kcu.constraint_catalog = tc.constraint_catalog \
+              AND kcu.constraint_schema = tc.constraint_schema \
+              AND kcu.constraint_name = tc.constraint_name \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_catalog = rc.unique_constraint_catalog \
+              AND ccu.constraint_schema = rc.unique_constraint_schema \
+              AND ccu.constraint_name = rc.unique_constraint_name \
+             WHERE tc.table_schema = current_schema() \
+               AND tc.table_name = 'api_keys'"
+                .to_owned(),
         ),
-        DbBackend::MySql => (
-            Statement::from_sql_and_values(
-                DbBackend::MySql,
-                "SELECT rc.delete_rule AS delete_rule FROM information_schema.referential_constraints rc \
-                 JOIN information_schema.table_constraints tc \
-                   ON tc.constraint_schema = rc.constraint_schema \
-                  AND tc.constraint_name = rc.constraint_name \
-                 WHERE tc.constraint_schema = DATABASE() AND tc.table_name = ?"
-                    .to_owned(),
-                [table.into()],
-            ),
-            "delete_rule",
+        DbBackend::MySql => Statement::from_string(
+            DbBackend::MySql,
+            "SELECT kcu.column_name AS source_column, \
+                    kcu.referenced_table_name AS target_table, \
+                    kcu.referenced_column_name AS target_column, \
+                    rc.delete_rule AS delete_rule \
+             FROM information_schema.key_column_usage kcu \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_schema = kcu.constraint_schema \
+              AND rc.constraint_name = kcu.constraint_name \
+             WHERE kcu.constraint_schema = DATABASE() \
+               AND kcu.table_name = 'api_keys' \
+               AND kcu.referenced_table_name IS NOT NULL"
+                .to_owned(),
         ),
     };
 
@@ -344,7 +365,20 @@ async fn foreign_key_delete_rules(
         .await
         .unwrap()
         .into_iter()
-        .map(|row| row.try_get::<String>("", column).unwrap())
+        .map(|row| ApiKeyForeignKey {
+            source_column: row
+                .try_get("", "from")
+                .unwrap_or_else(|_| row.try_get("", "source_column").unwrap()),
+            target_table: row
+                .try_get("", "table")
+                .unwrap_or_else(|_| row.try_get("", "target_table").unwrap()),
+            target_column: row
+                .try_get("", "to")
+                .unwrap_or_else(|_| row.try_get("", "target_column").unwrap()),
+            delete_rule: row
+                .try_get("", "on_delete")
+                .unwrap_or_else(|_| row.try_get("", "delete_rule").unwrap()),
+        })
         .collect()
 }
 
