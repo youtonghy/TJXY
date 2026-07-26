@@ -233,11 +233,10 @@ async fn api_key_schema_is_bounded_binary_and_restrictive() {
         DbBackend::Postgres => assert_eq!(token_digest_type, "bytea"),
         DbBackend::Sqlite => assert!(token_digest_type.to_ascii_uppercase().contains("BLOB")),
     }
+    let delete_rules = foreign_key_delete_rules(&database, "api_keys").await;
+    assert!(!delete_rules.is_empty(), "missing creator FK for api_keys");
     assert!(
-        foreign_key_delete_rules(&database, "api_keys")
-            .await
-            .iter()
-            .all(|rule| rule != "CASCADE"),
+        delete_rules.iter().all(|rule| rule != "CASCADE"),
         "api_keys creator FK must not cascade"
     );
 }
