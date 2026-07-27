@@ -1,3 +1,4 @@
+import { CloudOutlined, FolderCopyOutlined, SecurityOutlined, TaskAltOutlined } from '@mui/icons-material';
 import { AppBar, Layout, Menu, TitlePortal } from 'react-admin';
 
 const AdminAppBar = () => (
@@ -9,6 +10,31 @@ const AdminAppBar = () => (
 const AdminMenu = () => (
   <Menu>
     <Menu.ResourceItem name="users" />
+    <Menu.Item
+      to="/admin/access"
+      primaryText="Access"
+      leftIcon={<SecurityOutlined />}
+    />
+    <Menu.Item
+      to="/admin/tasks"
+      primaryText="Tasks"
+      leftIcon={<TaskAltOutlined />}
+    />
+    <Menu.Item
+      to="/admin/libraries"
+      primaryText="Libraries"
+      leftIcon={<FolderCopyOutlined />}
+    />
+    <Menu.Item
+      to="/admin/storage/google-drive"
+      primaryText="Google Drive"
+      leftIcon={<CloudOutlined />}
+    />
+    <Menu.Item
+      to="/admin/storage/onedrive"
+      primaryText="OneDrive"
+      leftIcon={<CloudOutlined />}
+    />
   </Menu>
 );
 

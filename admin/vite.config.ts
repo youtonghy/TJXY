@@ -25,6 +25,11 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        '/Admin': target,
+        '/Auth': target,
+        '/Devices': target,
+        '/Library': target,
+        '/ScheduledTasks': target,
         '/Users': target,
         '/System': target,
         '/health': target,
