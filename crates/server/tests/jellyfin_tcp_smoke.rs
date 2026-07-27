@@ -24,6 +24,10 @@ const FIXTURE_MEDIA: &[u8] =
     include_bytes!("fixtures/jellyfin-smoke/Smoke Show/Season 01/Smoke Show S01E01.mp4");
 const FIXTURE_SUBTITLE: &str =
     include_str!("fixtures/jellyfin-smoke/Smoke Show/Season 01/Smoke Show S01E01.srt");
+const FILESYSTEM_PLAYBACK_REQUEST: &str =
+    include_str!("golden/playback/filesystem-playback-info.request.json");
+const FILESYSTEM_PLAYBACK_RESPONSE: &str =
+    include_str!("golden/playback/filesystem-playback-info.response.json");
 
 fn credential_keyring(active_version: i32, keys: &[(i32, u8)]) -> String {
     let keys = keys
@@ -46,6 +50,48 @@ struct PlaybackContractSnapshot {
     source_id: String,
     direct_stream_url: String,
     external_subtitles: Vec<(i64, String)>,
+}
+
+fn normalize_filesystem_playback(playback: &mut Value, item_id: Uuid, source_id: Uuid) {
+    let _play_session = playback["PlaySessionId"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("PlaybackInfo PlaySessionId is a UUID");
+    assert_eq!(
+        Uuid::parse_str(
+            playback["MediaSources"][0]["Id"]
+                .as_str()
+                .expect("source ID")
+        )
+        .expect("source ID is a UUID"),
+        source_id,
+    );
+    let expected_direct = format!("/Videos/{item_id}/stream?static=true&mediaSourceId={source_id}");
+    assert_eq!(
+        playback["MediaSources"][0]["DirectStreamUrl"].as_str(),
+        Some(expected_direct.as_str()),
+    );
+    playback["PlaySessionId"] = json!("{{play_session_id}}");
+    playback["MediaSources"][0]["Id"] = json!("{{source_id}}");
+    playback["MediaSources"][0]["DirectStreamUrl"] =
+        json!("/Videos/{{item_id}}/stream?static=true&mediaSourceId={{source_id}}");
+    for stream in playback["MediaSources"][0]["MediaStreams"]
+        .as_array_mut()
+        .expect("media stream list")
+    {
+        if stream["IsExternal"] == true {
+            let index = stream["Index"].as_i64().expect("subtitle index");
+            let expected_subtitle =
+                format!("/Videos/{item_id}/{source_id}/Subtitles/{index}/Stream.srt");
+            assert_eq!(
+                stream["DeliveryUrl"].as_str(),
+                Some(expected_subtitle.as_str())
+            );
+            stream["DeliveryUrl"] = json!(format!(
+                "/Videos/{{{{item_id}}}}/{{{{source_id}}}}/Subtitles/{index}/Stream.srt"
+            ));
+        }
+    }
 }
 
 impl TestServer {
@@ -779,6 +825,8 @@ async fn assert_playback_delivery_contract(
     assert_eq!(detail["Id"], episode_id);
     assert_eq!(detail["Type"], "Episode");
 
+    let request: Value = serde_json::from_str(FILESYSTEM_PLAYBACK_REQUEST)
+        .expect("filesystem PlaybackInfo request golden is valid JSON");
     let playback = json_response(
         client
             .post(format!(
@@ -786,11 +834,7 @@ async fn assert_playback_delivery_contract(
                 server.base_url
             ))
             .header("Authorization", token_header(token))
-            .json(&json!({
-                "DeviceProfile": {
-                    "DirectPlayProfiles": [{"Type": "Video", "Container": "mp4"}]
-                }
-            }))
+            .json(&request)
             .send()
             .await
             .expect("playback info request"),
@@ -808,6 +852,15 @@ async fn assert_playback_delivery_contract(
     );
     let source = &sources[0];
     let source_id = source["Id"].as_str().expect("media source id").to_owned();
+    let mut normalized = playback.clone();
+    normalize_filesystem_playback(
+        &mut normalized,
+        Uuid::parse_str(episode_id).expect("episode ID is a UUID"),
+        Uuid::parse_str(&source_id).expect("source ID is a UUID"),
+    );
+    let expected: Value = serde_json::from_str(FILESYSTEM_PLAYBACK_RESPONSE)
+        .expect("filesystem PlaybackInfo golden is valid JSON");
+    assert_eq!(normalized, expected);
     assert_eq!(source["Protocol"], "Http");
     assert_eq!(source["Path"], Value::Null);
     assert_eq!(source["IsRemote"], false);

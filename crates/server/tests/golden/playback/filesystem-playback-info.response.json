@@ -1,0 +1,70 @@
+{
+  "MediaSources": [
+    {
+      "Container": "mp4",
+      "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{source_id}}",
+      "Id": "{{source_id}}",
+      "IsRemote": false,
+      "MediaStreams": [
+        {
+          "Channels": null,
+          "Codec": "h264",
+          "DeliveryMethod": "Embed",
+          "DeliveryUrl": null,
+          "Height": 16,
+          "Index": 1,
+          "IsExternal": false,
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": false,
+          "Language": null,
+          "Level": 10,
+          "Profile": "High",
+          "SupportsExternalStream": false,
+          "Type": "Video",
+          "Width": 16
+        },
+        {
+          "Channels": 1,
+          "Codec": "aac",
+          "DeliveryMethod": "Embed",
+          "DeliveryUrl": null,
+          "Height": null,
+          "Index": 2,
+          "IsExternal": false,
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": false,
+          "Language": null,
+          "Level": null,
+          "Profile": null,
+          "SupportsExternalStream": false,
+          "Type": "Audio",
+          "Width": null
+        },
+        {
+          "Channels": null,
+          "Codec": "srt",
+          "DeliveryMethod": "External",
+          "DeliveryUrl": "/Videos/{{item_id}}/{{source_id}}/Subtitles/0/Stream.srt",
+          "Height": null,
+          "Index": 0,
+          "IsExternal": true,
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": true,
+          "Language": null,
+          "Level": null,
+          "Profile": null,
+          "SupportsExternalStream": true,
+          "Type": "Subtitle",
+          "Width": null
+        }
+      ],
+      "Path": null,
+      "Protocol": "Http",
+      "SupportsDirectPlay": true,
+      "SupportsDirectStream": false,
+      "SupportsTranscoding": false,
+      "TranscodingUrl": null
+    }
+  ],
+  "PlaySessionId": "{{play_session_id}}"
+}

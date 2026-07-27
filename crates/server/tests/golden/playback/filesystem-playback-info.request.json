@@ -1,0 +1,7 @@
+{
+  "DeviceProfile": {
+    "DirectPlayProfiles": [
+      { "Type": "Video", "Container": "mp4" }
+    ]
+  }
+}
