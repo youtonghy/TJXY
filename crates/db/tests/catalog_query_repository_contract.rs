@@ -1,25 +1,19 @@
 use chrono::Utc;
 use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    ConnectionTrait, DatabaseConnection,
     sea_query::{Alias, Query},
 };
 use sea_orm_migration::MigratorTrait;
-use tjxy_common::{CatalogItemId, UserId, Username};
+use tjxy_common::{CatalogItemId, ImageType, UserId, Username};
 use tjxy_db::{
     AuthRepository, BrowseParent, CatalogItemType, CatalogPageRequest, CatalogQueryRepository,
 };
 use tjxy_db::{UserDataPatch, UserDataRepository};
+use tjxy_test_support::test_database;
 use uuid::Uuid;
 
 async fn database() -> DatabaseConnection {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await
-        .unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     database
 }
@@ -163,6 +157,70 @@ async fn add_to_library(database: &DatabaseConnection, library_id: Uuid, item_id
         .unwrap();
 }
 
+async fn seed_asset(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    image_type: ImageType,
+    priority: i32,
+    sha256: &str,
+    relative_path: &str,
+) {
+    let blob_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("asset_blobs"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("sha256"),
+                        Alias::new("mime_type"),
+                        Alias::new("width"),
+                        Alias::new("height"),
+                        Alias::new("byte_size"),
+                        Alias::new("local_relative_path"),
+                    ])
+                    .values_panic([
+                        blob_id.into(),
+                        sha256.into(),
+                        "image/jpeg".into(),
+                        300.into(),
+                        450.into(),
+                        4_i64.into(),
+                        relative_path.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("item_assets"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_id"),
+                        Alias::new("asset_blob_id"),
+                        Alias::new("image_type"),
+                        Alias::new("priority"),
+                        Alias::new("source_provider"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        item_id.as_uuid().into(),
+                        blob_id.into(),
+                        image_type.as_str().into(),
+                        priority.into(),
+                        "fixture".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn user_views_are_enabled_and_sorted_by_portable_key() {
     let database = database().await;
@@ -213,6 +271,49 @@ async fn library_page_filters_membership_tombstones_and_candidates() {
     assert_eq!(page.total_record_count(), 2);
     assert_eq!(page.items().len(), 1);
     assert_eq!(page.items()[0].name(), "Blade Runner");
+}
+
+#[tokio::test]
+async fn search_hints_filter_visible_items_before_type_filtering_and_paging() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let disabled = seed_library(&database, "Disabled", "movies", false).await;
+    let alpha = seed_item(&database, "Alpha", "Movie", None, true, "Matched").await;
+    let alpine = seed_item(&database, "Alpine", "Movie", None, true, "Matched").await;
+    let audio = seed_item(&database, "Alpha Song", "Audio", None, true, "Matched").await;
+    let absent = seed_item(&database, "Alpha Missing", "Movie", None, false, "Matched").await;
+    let candidate = seed_item(
+        &database,
+        "Alpha Candidate",
+        "Movie",
+        None,
+        true,
+        "Candidate",
+    )
+    .await;
+    let disabled_item =
+        seed_item(&database, "Alpha Disabled", "Movie", None, true, "Matched").await;
+    for item in [alpha, alpine, audio, absent, candidate] {
+        add_to_library(&database, library, item).await;
+    }
+    add_to_library(&database, disabled, disabled_item).await;
+
+    let page = CatalogQueryRepository::new(&database)
+        .search_hints(
+            user_id,
+            "Alp",
+            CatalogPageRequest::new(1, 1)
+                .unwrap()
+                .with_item_types(vec![CatalogItemType::Movie]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.total_record_count(), 2);
+    assert_eq!(page.start_index(), 1);
+    assert_eq!(page.items().len(), 1);
+    assert_eq!(page.items()[0].name(), "Alpine");
 }
 
 #[tokio::test]
@@ -443,8 +544,266 @@ async fn item_type_filter_is_applied_before_count_and_pagination() {
     assert_eq!(page.items()[0].name(), "Arrival");
 }
 
+#[tokio::test]
+async fn latest_items_are_date_ordered_and_library_scoped() {
+    let database = database().await;
+    let user = seed_user(&database).await;
+    let first_library = seed_library(&database, "Movies", "movies", true).await;
+    let second_library = seed_library(&database, "Other", "movies", true).await;
+    let older = seed_item(&database, "Older", "Movie", None, true, "Matched").await;
+    let newer = seed_item(&database, "Newer", "Movie", None, true, "Matched").await;
+    let foreign = seed_item(&database, "Foreign", "Movie", None, true, "Matched").await;
+    add_to_library(&database, first_library, older).await;
+    add_to_library(&database, first_library, newer).await;
+    add_to_library(&database, second_library, foreign).await;
+    set_date_created(&database, older, Utc::now() - chrono::Duration::days(2)).await;
+    set_date_created(&database, newer, Utc::now() - chrono::Duration::days(1)).await;
+    set_date_created(&database, foreign, Utc::now()).await;
+
+    let items = CatalogQueryRepository::new(&database)
+        .latest_items(user, Some(first_library), &[], 20)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        items
+            .iter()
+            .map(tjxy_db::CatalogItemRecord::name)
+            .collect::<Vec<_>>(),
+        ["Newer", "Older"]
+    );
+}
+
+#[tokio::test]
+async fn next_up_returns_the_first_unplayed_episode_per_series() {
+    let database = database().await;
+    let user = seed_user(&database).await;
+    let library = seed_library(&database, "TV", "tvshows", true).await;
+    let first_series = seed_item(&database, "First", "Series", None, true, "Matched").await;
+    let second_series = seed_item(&database, "Second", "Series", None, true, "Matched").await;
+    let first_episode = seed_item(
+        &database,
+        "S01E01",
+        "Episode",
+        Some(first_series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let next_episode = seed_item(
+        &database,
+        "S01E02",
+        "Episode",
+        Some(first_series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let other_episode = seed_item(
+        &database,
+        "S01E01 other",
+        "Episode",
+        Some(second_series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    for item in [
+        first_series,
+        second_series,
+        first_episode,
+        next_episode,
+        other_episode,
+    ] {
+        add_to_library(&database, library, item).await;
+    }
+    for (episode, owner) in [
+        (first_episode, first_series),
+        (next_episode, first_series),
+        (other_episode, second_series),
+    ] {
+        set_structure_owner(&database, episode, owner).await;
+    }
+    UserDataRepository::new(&database)
+        .commit(
+            user,
+            first_episode,
+            UserDataPatch::default().with_played(true),
+        )
+        .await
+        .unwrap();
+
+    let page = CatalogQueryRepository::new(&database)
+        .next_up_items(user, None, false, CatalogPageRequest::new(0, 20).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(page.total_record_count(), 2);
+    let expected = if first_series.as_uuid() < second_series.as_uuid() {
+        [next_episode, other_episode]
+    } else {
+        [other_episode, next_episode]
+    };
+    assert_eq!(
+        page.items()
+            .iter()
+            .map(tjxy_db::CatalogItemRecord::id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    UserDataRepository::new(&database)
+        .commit(
+            user,
+            next_episode,
+            UserDataPatch::default().with_playback_position_ticks(42_000),
+        )
+        .await
+        .unwrap();
+    let repository = CatalogQueryRepository::new(&database);
+    let without_resumable = repository
+        .next_up_items(user, None, false, CatalogPageRequest::new(0, 20).unwrap())
+        .await
+        .unwrap();
+    let with_resumable = repository
+        .next_up_items(user, None, true, CatalogPageRequest::new(0, 20).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(without_resumable.items()[0].id(), other_episode);
+    assert_eq!(without_resumable.total_record_count(), 1);
+    assert_eq!(with_resumable.total_record_count(), 2);
+}
+
+#[tokio::test]
+async fn item_pages_batch_primary_tags_and_resolve_authorized_images() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let item = seed_item(&database, "Arrival", "Movie", None, true, "Matched").await;
+    add_to_library(&database, library, item).await;
+    let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    seed_asset(
+        &database,
+        item,
+        ImageType::Primary,
+        0,
+        sha256,
+        "01/23/poster.jpg",
+    )
+    .await;
+
+    let repository = CatalogQueryRepository::new(&database);
+    let page = repository
+        .items(
+            user_id,
+            BrowseParent::Library(library),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+    let image = repository
+        .image(item, ImageType::Primary, 0)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(page.items()[0].image_tags()["Primary"], sha256);
+    assert_eq!(image.sha256(), sha256);
+    assert_eq!(image.mime_type(), "image/jpeg");
+    assert_eq!(image.byte_size(), 4);
+    assert_eq!(image.local_relative_path(), "01/23/poster.jpg");
+}
+
+#[tokio::test]
+async fn image_resolution_hides_items_without_enabled_visible_membership() {
+    let database = database().await;
+    let enabled = seed_library(&database, "Movies", "movies", true).await;
+    let disabled = seed_library(&database, "Disabled", "movies", false).await;
+    let visible = seed_item(&database, "Visible", "Movie", None, true, "Matched").await;
+    let absent = seed_item(&database, "Absent", "Movie", None, false, "Matched").await;
+    let candidate = seed_item(&database, "Candidate", "Movie", None, true, "Candidate").await;
+    let disabled_only = seed_item(&database, "Disabled only", "Movie", None, true, "Matched").await;
+    add_to_library(&database, enabled, visible).await;
+    add_to_library(&database, enabled, absent).await;
+    add_to_library(&database, enabled, candidate).await;
+    add_to_library(&database, disabled, disabled_only).await;
+    for (index, item) in [visible, absent, candidate, disabled_only]
+        .into_iter()
+        .enumerate()
+    {
+        let sha256 = format!("{index:064x}");
+        seed_asset(
+            &database,
+            item,
+            ImageType::Primary,
+            0,
+            &sha256,
+            &format!("{index:02x}/poster.jpg"),
+        )
+        .await;
+    }
+
+    let repository = CatalogQueryRepository::new(&database);
+    assert!(
+        repository
+            .image(visible, ImageType::Primary, 0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for item in [absent, candidate, disabled_only] {
+        assert!(
+            repository
+                .image(item, ImageType::Primary, 0)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
 #[test]
 fn page_request_rejects_unbounded_or_overflowing_limits() {
     assert!(CatalogPageRequest::new(0, 0).is_err());
     assert!(CatalogPageRequest::new(0, 201).is_err());
+}
+
+async fn set_date_created(
+    database: &DatabaseConnection,
+    item: CatalogItemId,
+    date_created: chrono::DateTime<Utc>,
+) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("date_created"), date_created)
+                    .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn set_structure_owner(
+    database: &DatabaseConnection,
+    episode: CatalogItemId,
+    series: CatalogItemId,
+) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("structure_owner_item_id"), series.as_uuid())
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("id")).eq(episode.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
 }

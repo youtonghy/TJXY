@@ -40,6 +40,10 @@ const ADDED_COLUMNS: &[(&str, &[&str])] = &[
     ("work_jobs", &["created_at", "started_at", "completed_at"]),
     ("asset_blobs", &["created_at"]),
     ("media_source_aliases", &["created_at"]),
+    ("import_jobs", &["created_at", "updated_at"]),
+    ("import_staging_items", &["created_at", "updated_at"]),
+    ("import_conflicts", &["created_at", "updated_at"]),
+    ("import_errors", &["created_at"]),
 ];
 
 #[derive(DeriveMigrationName)]

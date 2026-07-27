@@ -1,3 +1,4 @@
+use sea_orm::ConnectionTrait;
 use sea_orm_migration::prelude::{
     Alias, DbErr, DeriveMigrationName, Index, MigrationTrait, SchemaManager,
 };
@@ -11,6 +12,17 @@ pub struct Migration;
 #[sea_orm_migration::async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_connection().get_database_backend() == sea_orm::DbBackend::MySql {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("ix_storage_change_outbox_root")
+                        .table(Alias::new("storage_change_outbox"))
+                        .col(Alias::new("storage_root_id"))
+                        .to_owned(),
+                )
+                .await?;
+        }
         manager
             .create_index(
                 Index::create()

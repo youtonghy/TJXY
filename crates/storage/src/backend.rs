@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -24,6 +24,10 @@ pub enum BackendError {
     RangeNotSatisfiable { size: u64 },
     #[error("storage backend is temporarily unavailable: {message}")]
     TemporarilyUnavailable { message: String },
+    #[error("storage backend rate limit was exceeded")]
+    RateLimited { retry_after: Option<Duration> },
+    #[error("storage change cursor is no longer valid")]
+    ChangeCursorInvalid,
 }
 
 impl BackendError {
@@ -52,6 +56,12 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<ObjectPage, BackendError>;
 
     async fn list_changes(&self, cursor: ChangeCursor) -> Result<ChangePage, BackendError>;
+
+    async fn latest_change_cursor(&self) -> Result<ChangeCursor, BackendError> {
+        Err(BackendError::unsupported_capability(
+            "latest changes cursor",
+        ))
+    }
 
     async fn open_range(
         &self,

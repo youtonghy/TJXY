@@ -1,20 +1,14 @@
 use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    ConnectionTrait, DatabaseConnection,
     sea_query::{Alias, Query},
 };
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, UserId};
 use tjxy_db::{UserDataPatch, UserDataRepository, UserDataRepositoryError};
+use tjxy_test_support::test_database;
 
 async fn database() -> DatabaseConnection {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await
-        .unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     database
 }
@@ -71,6 +65,70 @@ async fn seed_user_and_item(database: &DatabaseConnection) -> (UserId, CatalogIt
         .to_owned();
     database.execute(backend.build(&insert_item)).await.unwrap();
     (user_id, item_id)
+}
+
+async fn attach_item_to_library(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    enabled: bool,
+) -> uuid::Uuid {
+    let library_id = uuid::Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("libraries"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("name"),
+                        Alias::new("scan_profile"),
+                        Alias::new("object_selection_scope"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("probe_policy"),
+                        Alias::new("profile_version"),
+                        Alias::new("collection_type"),
+                        Alias::new("sort_key"),
+                        Alias::new("is_enabled"),
+                    ])
+                    .values_panic([
+                        library_id.into(),
+                        "Movies".into(),
+                        "Lazy".into(),
+                        "title_layer".into(),
+                        "basic".into(),
+                        "on_browse".into(),
+                        "on_playback".into(),
+                        1.into(),
+                        "movies".into(),
+                        Vec::<u8>::from("movies").into(),
+                        enabled.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("catalog_item_id"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        library_id.into(),
+                        item_id.as_uuid().into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    library_id
 }
 
 #[tokio::test]
@@ -174,4 +232,69 @@ async fn concurrent_field_patches_do_not_overwrite_each_other() {
     let current = first.get(user_id, item_id).await.unwrap().unwrap();
     assert!(current.is_favorite);
     assert_eq!(current.playback_position_ticks, 42_000);
+}
+
+#[tokio::test]
+async fn visible_commit_checks_enabled_library_inside_the_write_transaction() {
+    let database = database().await;
+    let (user_id, item_id) = seed_user_and_item(&database).await;
+    let library_id = attach_item_to_library(&database, item_id, true).await;
+    let repository = UserDataRepository::new(&database);
+
+    let committed = repository
+        .commit_visible(user_id, item_id, UserDataPatch::favorite(true))
+        .await
+        .unwrap();
+    assert!(committed.is_some());
+    assert_eq!(repository.revision(user_id).await.unwrap(), Some(1));
+
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), false)
+                    .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .commit_visible(user_id, item_id, UserDataPatch::favorite(false))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repository
+            .get_visible(user_id, item_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(repository.revision(user_id).await.unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn repeated_visible_absolute_patch_does_not_bump_revision() {
+    let database = database().await;
+    let (user_id, item_id) = seed_user_and_item(&database).await;
+    attach_item_to_library(&database, item_id, true).await;
+    let repository = UserDataRepository::new(&database);
+
+    repository
+        .commit_visible(user_id, item_id, UserDataPatch::favorite(true))
+        .await
+        .unwrap();
+    let replay = repository
+        .commit_visible(user_id, item_id, UserDataPatch::favorite(true))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(replay.user_revision, 1);
+    assert!(replay.data.is_favorite);
+    assert_eq!(repository.revision(user_id).await.unwrap(), Some(1));
 }

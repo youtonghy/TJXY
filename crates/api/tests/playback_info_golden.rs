@@ -16,6 +16,11 @@ fn direct_play_response_matches_the_pinned_pascal_case_golden() {
         vec![MediaStream {
             codec: Some("srt".to_owned()),
             language: Some("eng".to_owned()),
+            width: None,
+            height: None,
+            channels: None,
+            profile: None,
+            level: None,
             stream_type: MediaStreamType::Subtitle,
             index: 3,
             is_external: true,
@@ -27,6 +32,7 @@ fn direct_play_response_matches_the_pinned_pascal_case_golden() {
             is_text_subtitle_stream: true,
             supports_external_stream: true,
         }],
+        true,
     )
     .unwrap();
     let response = PlaybackInfoResponse {
@@ -52,6 +58,7 @@ fn direct_play_urls_must_be_local_tjxy_routes() {
         "mkv",
         "https://drive.google.com/temporary-download",
         Vec::new(),
+        true,
     )
     .unwrap_err();
 
@@ -60,6 +67,11 @@ fn direct_play_urls_must_be_local_tjxy_routes() {
     let subtitle = MediaStream {
         codec: Some("srt".to_owned()),
         language: None,
+        width: None,
+        height: None,
+        channels: None,
+        profile: None,
+        level: None,
         stream_type: MediaStreamType::Subtitle,
         index: 0,
         is_external: true,
@@ -74,6 +86,7 @@ fn direct_play_urls_must_be_local_tjxy_routes() {
         "mkv",
         "/Videos/41/stream?static=true",
         vec![subtitle],
+        true,
     )
     .unwrap_err();
 

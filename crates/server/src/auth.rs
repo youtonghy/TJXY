@@ -3,15 +3,20 @@ use std::collections::HashMap;
 use axum::{
     Json,
     body::Bytes,
-    extract::{RawQuery, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
-use tjxy_api::{AuthenticateUserByName, AuthenticationResult, SessionInfoDto, UserDto, UserPolicy};
+use serde::{Deserialize, Serialize};
+use tjxy_api::{
+    AuthenticateUserByName, AuthenticationResult, CreateUserByName, SessionInfoDto, UpdateUserName,
+    UpdateUserPassword, UpdateUserPolicy, UserDto, UserPolicy,
+};
 use tjxy_application::AuthenticatedPrincipal;
 use tjxy_application::{AuthError, ClientIdentity};
-use tjxy_db::AuthUser;
+use tjxy_common::UserId;
+use tjxy_db::{AuthRepositoryError, AuthUser};
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -72,6 +77,215 @@ pub(crate) async fn current_user(
     }
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsersQuery {
+    is_hidden: Option<bool>,
+    is_disabled: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateUserQuery {
+    user_id: Uuid,
+}
+
+pub(crate) async fn users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<UsersQuery>,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    if query.is_hidden == Some(true) {
+        return Json(Vec::<UserDto>::new()).into_response();
+    }
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service.list_users().await {
+        Ok(users) => Json(
+            users
+                .into_iter()
+                .filter(|user| {
+                    query
+                        .is_disabled
+                        .is_none_or(|disabled| user.is_disabled() == disabled)
+                })
+                .map(|user| user_dto(&user, state.identity.id))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn user(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service.get_user(UserId::from_uuid(user_id)).await {
+        Ok(Some(user)) => Json(user_dto(&user, state.identity.id)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let payload: CreateUserByName = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .create_user(&payload.name, &payload.password, false)
+        .await
+    {
+        Ok(user) => Json(user_dto(&user, state.identity.id)).into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn update_user(
+    State(state): State<AppState>,
+    Query(query): Query<UpdateUserQuery>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let payload: UpdateUserName = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .rename_user(UserId::from_uuid(query.user_id), &payload.name)
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn update_user_password(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let payload: UpdateUserPassword = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .update_user_password(
+            UserId::from_uuid(user_id),
+            &payload.new_password,
+            payload.reset_password,
+        )
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn update_user_policy(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let payload: UpdateUserPolicy = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    if !supported_provider(
+        payload.authentication_provider_id.as_deref(),
+        "TJXY.LocalAuthentication",
+    ) || !supported_provider(
+        payload.password_reset_provider_id.as_deref(),
+        "TJXY.LocalPasswordReset",
+    ) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .update_user_policy(
+            UserId::from_uuid(user_id),
+            payload.is_administrator,
+            payload.is_disabled,
+        )
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
+pub(crate) async fn delete_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service.delete_user(UserId::from_uuid(user_id)).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => admin_error_response(&error),
+    }
+}
+
 pub(crate) async fn authenticated_principal(
     state: &AppState,
     headers: &HeaderMap,
@@ -88,9 +302,37 @@ pub(crate) async fn authenticated_principal(
         .map_err(|error| HttpAuthError::from(error).into_response())
 }
 
+pub(crate) async fn authenticated_administrator(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<AuthenticatedPrincipal, Response> {
+    let principal = authenticated_principal(state, headers, query).await?;
+    if principal.user().is_admin() {
+        Ok(principal)
+    } else {
+        Err(StatusCode::FORBIDDEN.into_response())
+    }
+}
+
+#[allow(clippy::result_large_err)] // Route guards return the ready-to-send Axum response directly.
+pub(crate) fn authenticated_session_id(
+    principal: &AuthenticatedPrincipal,
+) -> Result<Uuid, Response> {
+    principal
+        .session_id()
+        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())
+}
+
 pub(crate) fn request_query(query: Option<&str>) -> Result<HashMap<String, String>, ()> {
     query
         .map_or_else(|| Ok(HashMap::new()), parse_query)
+        .map_err(|_| ())
+}
+
+pub(crate) fn request_query_pairs(query: Option<&str>) -> Result<Vec<(String, String)>, ()> {
+    query
+        .map_or_else(|| Ok(Vec::new()), parse_query_pairs)
         .map_err(|_| ())
 }
 
@@ -100,8 +342,40 @@ fn user_dto(user: &AuthUser, server_id: uuid::Uuid) -> UserDto {
         user.name(),
         server_id,
         user.has_password(),
-        UserPolicy::direct_play_only(user.is_admin()),
+        UserPolicy::direct_play_only(user.is_admin()).with_disabled(user.is_disabled()),
     )
+}
+
+fn json_payload<Payload>(headers: &HeaderMap, body: &[u8]) -> Result<Payload, StatusCode>
+where
+    Payload: serde::de::DeserializeOwned,
+{
+    if !is_json_content_type(headers) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn supported_provider(value: Option<&str>, expected: &str) -> bool {
+    value.is_none_or(|value| value == expected)
+}
+
+fn admin_error_response(error: &AuthError) -> Response {
+    match error {
+        AuthError::InvalidUsername | AuthError::InvalidPassword | AuthError::PasswordRequired => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        AuthError::Repository(AuthRepositoryError::UserNotFound) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        AuthError::Repository(
+            AuthRepositoryError::LastEnabledAdmin
+            | AuthRepositoryError::UserReferenced
+            | AuthRepositoryError::UsernameConflict,
+        ) => StatusCode::CONFLICT.into_response(),
+        AuthError::Forbidden => StatusCode::FORBIDDEN.into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 fn client_identity(
@@ -153,14 +427,16 @@ fn access_token(
         }
     }
     if let Some(query) = query {
-        let parameters = parse_query(query)?;
-        if let Some(token) = parameters.get("ApiKey") {
-            return valid_token(token);
-        }
-        if legacy_enabled {
-            if let Some(token) = parameters.get("api_key") {
-                return valid_token(token);
+        let mut token = None;
+        for (name, value) in parse_query_pairs(query)? {
+            if (name == "ApiKey" || legacy_enabled && name == "api_key")
+                && token.replace(value).is_some()
+            {
+                return Err(HttpAuthError::Unauthorized);
             }
+        }
+        if let Some(token) = token {
+            return valid_token(&token);
         }
     }
     Err(HttpAuthError::Unauthorized)
@@ -181,10 +457,14 @@ pub(crate) fn is_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 fn valid_token(value: &str) -> Result<String, HttpAuthError> {
-    if value.is_empty() || value.len() > 1_024 || value.chars().any(char::is_control) {
+    if !valid_token_transport(value) {
         return Err(HttpAuthError::Unauthorized);
     }
     Ok(value.to_owned())
+}
+
+pub(crate) fn valid_token_transport(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1_024 && !value.chars().any(char::is_control)
 }
 
 fn required<'value>(
@@ -243,15 +523,23 @@ fn parse_parameters(mut input: &str) -> Result<HashMap<String, String>, HttpAuth
 
 fn parse_query(input: &str) -> Result<HashMap<String, String>, HttpAuthError> {
     let mut output = HashMap::new();
-    for pair in input.split('&').filter(|pair| !pair.is_empty()) {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = percent_decode(key, true)?;
-        let value = percent_decode(value, true)?;
+    for (key, value) in parse_query_pairs(input)? {
         if output.insert(key, value).is_some() {
             return Err(HttpAuthError::BadRequest);
         }
     }
     Ok(output)
+}
+
+fn parse_query_pairs(input: &str) -> Result<Vec<(String, String)>, HttpAuthError> {
+    input
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            Ok((percent_decode(key, true)?, percent_decode(value, true)?))
+        })
+        .collect()
 }
 
 fn percent_decode(value: &str, plus_as_space: bool) -> Result<String, HttpAuthError> {
@@ -316,6 +604,7 @@ enum HttpAuthError {
     BadRequest,
     Unauthorized,
     Forbidden,
+    Conflict,
     Unavailable,
     TooManyRequests,
 }
@@ -324,18 +613,26 @@ impl From<AuthError> for HttpAuthError {
     fn from(error: AuthError) -> Self {
         match error {
             AuthError::InvalidCredentials | AuthError::InvalidToken => Self::Unauthorized,
-            AuthError::Forbidden => Self::Forbidden,
+            AuthError::Forbidden | AuthError::SessionRequired => Self::Forbidden,
             AuthError::InvalidUsername
             | AuthError::InvalidPassword
             | AuthError::PasswordRequired
             | AuthError::InvalidClientIdentity
             | AuthError::InvalidCapabilities
+            | AuthError::InvalidSessionFilter
+            | AuthError::InvalidDeviceRequest
+            | AuthError::InvalidApiKeyRequest
             | AuthError::InvalidSessionLifetime
             | AuthError::InvalidPasswordConcurrency => Self::BadRequest,
+            AuthError::ApiKeyCapacity => Self::Conflict,
             AuthError::TimestampOverflow
             | AuthError::PasswordEngine
             | AuthError::PasswordWorker
-            | AuthError::Repository(_) => Self::Unavailable,
+            | AuthError::Repository(_)
+            | AuthError::DeviceRepository(_)
+            | AuthError::CredentialCipherUnavailable
+            | AuthError::ApiKeyRepository(_)
+            | AuthError::CredentialCipher(_) => Self::Unavailable,
             AuthError::Busy => Self::TooManyRequests,
         }
     }
@@ -347,6 +644,7 @@ impl IntoResponse for HttpAuthError {
             Self::BadRequest => (StatusCode::BAD_REQUEST, "invalid authentication request"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid credentials or token"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "authentication is not permitted"),
+            Self::Conflict => (StatusCode::CONFLICT, "authentication resource conflict"),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "authentication is unavailable",
@@ -365,6 +663,10 @@ impl IntoResponse for HttpAuthError {
         }
         response
     }
+}
+
+pub(crate) fn authentication_error_response(error: AuthError) -> Response {
+    HttpAuthError::from(error).into_response()
 }
 
 #[derive(Serialize)]

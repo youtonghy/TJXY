@@ -6,5 +6,5 @@ mod types;
 pub use backend::{BackendError, ByteStream, StorageBackend};
 pub use types::{
     ByteRange, ChangeCursor, ChangePage, IdentityQuality, ObjectPage, ObjectType, PageToken,
-    StorageCapabilities, StorageObject, StorageObjectId,
+    StorageCapabilities, StorageChange, StorageObject, StorageObjectId,
 };

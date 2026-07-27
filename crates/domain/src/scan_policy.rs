@@ -62,7 +62,7 @@ impl EffectiveScanPolicy {
                 probe: ProbePolicy::OnPlaybackInfo,
             },
             ScanProfile::Hybrid => Self {
-                object_selection: ObjectSelectionScope::EntireRoot,
+                object_selection: ObjectSelectionScope::OnDemandSubtree,
                 metadata: MetadataPolicy::Basic,
                 expansion: StructureExpansionPolicy::Background,
                 probe: ProbePolicy::OnPlaybackInfo,
@@ -71,7 +71,7 @@ impl EffectiveScanPolicy {
                 object_selection: ObjectSelectionScope::ExplicitOnly,
                 metadata: MetadataPolicy::ExplicitOnly,
                 expansion: StructureExpansionPolicy::ExplicitOnly,
-                probe: ProbePolicy::ExplicitOnly,
+                probe: ProbePolicy::OnPlaybackInfo,
             },
         }
     }

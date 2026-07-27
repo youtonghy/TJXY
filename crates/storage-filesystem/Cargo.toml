@@ -9,8 +9,13 @@ rust-version.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+chrono.workspace = true
+notify.workspace = true
 tokio.workspace = true
 tjxy-storage = { path = "../storage" }
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

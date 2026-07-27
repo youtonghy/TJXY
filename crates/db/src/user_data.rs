@@ -7,10 +7,13 @@ use thiserror::Error;
 use tjxy_common::{CatalogItemId, UserId};
 use uuid::Uuid;
 
+use crate::catalog_query::{catalog_item_is_visible, lock_catalog_item_visibility};
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UserDataPatch {
     playback_position_ticks: Option<i64>,
     is_played: Option<bool>,
+    play_count: Option<i32>,
     play_count_delta: Option<i32>,
     is_favorite: Option<bool>,
     last_played_at: Option<DateTime<Utc>>,
@@ -22,6 +25,7 @@ impl UserDataPatch {
         Self {
             playback_position_ticks: None,
             is_played: None,
+            play_count: None,
             play_count_delta: None,
             is_favorite: Some(value),
             last_played_at: None,
@@ -41,6 +45,18 @@ impl UserDataPatch {
     }
 
     #[must_use]
+    pub const fn with_play_count(mut self, value: i32) -> Self {
+        self.play_count = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_favorite(mut self, value: bool) -> Self {
+        self.is_favorite = Some(value);
+        self
+    }
+
+    #[must_use]
     pub const fn with_play_count_delta(mut self, value: i32) -> Self {
         self.play_count_delta = Some(value);
         self
@@ -55,6 +71,7 @@ impl UserDataPatch {
     const fn is_empty(&self) -> bool {
         self.playback_position_ticks.is_none()
             && self.is_played.is_none()
+            && self.play_count.is_none()
             && self.play_count_delta.is_none()
             && self.is_favorite.is_none()
             && self.last_played_at.is_none()
@@ -121,6 +138,57 @@ impl<'connection> UserDataRepository<'connection> {
         }
     }
 
+    /// Atomically checks enabled-library visibility, applies a patch, and bumps revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UserDataRepositoryError`] for invalid patches or database failures.
+    pub async fn commit_visible(
+        &self,
+        user_id: UserId,
+        catalog_item_id: CatalogItemId,
+        patch: UserDataPatch,
+    ) -> Result<Option<UserDataCommit>, UserDataRepositoryError> {
+        validate_patch(&patch)?;
+        let transaction = self.database.begin().await?;
+        let result = async {
+            if !lock_catalog_item_visibility(&transaction, catalog_item_id).await? {
+                return Ok(None);
+            }
+            let now = Utc::now();
+            ensure_revision_row(&transaction, user_id, now).await?;
+            lock_revision_row(&transaction, user_id).await?;
+            if let Some(current) = read_user_data(&transaction, user_id, catalog_item_id).await?
+                && !patch_changes(&patch, &current)
+            {
+                let user_revision = read_revision(&transaction, user_id)
+                    .await?
+                    .ok_or(UserDataRepositoryError::MissingRevision)?;
+                return Ok(Some(UserDataCommit {
+                    data: current,
+                    user_revision,
+                }));
+            }
+            commit_in_transaction(&transaction, user_id, catalog_item_id, &patch, now)
+                .await
+                .map(Some)
+        }
+        .await;
+        match result {
+            Ok(commit) => {
+                transaction.commit().await?;
+                Ok(commit)
+            }
+            Err(original) => match transaction.rollback().await {
+                Ok(()) => Err(original),
+                Err(rollback) => Err(UserDataRepositoryError::RollbackFailed {
+                    original: original.to_string(),
+                    rollback,
+                }),
+            },
+        }
+    }
+
     /// Reads the current SQL revision for a user.
     ///
     /// # Errors
@@ -143,6 +211,29 @@ impl<'connection> UserDataRepository<'connection> {
     ) -> Result<Option<UserDataRecord>, UserDataRepositoryError> {
         read_user_data(self.database, user_id, catalog_item_id).await
     }
+
+    /// Reads user data only when the item belongs to an enabled library.
+    ///
+    /// The outer option represents visibility; the inner option represents an
+    /// existing user-data row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UserDataRepositoryError`] when the transaction or query fails.
+    pub async fn get_visible(
+        &self,
+        user_id: UserId,
+        catalog_item_id: CatalogItemId,
+    ) -> Result<Option<Option<UserDataRecord>>, UserDataRepositoryError> {
+        let transaction = self.database.begin().await?;
+        if !catalog_item_is_visible(&transaction, catalog_item_id).await? {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let data = read_user_data(&transaction, user_id, catalog_item_id).await?;
+        transaction.commit().await?;
+        Ok(Some(data))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -153,6 +244,8 @@ pub enum UserDataRepositoryError {
     NegativePlaybackPosition,
     #[error("play count delta must be positive")]
     InvalidPlayCountDelta,
+    #[error("play count cannot be negative or combined with a delta")]
+    InvalidPlayCount,
     #[error("database operation failed: {0}")]
     Database(#[from] DbErr),
     #[error("user catalog state disappeared during commit")]
@@ -173,13 +266,14 @@ impl PartialEq for UserDataRepositoryError {
                     Self::NegativePlaybackPosition
                 )
                 | (Self::InvalidPlayCountDelta, Self::InvalidPlayCountDelta)
+                | (Self::InvalidPlayCount, Self::InvalidPlayCount)
                 | (Self::MissingRevision, Self::MissingRevision)
                 | (Self::MissingUserData, Self::MissingUserData)
         )
     }
 }
 
-fn validate_patch(patch: &UserDataPatch) -> Result<(), UserDataRepositoryError> {
+pub(crate) fn validate_patch(patch: &UserDataPatch) -> Result<(), UserDataRepositoryError> {
     if patch.is_empty() {
         return Err(UserDataRepositoryError::EmptyPatch);
     }
@@ -189,10 +283,15 @@ fn validate_patch(patch: &UserDataPatch) -> Result<(), UserDataRepositoryError> 
     if patch.play_count_delta.is_some_and(|value| value <= 0) {
         return Err(UserDataRepositoryError::InvalidPlayCountDelta);
     }
+    if patch.play_count.is_some_and(|value| value < 0)
+        || (patch.play_count.is_some() && patch.play_count_delta.is_some())
+    {
+        return Err(UserDataRepositoryError::InvalidPlayCount);
+    }
     Ok(())
 }
 
-async fn commit_in_transaction(
+pub(crate) async fn commit_in_transaction(
     transaction: &DatabaseTransaction,
     user_id: UserId,
     catalog_item_id: CatalogItemId,
@@ -219,6 +318,16 @@ async fn ensure_revision_row(
     user_id: UserId,
     now: DateTime<Utc>,
 ) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let conflict = if backend == sea_orm::DbBackend::MySql {
+        OnConflict::column(Alias::new("user_id"))
+            .update_column(Alias::new("user_id"))
+            .to_owned()
+    } else {
+        OnConflict::column(Alias::new("user_id"))
+            .do_nothing()
+            .to_owned()
+    };
     let statement = Query::insert()
         .into_table(Alias::new("user_catalog_state"))
         .columns([
@@ -233,13 +342,8 @@ async fn ensure_revision_row(
             0_i64.into(),
             now.into(),
         ])
-        .on_conflict(
-            OnConflict::column(Alias::new("user_id"))
-                .do_nothing()
-                .to_owned(),
-        )
+        .on_conflict(conflict)
         .to_owned();
-    let backend = transaction.get_database_backend();
     transaction.execute(backend.build(&statement)).await?;
     Ok(())
 }
@@ -266,6 +370,46 @@ async fn increment_revision(
     Ok(())
 }
 
+async fn lock_revision_row(
+    transaction: &DatabaseTransaction,
+    user_id: UserId,
+) -> Result<(), UserDataRepositoryError> {
+    let statement = Query::update()
+        .table(Alias::new("user_catalog_state"))
+        .value(Alias::new("revision"), Expr::col(Alias::new("revision")))
+        .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    if transaction
+        .execute(backend.build(&statement))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(UserDataRepositoryError::MissingRevision);
+    }
+    Ok(())
+}
+
+fn patch_changes(patch: &UserDataPatch, current: &UserDataRecord) -> bool {
+    patch
+        .playback_position_ticks
+        .is_some_and(|value| value != current.playback_position_ticks)
+        || patch
+            .is_played
+            .is_some_and(|value| value != current.is_played)
+        || patch.play_count_delta.is_some()
+        || patch
+            .play_count
+            .is_some_and(|value| value != current.play_count)
+        || patch
+            .is_favorite
+            .is_some_and(|value| value != current.is_favorite)
+        || patch
+            .last_played_at
+            .is_some_and(|value| Some(value) != current.last_played_at)
+}
+
 async fn upsert_user_data(
     transaction: &DatabaseTransaction,
     user_id: UserId,
@@ -285,6 +429,9 @@ async fn upsert_user_data(
             Alias::new("play_count"),
             Expr::col((Alias::new("user_data"), Alias::new("play_count"))).add(delta),
         );
+    }
+    if patch.play_count.is_some() {
+        conflict.update_column(Alias::new("play_count"));
     }
     if patch.is_favorite.is_some() {
         conflict.update_column(Alias::new("is_favorite"));
@@ -313,7 +460,11 @@ async fn upsert_user_data(
             catalog_item_id.as_uuid().into(),
             patch.playback_position_ticks.unwrap_or(0).into(),
             patch.is_played.unwrap_or(false).into(),
-            patch.play_count_delta.unwrap_or(0).into(),
+            patch
+                .play_count
+                .or(patch.play_count_delta)
+                .unwrap_or(0)
+                .into(),
             patch.is_favorite.unwrap_or(false).into(),
             patch.last_played_at.into(),
             now.into(),

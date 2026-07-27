@@ -53,6 +53,31 @@ async fn ping_and_liveness_are_available_without_authentication() {
 }
 
 #[tokio::test]
+async fn default_branding_is_public_and_contains_no_custom_content() {
+    let response = build_router(state())
+        .oneshot(
+            Request::builder()
+                .uri("/Branding/Configuration")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let branding: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        branding,
+        serde_json::json!({
+            "LoginDisclaimer": null,
+            "CustomCss": null,
+            "SplashscreenEnabled": false
+        })
+    );
+}
+
+#[tokio::test]
 async fn readiness_reports_service_dependency_state() {
     let response = build_router(state())
         .oneshot(

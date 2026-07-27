@@ -1,22 +1,39 @@
 //! Jellyfin-compatible HTTP DTO contracts.
 
-mod auth;
 mod api_key;
+mod auth;
 mod browse;
+mod device;
+mod display_preferences;
+mod library;
 mod playback;
+mod playstate;
 mod system;
+mod task;
 
-pub use auth::{
-    AuthenticateUserByName, AuthenticationResult, SessionInfoDto, UserConfiguration, UserDto,
-    UserPolicy,
-};
 pub use api_key::{AuthenticationInfoDto, AuthenticationInfoQueryResult};
+pub use auth::{
+    AuthenticateUserByName, AuthenticationResult, CreateUserByName, SessionCapabilitiesDto,
+    SessionInfoDto, UpdateUserName, UpdateUserPassword, UpdateUserPolicy, UserConfiguration,
+    UserDto, UserPolicy,
+};
 pub use browse::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, ClientCapabilitiesDto, CollectionType,
-    MediaType, UserItemDataDto,
+    MediaType, SearchHint, SearchHintResult, UpdateUserItemDataDto, UserItemDataDto,
+};
+pub use device::{DeviceInfoDto, DeviceInfoDtoQueryResult, DeviceOptionsDto};
+pub use display_preferences::{DisplayPreferencesDto, ScrollDirection, SortOrder};
+pub use library::{
+    AddVirtualFolderDto, CreateLibraryOptions, LibraryOptionsDto, UpdateLibraryOptions,
+    UpdateLibraryOptionsDto, VirtualFolderInfo,
 };
 pub use playback::{
     DeliveryMethod, MediaProtocol, MediaSourceInfo, MediaStream, MediaStreamType,
     PlaybackInfoError, PlaybackInfoResponse,
 };
-pub use system::PublicSystemInfo;
+pub use playstate::PlaybackStateRequest;
+pub use system::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
+pub use task::{
+    AdminHybridCandidateInfo, AdminHybridCandidatePage, AdminTaskJobInfo, AdminTaskJobStatus,
+    ScheduledTaskInfo, ScheduledTaskState,
+};

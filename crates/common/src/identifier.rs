@@ -41,8 +41,14 @@ macro_rules! uuid_identifier {
 }
 
 uuid_identifier!(CatalogItemId);
+uuid_identifier!(LibraryId);
+uuid_identifier!(LibraryRootBindingId);
+uuid_identifier!(MediaLocationId);
 uuid_identifier!(MediaSourceId);
 uuid_identifier!(PresentationKey);
+uuid_identifier!(PublicationId);
 uuid_identifier!(StorageObjectRecordId);
 uuid_identifier!(StorageRootId);
+uuid_identifier!(SubtitleId);
 uuid_identifier!(UserId);
+uuid_identifier!(WorkJobId);

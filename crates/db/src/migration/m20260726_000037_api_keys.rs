@@ -8,7 +8,7 @@ use sea_orm_migration::{
 };
 
 const TOKEN_DIGEST_BYTES: u32 = 32;
-const APP_NAME_MAX_BYTES: u32 = 256;
+const APP_NAME_MAX_LENGTH: u32 = 256;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -40,7 +40,7 @@ impl MigrationTrait for Migration {
                     })
                     .col(blob(Alias::new("encrypted_payload")))
                     .col(integer(Alias::new("key_version")))
-                    .col(string_len(Alias::new("app_name"), APP_NAME_MAX_BYTES))
+                    .col(string_len(Alias::new("app_name"), APP_NAME_MAX_LENGTH))
                     .col(timestamp_with_time_zone(Alias::new("created_at")))
                     .col(timestamp_with_time_zone_null(Alias::new("last_used_at")))
                     .foreign_key(

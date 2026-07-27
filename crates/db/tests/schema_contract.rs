@@ -1,28 +1,17 @@
-use std::collections::BTreeSet;
-
 use sea_orm::{
-    ConnectionTrait, Database, DbBackend, Statement,
-    sea_query::{Alias, Query},
+    ConnectionTrait, DbBackend, Statement,
+    sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::{MigratorTrait, SchemaManager};
-use tjxy_db::Migrator;
+use tjxy_common::Username;
+use tjxy_db::{AuthRepository, Migrator};
+use tjxy_test_support::test_database;
 
 #[tokio::test]
 async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
+    let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
-
-    let rows = database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'table'".to_owned(),
-        ))
-        .await
-        .unwrap();
-    let tables = rows
-        .into_iter()
-        .map(|row| row.try_get::<String>("", "name").unwrap())
-        .collect::<BTreeSet<_>>();
+    let schema = SchemaManager::new(&database);
 
     for required in [
         "catalog_state",
@@ -39,6 +28,7 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "subtitles",
         "provider_ids",
         "identity_matches",
+        "storage_relink_candidates",
         "metadata_provenance",
         "people",
         "item_people",
@@ -50,11 +40,14 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "auth_state",
         "auth_sessions",
         "api_keys",
+        "playback_sessions",
         "storage_accounts",
         "storage_credentials",
         "storage_roots",
         "storage_objects",
+        "storage_root_objects",
         "storage_sync_cursors",
+        "storage_sync_pages",
         "storage_change_outbox",
         "library_storage_roots",
         "asset_blobs",
@@ -62,17 +55,39 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "work_jobs",
         "work_staging_rows",
         "work_results",
-        "import_runs",
-        "import_legacy_ids",
+        "catalog_publications",
+        "publication_catalog_items",
+        "publication_media_sources",
+        "publication_media_locations",
+        "publication_subtitles",
+        "catalog_change_outbox",
+        "cache_invalidation_outbox",
+        "import_jobs",
+        "import_sources",
+        "import_staging_items",
+        "legacy_item_mappings",
+        "import_conflicts",
+        "import_errors",
+        "filesystem_storage_configs",
     ] {
-        assert!(tables.contains(required), "missing table {required}");
+        assert!(
+            schema.has_table(required).await.unwrap(),
+            "missing table {required}"
+        );
     }
+    assert!(
+        schema
+            .has_column("library_catalog_items", "hybrid_admin_selected_at")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
 async fn schema_enforces_stable_external_and_storage_identities() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
+    let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
 
     for (table, expected_unique_columns) in [
         ("media_sources", vec!["catalog_item_id", "presentation_key"]),
@@ -86,29 +101,76 @@ async fn schema_enforces_stable_external_and_storage_identities() {
         ),
         ("storage_change_outbox", vec!["dedupe_key"]),
         ("asset_blobs", vec!["sha256"]),
+        (
+            "legacy_item_mappings",
+            vec!["source_instance_id", "legacy_item_id"],
+        ),
     ] {
-        let sql =
-            format!("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'");
-        let row = database
-            .query_one(Statement::from_string(DbBackend::Sqlite, sql))
-            .await
-            .unwrap()
-            .unwrap();
-        let ddl = row.try_get::<String>("", "sql").unwrap().to_lowercase();
+        let definitions = unique_definitions(&database, table).await;
+        assert!(definitions.contains("unique"), "{table} lacks uniqueness");
         for column in expected_unique_columns {
-            assert!(ddl.contains(column), "{table} DDL missing {column}: {ddl}");
+            assert!(
+                schema.has_column(table, column).await.unwrap(),
+                "{table} missing {column}"
+            );
+            assert!(
+                definitions.contains(column),
+                "{table} unique definitions omit {column}: {definitions}"
+            );
         }
-        assert!(
-            ddl.contains("unique"),
-            "{table} lacks a unique constraint: {ddl}"
-        );
     }
 }
 
+async fn unique_definitions(database: &sea_orm::DatabaseConnection, table: &str) -> String {
+    if database.get_database_backend() == DbBackend::MySql {
+        return database
+            .query_all(Statement::from_string(
+                DbBackend::MySql,
+                format!("SHOW CREATE TABLE `{table}`"),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get_by_index::<String>(1).unwrap())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+    }
+    let statement = match database.get_database_backend() {
+        DbBackend::Sqlite => Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master \
+             WHERE (type = 'table' AND name = ?) OR (type = 'index' AND tbl_name = ?)"
+                .to_owned(),
+            [table.into(), table.into()],
+        ),
+        DbBackend::Postgres => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT indexdef AS sql FROM pg_indexes \
+             WHERE schemaname = current_schema() AND tablename = $1"
+                .to_owned(),
+            [table.into()],
+        ),
+        DbBackend::MySql => unreachable!(),
+    };
+
+    database
+        .query_all(statement)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| row.try_get::<Option<String>>("", "sql").unwrap())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the cross-table durable revision contract in one matrix.
 async fn schema_keeps_effective_policy_and_revisions_in_sql() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
+    let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
 
     for (table, required_columns) in [
         (
@@ -126,6 +188,7 @@ async fn schema_keeps_effective_policy_and_revisions_in_sql() {
             "user_catalog_state",
             vec!["user_id", "revision", "updated_at"],
         ),
+        ("catalog_items", vec!["date_created"]),
         (
             "users",
             vec![
@@ -161,50 +224,767 @@ async fn schema_keeps_effective_policy_and_revisions_in_sql() {
             vec!["sync_revision", "reconciled_sync_revision"],
         ),
         (
+            "storage_sync_cursors",
+            vec!["cursor_value", "status", "recovery_job_id"],
+        ),
+        (
             "work_jobs",
             vec![
                 "expected_revision",
                 "input_sync_revision",
                 "lease_owner",
                 "lease_expires_at",
+                "available_at",
                 "created_at",
                 "started_at",
                 "completed_at",
             ],
         ),
         (
+            "storage_root_objects",
+            vec![
+                "storage_root_id",
+                "storage_object_id",
+                "parent_storage_object_id",
+                "observed_sync_revision",
+                "children_indexed",
+                "children_index_revision",
+                "presence_state",
+            ],
+        ),
+        ("work_results", vec!["result_sync_revision"]),
+        (
+            "catalog_publications",
+            vec![
+                "job_id",
+                "owner_catalog_item_id",
+                "publication_kind",
+                "expected_revision",
+                "input_sync_revision",
+                "state",
+                "manifest_sha256",
+                "expected_row_count",
+                "activated_generation",
+                "sealed_at",
+            ],
+        ),
+        (
+            "catalog_items",
+            vec![
+                "last_expanded_at",
+                "structure_owner_item_id",
+                "metadata_revision",
+                "metadata_resolved_revision",
+                "metadata_resolved_requirement",
+            ],
+        ),
+        (
+            "work_jobs",
+            vec![
+                "metadata_requirement",
+                "storage_root_affinity",
+                "natural_key_storage_root_id",
+            ],
+        ),
+        (
+            "publication_catalog_items",
+            vec![
+                "publication_id",
+                "catalog_item_id",
+                "parent_catalog_item_id",
+                "storage_root_id",
+                "scope_storage_object_id",
+                "row_sha256",
+            ],
+        ),
+        (
+            "publication_media_sources",
+            vec![
+                "publication_id",
+                "media_source_id",
+                "catalog_item_id",
+                "presentation_key",
+                "row_sha256",
+            ],
+        ),
+        (
+            "publication_media_locations",
+            vec![
+                "publication_id",
+                "media_location_id",
+                "media_source_id",
+                "storage_object_id",
+                "row_sha256",
+            ],
+        ),
+        (
+            "publication_subtitles",
+            vec![
+                "publication_id",
+                "subtitle_id",
+                "media_source_id",
+                "storage_object_id",
+                "delivery_index",
+                "row_sha256",
+            ],
+        ),
+        (
+            "media_sources",
+            vec![
+                "video_codec",
+                "resolution",
+                "bitrate",
+                "runtime_ticks",
+                "admin_priority",
+                "is_default",
+                "is_hidden",
+            ],
+        ),
+        (
+            "media_streams",
+            vec![
+                "stream_identity",
+                "delivery_index",
+                "container_stream_index",
+                "width",
+                "height",
+                "channels",
+                "profile",
+                "level",
+                "is_default",
+                "is_forced",
+                "is_external",
+                "is_text",
+            ],
+        ),
+        (
             "storage_objects",
-            vec!["mime_type", "etag", "remote_modified_at", "last_listed_at"],
+            vec![
+                "mime_type",
+                "etag",
+                "remote_modified_at",
+                "last_listed_at",
+                "facts_observed_storage_root_id",
+            ],
         ),
         (
             "storage_sync_cursors",
             vec!["last_success_at", "last_full_sync_at"],
         ),
+        ("storage_roots", vec!["discovered_sync_revision"]),
+        ("library_storage_roots", vec!["discovered_sync_revision"]),
         ("storage_change_outbox", vec!["created_at", "processed_at"]),
         ("user_data", vec!["last_played_at", "updated_at"]),
+        (
+            "storage_relink_candidates",
+            vec![
+                "storage_root_id",
+                "previous_storage_object_id",
+                "replacement_storage_object_id",
+                "confidence",
+                "evidence",
+                "state",
+                "created_at",
+            ],
+        ),
     ] {
-        let rows = database
-            .query_all(Statement::from_string(
-                DbBackend::Sqlite,
-                format!("PRAGMA table_info('{table}')"),
-            ))
+        for required in required_columns {
+            assert!(
+                schema.has_column(table, required).await.unwrap(),
+                "{table} missing {required}"
+            );
+        }
+    }
+    database
+        .query_all(
+            database.get_database_backend().build(
+                &Query::select()
+                    .columns([Alias::new("profile"), Alias::new("level")])
+                    .from(Alias::new("media_streams"))
+                    .limit(0)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .expect("media_streams compatibility columns must be queryable");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The pre-m30 fixture proves both recoverable and ambiguous upgrade paths.
+async fn storage_work_root_key_migration_recovers_or_retires_legacy_jobs() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(29)).await.unwrap();
+    let backend = database.get_database_backend();
+    let account = uuid::Uuid::new_v4();
+    let first_root = uuid::Uuid::new_v4();
+    let second_root = uuid::Uuid::new_v4();
+    let unique_scope = uuid::Uuid::new_v4();
+    let ambiguous_scope = uuid::Uuid::new_v4();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_accounts"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("provider"),
+                        Alias::new("display_name"),
+                        Alias::new("account_identity"),
+                        Alias::new("credential_ref"),
+                        Alias::new("status"),
+                    ])
+                    .values_panic([
+                        account.into(),
+                        "filesystem".into(),
+                        "Fixture".into(),
+                        "fixture-account".into(),
+                        "fixture".into(),
+                        "Active".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    for (root, provider_root) in [(first_root, "first"), (second_root, "second")] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_roots"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_account_id"),
+                            Alias::new("provider_root_id"),
+                            Alias::new("sync_revision"),
+                            Alias::new("reconciled_sync_revision"),
+                        ])
+                        .values_panic([
+                            root.into(),
+                            account.into(),
+                            provider_root.into(),
+                            0_i64.into(),
+                            0_i64.into(),
+                        ]),
+                ),
+            )
             .await
             .unwrap();
-        let columns = rows
-            .into_iter()
-            .map(|row| row.try_get::<String>("", "name").unwrap())
-            .collect::<BTreeSet<_>>();
-        for required in required_columns {
-            assert!(columns.contains(required), "{table} missing {required}");
+    }
+    for (object, provider_id) in [(unique_scope, "unique"), (ambiguous_scope, "ambiguous")] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_account_id"),
+                            Alias::new("provider_drive_id"),
+                            Alias::new("provider_object_id"),
+                            Alias::new("name"),
+                            Alias::new("normalized_name"),
+                            Alias::new("object_type"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("identity_quality"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            object.into(),
+                            account.into(),
+                            "drive".into(),
+                            provider_id.into(),
+                            provider_id.into(),
+                            provider_id.into(),
+                            "Directory".into(),
+                            0_i64.into(),
+                            false.into(),
+                            0_i64.into(),
+                            "ProviderStableId".into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for (root, object) in [
+        (first_root, unique_scope),
+        (first_root, ambiguous_scope),
+        (second_root, ambiguous_scope),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_root_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            uuid::Uuid::new_v4().into(),
+                            root.into(),
+                            object.into(),
+                            0_i64.into(),
+                            false.into(),
+                            0_i64.into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for (id, scope, revision) in [
+        (uuid::Uuid::new_v4(), unique_scope, 1_i64),
+        (uuid::Uuid::new_v4(), ambiguous_scope, 2_i64),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("work_jobs"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("task_kind"),
+                            Alias::new("scope_type"),
+                            Alias::new("scope_id"),
+                            Alias::new("expected_revision"),
+                            Alias::new("state"),
+                            Alias::new("priority"),
+                            Alias::new("attempt_count"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            "ScopedStorageSync".into(),
+                            "StorageObject".into(),
+                            scope.into(),
+                            revision.into(),
+                            "Pending".into(),
+                            100_i32.into(),
+                            0_i32.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    Migrator::up(&database, Some(1)).await.unwrap();
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("scope_id"),
+                        Alias::new("state"),
+                        Alias::new("storage_root_affinity"),
+                        Alias::new("natural_key_storage_root_id"),
+                    ])
+                    .from(Alias::new("work_jobs"))
+                    .order_by(
+                        Alias::new("expected_revision"),
+                        sea_orm::sea_query::Order::Asc,
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].try_get::<String>("", "state").unwrap(), "Pending");
+    assert_eq!(
+        rows[0]
+            .try_get::<uuid::Uuid>("", "storage_root_affinity")
+            .unwrap(),
+        first_root
+    );
+    assert_eq!(
+        rows[0]
+            .try_get::<uuid::Uuid>("", "natural_key_storage_root_id")
+            .unwrap(),
+        first_root
+    );
+    assert_eq!(rows[1].try_get::<String>("", "state").unwrap(), "Failed");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The pre-m31 graph proves deterministic backfill and ambiguous fail-closed recovery.
+async fn storage_fact_origin_migration_backfills_unique_and_invalidates_ambiguous_facts() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(30)).await.unwrap();
+    let backend = database.get_database_backend();
+    let account = uuid::Uuid::new_v4();
+    let first_root = uuid::Uuid::new_v4();
+    let second_root = uuid::Uuid::new_v4();
+    let parent = uuid::Uuid::new_v4();
+    let unique = uuid::Uuid::new_v4();
+    let ambiguous = uuid::Uuid::new_v4();
+    let item = uuid::Uuid::new_v4();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_accounts"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("provider"),
+                        Alias::new("display_name"),
+                        Alias::new("account_identity"),
+                        Alias::new("credential_ref"),
+                        Alias::new("status"),
+                    ])
+                    .values_panic([
+                        account.into(),
+                        "filesystem".into(),
+                        "Fixture".into(),
+                        "fact-origin-fixture".into(),
+                        "fixture".into(),
+                        "Active".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    for (root, provider_root) in [(first_root, "first"), (second_root, "second")] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_roots"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_account_id"),
+                            Alias::new("provider_root_id"),
+                            Alias::new("sync_revision"),
+                            Alias::new("reconciled_sync_revision"),
+                        ])
+                        .values_panic([
+                            root.into(),
+                            account.into(),
+                            provider_root.into(),
+                            1_i64.into(),
+                            1_i64.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for (object, provider_id, object_type) in [
+        (parent, "parent", "Directory"),
+        (unique, "unique", "File"),
+        (ambiguous, "ambiguous", "File"),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_account_id"),
+                            Alias::new("provider_drive_id"),
+                            Alias::new("provider_object_id"),
+                            Alias::new("name"),
+                            Alias::new("normalized_name"),
+                            Alias::new("object_type"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("identity_quality"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            object.into(),
+                            account.into(),
+                            "drive".into(),
+                            provider_id.into(),
+                            provider_id.into(),
+                            provider_id.into(),
+                            object_type.into(),
+                            1_i64.into(),
+                            (object == parent).into(),
+                            1_i64.into(),
+                            "ProviderStableId".into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for (root, object, parent_id) in [
+        (first_root, parent, None),
+        (first_root, unique, Some(parent)),
+        (first_root, ambiguous, Some(parent)),
+        (second_root, ambiguous, None),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_root_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("parent_storage_object_id"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            uuid::Uuid::new_v4().into(),
+                            root.into(),
+                            object.into(),
+                            parent_id.into(),
+                            1_i64.into(),
+                            (object == parent).into(),
+                            1_i64.into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item.into(),
+                        "Movie".into(),
+                        "Movie".into(),
+                        "movie".into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "NotApplicable".into(),
+                        "Indexed".into(),
+                        0_i64.into(),
+                        3_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        parent.into(),
+                        item.into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    Migrator::up(&database, Some(1)).await.unwrap();
+
+    let unique_origin = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("facts_observed_storage_root_id"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(Expr::col(Alias::new("id")).eq(unique)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unique_origin
+            .try_get::<uuid::Uuid>("", "facts_observed_storage_root_id")
+            .unwrap(),
+        first_root
+    );
+    let ambiguous_relations = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("presence_state"),
+                        Alias::new("availability_reason"),
+                        Alias::new("children_indexed"),
+                    ])
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(Expr::col(Alias::new("storage_object_id")).eq(ambiguous)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ambiguous_relations.len(), 2);
+    for row in ambiguous_relations {
+        assert_eq!(
+            row.try_get::<String>("", "presence_state").unwrap(),
+            "TemporarilyUnavailable"
+        );
+        assert_eq!(
+            row.try_get::<String>("", "availability_reason").unwrap(),
+            "facts-origin-migration-required"
+        );
+        assert!(!row.try_get::<bool>("", "children_indexed").unwrap());
+    }
+    let ambiguous_origin = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("facts_observed_storage_root_id"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(Expr::col(Alias::new("id")).eq(ambiguous)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        ambiguous_origin
+            .try_get::<Option<uuid::Uuid>>("", "facts_observed_storage_root_id")
+            .unwrap()
+            .is_none()
+    );
+    let parent_relation = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("children_indexed"))
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(Expr::col(Alias::new("storage_root_id")).eq(first_root))
+                    .and_where(Expr::col(Alias::new("storage_object_id")).eq(parent)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !parent_relation
+            .try_get::<bool>("", "children_indexed")
+            .unwrap()
+    );
+    let item_row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("source_index_revision"),
+                        Alias::new("source_state"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        item_row
+            .try_get::<i64>("", "source_index_revision")
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        item_row.try_get::<String>("", "source_state").unwrap(),
+        "NotIndexed"
+    );
+}
+
+#[tokio::test]
+async fn schema_enforces_probe_delivery_identity_boundaries() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+
+    for (table, index, required_columns) in [
+        (
+            "media_streams",
+            "uq_media_streams_identity",
+            vec!["media_source_id", "stream_identity"],
+        ),
+        (
+            "subtitles",
+            "uq_subtitles_source_object",
+            vec!["media_source_id", "storage_object_id"],
+        ),
+        (
+            "catalog_change_outbox",
+            "uq_catalog_change_outbox_generation",
+            vec!["generation"],
+        ),
+    ] {
+        assert!(schema.has_index(table, index).await.unwrap());
+        for column in required_columns {
+            assert!(schema.has_column(table, column).await.unwrap());
         }
     }
 }
 
 #[tokio::test]
-async fn api_key_schema_is_bounded_binary_and_restrictive() {
-    let database = api_key_test_database().await;
+async fn schema_indexes_latest_catalog_order() {
+    let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
     let schema = SchemaManager::new(&database);
+    assert!(
+        schema
+            .has_index("catalog_items", "ix_catalog_items_latest")
+            .await
+            .unwrap()
+    );
+    for column in [
+        "item_type",
+        "is_present",
+        "classification_state",
+        "date_created",
+        "id",
+    ] {
+        assert!(schema.has_column("catalog_items", column).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn api_key_schema_is_bounded_binary_and_restrictive() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+
     for column in [
         "id",
         "envelope_id",
@@ -249,61 +1029,123 @@ async fn api_key_schema_is_bounded_binary_and_restrictive() {
     );
 }
 
-async fn api_key_test_database() -> sea_orm::DatabaseConnection {
-    let database_url =
-        std::env::var("TJXY_TEST_DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_owned());
-    Database::connect(database_url).await.unwrap()
+#[tokio::test]
+async fn all_migrations_can_be_rolled_back() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+
+    Migrator::down(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+    for table in [
+        "users",
+        "catalog_items",
+        "storage_objects",
+        "work_jobs",
+        "api_keys",
+    ] {
+        assert!(
+            !schema.has_table(table).await.unwrap(),
+            "table {table} remains"
+        );
+    }
 }
 
-async fn column_type_name(
+#[tokio::test]
+async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+
+    for table in ["storage_change_outbox", "media_locations"] {
+        assert!(
+            foreign_key_delete_rules(&database, table)
+                .await
+                .iter()
+                .all(|rule| rule != "CASCADE"),
+            "{table} must be reconciled explicitly"
+        );
+    }
+
+    for (table, index) in [
+        ("work_jobs", "uq_work_jobs_active"),
+        ("storage_change_outbox", "idx_outbox_root_claim"),
+        ("storage_change_outbox", "idx_outbox_root_revision_state"),
+        ("users", "uq_users_username_key"),
+        ("auth_sessions", "uq_auth_sessions_token_digest"),
+        ("auth_sessions", "idx_auth_sessions_user_state"),
+        ("auth_sessions", "idx_auth_sessions_expiry"),
+        ("api_keys", "uq_api_keys_envelope_id"),
+        ("api_keys", "uq_api_keys_token_digest"),
+        ("api_keys", "ix_api_keys_creator"),
+        ("user_data", "ix_user_data_hybrid_signals"),
+        (
+            "library_catalog_items",
+            "ix_library_catalog_items_hybrid_admin",
+        ),
+        (
+            "storage_objects",
+            "ix_storage_objects_facts_observed_root_revision",
+        ),
+        (
+            "storage_root_objects",
+            "ix_storage_root_objects_object_root",
+        ),
+    ] {
+        assert!(
+            schema.has_index(table, index).await.unwrap(),
+            "missing index {index}"
+        );
+    }
+}
+
+async fn foreign_key_delete_rules(
     database: &sea_orm::DatabaseConnection,
     table: &str,
-    column: &str,
-) -> String {
-    match database.get_database_backend() {
-        DbBackend::Sqlite => database
-            .query_all(Statement::from_string(
+) -> Vec<String> {
+    let (statement, column) = match database.get_database_backend() {
+        DbBackend::Sqlite => (
+            Statement::from_string(
                 DbBackend::Sqlite,
-                format!("PRAGMA table_info('{table}')"),
-            ))
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|row| row.try_get::<String>("", "name").unwrap() == column)
-            .unwrap()
-            .try_get("", "type")
-            .unwrap(),
-        DbBackend::Postgres => database
-            .query_one(Statement::from_sql_and_values(
+                format!("PRAGMA foreign_key_list('{table}')"),
+            ),
+            "on_delete",
+        ),
+        DbBackend::Postgres => (
+            Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT data_type FROM information_schema.columns \
-                 WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2"
+                "SELECT rc.delete_rule FROM information_schema.referential_constraints rc \
+                 JOIN information_schema.table_constraints tc \
+                   ON tc.constraint_catalog = rc.constraint_catalog \
+                  AND tc.constraint_schema = rc.constraint_schema \
+                  AND tc.constraint_name = rc.constraint_name \
+                 WHERE tc.table_schema = current_schema() AND tc.table_name = $1"
                     .to_owned(),
-                [table.into(), column.into()],
-            ))
-            .await
-            .unwrap()
-            .unwrap()
-            .try_get("", "data_type")
-            .unwrap(),
-        DbBackend::MySql => {
-            let row = database
-                .query_one(Statement::from_sql_and_values(
-                    DbBackend::MySql,
-                    "SELECT data_type, character_maximum_length \
-                     FROM information_schema.columns \
-                     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
-                        .to_owned(),
-                    [table.into(), column.into()],
-                ))
-                .await
-                .unwrap()
-                .unwrap();
-            let data_type = row.try_get::<String>("", "data_type").unwrap();
-            let maximum_length = row.try_get::<u64>("", "character_maximum_length").unwrap();
-            format!("{}({maximum_length})", data_type.to_ascii_uppercase())
-        }
-    }
+                [table.into()],
+            ),
+            "delete_rule",
+        ),
+        DbBackend::MySql => (
+            Statement::from_sql_and_values(
+                DbBackend::MySql,
+                "SELECT rc.delete_rule AS delete_rule FROM information_schema.referential_constraints rc \
+                 JOIN information_schema.table_constraints tc \
+                   ON tc.constraint_schema = rc.constraint_schema \
+                  AND tc.constraint_name = rc.constraint_name \
+                 WHERE tc.constraint_schema = DATABASE() AND tc.table_name = ?"
+                    .to_owned(),
+                [table.into()],
+            ),
+            "delete_rule",
+        ),
+    };
+
+    database
+        .query_all(statement)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<String>("", column).unwrap())
+        .collect()
 }
 
 #[derive(Debug)]
@@ -382,114 +1224,61 @@ async fn api_key_foreign_keys(database: &sea_orm::DatabaseConnection) -> Vec<Api
         .collect()
 }
 
-#[tokio::test]
-async fn all_migrations_can_be_rolled_back() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&database, None).await.unwrap();
-
-    Migrator::down(&database, None).await.unwrap();
-
-    let api_keys = database
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'".to_owned(),
-        ))
-        .await
-        .unwrap();
-    assert!(api_keys.is_none(), "table api_keys remains");
-
-    let rows = database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'seaql_%' AND name <> 'sqlite_sequence'"
-                .to_owned(),
-        ))
-        .await
-        .unwrap();
-    let remaining_tables = rows
-        .into_iter()
-        .map(|row| row.try_get::<String>("", "name").unwrap())
-        .collect::<Vec<_>>();
-    assert!(
-        remaining_tables.is_empty(),
-        "tables remain after rollback: {remaining_tables:?}"
-    );
-}
-
-#[tokio::test]
-async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&database, None).await.unwrap();
-
-    for table in ["storage_change_outbox", "media_locations"] {
-        let row = database
-            .query_one(Statement::from_string(
+async fn column_type_name(
+    database: &sea_orm::DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> String {
+    match database.get_database_backend() {
+        DbBackend::Sqlite => database
+            .query_all(Statement::from_string(
                 DbBackend::Sqlite,
-                format!("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"),
+                format!("PRAGMA table_info('{table}')"),
             ))
             .await
             .unwrap()
-            .unwrap();
-        let ddl = row.try_get::<String>("", "sql").unwrap().to_lowercase();
-        assert!(
-            !ddl.contains("on delete cascade"),
-            "{table} must be reconciled explicitly: {ddl}"
-        );
-    }
-
-    let row = database
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_work_jobs_active'"
-                .to_owned(),
-        ))
-        .await
-        .unwrap()
-        .expect("active-job partial unique index must exist");
-    let ddl = row.try_get::<String>("", "sql").unwrap().to_lowercase();
-    assert!(ddl.contains("unique index"));
-    assert!(ddl.contains("where"));
-    assert!(ddl.contains("pending"));
-    assert!(ddl.contains("running"));
-
-    let outbox_indexes = database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'storage_change_outbox'"
-                .to_owned(),
-        ))
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.try_get::<String>("", "name").unwrap())
-        .collect::<BTreeSet<_>>();
-    assert!(outbox_indexes.contains("idx_outbox_root_claim"));
-    assert!(outbox_indexes.contains("idx_outbox_root_revision_state"));
-
-    let auth_indexes = database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('users', 'auth_sessions')"
-                .to_owned(),
-        ))
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.try_get::<String>("", "name").unwrap())
-        .collect::<BTreeSet<_>>();
-    for required in [
-        "uq_users_username_key",
-        "uq_auth_sessions_token_digest",
-        "idx_auth_sessions_user_state",
-        "idx_auth_sessions_expiry",
-    ] {
-        assert!(auth_indexes.contains(required), "missing index {required}");
+            .into_iter()
+            .find(|row| row.try_get::<String>("", "name").unwrap() == column)
+            .unwrap()
+            .try_get("", "type")
+            .unwrap(),
+        DbBackend::Postgres => database
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2"
+                    .to_owned(),
+                [table.into(), column.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "data_type")
+            .unwrap(),
+        DbBackend::MySql => {
+            let row = database
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::MySql,
+                    "SELECT data_type AS column_data_type, \
+                            character_maximum_length AS column_maximum_length \
+                     FROM information_schema.columns \
+                     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
+                        .to_owned(),
+                    [table.into(), column.into()],
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            let data_type = row.try_get::<String>("", "column_data_type").unwrap();
+            let maximum_length = row.try_get::<i64>("", "column_maximum_length").unwrap();
+            format!("{}({maximum_length})", data_type.to_ascii_uppercase())
+        }
     }
 }
 
 #[tokio::test]
-async fn sqlite_auth_migration_backfills_portable_username_keys() {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
+async fn auth_migration_backfills_portable_username_keys() {
+    let database = test_database().await.unwrap();
     Migrator::up(&database, Some(3)).await.unwrap();
     let user_id = uuid::Uuid::new_v4();
     let backend = database.get_database_backend();
@@ -523,7 +1312,7 @@ async fn sqlite_auth_migration_backfills_portable_username_keys() {
                 Query::select()
                     .column(Alias::new("username_key"))
                     .from(Alias::new("users"))
-                    .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(user_id)),
+                    .and_where(Expr::col(Alias::new("id")).eq(user_id)),
             ),
         )
         .await
@@ -532,5 +1321,405 @@ async fn sqlite_auth_migration_backfills_portable_username_keys() {
     assert_eq!(
         row.try_get::<Vec<u8>>("", "username_key").unwrap(),
         b"alice"
+    );
+}
+
+#[tokio::test]
+async fn device_migration_backfills_exact_identity_keys() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(35)).await.unwrap();
+    let now = chrono::Utc::now();
+    let user = AuthRepository::new(&database)
+        .create_user(
+            &Username::parse("Alice").unwrap(),
+            "legacy-hash",
+            true,
+            true,
+            now,
+        )
+        .await
+        .unwrap();
+    let session_id = uuid::Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("auth_sessions"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("user_id"),
+                        Alias::new("token_digest"),
+                        Alias::new("auth_revision"),
+                        Alias::new("device_id"),
+                        Alias::new("device_name"),
+                        Alias::new("client_name"),
+                        Alias::new("client_version"),
+                        Alias::new("created_at"),
+                    ])
+                    .values_panic([
+                        session_id.into(),
+                        user.id().as_uuid().into(),
+                        vec![91_u8; 32].into(),
+                        user.auth_revision().into(),
+                        "Phone".into(),
+                        "Legacy Phone".into(),
+                        "Legacy Client".into(),
+                        "1.0".into(),
+                        now.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    Migrator::up(&database, None).await.unwrap();
+
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("device_key"))
+                    .from(Alias::new("auth_sessions"))
+                    .and_where(Expr::col(Alias::new("id")).eq(session_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let device_key = row.try_get::<String>("", "device_key").unwrap();
+    assert_eq!(device_key.len(), 64);
+    assert!(device_key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Seeds the complete legacy publication graph at migration 26.
+async fn structure_scope_migration_invalidates_legacy_active_projections() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(26)).await.unwrap();
+    let backend = database.get_database_backend();
+    let owner = uuid::Uuid::new_v4();
+    let child = uuid::Uuid::new_v4();
+    let job = uuid::Uuid::new_v4();
+    let publication = uuid::Uuid::new_v4();
+    for (id, item_type, name, owner_id) in [
+        (owner, "Series", "Legacy Series", None),
+        (child, "Season", "Season 01", Some(owner)),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("catalog_items"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("item_type"),
+                            Alias::new("name"),
+                            Alias::new("sort_name"),
+                            Alias::new("sort_key"),
+                            Alias::new("classification_state"),
+                            Alias::new("metadata_state"),
+                            Alias::new("structure_state"),
+                            Alias::new("source_state"),
+                            Alias::new("structure_expansion_revision"),
+                            Alias::new("source_index_revision"),
+                            Alias::new("structure_owner_item_id"),
+                            Alias::new("is_present"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            item_type.into(),
+                            name.into(),
+                            name.to_lowercase().into(),
+                            name.to_lowercase().into_bytes().into(),
+                            "Matched".into(),
+                            "Ready".into(),
+                            if id == owner {
+                                "Expanded"
+                            } else {
+                                "NotApplicable"
+                            }
+                            .into(),
+                            "Unknown".into(),
+                            4_i64.into(),
+                            0_i64.into(),
+                            owner_id.into(),
+                            true.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("work_jobs"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("task_kind"),
+                        Alias::new("scope_type"),
+                        Alias::new("scope_id"),
+                        Alias::new("expected_revision"),
+                        Alias::new("state"),
+                        Alias::new("priority"),
+                        Alias::new("attempt_count"),
+                    ])
+                    .values_panic([
+                        job.into(),
+                        "ExpandItem".into(),
+                        "CatalogItem".into(),
+                        owner.into(),
+                        4_i64.into(),
+                        "Completed".into(),
+                        100_i32.into(),
+                        1_i32.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_publications"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("job_id"),
+                        Alias::new("owner_catalog_item_id"),
+                        Alias::new("publication_kind"),
+                        Alias::new("expected_revision"),
+                        Alias::new("state"),
+                        Alias::new("manifest_sha256"),
+                        Alias::new("expected_row_count"),
+                    ])
+                    .values_panic([
+                        publication.into(),
+                        job.into(),
+                        owner.into(),
+                        "Structure".into(),
+                        4_i64.into(),
+                        "Active".into(),
+                        "legacy".into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("publication_catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("publication_id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("parent_catalog_item_id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("sort_key"),
+                        Alias::new("source_state"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("row_sha256"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        publication.into(),
+                        child.into(),
+                        owner.into(),
+                        "Season".into(),
+                        "Season 01".into(),
+                        "season 01".into(),
+                        b"season 01".to_vec().into(),
+                        "Unknown".into(),
+                        0_i64.into(),
+                        "legacy-row".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("active_structure_publication_id"), publication)
+                    .and_where(Expr::col(Alias::new("id")).eq(owner)),
+            ),
+        )
+        .await
+        .unwrap();
+
+    Migrator::up(&database, None).await.unwrap();
+
+    let owner_row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("active_structure_publication_id"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("structure_state"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(owner)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner_row
+            .try_get::<Option<uuid::Uuid>>("", "active_structure_publication_id")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        owner_row
+            .try_get::<i64>("", "structure_expansion_revision")
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        owner_row.try_get::<String>("", "structure_state").unwrap(),
+        "NotExpanded"
+    );
+    let state = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("state"))
+                    .from(Alias::new("catalog_publications"))
+                    .and_where(Expr::col(Alias::new("id")).eq(publication)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "state")
+        .unwrap();
+    assert_eq!(state, "Retired");
+    let generation = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("generation"))
+                    .from(Alias::new("catalog_state"))
+                    .and_where(Expr::col(Alias::new("id")).eq(1_i32)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "generation")
+        .unwrap();
+    assert_eq!(generation, 1);
+    let invalidations = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("count"))
+                    .from(Alias::new("cache_invalidation_outbox")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "count")
+        .unwrap();
+    assert_eq!(invalidations, 1);
+}
+
+#[tokio::test]
+async fn publication_migration_down_clears_active_pointers_and_derived_states() {
+    const PUBLICATION_MIGRATION_POSITION: usize = 8;
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let item = uuid::Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("active_structure_publication_id"),
+                        Alias::new("active_source_publication_id"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item.into(),
+                        "Series".into(),
+                        "Series".into(),
+                        "series".into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "Expanded".into(),
+                        "Indexed".into(),
+                        1_i64.into(),
+                        1_i64.into(),
+                        uuid::Uuid::new_v4().into(),
+                        uuid::Uuid::new_v4().into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let steps =
+        u32::try_from(Migrator::migrations().len() - PUBLICATION_MIGRATION_POSITION + 1).unwrap();
+    Migrator::down(&database, Some(steps)).await.unwrap();
+
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("active_structure_publication_id"),
+                        Alias::new("active_source_publication_id"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.try_get::<Option<uuid::Uuid>>("", "active_structure_publication_id")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        row.try_get::<Option<uuid::Uuid>>("", "active_source_publication_id")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        row.try_get::<String>("", "structure_state").unwrap(),
+        "Unexpanded"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "source_state").unwrap(),
+        "Unknown"
     );
 }

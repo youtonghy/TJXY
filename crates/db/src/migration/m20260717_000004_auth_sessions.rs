@@ -24,6 +24,8 @@ const USER_COLUMNS: &[&str] = &[
     "last_login_at",
     "last_activity_at",
 ];
+const MAX_USERNAME_KEY_BYTES: u32 = 512;
+const TOKEN_DIGEST_BYTES: u32 = 32;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -33,7 +35,8 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager.create_table(auth_state()).await?;
         seed_auth_state(manager).await?;
-        for statement in user_columns() {
+        let mysql = manager.get_connection().get_database_backend() == sea_orm::DbBackend::MySql;
+        for statement in user_columns(mysql) {
             manager.alter_table(statement).await?;
         }
         backfill_username_keys(manager).await?;
@@ -47,7 +50,7 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager.create_table(auth_sessions()).await?;
+        manager.create_table(auth_sessions(mysql)).await?;
         for index in auth_session_indexes() {
             manager.create_index(index).await?;
         }
@@ -114,13 +117,19 @@ async fn seed_auth_state(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
-fn user_columns() -> Vec<sea_orm_migration::prelude::TableAlterStatement> {
+fn user_columns(mysql: bool) -> Vec<sea_orm_migration::prelude::TableAlterStatement> {
     vec![
-        add_user_column(
+        add_user_column(if mysql {
+            ColumnDef::new(Alias::new("username_key"))
+                .var_binary(MAX_USERNAME_KEY_BYTES)
+                .not_null()
+                .default(Vec::<u8>::new())
+                .take()
+        } else {
             blob(Alias::new("username_key"))
                 .default(Vec::<u8>::new())
-                .take(),
-        ),
+                .take()
+        }),
         add_user_column(boolean(Alias::new("has_password")).default(true).take()),
         add_user_column(
             big_integer(Alias::new("auth_revision"))
@@ -177,13 +186,20 @@ fn user_identity(row: &QueryResult) -> Result<(Uuid, String), DbErr> {
     Ok((row.try_get("", "id")?, row.try_get("", "username")?))
 }
 
-fn auth_sessions() -> sea_orm_migration::prelude::TableCreateStatement {
+fn auth_sessions(mysql: bool) -> sea_orm_migration::prelude::TableCreateStatement {
     Table::create()
         .table(Alias::new("auth_sessions"))
         .if_not_exists()
         .col(uuid(Alias::new("id")).primary_key().take())
         .col(uuid(Alias::new("user_id")))
-        .col(blob(Alias::new("token_digest")))
+        .col(if mysql {
+            ColumnDef::new(Alias::new("token_digest"))
+                .var_binary(TOKEN_DIGEST_BYTES)
+                .not_null()
+                .take()
+        } else {
+            blob(Alias::new("token_digest"))
+        })
         .col(big_integer(Alias::new("auth_revision")))
         .col(string_len(Alias::new("device_id"), 512))
         .col(string_len(Alias::new("device_name"), 256))

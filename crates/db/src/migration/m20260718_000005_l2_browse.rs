@@ -25,14 +25,15 @@ const ADDED_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const INDEXES: &[&str] = &[
-    "idx_libraries_browse",
-    "idx_catalog_items_parent_browse",
-    "idx_catalog_items_type_browse",
-    "idx_library_catalog_items_reverse",
-    "idx_media_sources_item_probe",
-    "idx_media_locations_source_availability",
+const INDEXES: &[(&str, &str)] = &[
+    ("idx_libraries_browse", "libraries"),
+    ("idx_catalog_items_parent_browse", "catalog_items"),
+    ("idx_catalog_items_type_browse", "catalog_items"),
+    ("idx_library_catalog_items_reverse", "library_catalog_items"),
+    ("idx_media_sources_item_probe", "media_sources"),
+    ("idx_media_locations_source_availability", "media_locations"),
 ];
+const MAX_SORT_KEY_BYTES: u32 = 2_000;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -40,21 +41,41 @@ pub struct Migration;
 #[sea_orm_migration::async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        for column in library_columns() {
+        let mysql = manager.get_connection().get_database_backend() == sea_orm::DbBackend::MySql;
+        for column in library_columns(mysql) {
             add_column(manager, "libraries", column).await?;
         }
-        add_column(
-            manager,
-            "catalog_items",
-            blob(Alias::new("sort_key"))
-                .default(Vec::<u8>::new())
-                .take(),
-        )
-        .await?;
+        add_column(manager, "catalog_items", sort_key_column(mysql)).await?;
         for column in session_columns() {
             add_column(manager, "auth_sessions", column).await?;
         }
         backfill_sort_keys(manager).await?;
+        if mysql {
+            for index in [
+                Index::create()
+                    .name("ix_catalog_items_parent")
+                    .table(Alias::new("catalog_items"))
+                    .col(Alias::new("parent_id"))
+                    .to_owned(),
+                Index::create()
+                    .name("ix_library_catalog_items_catalog_item")
+                    .table(Alias::new("library_catalog_items"))
+                    .col(Alias::new("catalog_item_id"))
+                    .to_owned(),
+                Index::create()
+                    .name("ix_media_sources_catalog_item")
+                    .table(Alias::new("media_sources"))
+                    .col(Alias::new("catalog_item_id"))
+                    .to_owned(),
+                Index::create()
+                    .name("ix_media_locations_media_source")
+                    .table(Alias::new("media_locations"))
+                    .col(Alias::new("media_source_id"))
+                    .to_owned(),
+            ] {
+                manager.create_index(index).await?;
+            }
+        }
         for index in indexes() {
             manager.create_index(index).await?;
         }
@@ -62,9 +83,14 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        for name in INDEXES.iter().rev() {
+        for (name, table) in INDEXES.iter().rev() {
             manager
-                .drop_index(Index::drop().name(*name).to_owned())
+                .drop_index(
+                    Index::drop()
+                        .name(*name)
+                        .table(Alias::new(*table))
+                        .to_owned(),
+                )
                 .await?;
         }
         for (table, columns) in ADDED_COLUMNS.iter().rev() {
@@ -83,16 +109,28 @@ impl MigrationTrait for Migration {
     }
 }
 
-fn library_columns() -> Vec<ColumnDef> {
+fn library_columns(mysql: bool) -> Vec<ColumnDef> {
     vec![
         string(Alias::new("collection_type"))
             .default("unknown")
             .take(),
-        blob(Alias::new("sort_key"))
-            .default(Vec::<u8>::new())
-            .take(),
+        sort_key_column(mysql),
         boolean(Alias::new("is_enabled")).default(true).take(),
     ]
+}
+
+fn sort_key_column(mysql: bool) -> ColumnDef {
+    if mysql {
+        ColumnDef::new(Alias::new("sort_key"))
+            .var_binary(MAX_SORT_KEY_BYTES)
+            .not_null()
+            .default(Vec::<u8>::new())
+            .take()
+    } else {
+        blob(Alias::new("sort_key"))
+            .default(Vec::<u8>::new())
+            .take()
+    }
 }
 
 fn session_columns() -> Vec<ColumnDef> {

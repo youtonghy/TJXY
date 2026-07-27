@@ -1,83 +1,55 @@
-use std::collections::BTreeSet;
-
-use sea_orm::{ConnectionTrait, Database, DbBackend, QueryResult, Statement};
-use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::{MigratorTrait, SchemaManager};
+use tjxy_test_support::test_database;
 
 async fn database() -> sea_orm::DatabaseConnection {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     database
-}
-
-async fn columns(database: &sea_orm::DatabaseConnection, table: &str) -> BTreeSet<String> {
-    database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            format!("PRAGMA table_info('{table}')"),
-        ))
-        .await
-        .unwrap()
-        .iter()
-        .map(|row: &QueryResult| row.try_get("", "name").unwrap())
-        .collect()
 }
 
 #[tokio::test]
 async fn browse_schema_persists_library_sorting_and_session_capabilities() {
     let database = database().await;
+    let schema = SchemaManager::new(&database);
 
+    for column in ["collection_type", "sort_key", "is_enabled"] {
+        assert!(schema.has_column("libraries", column).await.unwrap());
+    }
     assert!(
-        columns(&database, "libraries")
+        schema
+            .has_column("catalog_items", "sort_key")
             .await
-            .is_superset(&BTreeSet::from([
-                "collection_type".to_owned(),
-                "sort_key".to_owned(),
-                "is_enabled".to_owned(),
-            ]))
+            .unwrap()
     );
-    assert!(
-        columns(&database, "catalog_items")
-            .await
-            .contains("sort_key")
-    );
-    assert!(
-        columns(&database, "auth_sessions")
-            .await
-            .is_superset(&BTreeSet::from([
-                "playable_media_types".to_owned(),
-                "supported_commands".to_owned(),
-                "supports_media_control".to_owned(),
-                "supports_persistent_identifier".to_owned(),
-                "device_profile".to_owned(),
-                "app_store_url".to_owned(),
-                "icon_url".to_owned(),
-            ]))
-    );
+    for column in [
+        "playable_media_types",
+        "supported_commands",
+        "supports_media_control",
+        "supports_persistent_identifier",
+        "device_profile",
+        "app_store_url",
+        "icon_url",
+    ] {
+        assert!(schema.has_column("auth_sessions", column).await.unwrap());
+    }
 }
 
 #[tokio::test]
 async fn browse_schema_has_membership_and_stable_page_indexes() {
     let database = database().await;
-    let rows = database
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'index'".to_owned(),
-        ))
-        .await
-        .unwrap();
-    let indexes = rows
-        .iter()
-        .map(|row| row.try_get::<String>("", "name").unwrap())
-        .collect::<BTreeSet<_>>();
+    let schema = SchemaManager::new(&database);
 
-    for required in [
-        "idx_libraries_browse",
-        "idx_catalog_items_parent_browse",
-        "idx_catalog_items_type_browse",
-        "idx_library_catalog_items_reverse",
-        "idx_media_sources_item_probe",
-        "idx_media_locations_source_availability",
+    for (table, index) in [
+        ("libraries", "idx_libraries_browse"),
+        ("catalog_items", "idx_catalog_items_parent_browse"),
+        ("catalog_items", "idx_catalog_items_type_browse"),
+        ("library_catalog_items", "idx_library_catalog_items_reverse"),
+        ("media_sources", "idx_media_sources_item_probe"),
+        ("media_locations", "idx_media_locations_source_availability"),
     ] {
-        assert!(indexes.contains(required), "missing index {required}");
+        assert!(
+            schema.has_index(table, index).await.unwrap(),
+            "missing index {index}"
+        );
     }
 }

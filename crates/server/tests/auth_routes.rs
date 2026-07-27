@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode, header},
+    http::{Method, Request, StatusCode, header},
 };
 use chrono::Duration;
 use http_body_util::BodyExt;
-use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tjxy_application::{AuthService, SystemClock};
 use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_test_support::test_database;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -23,14 +23,7 @@ async fn app() -> axum::Router {
 }
 
 async fn app_with_legacy(legacy_auth_enabled: bool) -> axum::Router {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await
-        .unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
         AuthService::new(database, SystemClock, Some(Duration::days(30)), 2)
@@ -51,19 +44,62 @@ async fn app_with_legacy(legacy_auth_enabled: bool) -> axum::Router {
 }
 
 async fn login(app: axum::Router, password: &str) -> axum::response::Response {
+    login_as(app, "alice", password).await
+}
+
+async fn login_as(app: axum::Router, username: &str, password: &str) -> axum::response::Response {
+    login_as_with_identity(app, username, password, IDENTITY).await
+}
+
+async fn login_as_with_identity(
+    app: axum::Router,
+    username: &str,
+    password: &str,
+    identity: &str,
+) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method("POST")
             .uri("/Users/AuthenticateByName")
-            .header(header::AUTHORIZATION, IDENTITY)
+            .header(header::AUTHORIZATION, identity)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                json!({"Username": "alice", "Pw": password}).to_string(),
+                json!({"Username": username, "Pw": password}).to_string(),
             ))
             .unwrap(),
     )
     .await
     .unwrap()
+}
+
+fn token_header(token: &str) -> String {
+    format!(r#"MediaBrowser Token="{token}""#)
+}
+
+async fn token_request(
+    app: axum::Router,
+    method: Method,
+    uri: impl AsRef<str>,
+    token: &str,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri.as_ref())
+        .header(header::AUTHORIZATION, token_header(token));
+    let request = match body {
+        Some(value) => request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(value.to_string())),
+        None => request.body(Body::empty()),
+    };
+
+    app.oneshot(request.unwrap()).await.unwrap()
+}
+
+async fn json_response(response: axum::response::Response) -> Value {
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
 }
 
 #[tokio::test]
@@ -282,4 +318,473 @@ async fn legacy_auth_can_be_disabled_without_disabling_canonical_auth() {
 
     let response = login(app_with_legacy(false).await, "correct horse").await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn administrator_can_manage_users_without_leaving_the_server_without_an_admin() {
+    let app = app().await;
+    let response = login(app.clone(), "correct horse").await;
+    let authentication = json_response(response).await;
+    let alice_id = authentication["User"]["Id"].as_str().unwrap();
+    let alice_token = authentication["AccessToken"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/Users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = token_request(app.clone(), Method::GET, "/Users", alice_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let users = json_response(response).await;
+    assert_eq!(users.as_array().unwrap().len(), 1);
+    assert_eq!(users[0]["Name"], "Alice");
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        "/Users/New",
+        alice_token,
+        Some(json!({"Name": "Bob", "Password": "bob password"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bob = json_response(response).await;
+    let bob_id = bob["Id"].as_str().unwrap().to_owned();
+    assert_eq!(bob["Policy"]["IsAdministrator"], false);
+
+    let response = login_as(app.clone(), "Bob", "bob password").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bob_authentication = json_response(response).await;
+    let bob_token = bob_authentication["AccessToken"].as_str().unwrap();
+    let response = token_request(app.clone(), Method::GET, "/Users", bob_token, None).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Users?userId={bob_id}"),
+        alice_token,
+        Some(json!({"Name": "Robert"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Users/{bob_id}/Password"),
+        alice_token,
+        Some(json!({"NewPw": "new password", "ResetPassword": false})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        login_as(app.clone(), "Robert", "bob password")
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Users/{bob_id}/Policy"),
+        alice_token,
+        Some(json!({
+            "IsAdministrator": true,
+            "IsDisabled": false,
+            "AuthenticationProviderId": "TJXY.LocalAuthentication",
+            "PasswordResetProviderId": "TJXY.LocalPasswordReset"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = token_request(
+        app.clone(),
+        Method::DELETE,
+        format!("/Users/{alice_id}"),
+        alice_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = login_as(app.clone(), "Robert", "new password").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let authentication = json_response(response).await;
+    let bob_token = authentication["AccessToken"].as_str().unwrap();
+    let response = token_request(
+        app,
+        Method::DELETE,
+        format!("/Users/{bob_id}"),
+        bob_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the scoped list, filters, and logout lifecycle in one flow.
+async fn sessions_are_scoped_filterable_and_logout_revokes_only_the_current_token() {
+    let app = app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/Sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let alice_authentication = json_response(login(app.clone(), "correct horse").await).await;
+    let alice_token = alice_authentication["AccessToken"].as_str().unwrap();
+    let alice_id = alice_authentication["User"]["Id"].as_str().unwrap();
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        "/Users/New",
+        alice_token,
+        Some(json!({"Name": "Bob", "Password": "bob password"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bob_authentication = json_response(
+        login_as_with_identity(
+            app.clone(),
+            "Bob",
+            "bob password",
+            r#"MediaBrowser Client="Findroid", Device="Tablet", DeviceId="tablet-2", Version="0.16.0""#,
+        )
+        .await,
+    )
+    .await;
+    let bob_token = bob_authentication["AccessToken"].as_str().unwrap();
+    let bob_id = bob_authentication["User"]["Id"].as_str().unwrap();
+    let bob_session_id = bob_authentication["SessionInfo"]["Id"].as_str().unwrap();
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Sessions/Capabilities/Full?id={bob_session_id}"),
+        bob_token,
+        Some(json!({
+            "PlayableMediaTypes": ["Video", "Audio"],
+            "SupportedCommands": ["Play", "Stop"],
+            "SupportsMediaControl": true,
+            "SupportsPersistentIdentifier": true
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = token_request(app.clone(), Method::GET, "/Sessions", bob_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sessions = json_response(response).await;
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["Id"], bob_session_id);
+    assert_eq!(sessions[0]["UserId"], bob_id);
+    assert_eq!(sessions[0]["DeviceId"], "tablet-2");
+    assert_eq!(sessions[0]["PlayableMediaTypes"], json!(["Video", "Audio"]));
+    assert_eq!(sessions[0]["SupportedCommands"], json!(["Play", "Stop"]));
+    assert_eq!(sessions[0]["SupportsMediaControl"], true);
+    assert_eq!(
+        sessions[0]["Capabilities"]["SupportsPersistentIdentifier"],
+        true
+    );
+    assert!(sessions[0]["LastActivityDate"].is_string());
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Sessions?controllableByUserId={alice_id}"),
+        bob_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = token_request(app.clone(), Method::GET, "/Sessions", alice_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await.as_array().unwrap().len(), 2);
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        "/Sessions?deviceId=tablet-2",
+        alice_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await.as_array().unwrap().len(), 1);
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Sessions?controllableByUserId={bob_id}"),
+        alice_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await.as_array().unwrap().len(), 1);
+
+    for uri in [
+        "/Sessions?unexpected=1",
+        "/Sessions?activeWithinSeconds=not-a-number",
+        "/Sessions?activeWithinSeconds=2592001",
+    ] {
+        let response = token_request(app.clone(), Method::GET, uri, alice_token, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri {uri}");
+    }
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        "/Sessions/Logout",
+        bob_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = token_request(app.clone(), Method::GET, "/Users/Me", bob_token, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = token_request(app.clone(), Method::GET, "/Users/Me", alice_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = token_request(app, Method::GET, "/Sessions", alice_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers the Jellyfin device list, options, and revoke lifecycle.
+async fn administrator_can_manage_devices_without_exposing_tokens() {
+    let app = app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/Devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let admin_authentication = json_response(login(app.clone(), "correct horse").await).await;
+    let admin_token = admin_authentication["AccessToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        "/Users/New",
+        &admin_token,
+        Some(json!({"Name": "Bob", "Password": "bob password"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bob_authentication = json_response(
+        login_as_with_identity(
+            app.clone(),
+            "Bob",
+            "bob password",
+            r#"MediaBrowser Client="Findroid", Device="Tablet", DeviceId="tablet-2", Version="0.16.0""#,
+        )
+        .await,
+    )
+    .await;
+    let bob_token = bob_authentication["AccessToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bob_id = bob_authentication["User"]["Id"].as_str().unwrap();
+    let bob_session_id = bob_authentication["SessionInfo"]["Id"].as_str().unwrap();
+
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Sessions/Capabilities/Full?id={bob_session_id}"),
+        &bob_token,
+        Some(json!({
+            "PlayableMediaTypes": ["Video", "Audio"],
+            "SupportedCommands": ["Play", "Stop"],
+            "SupportsMediaControl": true,
+            "SupportsPersistentIdentifier": true,
+            "IconUrl": "https://example.invalid/findroid.png"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = token_request(app.clone(), Method::GET, "/Devices", &bob_token, None).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = token_request(app.clone(), Method::GET, "/Devices", &admin_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let devices = json_response(response).await;
+    assert_eq!(devices["TotalRecordCount"], 2);
+    assert_eq!(devices["StartIndex"], 0);
+    let bob_device = devices["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["Id"] == "tablet-2")
+        .unwrap();
+    assert_eq!(bob_device["Name"], "Tablet");
+    assert_eq!(bob_device["LastUserName"], "Bob");
+    assert_eq!(
+        bob_device["Capabilities"]["PlayableMediaTypes"],
+        json!(["Video", "Audio"])
+    );
+    assert_eq!(bob_device["Capabilities"]["SupportsMediaControl"], true);
+    assert_eq!(
+        bob_device["IconUrl"],
+        "https://example.invalid/findroid.png"
+    );
+    assert!(bob_device.get("AccessToken").is_none());
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Devices?userId={bob_id}"),
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await["TotalRecordCount"], 2);
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Devices?UserId={bob_id}"),
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await["TotalRecordCount"], 2);
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Devices?userId={}", Uuid::new_v4()),
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        "/Devices/Info?Id=tablet-2",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_response(response).await["Id"], "tablet-2");
+
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        "/Devices/Options?Id=tablet-2",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = token_request(
+        app.clone(),
+        Method::POST,
+        "/Devices/Options?Id=tablet-2",
+        &admin_token,
+        Some(json!({
+            "id": 0,
+            "deviceId": "ignored-by-controller",
+            "customName": "Living room tablet",
+            "FutureField": true
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = token_request(
+        app.clone(),
+        Method::GET,
+        "/Devices/Options?id=tablet-2",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let options = json_response(response).await;
+    assert_eq!(options["DeviceId"], "tablet-2");
+    assert_eq!(options["CustomName"], "Living room tablet");
+
+    for uri in [
+        "/Devices?unexpected=1",
+        "/Devices/Info",
+        "/Devices/Info?id=",
+    ] {
+        let response = token_request(app.clone(), Method::GET, uri, &admin_token, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri {uri}");
+    }
+
+    let response = token_request(
+        app.clone(),
+        Method::DELETE,
+        "/Devices?Id=tablet-2&id=missing",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        token_request(app.clone(), Method::GET, "/Users/Me", &bob_token, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let response = token_request(
+        app.clone(),
+        Method::DELETE,
+        "/Devices?id=tablet-2",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        token_request(app.clone(), Method::GET, "/Users/Me", &bob_token, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        token_request(app, Method::GET, "/Users/Me", &admin_token, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
 }

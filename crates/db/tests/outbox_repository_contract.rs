@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, TimeZone, Utc};
 use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
@@ -11,6 +11,7 @@ use tjxy_db::{
     ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason, OutboxRepository,
     OutboxRepositoryError,
 };
+use tjxy_test_support::test_database;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -62,14 +63,7 @@ async fn complete_claim(
 }
 
 async fn database() -> DatabaseConnection {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await
-        .unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     database
 }
@@ -134,17 +128,21 @@ async fn seed_root(database: &DatabaseConnection, sync_revision: i64) -> Storage
 async fn seed_event(database: &DatabaseConnection, root_id: StorageRootId, revision: i64) -> Uuid {
     let object_id = StorageObjectRecordId::new();
     let event_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
     let account_id: Uuid = database
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT storage_account_id FROM storage_roots LIMIT 1".to_owned(),
-        ))
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("storage_account_id"))
+                    .from(Alias::new("storage_roots"))
+                    .limit(1),
+            ),
+        )
         .await
         .unwrap()
         .unwrap()
         .try_get("", "storage_account_id")
         .unwrap();
-    let backend = database.get_database_backend();
     database
         .execute(
             backend.build(
@@ -396,6 +394,48 @@ async fn empty_revision_is_skipped_before_claiming_the_next_revision() {
         .try_get("", "reconciled_sync_revision")
         .unwrap();
     assert_eq!(watermark, 1);
+}
+
+#[tokio::test]
+async fn backlogged_roots_are_ordered_and_bounded() {
+    let database = database().await;
+    let first = seed_root(&database, 1).await;
+    let second = seed_root(&database, 2).await;
+    let current = seed_root(&database, 1).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_roots"))
+                    .value(Alias::new("reconciled_sync_revision"), 1_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(current.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let repository = OutboxRepository::new(&database);
+
+    let roots = repository.backlogged_roots(None, 2).await.unwrap();
+    let mut expected = vec![(first.as_uuid(), 1_i64), (second.as_uuid(), 2_i64)];
+    expected.sort_unstable_by_key(|(root, _)| *root);
+
+    assert_eq!(roots.len(), 2);
+    assert_eq!(
+        roots
+            .iter()
+            .map(|root| (root.root_id().as_uuid(), root.expected_revision()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        repository
+            .backlogged_roots(Some(roots[0].root_id()), 2)
+            .await
+            .unwrap(),
+        vec![roots[1]]
+    );
+    assert_eq!(repository.backlogged_roots(None, 1).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

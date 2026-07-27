@@ -1,5 +1,9 @@
+use chrono::{TimeZone, Utc};
 use serde_json::json;
-use tjxy_api::{AuthenticateUserByName, AuthenticationResult, SessionInfoDto, UserDto, UserPolicy};
+use tjxy_api::{
+    AuthenticateUserByName, AuthenticationResult, CreateUserByName, SessionInfoDto, UpdateUserName,
+    UpdateUserPassword, UpdateUserPolicy, UserDto, UserPolicy,
+};
 use uuid::Uuid;
 
 #[test]
@@ -74,6 +78,91 @@ fn authentication_result_matches_the_l1_contract() {
             },
             "AccessToken": "secret",
             "ServerId": server_id
+        })
+    );
+}
+
+#[test]
+fn administrator_user_requests_use_the_pinned_pascal_case_contract() {
+    let create: CreateUserByName =
+        serde_json::from_value(json!({"Name": "Bob", "Password": null})).unwrap();
+    assert_eq!(create.name, "Bob");
+    assert_eq!(create.password, "");
+
+    let rename: UpdateUserName = serde_json::from_value(json!({
+        "Name": "Robert",
+        "ServerId": "ignored-client-field"
+    }))
+    .unwrap();
+    assert_eq!(rename.name, "Robert");
+
+    let password: UpdateUserPassword = serde_json::from_value(json!({
+        "CurrentPw": null,
+        "NewPw": "new password",
+        "ResetPassword": false
+    }))
+    .unwrap();
+    assert_eq!(password.new_password, "new password");
+    assert!(!password.reset_password);
+
+    let policy: UpdateUserPolicy = serde_json::from_value(json!({
+        "IsAdministrator": true,
+        "IsDisabled": false,
+        "EnableVideoPlaybackTranscoding": true,
+        "AuthenticationProviderId": "TJXY.LocalAuthentication",
+        "PasswordResetProviderId": "TJXY.LocalPasswordReset"
+    }))
+    .unwrap();
+    assert!(policy.is_administrator);
+    assert!(!policy.is_disabled);
+}
+
+#[test]
+fn listed_session_exposes_activity_and_persisted_capabilities() {
+    let session_id = Uuid::parse_str("018f17ac-4e99-7ec5-b4fd-8f15ca9f4f21").unwrap();
+    let user_id = Uuid::parse_str("018f17ac-4e99-7ec5-b4fd-8f15ca9f4f22").unwrap();
+    let server_id = Uuid::parse_str("018f17ac-4e99-7ec5-b4fd-8f15ca9f4f23").unwrap();
+    let activity = Utc.with_ymd_and_hms(2026, 7, 26, 11, 0, 0).unwrap();
+
+    let session = SessionInfoDto::listed(
+        session_id,
+        user_id,
+        "Alice",
+        "Findroid",
+        "phone-1",
+        "Pixel",
+        "0.16.0",
+        server_id,
+        activity,
+        vec!["Video".to_owned(), "Audio".to_owned()],
+        vec!["Play".to_owned()],
+        true,
+        true,
+    );
+
+    assert_eq!(
+        serde_json::to_value(session).unwrap(),
+        json!({
+            "Id": session_id,
+            "UserId": user_id,
+            "UserName": "Alice",
+            "Client": "Findroid",
+            "DeviceId": "phone-1",
+            "DeviceName": "Pixel",
+            "ApplicationVersion": "0.16.0",
+            "ServerId": server_id,
+            "IsActive": true,
+            "PlayableMediaTypes": ["Video", "Audio"],
+            "SupportedCommands": ["Play"],
+            "LastActivityDate": "2026-07-26T11:00:00Z",
+            "SupportsMediaControl": true,
+            "SupportsRemoteControl": true,
+            "Capabilities": {
+                "PlayableMediaTypes": ["Video", "Audio"],
+                "SupportedCommands": ["Play"],
+                "SupportsMediaControl": true,
+                "SupportsPersistentIdentifier": true
+            }
         })
     );
 }

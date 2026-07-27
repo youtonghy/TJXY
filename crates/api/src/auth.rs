@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -7,6 +8,40 @@ pub struct AuthenticateUserByName {
     pub username: String,
     #[serde(rename = "Pw", default, deserialize_with = "null_as_default")]
     pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct CreateUserByName {
+    pub name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateUserName {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateUserPassword {
+    #[serde(rename = "NewPw", default, deserialize_with = "null_as_default")]
+    pub new_password: String,
+    #[serde(default)]
+    pub reset_password: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateUserPolicy {
+    pub is_administrator: bool,
+    pub is_disabled: bool,
+    #[serde(default)]
+    pub authentication_provider_id: Option<String>,
+    #[serde(default)]
+    pub password_reset_provider_id: Option<String>,
 }
 
 fn null_as_default<'de, Deserializer>(
@@ -108,6 +143,12 @@ impl UserPolicy {
             password_reset_provider_id: "TJXY.LocalPasswordReset".to_owned(),
         }
     }
+
+    #[must_use]
+    pub const fn with_disabled(mut self, is_disabled: bool) -> Self {
+        self.is_disabled = is_disabled;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -124,6 +165,23 @@ pub struct SessionInfoDto {
     pub is_active: bool,
     pub playable_media_types: Vec<String>,
     pub supported_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_media_control: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_remote_control: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<SessionCapabilitiesDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SessionCapabilitiesDto {
+    pub playable_media_types: Vec<String>,
+    pub supported_commands: Vec<String>,
+    pub supports_media_control: bool,
+    pub supports_persistent_identifier: bool,
 }
 
 impl SessionInfoDto {
@@ -151,6 +209,51 @@ impl SessionInfoDto {
             is_active: true,
             playable_media_types: Vec::new(),
             supported_commands: Vec::new(),
+            last_activity_date: None,
+            supports_media_control: None,
+            supports_remote_control: None,
+            capabilities: None,
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // Mirrors Jellyfin's session identity and capability tuple.
+    pub fn listed(
+        id: Uuid,
+        user_id: Uuid,
+        user_name: impl Into<String>,
+        client: impl Into<String>,
+        device_id: impl Into<String>,
+        device_name: impl Into<String>,
+        application_version: impl Into<String>,
+        server_id: Uuid,
+        last_activity_date: DateTime<Utc>,
+        playable_media_types: Vec<String>,
+        supported_commands: Vec<String>,
+        supports_media_control: bool,
+        supports_persistent_identifier: bool,
+    ) -> Self {
+        Self {
+            id,
+            user_id,
+            user_name: user_name.into(),
+            client: client.into(),
+            device_id: device_id.into(),
+            device_name: device_name.into(),
+            application_version: application_version.into(),
+            server_id,
+            is_active: true,
+            playable_media_types: playable_media_types.clone(),
+            supported_commands: supported_commands.clone(),
+            last_activity_date: Some(last_activity_date),
+            supports_media_control: Some(supports_media_control),
+            supports_remote_control: Some(supports_media_control),
+            capabilities: Some(SessionCapabilitiesDto {
+                playable_media_types,
+                supported_commands,
+                supports_media_control,
+                supports_persistent_identifier,
+            }),
         }
     }
 }

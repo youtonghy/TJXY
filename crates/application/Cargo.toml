@@ -6,19 +6,37 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
 argon2.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
+image.workspace = true
+matroska = "0.30.1"
+reqwest.workspace = true
 sha2.workspace = true
 sea-orm.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tjxy-common = { path = "../common" }
+tjxy-cache = { path = "../cache" }
+tjxy-credentials = { path = "../credentials" }
 tjxy-db = { path = "../db" }
+tjxy-domain = { path = "../domain" }
+tjxy-metadata = { path = "../metadata" }
+tjxy-storage = { path = "../storage" }
 tokio.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 sea-orm-migration.workspace = true
+tempfile.workspace = true
+tjxy-test-support = { path = "../test-support" }
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

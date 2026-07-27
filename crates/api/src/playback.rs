@@ -35,6 +35,11 @@ pub enum DeliveryMethod {
 pub struct MediaStream {
     pub codec: Option<String>,
     pub language: Option<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub channels: Option<i32>,
+    pub profile: Option<String>,
+    pub level: Option<i32>,
     #[serde(rename = "Type")]
     pub stream_type: MediaStreamType,
     pub index: i32,
@@ -75,6 +80,7 @@ impl MediaSourceInfo {
         container: impl Into<String>,
         direct_stream_url: impl Into<String>,
         media_streams: Vec<MediaStream>,
+        supports_direct_play: bool,
     ) -> Result<Self, PlaybackInfoError> {
         let direct_stream_url = direct_stream_url.into();
         if !is_local_media_route(&direct_stream_url) {
@@ -96,7 +102,7 @@ impl MediaSourceInfo {
             is_remote: false,
             supports_transcoding: false,
             supports_direct_stream: false,
-            supports_direct_play: true,
+            supports_direct_play,
             media_streams,
             transcoding_url: None,
             direct_stream_url,

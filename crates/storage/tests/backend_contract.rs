@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use tjxy_storage::{
-    BackendError, ByteRange, ChangeCursor, ObjectPage, PageToken, StorageBackend,
-    StorageCapabilities, StorageObject, StorageObjectId,
+    BackendError, ByteRange, ChangeCursor, ChangePage, ObjectPage, PageToken, StorageBackend,
+    StorageCapabilities, StorageChange, StorageObject, StorageObjectId,
 };
 
 struct ContractFake;
@@ -88,5 +88,90 @@ async fn unsupported_change_feeds_are_explicit_capability_errors() {
         BackendError::UnsupportedCapability { capability } if capability == "changes"
     ));
     assert!(!backend.capabilities().changes());
+    assert!(!backend.capabilities().file_events());
     assert!(backend.capabilities().range_reads());
+}
+
+#[test]
+fn filesystem_events_are_a_separate_capability_from_provider_changes() {
+    let capabilities = StorageCapabilities::new().with_file_events(true);
+
+    assert!(capabilities.file_events());
+    assert!(!capabilities.changes());
+}
+
+#[test]
+fn pagination_and_change_tokens_remain_opaque_and_non_empty() {
+    let page = PageToken::new("provider-next-page").unwrap();
+    let cursor = ChangeCursor::new("provider-delta-cursor").unwrap();
+
+    assert_eq!(page.as_str(), "provider-next-page");
+    assert_eq!(cursor.as_str(), "provider-delta-cursor");
+    assert!(PageToken::new("").is_err());
+    assert!(ChangeCursor::new("").is_err());
+    assert!(StorageObjectId::new("bad\nprovider", "object").is_err());
+    assert!(StorageObjectId::new("provider", "x".repeat(2049)).is_err());
+}
+
+#[test]
+fn change_pages_distinguish_continuations_from_terminal_cursors() {
+    let terminal = ChangePage::new(Vec::new(), ChangeCursor::new("new-start-token").unwrap());
+    let continuation =
+        ChangePage::continuation(Vec::new(), ChangeCursor::new("next-page-token").unwrap());
+
+    assert!(!terminal.has_more());
+    assert!(continuation.has_more());
+}
+
+#[test]
+fn change_pages_distinguish_upserts_from_confirmed_provider_removals() {
+    let present_id = StorageObjectId::new("drive", "present").unwrap();
+    let removed_id = StorageObjectId::new("drive", "removed").unwrap();
+    let present = StorageObject::file(present_id.clone(), "movie.mkv", 8)
+        .with_remote_revision("revision-2")
+        .unwrap()
+        .with_mime_type("video/x-matroska")
+        .unwrap();
+    let page = ChangePage::new(
+        vec![
+            StorageChange::Upsert(present),
+            StorageChange::Removed(removed_id.clone()),
+        ],
+        ChangeCursor::new("cursor-2").unwrap(),
+    );
+
+    assert_eq!(page.changes().len(), 2);
+    let StorageChange::Upsert(upserted) = &page.changes()[0] else {
+        panic!("first change was not an upsert");
+    };
+    assert_eq!(upserted.id(), &present_id);
+    assert_eq!(upserted.remote_revision(), Some("revision-2"));
+    assert_eq!(upserted.mime_type(), Some("video/x-matroska"));
+    assert_eq!(page.changes()[1], StorageChange::Removed(removed_id));
+    assert_eq!(page.next_cursor().as_str(), "cursor-2");
+}
+
+#[test]
+fn change_objects_carry_stable_provider_parent_identities() {
+    let parent = StorageObjectId::new("drive", "folder-id").unwrap();
+    let object = StorageObject::file(
+        StorageObjectId::new("drive", "movie-id").unwrap(),
+        "movie.mkv",
+        8,
+    )
+    .with_parents(vec![parent.clone()])
+    .unwrap();
+
+    assert_eq!(object.parents(), &[parent]);
+    assert!(
+        StorageObject::file(
+            StorageObjectId::new("drive", "other").unwrap(),
+            "other.mkv",
+            8,
+        )
+        .with_parents(vec![
+            StorageObjectId::new("other-provider", "folder").unwrap()
+        ])
+        .is_err()
+    );
 }

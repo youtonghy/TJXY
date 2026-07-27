@@ -9,12 +9,18 @@ rust-version.workspace = true
 chrono.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tjxy-common = { path = "../common" }
+tjxy-credentials = { path = "../credentials" }
+tjxy-metadata = { path = "../metadata" }
+tjxy-storage = { path = "../storage" }
 uuid.workspace = true
 
 [dev-dependencies]
+tjxy-test-support = { path = "../test-support" }
 tokio.workspace = true
 
 [lints]

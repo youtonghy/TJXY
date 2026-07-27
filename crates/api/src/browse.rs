@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ClientCapabilitiesDto {
     #[serde(default)]
@@ -24,6 +25,7 @@ pub struct ClientCapabilitiesDto {
 pub enum BaseItemKind {
     CollectionFolder,
     Movie,
+    Audio,
     Series,
     Season,
     Episode,
@@ -32,12 +34,13 @@ pub enum BaseItemKind {
 
 impl BaseItemKind {
     const fn is_folder(self) -> bool {
-        !matches!(self, Self::Movie | Self::Episode)
+        !matches!(self, Self::Movie | Self::Audio | Self::Episode)
     }
 
     const fn media_type(self) -> Option<MediaType> {
         match self {
             Self::Movie | Self::Episode => Some(MediaType::Video),
+            Self::Audio => Some(MediaType::Audio),
             _ => None,
         }
     }
@@ -46,6 +49,7 @@ impl BaseItemKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum MediaType {
     Video,
+    Audio,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -135,6 +139,12 @@ impl BaseItemDto {
             user_data,
         }
     }
+
+    #[must_use]
+    pub fn with_image_tags(mut self, image_tags: BTreeMap<String, String>) -> Self {
+        self.image_tags = image_tags;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -146,6 +156,8 @@ pub struct UserItemDataDto {
     played: bool,
     play_count: i32,
     playback_position_ticks: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_played_date: Option<DateTime<Utc>>,
 }
 
 impl UserItemDataDto {
@@ -164,8 +176,24 @@ impl UserItemDataDto {
             played,
             play_count,
             playback_position_ticks,
+            last_played_date: None,
         }
     }
+
+    #[must_use]
+    pub const fn with_last_played_date(mut self, value: Option<DateTime<Utc>>) -> Self {
+        self.last_played_date = value;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct UpdateUserItemDataDto {
+    pub is_favorite: Option<bool>,
+    pub played: Option<bool>,
+    pub play_count: Option<i32>,
+    pub playback_position_ticks: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -174,6 +202,49 @@ pub struct BaseItemDtoQueryResult {
     items: Vec<BaseItemDto>,
     total_record_count: u64,
     start_index: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SearchHint {
+    id: Uuid,
+    name: String,
+    #[serde(rename = "Type")]
+    item_type: BaseItemKind,
+}
+
+impl SearchHint {
+    #[must_use]
+    pub fn new(id: Uuid, name: impl Into<String>, item_type: BaseItemKind) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            item_type,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SearchHintResult {
+    search_hints: Vec<SearchHint>,
+    total_record_count: u64,
+    start_index: u64,
+}
+
+impl SearchHintResult {
+    #[must_use]
+    pub const fn new(
+        search_hints: Vec<SearchHint>,
+        start_index: u64,
+        total_record_count: u64,
+    ) -> Self {
+        Self {
+            search_hints,
+            total_record_count,
+            start_index,
+        }
+    }
 }
 
 impl BaseItemDtoQueryResult {

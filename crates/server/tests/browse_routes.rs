@@ -1,20 +1,36 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
-use chrono::Duration;
+use bytes::Bytes;
+use chrono::{Duration, Utc};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-    sea_query::{Alias, Query},
+    ConnectionTrait, DatabaseConnection, Statement,
+    sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
-use tjxy_application::{AuthService, CatalogQueryService, SystemClock};
+use tempfile::TempDir;
+use tjxy_application::{
+    AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
+    MediaInspector, MediaReadService, PlaystateService, ProbeInput, ProbeService,
+    ProbeServiceError, SystemClock, TaskService, UserDataService,
+};
 use tjxy_common::{CatalogItemId, SortKey};
 use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_storage::{
+    BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
+    StorageBackend, StorageCapabilities, StorageObject, StorageObjectId,
+};
+use tjxy_storage_filesystem::FilesystemBackend;
+use tjxy_test_support::test_database;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -25,17 +41,212 @@ const IDENTITY: &str =
 struct TestApp {
     router: axum::Router,
     database: DatabaseConnection,
+    assets: TempDir,
+    media: TempDir,
+    media_account: Uuid,
+    media_object_id: String,
+    empty_media_object_id: String,
+    subtitle_object_id: String,
+    cloud_account: Uuid,
+    cloud_object_id: String,
+    cloud_subtitle_object_id: String,
+    cloud_backend: Arc<MemoryCloudBackend>,
+}
+
+struct MemoryCloudBackend {
+    objects: HashMap<String, Vec<u8>>,
+    reads: Mutex<VecDeque<CloudReadBehavior>>,
+    ranges: Mutex<Vec<(String, u64, u64)>>,
+}
+
+enum CloudReadBehavior {
+    OpenNotFound,
+    OpenUnavailable,
+    StreamUnavailable,
+    StreamPendingAfterChunk,
+}
+
+impl MemoryCloudBackend {
+    fn enqueue_read(&self, behavior: CloudReadBehavior) {
+        self.reads.lock().unwrap().push_back(behavior);
+    }
+
+    fn ranges(&self) -> Vec<(String, u64, u64)> {
+        self.ranges.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for MemoryCloudBackend {
+    async fn get_object(&self, id: &StorageObjectId) -> Result<StorageObject, BackendError> {
+        let bytes = self
+            .objects
+            .get(id.provider_object_id())
+            .filter(|_| id.provider() == "cloud-test")
+            .ok_or(BackendError::NotFound)?;
+        Ok(StorageObject::file(
+            id.clone(),
+            "remote-object",
+            bytes.len() as u64,
+        ))
+    }
+
+    async fn list_children(
+        &self,
+        _parent: &StorageObjectId,
+        _page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        Err(BackendError::unsupported_capability("list children"))
+    }
+
+    async fn list_changes(&self, _cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
+        Err(BackendError::unsupported_capability("changes"))
+    }
+
+    async fn open_range(
+        &self,
+        id: &StorageObjectId,
+        range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        self.ranges.lock().unwrap().push((
+            id.provider_object_id().to_owned(),
+            range.start(),
+            range.end_exclusive(),
+        ));
+        let behavior = self.reads.lock().unwrap().pop_front();
+        if matches!(behavior, Some(CloudReadBehavior::OpenNotFound)) {
+            return Err(BackendError::NotFound);
+        }
+        if matches!(behavior, Some(CloudReadBehavior::OpenUnavailable)) {
+            return Err(BackendError::TemporarilyUnavailable {
+                message: "fixture detail must not be persisted".to_owned(),
+            });
+        }
+        let bytes = self
+            .objects
+            .get(id.provider_object_id())
+            .filter(|_| id.provider() == "cloud-test")
+            .ok_or(BackendError::NotFound)?;
+        let start =
+            usize::try_from(range.start()).map_err(|_| BackendError::RangeNotSatisfiable {
+                size: bytes.len() as u64,
+            })?;
+        let end = usize::try_from(range.end_exclusive()).map_err(|_| {
+            BackendError::RangeNotSatisfiable {
+                size: bytes.len() as u64,
+            }
+        })?;
+        let chunk = Bytes::copy_from_slice(bytes.get(start..end).ok_or(
+            BackendError::RangeNotSatisfiable {
+                size: bytes.len() as u64,
+            },
+        )?);
+        match behavior {
+            Some(CloudReadBehavior::StreamUnavailable) => Ok(Box::pin(async_stream::try_stream! {
+                Err(BackendError::RateLimited { retry_after: None })?;
+                yield chunk;
+            })),
+            Some(CloudReadBehavior::StreamPendingAfterChunk) => {
+                Ok(Box::pin(async_stream::try_stream! {
+                    yield chunk;
+                    std::future::pending::<()>().await;
+                }))
+            }
+            Some(CloudReadBehavior::OpenNotFound | CloudReadBehavior::OpenUnavailable) | None => {
+                Ok(Box::pin(async_stream::try_stream! { yield chunk; }))
+            }
+        }
+    }
+
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::new().with_range_reads(true)
+    }
+}
+
+async fn filesystem_fixture() -> (TempDir, Arc<FilesystemBackend>, String, String, String) {
+    let media = TempDir::new().unwrap();
+    tokio::fs::write(media.path().join("Arrival.mkv"), b"0123456789")
+        .await
+        .unwrap();
+    tokio::fs::write(media.path().join("Empty.mkv"), b"")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        media.path().join("Arrival.srt"),
+        b"1\n00:00:01,000 --> 00:00:02,000\nArrival\n",
+    )
+    .await
+    .unwrap();
+    let backend = Arc::new(FilesystemBackend::new(media.path()).await.unwrap());
+    let page = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+    let object_id = |name: &str| {
+        page.objects
+            .iter()
+            .find(|object| object.name() == name)
+            .unwrap()
+            .id()
+            .provider_object_id()
+            .to_owned()
+    };
+    (
+        media,
+        backend,
+        object_id("Arrival.mkv"),
+        object_id("Empty.mkv"),
+        object_id("Arrival.srt"),
+    )
+}
+
+fn cloud_fixture() -> (Uuid, String, String, Arc<MemoryCloudBackend>) {
+    let account = Uuid::new_v4();
+    let object = "remote-object-secret".to_owned();
+    let subtitle = "remote-subtitle-secret".to_owned();
+    let backend = Arc::new(MemoryCloudBackend {
+        objects: HashMap::from([
+            (object.clone(), b"cloud-byte-stream".to_vec()),
+            (
+                subtitle.clone(),
+                b"1\n00:00:01,000 --> 00:00:02,000\nCloud\n\n\n".to_vec(),
+            ),
+        ]),
+        reads: Mutex::new(VecDeque::new()),
+        ranges: Mutex::new(Vec::new()),
+    });
+    (account, object, subtitle, backend)
+}
+
+struct CloudProbeInspector;
+
+impl MediaInspector for CloudProbeInspector {
+    fn inspect(&self, input: ProbeInput) -> Result<tjxy_db::ProbeResult, ProbeServiceError> {
+        if input.size() != 17 {
+            return Err(ProbeServiceError::Inspection(
+                "unexpected cloud probe size".to_owned(),
+            ));
+        }
+        let stream = tjxy_db::ProbedStream::new(
+            "cloud-video",
+            "Video",
+            0,
+            Some("h264".to_owned()),
+            None,
+            Some(1920),
+            Some(1080),
+            None,
+            true,
+            false,
+        )
+        .map_err(|_| ProbeServiceError::Inspection("invalid cloud probe stream".to_owned()))?;
+        tjxy_db::ProbeResult::new("mkv", vec![stream])
+            .map_err(|_| ProbeServiceError::Inspection("invalid cloud probe result".to_owned()))
+    }
 }
 
 async fn test_app() -> TestApp {
-    let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await
-        .unwrap();
+    let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
         AuthService::new(database.clone(), SystemClock, Some(Duration::days(30)), 2)
@@ -46,20 +257,61 @@ async fn test_app() -> TestApp {
         .await
         .unwrap();
     let catalog = Arc::new(CatalogQueryService::new(database.clone()));
+    let libraries = Arc::new(LibraryService::new(database.clone()));
+    let assets = TempDir::new().unwrap();
+    let asset_reader = Arc::new(
+        AssetReadService::new(database.clone(), assets.path())
+            .await
+            .unwrap(),
+    );
     let identity = ServerIdentity::new(Uuid::parse_str(SERVER_ID).unwrap(), "TJXY", "Linux")
         .with_startup_wizard_completed(true);
+    let (media, backend, media_object_id, empty_media_object_id, subtitle_object_id) =
+        filesystem_fixture().await;
+    let media_account = Uuid::new_v4();
+    let (cloud_account, cloud_object_id, cloud_subtitle_object_id, cloud_backend) = cloud_fixture();
+    let media_reader = Arc::new(
+        MediaReadService::new(database.clone())
+            .with_backend(media_account, backend)
+            .with_backend(cloud_account, Arc::clone(&cloud_backend)),
+    );
+    let media_collections = Arc::new(MediaCollectionService::new(database.clone()));
+    let user_data = Arc::new(UserDataService::new(database.clone()));
+    let playstate = Arc::new(PlaystateService::new(database.clone()));
+    let tasks = Arc::new(TaskService::new(database.clone()));
     TestApp {
         router: build_router(
             AppState::new(identity)
                 .with_auth(auth)
                 .with_catalog(catalog)
+                .with_libraries(libraries)
+                .with_assets(asset_reader)
+                .with_media(media_reader)
+                .with_media_collections(media_collections)
+                .with_playstate(playstate)
+                .with_tasks(tasks)
+                .with_user_data(user_data)
                 .with_ready(true),
         ),
         database,
+        assets,
+        media,
+        media_account,
+        media_object_id,
+        empty_media_object_id,
+        subtitle_object_id,
+        cloud_account,
+        cloud_object_id,
+        cloud_subtitle_object_id,
+        cloud_backend,
     }
 }
 
 async fn login(router: &axum::Router) -> (Uuid, Uuid, String) {
+    login_as(router, "alice", "correct horse").await
+}
+
+async fn login_as(router: &axum::Router, username: &str, password: &str) -> (Uuid, Uuid, String) {
     let response = router
         .clone()
         .oneshot(
@@ -69,7 +321,7 @@ async fn login(router: &axum::Router) -> (Uuid, Uuid, String) {
                 .header(header::AUTHORIZATION, IDENTITY)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"Username": "alice", "Pw": "correct horse"}).to_string(),
+                    json!({"Username": username, "Pw": password}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -192,6 +444,758 @@ async fn seed_item(
     id
 }
 
+async fn seed_hybrid_series(database: &DatabaseConnection) -> (Uuid, CatalogItemId) {
+    let library = seed_library(database, "Hybrid Shows", true).await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("scan_profile"), "Hybrid")
+                    .value(Alias::new("expansion_policy"), "background")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    let series = seed_item(database, library, "Pinned Series", "Series").await;
+    (library, series)
+}
+
+#[allow(clippy::too_many_lines)] // Mirrors the normalized lazy CatalogItem-to-root scope.
+async fn seed_manual_storage_scope(
+    database: &DatabaseConnection,
+    library_id: Uuid,
+    item_id: CatalogItemId,
+    children_indexed: bool,
+) -> Uuid {
+    let account = Uuid::new_v4();
+    let root = Uuid::new_v4();
+    let object = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("storage_accounts"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("provider"),
+                Alias::new("display_name"),
+                Alias::new("account_identity"),
+                Alias::new("credential_ref"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                account.into(),
+                "filesystem".into(),
+                "Manual fixture".into(),
+                format!("manual-{account}").into(),
+                format!("manual-ref-{account}").into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_root_id"),
+                Alias::new("sync_revision"),
+                Alias::new("reconciled_sync_revision"),
+            ])
+            .values_panic([
+                root.into(),
+                account.into(),
+                format!("manual-root-{root}").into(),
+                3_i64.into(),
+                3_i64.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_drive_id"),
+                Alias::new("provider_object_id"),
+                Alias::new("name"),
+                Alias::new("normalized_name"),
+                Alias::new("object_type"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("identity_quality"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                object.into(),
+                account.into(),
+                "local".into(),
+                format!("manual-object-{object}").into(),
+                "Manual item".into(),
+                "manual item".into(),
+                "Directory".into(),
+                3_i64.into(),
+                children_indexed.into(),
+                3_i64.into(),
+                "ProviderStable".into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_root_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_root_id"),
+                Alias::new("storage_object_id"),
+                Alias::new("parent_storage_object_id"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                root.into(),
+                object.into(),
+                Option::<Uuid>::None.into(),
+                3_i64.into(),
+                children_indexed.into(),
+                3_i64.into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("library_storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("library_id"),
+                Alias::new("storage_root_id"),
+            ])
+            .values_panic([Uuid::new_v4().into(), library_id.into(), root.into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("identity_matches"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_object_id"),
+                Alias::new("candidate_catalog_item_id"),
+                Alias::new("confidence"),
+                Alias::new("state"),
+                Alias::new("evidence"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                object.into(),
+                item_id.as_uuid().into(),
+                1.0.into(),
+                "Matched".into(),
+                json!({}).into(),
+            ])
+            .to_owned(),
+    ] {
+        database.execute(backend.build(&statement)).await.unwrap();
+    }
+    object
+}
+
+async fn seed_asset(app: &TestApp, item_id: CatalogItemId, bytes: &[u8]) -> String {
+    let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let relative_path = "posters/arrival.jpg";
+    tokio::fs::create_dir(app.assets.path().join("posters"))
+        .await
+        .unwrap();
+    tokio::fs::write(app.assets.path().join(relative_path), bytes)
+        .await
+        .unwrap();
+    let blob_id = Uuid::new_v4();
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("asset_blobs"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("sha256"),
+                        Alias::new("mime_type"),
+                        Alias::new("byte_size"),
+                        Alias::new("local_relative_path"),
+                    ])
+                    .values_panic([
+                        blob_id.into(),
+                        sha256.into(),
+                        "image/jpeg".into(),
+                        i64::try_from(bytes.len()).unwrap().into(),
+                        relative_path.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("item_assets"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_id"),
+                        Alias::new("asset_blob_id"),
+                        Alias::new("image_type"),
+                        Alias::new("priority"),
+                        Alias::new("source_provider"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        item_id.as_uuid().into(),
+                        blob_id.into(),
+                        "Primary".into(),
+                        0.into(),
+                        "fixture".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    sha256.to_owned()
+}
+
+#[allow(clippy::too_many_lines)] // Builds the complete active/probed source read model for HTTP integration.
+async fn seed_playable_source(
+    database: &DatabaseConnection,
+    item: CatalogItemId,
+    account: Uuid,
+    provider_object_id: &str,
+    media_size: i64,
+    subtitle_provider_object_id: &str,
+) -> Uuid {
+    seed_playable_source_for_provider(
+        database,
+        item,
+        account,
+        "filesystem",
+        provider_object_id,
+        media_size,
+        subtitle_provider_object_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // Test fixture mirrors persisted media_stream fields.
+async fn seed_embedded_stream(
+    database: &DatabaseConnection,
+    presentation: Uuid,
+    stream_type: &str,
+    stream_index: i32,
+    codec: &str,
+    width: Option<i32>,
+    height: Option<i32>,
+    channels: Option<i32>,
+    profile: Option<&str>,
+    level: Option<i32>,
+) {
+    let backend = database.get_database_backend();
+    let source = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<Uuid>("", "id")
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("media_streams"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("stream_type"),
+                        Alias::new("stream_index"),
+                        Alias::new("delivery_index"),
+                        Alias::new("codec"),
+                        Alias::new("width"),
+                        Alias::new("height"),
+                        Alias::new("channels"),
+                        Alias::new("profile"),
+                        Alias::new("level"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        source.into(),
+                        stream_type.into(),
+                        stream_index.into(),
+                        stream_index.into(),
+                        codec.into(),
+                        width.into(),
+                        height.into(),
+                        channels.into(),
+                        profile.into(),
+                        level.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn seed_playable_source_for_provider(
+    database: &DatabaseConnection,
+    item: CatalogItemId,
+    account: Uuid,
+    provider: &str,
+    provider_object_id: &str,
+    media_size: i64,
+    subtitle_provider_object_id: &str,
+) -> Uuid {
+    let backend = database.get_database_backend();
+    let job = Uuid::new_v4();
+    let publication = Uuid::new_v4();
+    let source = Uuid::new_v4();
+    let presentation = Uuid::new_v4();
+    let location = Uuid::new_v4();
+    let object = Uuid::new_v4();
+    let subtitle_object = Uuid::new_v4();
+    let subtitle_id = Uuid::new_v4();
+    let media_root = Uuid::new_v4();
+    let library_id = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("library_id"))
+                    .from(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<Uuid>("", "library_id")
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_accounts"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("provider"),
+                        Alias::new("display_name"),
+                        Alias::new("account_identity"),
+                        Alias::new("credential_ref"),
+                        Alias::new("status"),
+                    ])
+                    .values_panic([
+                        account.into(),
+                        provider.into(),
+                        "Private disk".into(),
+                        format!("account-{account}").into(),
+                        "secret-ref".into(),
+                        "Active".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("work_jobs"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("task_kind"),
+                        Alias::new("scope_type"),
+                        Alias::new("scope_id"),
+                        Alias::new("expected_revision"),
+                        Alias::new("state"),
+                        Alias::new("priority"),
+                        Alias::new("attempt_count"),
+                        Alias::new("storage_root_affinity"),
+                    ])
+                    .values_panic([
+                        job.into(),
+                        "IndexMediaSources".into(),
+                        "CatalogItem".into(),
+                        item.as_uuid().into(),
+                        0_i64.into(),
+                        "Completed".into(),
+                        100.into(),
+                        1.into(),
+                        media_root.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_publications"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("job_id"),
+                        Alias::new("owner_catalog_item_id"),
+                        Alias::new("publication_kind"),
+                        Alias::new("expected_revision"),
+                        Alias::new("state"),
+                        Alias::new("manifest_sha256"),
+                        Alias::new("expected_row_count"),
+                        Alias::new("activated_generation"),
+                    ])
+                    .values_panic([
+                        publication.into(),
+                        job.into(),
+                        item.as_uuid().into(),
+                        "Sources".into(),
+                        0_i64.into(),
+                        "Active".into(),
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                        3_i64.into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("media_sources"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("presentation_key"),
+                        Alias::new("container"),
+                        Alias::new("probe_state"),
+                        Alias::new("probe_revision"),
+                    ])
+                    .values_panic([
+                        source.into(),
+                        item.as_uuid().into(),
+                        presentation.into(),
+                        "mkv".into(),
+                        "Probed".into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("size"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                        Alias::new("facts_observed_storage_root_id"),
+                    ])
+                    .values_panic([
+                        subtitle_object.into(),
+                        account.into(),
+                        "private-drive".into(),
+                        subtitle_provider_object_id.into(),
+                        "Arrival.srt".into(),
+                        "arrival.srt".into(),
+                        "File".into(),
+                        40_i64.into(),
+                        1_i64.into(),
+                        false.into(),
+                        0_i64.into(),
+                        "ProviderStable".into(),
+                        "Present".into(),
+                        media_root.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("publication_media_sources"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("publication_id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("presentation_key"),
+                        Alias::new("container"),
+                        Alias::new("row_sha256"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        publication.into(),
+                        source.into(),
+                        item.as_uuid().into(),
+                        presentation.into(),
+                        "mkv".into(),
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("subtitles"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("format"),
+                        Alias::new("language"),
+                        Alias::new("delivery_index"),
+                        Alias::new("is_default"),
+                        Alias::new("is_forced"),
+                    ])
+                    .values_panic([
+                        subtitle_id.into(),
+                        source.into(),
+                        subtitle_object.into(),
+                        "srt".into(),
+                        "eng".into(),
+                        3.into(),
+                        false.into(),
+                        false.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("publication_subtitles"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("publication_id"),
+                        Alias::new("subtitle_id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("format"),
+                        Alias::new("language"),
+                        Alias::new("delivery_index"),
+                        Alias::new("is_default"),
+                        Alias::new("is_forced"),
+                        Alias::new("row_sha256"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        publication.into(),
+                        subtitle_id.into(),
+                        source.into(),
+                        subtitle_object.into(),
+                        "srt".into(),
+                        "eng".into(),
+                        3.into(),
+                        false.into(),
+                        false.into(),
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("size"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                        Alias::new("facts_observed_storage_root_id"),
+                    ])
+                    .values_panic([
+                        object.into(),
+                        account.into(),
+                        "private-drive".into(),
+                        provider_object_id.into(),
+                        "Arrival.mkv".into(),
+                        "arrival.mkv".into(),
+                        "File".into(),
+                        media_size.into(),
+                        1_i64.into(),
+                        false.into(),
+                        0_i64.into(),
+                        "ProviderStable".into(),
+                        "Present".into(),
+                        media_root.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_root_id"),
+                        Alias::new("sync_revision"),
+                        Alias::new("reconciled_sync_revision"),
+                    ])
+                    .values_panic([
+                        media_root.into(),
+                        account.into(),
+                        provider_object_id.into(),
+                        1_i64.into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("storage_root_id"),
+                    ])
+                    .values_panic([Uuid::new_v4().into(), library_id.into(), media_root.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for storage_object in [object, subtitle_object] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_root_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            media_root.into(),
+                            storage_object.into(),
+                            1_i64.into(),
+                            false.into(),
+                            0_i64.into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("media_locations"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("priority"),
+                        Alias::new("availability_state"),
+                    ])
+                    .values_panic([
+                        location.into(),
+                        source.into(),
+                        object.into(),
+                        10.into(),
+                        "Available".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("publication_media_locations"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("publication_id"),
+                        Alias::new("media_location_id"),
+                        Alias::new("media_source_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("priority"),
+                        Alias::new("row_sha256"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        publication.into(),
+                        location.into(),
+                        source.into(),
+                        object.into(),
+                        10.into(),
+                        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("active_source_publication_id"), publication)
+                    .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    presentation
+}
+
 async fn get(router: &axum::Router, uri: &str, token: Option<&str>) -> axum::response::Response {
     let mut request = Request::builder().uri(uri);
     if let Some(token) = token {
@@ -199,6 +1203,91 @@ async fn get(router: &axum::Router, uri: &str, token: Option<&str>) -> axum::res
             header::AUTHORIZATION,
             format!(r#"MediaBrowser Token="{token}""#),
         );
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn post_empty(
+    router: &axum::Router,
+    uri: &str,
+    token: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method("POST").uri(uri);
+    if let Some(token) = token {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        );
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn delete_empty(
+    router: &axum::Router,
+    uri: &str,
+    token: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method("DELETE").uri(uri);
+    if let Some(token) = token {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        );
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn put_empty(
+    router: &axum::Router,
+    uri: &str,
+    token: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method("PUT").uri(uri);
+    if let Some(token) = token {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        );
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn stream_request(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    range: Option<&str>,
+    if_range: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        );
+    }
+    if let Some(range) = range {
+        request = request.header(header::RANGE, range);
+    }
+    if let Some(if_range) = if_range {
+        request = request.header(header::IF_RANGE, if_range);
     }
     router
         .clone()
@@ -219,6 +1308,13 @@ async fn browse_routes_require_a_valid_session() {
         get(&app.router, "/Items", None).await.status(),
         StatusCode::UNAUTHORIZED
     );
+    for path in ["/Items/Latest", "/UserItems/Resume", "/Shows/NextUp"] {
+        assert_eq!(
+            get(&app.router, path, None).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path}"
+        );
+    }
     for path in ["/Sessions/Capabilities/Full", "/Sessions/Capabilities"] {
         let response = app
             .router
@@ -235,6 +1331,142 @@ async fn browse_routes_require_a_valid_session() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
+}
+
+#[tokio::test]
+async fn socket_upgrade_requires_a_valid_session() {
+    let app = test_app().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.router).await.unwrap();
+    });
+
+    let error = tokio_tungstenite::connect_async(format!("ws://{address}/socket"))
+        .await
+        .unwrap_err();
+    server.abort();
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        error => panic!("expected an HTTP authentication failure, got {error}"),
+    }
+}
+
+#[tokio::test]
+async fn system_endpoint_requires_auth_and_does_not_guess_missing_connection_info() {
+    let app = test_app().await;
+    assert_eq!(
+        get(&app.router, "/System/Endpoint", None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, _, token) = login(&app.router).await;
+    let response = get(&app.router, "/System/Endpoint", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"IsLocal": false, "IsInNetwork": false})
+    );
+}
+
+#[tokio::test]
+async fn user_data_commit_notifies_the_authenticated_users_socket() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (_, _, token) = login(&app.router).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.router).await.unwrap();
+    });
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/socket?api_key={token}"))
+            .await
+            .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/UserItems/{item}/UserData"))
+        .header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        )
+        .json(&json!({"IsFavorite": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
+    server.abort();
+    let message = received
+        .expect("user data change must notify the active socket")
+        .expect("socket must remain open")
+        .expect("socket message must be valid");
+    let tokio_tungstenite::tungstenite::Message::Text(payload) = message else {
+        panic!("expected a text event");
+    };
+    let event: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(event["MessageType"], "UserDataChanged");
+    assert_eq!(event["Data"]["UserRevision"], 1);
+}
+
+#[tokio::test]
+async fn user_data_commit_does_not_notify_another_users_socket() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap()
+    .create_user("Bob", "ordinary password", false)
+    .await
+    .unwrap();
+    let (_, _, alice_token) = login(&app.router).await;
+    let (_, _, bob_token) = login_as(&app.router, "bob", "ordinary password").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.router).await.unwrap();
+    });
+
+    let (mut alice_socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/socket?api_key={alice_token}"))
+            .await
+            .unwrap();
+    let (mut bob_socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/socket?api_key={bob_token}"))
+            .await
+            .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/UserItems/{item}/UserData"))
+        .header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{alice_token}""#),
+        )
+        .json(&json!({"IsFavorite": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let alice_event =
+        tokio::time::timeout(std::time::Duration::from_secs(1), alice_socket.next()).await;
+    let bob_event =
+        tokio::time::timeout(std::time::Duration::from_millis(250), bob_socket.next()).await;
+    server.abort();
+    assert!(alice_event.is_ok(), "the owner must receive the event");
+    assert!(
+        bob_event.is_err(),
+        "another user must not receive the event"
+    );
 }
 
 #[tokio::test]
@@ -276,7 +1508,8 @@ async fn items_apply_parent_paging_and_findroid_type_filter() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Library", true).await;
     seed_item(&app.database, library, "Arrival", "Movie").await;
-    seed_item(&app.database, library, "Blade Runner", "Movie").await;
+    let blade_runner = seed_item(&app.database, library, "Blade Runner", "Movie").await;
+    let sha256 = seed_asset(&app, blade_runner, b"jpeg").await;
     seed_item(&app.database, library, "Dark", "Series").await;
     let (user_id, _, token) = login(&app.router).await;
 
@@ -294,6 +1527,573 @@ async fn items_apply_parent_paging_and_findroid_type_filter() {
     assert_eq!(result["Items"][0]["Type"], "Movie");
     assert_eq!(result["Items"][0]["MediaType"], "Video");
     assert_eq!(result["Items"][0]["ParentId"], library.to_string());
+    assert_eq!(result["Items"][0]["ImageTags"]["Primary"], sha256);
+}
+
+#[tokio::test]
+async fn search_hints_returns_authenticated_visible_type_filtered_pages() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let disabled = seed_library(&app.database, "Disabled", false).await;
+    let alpha = seed_item(&app.database, library, "Alpha", "Movie").await;
+    seed_item(&app.database, library, "Alpine", "Movie").await;
+    seed_item(&app.database, library, "Alpha Song", "Audio").await;
+    seed_item(&app.database, disabled, "Alpha Disabled", "Movie").await;
+    app.database
+        .execute(
+            app.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("is_present"), false)
+                    .and_where(Expr::col(Alias::new("id")).eq(alpha.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let (user_id, _, token) = login(&app.router).await;
+
+    let path = format!(
+        "/Search/Hints?userId={user_id}&searchTerm=Alp&includeItemTypes=Movie&startIndex=0&limit=1"
+    );
+    let response = get(&app.router, &path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["StartIndex"], 0);
+    assert_eq!(result["SearchHints"].as_array().unwrap().len(), 1);
+    assert_eq!(result["SearchHints"][0]["Name"], "Alpine");
+    assert_eq!(result["SearchHints"][0]["Type"], "Movie");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers the Playlist lifecycle and stable-entry mutation contract.
+async fn playlists_create_append_and_read_visible_entries_for_the_owner() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = post(
+        &app.router,
+        "/Playlists",
+        &token,
+        json!({"Name": "Road trip"}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let playlist: Value = serde_json::from_slice(&body).unwrap();
+    let playlist_id = playlist["Id"].as_str().unwrap();
+    assert_eq!(playlist["Name"], "Road trip");
+    assert_eq!(playlist["Type"], "Playlist");
+
+    let response = get(&app.router, "/Playlists", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let playlists: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(playlists["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(playlists["Items"][0]["Id"], playlist_id);
+
+    assert_eq!(
+        put(
+            &app.router,
+            &format!("/Playlists/{playlist_id}"),
+            &token,
+            json!({"Name": "Driving songs"}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let response = post(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items"),
+        &token,
+        json!({"ItemIds": [item, item]}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = get(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let entries: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(entries["Items"].as_array().unwrap().len(), 2);
+    assert_eq!(entries["Items"][0]["Name"], "Arrival");
+    assert_eq!(entries["Items"][1]["Name"], "Arrival");
+    assert_ne!(
+        entries["Items"][0]["PlaylistItemId"],
+        entries["Items"][1]["PlaylistItemId"]
+    );
+    let first_id = entries["Items"][0]["PlaylistItemId"].as_str().unwrap();
+    let second_id = entries["Items"][1]["PlaylistItemId"].as_str().unwrap();
+
+    let response = post(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items/{second_id}/Move/0"),
+        &token,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items"),
+        Some(&token),
+    )
+    .await;
+    let entries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(entries["Items"][0]["PlaylistItemId"], second_id);
+
+    let response = delete_empty(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items/{second_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(
+        &app.router,
+        &format!("/Playlists/{playlist_id}/Items"),
+        Some(&token),
+    )
+    .await;
+    let entries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(entries["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(entries["Items"][0]["PlaylistItemId"], first_id);
+
+    assert_eq!(
+        delete_empty(
+            &app.router,
+            &format!("/Playlists/{playlist_id}"),
+            Some(&token)
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = get(&app.router, "/Playlists", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let playlists: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(playlists["Items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers shared Collection reads and the administrator-only write boundary.
+async fn shared_collections_require_administrators_for_writes_and_allow_authenticated_reads() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let auth = AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap();
+    auth.create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    let (_, _, user_token) = login_as(&app.router, "bob", "ordinary password").await;
+    let (_, _, admin_token) = login(&app.router).await;
+
+    assert_eq!(
+        post(
+            &app.router,
+            "/Admin/Collections",
+            &user_token,
+            json!({"Name": "Staff picks"}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = post(
+        &app.router,
+        "/Admin/Collections",
+        &admin_token,
+        json!({"Name": "Staff picks"}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let collection: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let collection_id = collection["Id"].as_str().unwrap();
+    assert_eq!(collection["Type"], "Collection");
+
+    let response = get(&app.router, "/Collections", Some(&user_token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let collections: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(collections["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(collections["Items"][0]["Id"], collection_id);
+
+    assert_eq!(
+        put(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}"),
+            &user_token,
+            json!({"Name": "Updated picks"}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        put(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}"),
+            &admin_token,
+            json!({"Name": "Updated picks"}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        post(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}/Items"),
+            &user_token,
+            json!({"ItemIds": [item]}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}/Items"),
+            &admin_token,
+            json!({"ItemIds": [item]}).to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = get(
+        &app.router,
+        &format!("/Collections/{collection_id}/Items"),
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let entries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(entries["Items"][0]["Name"], "Arrival");
+
+    assert_eq!(
+        delete_empty(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}"),
+            Some(&user_token),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        delete_empty(
+            &app.router,
+            &format!("/Admin/Collections/{collection_id}"),
+            Some(&admin_token),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = get(&app.router, "/Collections", Some(&user_token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let collections: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(collections["Items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn latest_and_next_up_return_user_scoped_home_rows() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let older = seed_item(&app.database, library, "Older", "Movie").await;
+    let newer = seed_item(&app.database, library, "Newer", "Movie").await;
+    let series = seed_item(&app.database, library, "Series", "Series").await;
+    let first = seed_item(&app.database, library, "S01E01", "Episode").await;
+    let second = seed_item(&app.database, library, "S01E02", "Episode").await;
+    let backend = app.database.get_database_backend();
+    for (item, date) in [
+        (older, Utc::now() - Duration::days(2)),
+        (newer, Utc::now() - Duration::days(1)),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("date_created"), date)
+                        .and_where(
+                            sea_orm::sea_query::Expr::col(Alias::new("id")).eq(item.as_uuid()),
+                        ),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for episode in [first, second] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .values([
+                            (Alias::new("parent_id"), series.as_uuid().into()),
+                            (
+                                Alias::new("structure_owner_item_id"),
+                                series.as_uuid().into(),
+                            ),
+                        ])
+                        .and_where(
+                            sea_orm::sea_query::Expr::col(Alias::new("id")).eq(episode.as_uuid()),
+                        ),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (user_id, _, token) = login(&app.router).await;
+    assert_eq!(
+        post_empty(
+            &app.router,
+            &format!("/Users/{user_id}/PlayedItems/{first}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let latest = get(
+        &app.router,
+        &format!(
+            "/Items/Latest?userId={user_id}&parentId={library}&includeItemTypes=Movie&limit=2"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(latest.status(), StatusCode::OK);
+    let latest: Value =
+        serde_json::from_slice(&latest.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(latest[0]["Id"], newer.to_string());
+    assert_eq!(latest[1]["Id"], older.to_string());
+
+    let next_up = get(
+        &app.router,
+        &format!("/Shows/NextUp?userId={user_id}&seriesId={series}&limit=20"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(next_up.status(), StatusCode::OK);
+    let next_up: Value =
+        serde_json::from_slice(&next_up.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(next_up["TotalRecordCount"], 1);
+    assert_eq!(next_up["Items"][0]["Id"], second.to_string());
+}
+
+#[tokio::test]
+async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
+    let app = test_app().await;
+    let enabled = seed_library(&app.database, "Movies", true).await;
+    let disabled = seed_library(&app.database, "Hidden", false).await;
+    let visible = seed_item(&app.database, enabled, "Arrival", "Movie").await;
+    let hidden = seed_item(&app.database, disabled, "Secret", "Movie").await;
+    let sha256 = seed_asset(&app, visible, b"jpeg").await;
+    let (user_id, _, token) = login(&app.router).await;
+
+    assert_eq!(
+        get(&app.router, &format!("/Items/{visible}"), None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(
+        &app.router,
+        &format!("/Items/{visible}?userId={user_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let item: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(item["Id"], visible.to_string());
+    assert_eq!(item["Name"], "Arrival");
+    assert_eq!(item["Type"], "Movie");
+    assert_eq!(item["MediaType"], "Video");
+    assert_eq!(item["ImageTags"]["Primary"], sha256);
+
+    for item_id in [hidden, CatalogItemId::new()] {
+        assert_eq!(
+            get(&app.router, &format!("/Items/{item_id}"), Some(&token))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Items/{visible}?userId={}", Uuid::new_v4()),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let sha256 = seed_asset(&app, item, b"jpeg").await;
+    let (_, _, token) = login(&app.router).await;
+    let path = format!("/Items/{item}/Images/Primary");
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
+    assert_eq!(response.headers()[header::ETAG], format!("\"{sha256}\""));
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, max-age=0, must-revalidate"
+    );
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        b"jpeg"[..]
+    );
+
+    let head = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], "4");
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    let not_modified = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .header(header::IF_NONE_MATCH, format!("\"{sha256}\""))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers()[header::ETAG],
+        format!("\"{sha256}\"")
+    );
+    assert!(
+        not_modified
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let unknown = CatalogItemId::new();
+
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Items/{unknown}/Images/Primary"),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Items/{unknown}/Images/Primary"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    for path in [
+        format!("/Items/{unknown}/Images/primary"),
+        format!("/Items/{unknown}/Images/Primary?width=100"),
+        format!("/Items/{unknown}/Images/Primary?tag=a&tag=b"),
+    ] {
+        assert_eq!(
+            get(&app.router, &path, Some(&token)).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -301,21 +2101,25 @@ async fn browse_queries_reject_impersonation_unknown_keys_and_invalid_pages() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;
 
-    for path in [
-        format!("/UserViews?userId={}", Uuid::new_v4()),
-        "/UserViews?unexpected=1".to_owned(),
-        "/UserViews?userId=bad".to_owned(),
-        "/Items?limit=0".to_owned(),
-        "/Items?limit=201".to_owned(),
-        "/Items?limit=1&limit=2".to_owned(),
-        "/Items?includeItemTypes=Movie".to_owned(),
+    for (path, expected) in [
+        (
+            format!("/UserViews?userId={}", Uuid::new_v4()),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/UserViews?unexpected=1".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("/UserViews?userId=bad".to_owned(), StatusCode::BAD_REQUEST),
+        ("/Items?limit=0".to_owned(), StatusCode::BAD_REQUEST),
+        ("/Items?limit=201".to_owned(), StatusCode::BAD_REQUEST),
+        ("/Items?limit=1&limit=2".to_owned(), StatusCode::BAD_REQUEST),
+        (
+            "/Items?includeItemTypes=Movie".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
         let response = get(&app.router, &path, Some(&token)).await;
-        let expected = if path.contains("userId=") && !path.contains("bad") {
-            StatusCode::FORBIDDEN
-        } else {
-            StatusCode::BAD_REQUEST
-        };
         assert_eq!(response.status(), expected, "{path}");
     }
 }
@@ -331,6 +2135,30 @@ async fn post(
         .oneshot(
             Request::builder()
                 .method("POST")
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body.into())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn put(
+    router: &axum::Router,
+    uri: &str,
+    token: &str,
+    body: impl Into<Body>,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
                 .uri(uri)
                 .header(
                     header::AUTHORIZATION,
@@ -539,4 +2367,2745 @@ async fn empty_full_capabilities_persist_protocol_defaults() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn playback_info_requires_auth_and_never_invents_unprobed_sources() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (user_id, _, token) = login(&app.router).await;
+    let uri = format!("/Items/{item}/PlaybackInfo");
+
+    let response = get(&app.router, &uri, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post(
+        &app.router,
+        &uri,
+        &token,
+        json!({
+            "DeviceProfile": {
+                "DirectPlayProfiles": [{"Type": "Video", "Container": "mkv,mp4"}]
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"], json!([]));
+    assert!(Uuid::parse_str(payload["PlaySessionId"].as_str().unwrap()).is_ok());
+
+    let response = get(
+        &app.router,
+        &format!("{uri}?userId={}", Uuid::new_v4()),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = get(
+        &app.router,
+        &format!("{uri}?userId={user_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn playback_info_exposes_only_stable_ids_and_local_routes() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let response = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        json!({
+            "DeviceProfile": {
+                "DirectPlayProfiles": [{"Type": "Video", "Container": "mkv"}]
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+    assert_eq!(payload["MediaSources"][0]["Protocol"], "Http");
+    assert_eq!(
+        payload["MediaSources"][0]["DirectStreamUrl"],
+        format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}")
+    );
+    assert_eq!(
+        payload["MediaSources"][0]["MediaStreams"][0]["DeliveryUrl"],
+        format!("/Videos/{item}/{presentation}/Subtitles/3/Stream.srt")
+    );
+    let encoded = String::from_utf8(body.to_vec()).unwrap();
+    for secret in [
+        "private-drive",
+        app.media_object_id.as_str(),
+        "Arrival.mkv",
+        "secret-ref",
+    ] {
+        assert!(!encoded.contains(secret));
+    }
+    let capabilities = post(
+        &app.router,
+        "/Sessions/Capabilities/Full",
+        &token,
+        json!({
+            "DeviceProfile": {
+                "DirectPlayProfiles": [{"Type": "Video", "Container": "mkv"}]
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(capabilities.status(), StatusCode::NO_CONTENT);
+    let response = get(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn playback_info_without_a_device_profile_returns_available_direct_play_sources() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+
+    let response = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        json!({"DeviceProfile": {"DirectPlayProfiles": []}}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+}
+
+#[tokio::test]
+async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Video",
+        0,
+        "h264",
+        Some(1920),
+        Some(1080),
+        None,
+        Some("High"),
+        Some(41),
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Audio",
+        1,
+        "aac",
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Items/{item}/PlaybackInfo");
+
+    for (video_codec, max_width, profile, max_level, expected) in [
+        ("hevc", "3840", "High", "41", false),
+        ("h264", "1280", "High", "41", false),
+        ("h264", "1920", "Baseline", "41", false),
+        ("h264", "1920", "High", "40", false),
+        ("h264", "1920", "High", "41", true),
+    ] {
+        let response = post(
+            &app.router,
+            &uri,
+            &token,
+            json!({
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Type": "Video",
+                        "Container": "mkv",
+                        "VideoCodec": video_codec,
+                        "AudioCodec": "aac"
+                    }],
+                    "CodecProfiles": [{
+                        "Type": "Video",
+                        "Codec": "h264",
+                        "Conditions": [
+                            {
+                                "Condition": "LessThanEqual",
+                                "Property": "Width",
+                                "Value": max_width,
+                                "IsRequired": true
+                            },
+                            {
+                                "Condition": "Equals",
+                                "Property": "VideoProfile",
+                                "Value": profile,
+                                "IsRequired": true
+                            },
+                            {
+                                "Condition": "LessThanEqual",
+                                "Property": "VideoLevel",
+                                "Value": max_level,
+                                "IsRequired": true
+                            }
+                        ]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], expected);
+    }
+}
+
+#[tokio::test]
+async fn playback_info_query_overrides_body_identity_source_and_direct_play_flags() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+    let wrong_user = Uuid::new_v4();
+    let wrong_source = Uuid::new_v4();
+    let body = json!({
+        "UserId": wrong_user,
+        "MediaSourceId": wrong_source,
+        "EnableDirectPlay": true,
+        "DeviceProfile": {
+            "DirectPlayProfiles": [{"Type": "Video", "Container": "mkv"}]
+        }
+    })
+    .to_string();
+
+    let forbidden = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        body.clone(),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    let selected = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo?userId={user_id}&mediaSourceId={presentation}"),
+        &token,
+        body.clone(),
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    let body_bytes = selected.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+
+    let disabled = post(
+        &app.router,
+        &format!(
+            "/Items/{item}/PlaybackInfo?userId={user_id}&mediaSourceId={presentation}&enableDirectPlay=false"
+        ),
+        &token,
+        body,
+    )
+    .await;
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let body = disabled.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+}
+
+#[tokio::test]
+async fn media_stream_supports_get_head_range_if_range_and_416() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}");
+
+    let unauthorized = stream_request(&app.router, "GET", &uri, None, None, None).await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let full = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
+    let etag = full.headers()[header::ETAG].to_str().unwrap().to_owned();
+    let body = full.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"0123456789");
+
+    let partial = stream_request(
+        &app.router,
+        "GET",
+        &uri,
+        Some(&token),
+        Some("bytes=2-5"),
+        Some(&etag),
+    )
+    .await;
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(partial.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+    assert_eq!(partial.headers()[header::CONTENT_LENGTH], "4");
+    let body = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"2345");
+
+    let head = stream_request(
+        &app.router,
+        "HEAD",
+        &uri,
+        Some(&token),
+        Some("bytes=-3"),
+        None,
+    )
+    .await;
+    assert_eq!(head.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(head.headers()[header::CONTENT_RANGE], "bytes 7-9/10");
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], "3");
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    let mismatch = stream_request(
+        &app.router,
+        "GET",
+        &uri,
+        Some(&token),
+        Some("bytes=2-5"),
+        Some("\"different\""),
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::OK);
+    assert_eq!(mismatch.headers()[header::CONTENT_LENGTH], "10");
+
+    let unsatisfied = stream_request(
+        &app.router,
+        "GET",
+        &uri,
+        Some(&token),
+        Some("bytes=10-"),
+        None,
+    )
+    .await;
+    assert_eq!(unsatisfied.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(unsatisfied.headers()[header::CONTENT_RANGE], "bytes */10");
+
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_accounts"))
+                    .value(Alias::new("status"), "Disabled")
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("id")).eq(app.media_account),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_request(&app.router, "GET", &uri, Some(&token), None, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Music", true).await;
+    let item = seed_item(&app.database, library, "Track", "Audio").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let playback = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        "{}".to_owned(),
+    )
+    .await;
+    assert_eq!(playback.status(), StatusCode::OK);
+    let playback = playback.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&playback).unwrap();
+    assert_eq!(
+        payload["MediaSources"][0]["DirectStreamUrl"],
+        format!("/Audio/{item}/stream?static=true&mediaSourceId={presentation}")
+    );
+    let uri = format!("/Audio/{item}/stream?static=true&mediaSourceId={presentation}");
+
+    let unauthorized = stream_request(&app.router, "GET", &uri, None, None, None).await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let full = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
+    let body = full.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"0123456789");
+
+    let partial = stream_request(
+        &app.router,
+        "GET",
+        &uri,
+        Some(&token),
+        Some("bytes=3-6"),
+        None,
+    )
+    .await;
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(partial.headers()[header::CONTENT_RANGE], "bytes 3-6/10");
+    let body = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"3456");
+
+    let head = stream_request(
+        &app.router,
+        "HEAD",
+        &uri,
+        Some(&token),
+        Some("bytes=-2"),
+        None,
+    )
+    .await;
+    assert_eq!(head.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(head.headers()[header::CONTENT_RANGE], "bytes 8-9/10");
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], "2");
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cloud_media_is_proxied_through_local_routes_without_identity_leaks() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Cloud Movies", true).await;
+    let item = seed_item(&app.database, library, "Remote", "Movie").await;
+    let presentation = seed_playable_source_for_provider(
+        &app.database,
+        item,
+        app.cloud_account,
+        "cloud-test",
+        &app.cloud_object_id,
+        17,
+        &app.cloud_subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let playback = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        json!({
+            "DeviceProfile": {
+                "DirectPlayProfiles": [{"Type":"Video","Container":"mkv"}]
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(playback.status(), StatusCode::OK);
+    let playback = playback.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&playback).unwrap();
+    assert_eq!(
+        payload["MediaSources"][0]["DirectStreamUrl"],
+        format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}")
+    );
+    let encoded = String::from_utf8(playback.to_vec()).unwrap();
+    for hidden in ["cloud-test", app.cloud_object_id.as_str(), "secret-ref"] {
+        assert!(!encoded.contains(hidden));
+    }
+
+    let stream = stream_request(
+        &app.router,
+        "GET",
+        &format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}"),
+        Some(&token),
+        Some("bytes=6-9"),
+        None,
+    )
+    .await;
+    assert_eq!(stream.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(stream.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
+    let body = stream.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"byte");
+
+    let subtitle = get(
+        &app.router,
+        &format!("/Videos/{item}/{presentation}/Subtitles/3/Stream.srt"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(subtitle.status(), StatusCode::OK);
+    let body = subtitle.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"1\n00:00:01,000 --> 00:00:02,000\nCloud\n\n\n");
+}
+
+#[tokio::test]
+async fn cloud_source_probe_uses_the_registered_backend_and_a_bounded_range() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Cloud probe", true).await;
+    let item = seed_item(&app.database, library, "Remote probe", "Movie").await;
+    let presentation = seed_playable_source_for_provider(
+        &app.database,
+        item,
+        app.cloud_account,
+        "cloud-test",
+        &app.cloud_object_id,
+        17,
+        &app.cloud_subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    let source_id: Uuid = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), "NotProbed")
+                    .and_where(Expr::col(Alias::new("id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    let submission = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(tjxy_common::MediaSourceId::from_uuid(source_id)),
+                1,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "cloud-probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), submission.job().id());
+
+    ProbeService::new(app.database.clone())
+        .with_backend(app.cloud_account, Arc::clone(&app.cloud_backend))
+        .with_inspector(Arc::new(CloudProbeInspector))
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.cloud_backend.ranges(),
+        vec![(app.cloud_object_id.clone(), 0, 17)]
+    );
+    let source = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("probe_state"),
+                        Alias::new("container"),
+                        Alias::new("probe_revision"),
+                    ])
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source.try_get::<String>("", "probe_state").unwrap(),
+        "Probed"
+    );
+    assert_eq!(source.try_get::<String>("", "container").unwrap(), "mkv");
+    assert_eq!(source.try_get::<i64>("", "probe_revision").unwrap(), 2);
+}
+
+async fn cloud_object_availability(
+    database: &DatabaseConnection,
+    provider_object_id: &str,
+) -> (String, Option<String>, String, i64, i64) {
+    let object = Alias::new("storage_objects");
+    let relation = Alias::new("storage_root_objects");
+    let root = Alias::new("storage_roots");
+    let location = Alias::new("media_locations");
+    let query = Query::select()
+        .column((relation.clone(), Alias::new("presence_state")))
+        .column((relation.clone(), Alias::new("availability_reason")))
+        .column((location.clone(), Alias::new("availability_state")))
+        .column((root.clone(), Alias::new("sync_revision")))
+        .column((root.clone(), Alias::new("reconciled_sync_revision")))
+        .from(object.clone())
+        .inner_join(
+            relation.clone(),
+            Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                .equals((object.clone(), Alias::new("id"))),
+        )
+        .inner_join(
+            root.clone(),
+            Expr::col((root, Alias::new("id"))).equals((relation, Alias::new("storage_root_id"))),
+        )
+        .inner_join(
+            location.clone(),
+            Expr::col((location, Alias::new("storage_object_id")))
+                .equals((object.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((object, Alias::new("provider_object_id"))).eq(provider_object_id))
+        .to_owned();
+    let row = database
+        .query_one(database.get_database_backend().build(&query))
+        .await
+        .unwrap()
+        .unwrap();
+    (
+        row.try_get("", "presence_state").unwrap(),
+        row.try_get("", "availability_reason").unwrap(),
+        row.try_get("", "availability_state").unwrap(),
+        row.try_get("", "sync_revision").unwrap(),
+        row.try_get("", "reconciled_sync_revision").unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn cloud_read_failures_update_availability_and_successful_retry_restores_it() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Cloud recovery", true).await;
+    let item = seed_item(&app.database, library, "Remote recovery", "Movie").await;
+    let presentation = seed_playable_source_for_provider(
+        &app.database,
+        item,
+        app.cloud_account,
+        "cloud-test",
+        &app.cloud_object_id,
+        17,
+        &app.cloud_subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}");
+
+    app.cloud_backend
+        .enqueue_read(CloudReadBehavior::OpenUnavailable);
+    let unavailable = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        cloud_object_availability(&app.database, &app.cloud_object_id).await,
+        (
+            "TemporarilyUnavailable".to_owned(),
+            Some("backend-temporarily-unavailable".to_owned()),
+            "TemporarilyUnavailable".to_owned(),
+            2,
+            2,
+        )
+    );
+
+    let recovered = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    assert_eq!(
+        recovered.into_body().collect().await.unwrap().to_bytes(),
+        Bytes::from_static(b"cloud-byte-stream")
+    );
+    assert_eq!(
+        cloud_object_availability(&app.database, &app.cloud_object_id).await,
+        ("Present".to_owned(), None, "Available".to_owned(), 3, 3)
+    );
+
+    app.cloud_backend
+        .enqueue_read(CloudReadBehavior::StreamUnavailable);
+    let streamed_failure = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(streamed_failure.status(), StatusCode::OK);
+    assert!(streamed_failure.into_body().collect().await.is_err());
+    assert_eq!(
+        cloud_object_availability(&app.database, &app.cloud_object_id).await,
+        (
+            "TemporarilyUnavailable".to_owned(),
+            Some("backend-rate-limited".to_owned()),
+            "TemporarilyUnavailable".to_owned(),
+            4,
+            4,
+        )
+    );
+
+    app.cloud_backend
+        .enqueue_read(CloudReadBehavior::StreamPendingAfterChunk);
+    let cancelled = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    let mut body = cancelled.into_body();
+    let frame = body.frame().await.unwrap().unwrap();
+    assert_eq!(
+        frame.into_data().unwrap(),
+        Bytes::from_static(b"cloud-byte-stream")
+    );
+    drop(body);
+    assert_eq!(
+        cloud_object_availability(&app.database, &app.cloud_object_id).await,
+        ("Present".to_owned(), None, "Available".to_owned(), 5, 5)
+    );
+
+    app.cloud_backend
+        .enqueue_read(CloudReadBehavior::OpenNotFound);
+    let not_found = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(not_found.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        cloud_object_availability(&app.database, &app.cloud_object_id).await,
+        (
+            "TemporarilyUnavailable".to_owned(),
+            Some("backend-object-not-found-unconfirmed".to_owned()),
+            "TemporarilyUnavailable".to_owned(),
+            6,
+            6,
+        )
+    );
+}
+
+#[tokio::test]
+async fn empty_media_rejects_byte_ranges_with_a_zero_size_content_range() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Empty", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.empty_media_object_id,
+        0,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}");
+
+    let full = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "0");
+    let ranged = stream_request(
+        &app.router,
+        "GET",
+        &uri,
+        Some(&token),
+        Some("bytes=0-"),
+        None,
+    )
+    .await;
+    assert_eq!(ranged.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(ranged.headers()[header::CONTENT_RANGE], "bytes */0");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the multi-generation Probe/index/failure race in one state sequence.
+async fn probe_commit_publishes_canonical_metadata_and_never_reuses_delivery_indexes() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    let source_row = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("presentation_key"))
+                            .eq(presentation),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let source_id = tjxy_common::MediaSourceId::from_uuid(source_row.try_get("", "id").unwrap());
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("container"), Option::<String>::None)
+                    .value(Alias::new("probe_state"), "NotProbed")
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("id")).eq(source_id.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    let submission = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(source_id),
+                1,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), submission.job().id());
+    let probes = tjxy_db::ProbeRepository::new(&app.database);
+    let candidate = probes.candidate(&claimed).await.unwrap().unwrap();
+    let video = tjxy_db::ProbedStream::new(
+        "track-uid-7",
+        "Video",
+        3,
+        Some("h264".to_owned()),
+        None,
+        Some(1920),
+        Some(1080),
+        None,
+        true,
+        false,
+    )
+    .unwrap()
+    .with_video_compatibility(Some("High".to_owned()), Some(41))
+    .unwrap();
+    let result = tjxy_db::ProbeResult::new("mkv", vec![video])
+        .unwrap()
+        .with_video(Some("h264".to_owned()), Some("1920x1080".to_owned()));
+    probes
+        .commit_success(&claimed, &candidate, &result)
+        .await
+        .unwrap();
+
+    let active = tjxy_db::CatalogPublicationRepository::new(&app.database)
+        .active_sources(item)
+        .await
+        .unwrap();
+    assert_eq!(active[0].container(), Some("mkv"));
+    assert_eq!(active[0].probe_state(), "Probed");
+    assert_eq!(active[0].streams()[0].profile(), Some("High"));
+    assert_eq!(active[0].streams()[0].level(), Some(41));
+    assert_eq!(active[0].subtitles()[0].delivery_index(), Some(3));
+
+    let second = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(source_id),
+                2,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), second.job().id());
+    let candidate = probes.candidate(&claimed).await.unwrap().unwrap();
+    let audio = tjxy_db::ProbedStream::new(
+        "track-uid-8",
+        "Audio",
+        0,
+        Some("aac".to_owned()),
+        Some("eng".to_owned()),
+        None,
+        None,
+        Some(2),
+        true,
+        false,
+    )
+    .unwrap();
+    probes
+        .commit_success(
+            &claimed,
+            &candidate,
+            &tjxy_db::ProbeResult::new("mkv", vec![audio]).unwrap(),
+        )
+        .await
+        .unwrap();
+    let rows = app
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("stream_identity"),
+                        Alias::new("delivery_index"),
+                        Alias::new("is_present"),
+                    ])
+                    .from(Alias::new("media_stream_index_map"))
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("media_source_id"))
+                            .eq(source_id.as_uuid()),
+                    )
+                    .order_by(Alias::new("delivery_index"), sea_orm::sea_query::Order::Asc),
+            ),
+        )
+        .await
+        .unwrap();
+    let indexes = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get::<String>("", "stream_identity").unwrap(),
+                row.try_get::<i32>("", "delivery_index").unwrap(),
+                row.try_get::<bool>("", "is_present").unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(indexes.contains(&("embedded:track-uid-7".to_owned(), 0, false)));
+    assert!(indexes.contains(&("embedded:track-uid-8".to_owned(), 1, true)));
+    assert!(
+        indexes
+            .iter()
+            .any(|row| row.0.starts_with("external:") && row.1 == 3 && row.2)
+    );
+
+    let failed = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(source_id),
+                3,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), failed.job().id());
+    let candidate = probes.candidate(&claimed).await.unwrap().unwrap();
+    let failed_generation = probes
+        .commit_failure(&claimed, &candidate, "unsupported media container")
+        .await
+        .unwrap();
+    let failed_source = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("probe_state"),
+                        Alias::new("probe_revision"),
+                        Alias::new("last_probe_error"),
+                    ])
+                    .from(Alias::new("media_sources"))
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("id")).eq(source_id.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed_source.try_get::<String>("", "probe_state").unwrap(),
+        "ProbeFailed"
+    );
+    assert_eq!(
+        failed_source.try_get::<i64>("", "probe_revision").unwrap(),
+        3
+    );
+    assert_eq!(
+        failed_source
+            .try_get::<String>("", "last_probe_error")
+            .unwrap(),
+        "unsupported media container"
+    );
+    assert_eq!(
+        jobs.get(failed.job().id()).await.unwrap().unwrap().state(),
+        tjxy_db::WorkJobState::Failed
+    );
+    let outbox = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("generation"))
+                    .from(Alias::new("catalog_change_outbox"))
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("event_type")).eq("ProbeFailed"),
+                    )
+                    .order_by(Alias::new("generation"), sea_orm::sea_query::Order::Desc)
+                    .limit(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outbox.try_get::<i64>("", "generation").unwrap(),
+        failed_generation
+    );
+
+    let third = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(source_id),
+                3,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let candidate = probes.candidate(&claimed).await.unwrap().unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("remote_revision"), "changed-during-probe")
+                    .and_where(
+                        sea_orm::sea_query::Expr::col(Alias::new("provider_object_id"))
+                            .eq(app.media_object_id.as_str()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let error = probes
+        .commit_success(
+            &claimed,
+            &candidate,
+            &tjxy_db::ProbeResult::new("mkv", Vec::new()).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tjxy_db::ProbeRepositoryError::StaleSnapshot
+    ));
+    assert_eq!(
+        jobs.get(third.job().id()).await.unwrap().unwrap().state(),
+        tjxy_db::WorkJobState::Running
+    );
+}
+
+#[tokio::test]
+async fn library_refresh_requires_an_admin_and_enqueues_enabled_libraries() {
+    let app = test_app().await;
+    let enabled = seed_library(&app.database, "Movies", true).await;
+    seed_library(&app.database, "Archive", false).await;
+    let manual = seed_library(&app.database, "Curated", true).await;
+    let set_manual = Query::update()
+        .table(Alias::new("libraries"))
+        .value(Alias::new("scan_profile"), "Manual")
+        .value(Alias::new("object_selection_scope"), "library_roots")
+        .value(Alias::new("metadata_policy"), "none")
+        .value(Alias::new("expansion_policy"), "manual")
+        .value(Alias::new("probe_policy"), "on_playback")
+        .and_where(Expr::col(Alias::new("id")).eq(manual))
+        .to_owned();
+    app.database
+        .execute(app.database.get_database_backend().build(&set_manual))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        post_empty(&app.router, "/Library/Refresh", None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, _, token) = login(&app.router).await;
+    assert_eq!(
+        post_empty(&app.router, "/Library/Refresh", Some(&token))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let row = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT task_kind, scope_type, scope_id, state FROM work_jobs".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "task_kind").unwrap(),
+        "FullMediaScan"
+    );
+    assert_eq!(row.try_get::<String>("", "scope_type").unwrap(), "Library");
+    assert_eq!(row.try_get::<Uuid>("", "scope_id").unwrap(), enabled);
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "Pending");
+    let count = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT COUNT(*) AS count FROM work_jobs".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "count")
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn manual_media_tasks_require_admin_and_reject_unknown_scopes() {
+    let app = test_app().await;
+    let root = Uuid::new_v4();
+    let item = Uuid::new_v4();
+    let validate_uri = format!("/Admin/Tasks/ValidateStorage/{root}");
+    let discover_uri = format!("/Admin/Tasks/DiscoverTitles/{root}");
+    let metadata_uri = format!("/Admin/Tasks/ResolveMetadata/{item}");
+    let expand_uri = format!("/Admin/Tasks/ExpandItem/{item}");
+    let index_uri = format!("/Admin/Tasks/IndexMediaSources/{item}");
+    let probe_uri = format!("/Admin/Tasks/ProbeMedia/{item}");
+
+    assert_eq!(
+        post_empty(&app.router, &validate_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_empty(&app.router, &discover_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_empty(&app.router, &metadata_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_empty(&app.router, &expand_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_empty(&app.router, &index_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_empty(&app.router, &probe_uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let auth = AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap();
+    auth.create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    let (_, _, user_token) = login_as(&app.router, "bob", "ordinary password").await;
+    assert_eq!(
+        post_empty(&app.router, &probe_uri, Some(&user_token))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let (_, _, token) = login(&app.router).await;
+    assert_eq!(
+        post_empty(&app.router, &validate_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_empty(&app.router, &discover_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_empty(&app.router, &metadata_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_empty(&app.router, &expand_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_empty(&app.router, &index_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_empty(&app.router, &probe_uri, Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn administrators_manage_library_scoped_hybrid_candidates_idempotently() {
+    let app = test_app().await;
+    let (hybrid, series) = seed_hybrid_series(&app.database).await;
+    let path = format!("/Admin/Libraries/{hybrid}/HybridCandidates/{series}");
+    let list = format!("/Admin/Libraries/{hybrid}/HybridCandidates?StartIndex=0&Limit=50");
+
+    let (_, _, token) = login(&app.router).await;
+    assert_eq!(
+        put_empty(&app.router, &path, Some(&token)).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_empty(&app.router, &path, Some(&token)).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = get(&app.router, &list, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["TotalRecordCount"], 1);
+    assert_eq!(body["StartIndex"], 0);
+    assert_eq!(body["Items"][0]["Id"], series.to_string());
+    assert_eq!(body["Items"][0]["Name"], "Pinned Series");
+    assert!(body["Items"][0].get("Path").is_none());
+
+    assert_eq!(
+        delete_empty(&app.router, &path, Some(&token))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete_empty(&app.router, &path, Some(&token))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let body = get(&app.router, &list, Some(&token)).await;
+    let body = body.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["TotalRecordCount"], 0);
+}
+
+#[tokio::test]
+async fn hybrid_candidate_routes_enforce_admin_policy_membership_and_page_boundaries() {
+    let app = test_app().await;
+    let (hybrid, series) = seed_hybrid_series(&app.database).await;
+    let path = format!("/Admin/Libraries/{hybrid}/HybridCandidates/{series}");
+    let list = format!("/Admin/Libraries/{hybrid}/HybridCandidates?StartIndex=0&Limit=50");
+
+    assert_eq!(
+        get(&app.router, &list, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        put_empty(&app.router, &path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let auth = AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap();
+    auth.create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    let (_, _, user_token) = login_as(&app.router, "bob", "ordinary password").await;
+    assert_eq!(
+        put_empty(&app.router, &path, Some(&user_token))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let (_, _, token) = login(&app.router).await;
+
+    let lazy = seed_library(&app.database, "Lazy Shows", true).await;
+    let lazy_series = seed_item(&app.database, lazy, "Lazy Series", "Series").await;
+    assert_eq!(
+        put_empty(
+            &app.router,
+            &format!("/Admin/Libraries/{lazy}/HybridCandidates/{lazy_series}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        put_empty(
+            &app.router,
+            &format!(
+                "/Admin/Libraries/{hybrid}/HybridCandidates/{}",
+                Uuid::new_v4()
+            ),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Admin/Libraries/{hybrid}/HybridCandidates?Limit=0"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the final-job, retry, and type-boundary HTTP contract together.
+async fn manual_expand_and_index_return_the_final_durable_media_jobs() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Manual", true).await;
+    let series = seed_item(&app.database, library, "Example Series", "Series").await;
+    let movie = seed_item(&app.database, library, "Example Movie", "Movie").await;
+    let series_scope = seed_manual_storage_scope(&app.database, library, series, false).await;
+    seed_manual_storage_scope(&app.database, library, movie, true).await;
+    let (_, _, token) = login(&app.router).await;
+
+    let expand = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/ExpandItem/{series}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(expand.status(), StatusCode::ACCEPTED);
+    let expand: Value =
+        serde_json::from_slice(&expand.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let expand_job = Uuid::parse_str(expand["JobId"].as_str().unwrap()).unwrap();
+
+    let index = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/IndexMediaSources/{movie}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(index.status(), StatusCode::ACCEPTED);
+    let index: Value =
+        serde_json::from_slice(&index.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let index_job = Uuid::parse_str(index["JobId"].as_str().unwrap()).unwrap();
+    let expand_retry = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/ExpandItem/{series}"),
+        Some(&token),
+    )
+    .await;
+    let expand_retry: Value =
+        serde_json::from_slice(&expand_retry.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(expand_retry["JobId"], expand_job.to_string());
+    assert_eq!(
+        post_empty(
+            &app.router,
+            &format!("/Admin/Tasks/ExpandItem/{movie}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post_empty(
+            &app.router,
+            &format!("/Admin/Tasks/IndexMediaSources/{series}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+
+    let rows = app
+        .database
+        .query_all(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT id, task_kind, scope_id, required_sync_job_id, input_sync_revision \
+             FROM work_jobs ORDER BY task_kind"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    let expand_row = rows
+        .iter()
+        .find(|row| row.try_get::<Uuid>("", "id").unwrap() == expand_job)
+        .unwrap();
+    assert_eq!(
+        expand_row.try_get::<String>("", "task_kind").unwrap(),
+        "ExpandItem"
+    );
+    assert_eq!(
+        expand_row.try_get::<Uuid>("", "scope_id").unwrap(),
+        series.as_uuid()
+    );
+    assert!(
+        expand_row
+            .try_get::<Option<Uuid>>("", "required_sync_job_id")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        expand_row
+            .try_get::<Option<i64>>("", "input_sync_revision")
+            .unwrap(),
+        None
+    );
+    let sync_row = rows
+        .iter()
+        .find(|row| row.try_get::<String>("", "task_kind").unwrap() == "ScopedStorageSync")
+        .unwrap();
+    assert_eq!(
+        sync_row.try_get::<Uuid>("", "scope_id").unwrap(),
+        series_scope
+    );
+
+    let index_row = rows
+        .iter()
+        .find(|row| row.try_get::<Uuid>("", "id").unwrap() == index_job)
+        .unwrap();
+    assert_eq!(
+        index_row.try_get::<String>("", "task_kind").unwrap(),
+        "IndexMediaSources"
+    );
+    assert_eq!(
+        index_row
+            .try_get::<Option<Uuid>>("", "required_sync_job_id")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        index_row
+            .try_get::<Option<i64>>("", "input_sync_revision")
+            .unwrap(),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+async fn manual_probe_reprobes_available_active_sources_and_joins_retries() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    seed_playable_source(
+        &app.database,
+        item,
+        Uuid::new_v4(),
+        "arrival-video",
+        1_024,
+        "arrival-subtitle",
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Admin/Tasks/ProbeMedia/{item}");
+
+    let first = post_empty(&app.router, &uri, Some(&token)).await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    let first: Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first["Jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(first["Jobs"][0]["Created"], true);
+    let first_job = first["Jobs"][0]["JobId"].as_str().unwrap();
+
+    let retry = post_empty(&app.router, &uri, Some(&token)).await;
+    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    let retry_body = retry.into_body().collect().await.unwrap().to_bytes();
+    let retry: Value = serde_json::from_slice(&retry_body).unwrap();
+    assert_eq!(retry["Jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(retry["Jobs"][0]["Created"], false);
+    assert_eq!(retry["Jobs"][0]["JobId"], first_job);
+
+    let row = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT task_kind, scope_type, scope_id, expected_revision, priority, state \
+             FROM work_jobs WHERE task_kind = 'ProbeMedia'"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "task_kind").unwrap(),
+        "ProbeMedia"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "scope_type").unwrap(),
+        "MediaSource"
+    );
+    assert_eq!(row.try_get::<i64>("", "expected_revision").unwrap(), 1);
+    assert_eq!(row.try_get::<i32>("", "priority").unwrap(), 100);
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "Pending");
+    assert_eq!(
+        row.try_get::<Uuid>("", "scope_id").unwrap().to_string(),
+        first["Jobs"][0]["MediaSourceId"]
+    );
+}
+
+#[tokio::test]
+async fn manual_probe_does_not_implicitly_index_an_item_without_active_sources() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/ProbeMedia/{item}"),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let count = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT COUNT(*) AS count FROM work_jobs".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "count")
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps live-root setup, HTTP submission, and durable job assertions together.
+async fn manual_storage_validation_enqueues_a_root_scoped_job() {
+    let app = test_app().await;
+    let account = Uuid::new_v4();
+    let root = Uuid::new_v4();
+    let root_object = Uuid::new_v4();
+    let root_relation = Uuid::new_v4();
+    let backend = app.database.get_database_backend();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("storage_accounts"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("provider"),
+                Alias::new("display_name"),
+                Alias::new("account_identity"),
+                Alias::new("credential_ref"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                account.into(),
+                "filesystem".into(),
+                "Disk".into(),
+                "validate-account".into(),
+                "validate-ref".into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_root_id"),
+                Alias::new("sync_revision"),
+                Alias::new("reconciled_sync_revision"),
+            ])
+            .values_panic([
+                root.into(),
+                account.into(),
+                "validate-root".into(),
+                7_i64.into(),
+                7_i64.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_drive_id"),
+                Alias::new("provider_object_id"),
+                Alias::new("name"),
+                Alias::new("normalized_name"),
+                Alias::new("object_type"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("identity_quality"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                root_object.into(),
+                account.into(),
+                "local".into(),
+                "validate-root".into(),
+                "Root".into(),
+                "root".into(),
+                "Directory".into(),
+                7_i64.into(),
+                true.into(),
+                7_i64.into(),
+                "ProviderStable".into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_root_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_root_id"),
+                Alias::new("storage_object_id"),
+                Alias::new("parent_storage_object_id"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                root_relation.into(),
+                root.into(),
+                root_object.into(),
+                Option::<Uuid>::None.into(),
+                7_i64.into(),
+                true.into(),
+                7_i64.into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+    ] {
+        app.database
+            .execute(backend.build(&statement))
+            .await
+            .unwrap();
+    }
+
+    let (_, _, token) = login(&app.router).await;
+    let response = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/ValidateStorage/{root}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let row = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT task_kind, scope_type, scope_id, expected_revision, state FROM work_jobs"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "task_kind").unwrap(),
+        "ValidateStorageRoot"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "scope_type").unwrap(),
+        "StorageRoot"
+    );
+    assert_eq!(row.try_get::<Uuid>("", "scope_id").unwrap(), root);
+    assert_eq!(row.try_get::<i64>("", "expected_revision").unwrap(), 7);
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "Pending");
+}
+
+#[tokio::test]
+async fn manual_root_full_scan_enqueues_a_library_root_binding_job() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Manual", true).await;
+    let item = seed_item(&app.database, library, "Example Series", "Series").await;
+    seed_manual_storage_scope(&app.database, library, item, true).await;
+    let binding = app
+        .database
+        .query_one(
+            app.database.get_database_backend().build(
+                &Query::select()
+                    .columns([Alias::new("id"), Alias::new("storage_root_id")])
+                    .from(Alias::new("library_storage_roots"))
+                    .and_where(Expr::col(Alias::new("library_id")).eq(library))
+                    .limit(1)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let binding_id: Uuid = binding.try_get("", "id").unwrap();
+    let root_id: Uuid = binding.try_get("", "storage_root_id").unwrap();
+    let (_, _, token) = login(&app.router).await;
+
+    let response = post_empty(
+        &app.router,
+        &format!("/Admin/Tasks/FullScan/{library}/{root_id}"),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let row = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT task_kind, scope_type, scope_id, expected_revision FROM work_jobs".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "task_kind").unwrap(),
+        "FullLibraryRootScan"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "scope_type").unwrap(),
+        "LibraryRootBinding"
+    );
+    assert_eq!(row.try_get::<Uuid>("", "scope_id").unwrap(), binding_id);
+    assert_eq!(row.try_get::<i64>("", "expected_revision").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn scheduled_tasks_expose_start_and_cancel_for_full_library_scans() {
+    let app = test_app().await;
+    seed_library(&app.database, "Movies", true).await;
+    assert_eq!(
+        get(&app.router, "/ScheduledTasks", None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, _, token) = login(&app.router).await;
+
+    let initial = get(&app.router, "/ScheduledTasks", Some(&token)).await;
+    assert_eq!(initial.status(), StatusCode::OK);
+    let body = initial.into_body().collect().await.unwrap().to_bytes();
+    let tasks: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["Key"], "FullMediaScan");
+    assert_eq!(tasks[0]["State"], "Idle");
+    let task_id = tasks[0]["Id"].as_str().unwrap();
+
+    assert_eq!(
+        post_empty(
+            &app.router,
+            &format!("/ScheduledTasks/Running/{task_id}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let running = get(
+        &app.router,
+        &format!("/ScheduledTasks/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    let body = running.into_body().collect().await.unwrap().to_bytes();
+    let running: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(running["State"], "Running");
+
+    assert_eq!(
+        delete_empty(
+            &app.router,
+            &format!("/ScheduledTasks/Running/{task_id}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let stopped = get(
+        &app.router,
+        &format!("/ScheduledTasks/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    let body = stopped.into_body().collect().await.unwrap().to_bytes();
+    let stopped: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(stopped["State"], "Idle");
+    let cancelled = app
+        .database
+        .query_one(Statement::from_string(
+            app.database.get_database_backend(),
+            "SELECT j.state, r.error_summary FROM work_jobs j JOIN work_results r ON r.job_id = j.id"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.try_get::<String>("", "state").unwrap(), "Failed");
+    assert_eq!(
+        cancelled.try_get::<String>("", "error_summary").unwrap(),
+        "cancelled by administrator"
+    );
+}
+
+#[tokio::test]
+async fn recent_admin_jobs_require_admin_validate_limits_and_hide_persisted_errors() {
+    let app = test_app().await;
+    seed_library(&app.database, "Movies", true).await;
+    assert_eq!(
+        get(&app.router, "/Admin/Tasks/Jobs", None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, _, token) = login(&app.router).await;
+
+    let tasks = get(&app.router, "/ScheduledTasks", Some(&token)).await;
+    let body = tasks.into_body().collect().await.unwrap().to_bytes();
+    let tasks: Value = serde_json::from_slice(&body).unwrap();
+    let task_id = tasks[0]["Id"].as_str().unwrap();
+    post_empty(
+        &app.router,
+        &format!("/ScheduledTasks/Running/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    delete_empty(
+        &app.router,
+        &format!("/ScheduledTasks/Running/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    let cancelled = get(&app.router, "/Admin/Tasks/Jobs?Limit=1", Some(&token)).await;
+    let body = cancelled.into_body().collect().await.unwrap().to_bytes();
+    let cancelled: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(cancelled[0]["Status"], "Cancelled");
+
+    app.database
+        .execute(Statement::from_string(
+            app.database.get_database_backend(),
+            "UPDATE work_jobs SET last_error = 'token=secret must remain private'".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+    let response = get(&app.router, "/Admin/Tasks/Jobs?Limit=1", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!body_text.contains("secret"));
+    assert!(!body_text.contains("LastError"));
+    assert!(!body_text.contains("Lease"));
+    let jobs: Value = serde_json::from_str(&body_text).unwrap();
+    assert_eq!(jobs.as_array().unwrap().len(), 1);
+    assert_eq!(jobs[0]["TaskKind"], "FullMediaScan");
+    assert_eq!(jobs[0]["ScopeType"], "Library");
+    assert_eq!(jobs[0]["Status"], "Failed");
+    assert!(jobs[0]["CreatedAt"].is_string());
+    assert!(jobs[0]["CompletedAt"].is_string());
+
+    for uri in [
+        "/Admin/Tasks/Jobs?Limit=0",
+        "/Admin/Tasks/Jobs?Limit=101",
+        "/Admin/Tasks/Jobs?Limit=not-a-number",
+        "/Admin/Tasks/Jobs?Unexpected=true",
+    ] {
+        assert_eq!(
+            get(&app.router, uri, Some(&token)).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps admin auth, secret exclusion, policy CAS, and readback in one HTTP flow.
+async fn virtual_folders_require_admin_and_return_sql_effective_policy_without_backend_secrets() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let account = Uuid::new_v4();
+    let root = Uuid::new_v4();
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_accounts"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("provider"),
+                        Alias::new("display_name"),
+                        Alias::new("account_identity"),
+                        Alias::new("credential_ref"),
+                        Alias::new("status"),
+                    ])
+                    .values_panic([
+                        account.into(),
+                        "GoogleDrive".into(),
+                        "Cloud".into(),
+                        "private-account".into(),
+                        "private-credential".into(),
+                        "Ready".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_root_id"),
+                        Alias::new("sync_revision"),
+                        Alias::new("reconciled_sync_revision"),
+                    ])
+                    .values_panic([
+                        root.into(),
+                        account.into(),
+                        "private-provider-root".into(),
+                        0.into(),
+                        0.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("storage_root_id"),
+                    ])
+                    .values_panic([Uuid::new_v4().into(), library.into(), root.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        get(&app.router, "/Library/VirtualFolders", None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, _, token) = login(&app.router).await;
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!body.contains("private-"));
+    let folders: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(folders[0]["ItemId"], library.to_string());
+    assert_eq!(folders[0]["LibraryOptions"]["ScanProfile"], "Lazy");
+    assert_eq!(
+        folders[0]["Locations"][0],
+        format!("tjxy://storage-root/{root}")
+    );
+
+    let update = json!({
+        "Id": library,
+        "LibraryOptions": {
+            "Enabled": false,
+            "ScanProfile": "Hybrid",
+            "ProfileVersion": 1,
+            "ObjectSelectionScope": "all_synced_objects",
+            "MetadataPolicy": "full",
+            "ExpansionPolicy": "manual",
+            "ProbePolicy": "manual"
+        }
+    });
+    assert_eq!(
+        post(
+            &app.router,
+            "/Library/VirtualFolders/LibraryOptions",
+            &token,
+            update.to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        post(
+            &app.router,
+            "/Library/VirtualFolders/LibraryOptions",
+            &token,
+            update.to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let folders: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(folders[0]["LibraryOptions"]["Enabled"], false);
+    assert_eq!(folders[0]["LibraryOptions"]["ScanProfile"], "Hybrid");
+    assert_eq!(folders[0]["LibraryOptions"]["ProfileVersion"], 2);
+    assert_eq!(
+        folders[0]["LibraryOptions"]["ObjectSelectionScope"],
+        "all_synced_objects"
+    );
+    assert_eq!(folders[0]["LibraryOptions"]["MetadataPolicy"], "full");
+    assert_eq!(folders[0]["LibraryOptions"]["ExpansionPolicy"], "manual");
+    assert_eq!(folders[0]["LibraryOptions"]["ProbePolicy"], "manual");
+}
+
+#[tokio::test]
+async fn administrator_can_create_and_delete_an_empty_virtual_folder() {
+    let app = test_app().await;
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Library/VirtualFolders")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let (_, _, token) = login(&app.router).await;
+
+    let response = post(
+        &app.router,
+        "/Library/VirtualFolders?name=Documentaries&collectionType=movies&refreshLibrary=false",
+        &token,
+        json!({"LibraryOptions": {"Enabled": true, "ScanProfile": "Lazy"}}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(folders.as_array().unwrap().len(), 1);
+    assert_eq!(folders[0]["Name"], "Documentaries");
+    assert_eq!(folders[0]["LibraryOptions"]["ScanProfile"], "Lazy");
+
+    let response = post(
+        &app.router,
+        "/Library/VirtualFolders?name=Rejected&collectionType=movies&paths=/private/media",
+        &token,
+        "{}",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/Library/VirtualFolders?name=Documentaries&refreshLibrary=false")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(folders.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn administrator_can_persist_rename_and_safely_detach_a_filesystem_root() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let path = app.media.path().display();
+    let response = post(
+        &app.router,
+        &format!("/Library/VirtualFolders?name=Local&collectionType=movies&paths={path}"),
+        &token,
+        "{}",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let location = folders[0]["Locations"][0].as_str().unwrap();
+    assert!(location.starts_with("tjxy://storage-root/"));
+    assert!(!location.contains(app.media.path().to_str().unwrap()));
+
+    assert_eq!(
+        post_empty(
+            &app.router,
+            "/Library/VirtualFolders/Name?name=Local&newName=Renamed",
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let detached = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/Library/VirtualFolders/Paths?name=Renamed&path={location}"
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detached.status(), StatusCode::NO_CONTENT);
+    let status = app
+        .database
+        .query_one(
+            app.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("status"))
+                    .from(Alias::new("storage_accounts"))
+                    .and_where(Expr::col(Alias::new("provider")).eq("filesystem")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "status")
+        .unwrap();
+    assert_eq!(status, "Disabled");
+}
+
+#[tokio::test]
+async fn external_subtitles_require_auth_and_stream_only_the_indexed_format() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let path = format!("/Videos/{item}/{presentation}/Subtitles/3/Stream.srt");
+
+    assert_eq!(
+        get(&app.router, &path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/x-subrip"
+    );
+    assert_eq!(response.headers()[header::CONTENT_LENGTH], "40");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"1\n00:00:01,000 --> 00:00:02,000\nArrival\n");
+
+    let with_zero_offset = format!("/Videos/{item}/{presentation}/Subtitles/3/0/Stream.srt");
+    assert_eq!(
+        get(&app.router, &with_zero_offset, Some(&token))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    for (path, expected) in [
+        (
+            format!("/Videos/{item}/{presentation}/Subtitles/3/1/Stream.srt"),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("/Videos/{item}/{presentation}/Subtitles/3/Stream.vtt"),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            format!("/Videos/{item}/{presentation}/Subtitles/4/Stream.srt"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            get(&app.router, &path, Some(&token)).await.status(),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercises one stateful GET/partial-POST/revision HTTP contract.
+async fn user_data_get_and_post_are_authorized_patch_based_and_revisioned() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (user_id, _, token) = login(&app.router).await;
+    let path = format!("/UserItems/{item}/UserData?userId={user_id}");
+
+    assert_eq!(
+        get(&app.router, &path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let data: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(data["ItemId"], item.to_string());
+    assert_eq!(data["IsFavorite"], false);
+    assert_eq!(data["Played"], false);
+    assert_eq!(data["PlayCount"], 0);
+    assert_eq!(data["PlaybackPositionTicks"], 0);
+
+    let response = post(
+        &app.router,
+        &path,
+        &token,
+        json!({
+            "IsFavorite": true,
+            "Played": true,
+            "PlayCount": 2,
+            "PlaybackPositionTicks": 900_000
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let data: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(data["IsFavorite"], true);
+    assert_eq!(data["Played"], true);
+    assert_eq!(data["PlayCount"], 2);
+    assert_eq!(data["PlaybackPositionTicks"], 900_000);
+
+    let response = post(
+        &app.router,
+        &path,
+        &token,
+        json!({"IsFavorite": false}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let data: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(data["IsFavorite"], false);
+    assert_eq!(data["Played"], true);
+    assert_eq!(data["PlayCount"], 2);
+    assert_eq!(data["PlaybackPositionTicks"], 900_000);
+
+    let repository = tjxy_db::UserDataRepository::new(&app.database);
+    assert_eq!(
+        repository
+            .revision(tjxy_common::UserId::from_uuid(user_id))
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/UserItems/{item}/UserData?userId={}", Uuid::new_v4()),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    for invalid in [
+        json!({}),
+        json!({"PlaybackPositionTicks": -1}),
+        json!({"Unknown": true}),
+    ] {
+        assert_eq!(
+            post(&app.router, &path, &token, invalid.to_string())
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        repository
+            .revision(tjxy_common::UserId::from_uuid(user_id))
+            .await
+            .unwrap(),
+        Some(2)
+    );
+
+    let hidden_library = seed_library(&app.database, "Hidden", false).await;
+    let hidden = seed_item(&app.database, hidden_library, "Secret", "Movie").await;
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/UserItems/{hidden}/UserData"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    for (method, resource, expected_favorite, expected_played) in [
+        ("POST", "FavoriteItems", true, true),
+        ("DELETE", "FavoriteItems", false, true),
+        ("POST", "PlayedItems", false, true),
+        ("DELETE", "PlayedItems", false, false),
+    ] {
+        let response = stream_request(
+            &app.router,
+            method,
+            &format!("/Users/{user_id}/{resource}/{item}"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let data: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["IsFavorite"], expected_favorite);
+        assert_eq!(data["Played"], expected_played);
+    }
+    assert_eq!(
+        repository
+            .revision(tjxy_common::UserId::from_uuid(user_id))
+            .await
+            .unwrap(),
+        Some(5)
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers the ordered, retryable playback session lifecycle.
+async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+    let play_session = Uuid::new_v4();
+    let event = |position: i64| {
+        json!({
+            "ItemId": item,
+            "MediaSourceId": presentation,
+            "PlaySessionId": play_session,
+            "PositionTicks": position,
+            "UserId": user_id,
+            "CanSeek": true,
+            "PlayMethod": "DirectPlay"
+        })
+        .to_string()
+    };
+    let repository = tjxy_db::UserDataRepository::new(&app.database);
+    let user = tjxy_common::UserId::from_uuid(user_id);
+
+    for (invalid, expected) in [
+        (
+            json!({
+                "ItemId": item,
+                "MediaSourceId": Uuid::new_v4(),
+                "PlaySessionId": Uuid::new_v4(),
+                "PositionTicks": 0
+            }),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            json!({
+                "ItemId": item,
+                "MediaSourceId": presentation,
+                "PlaySessionId": Uuid::new_v4(),
+                "PositionTicks": -1
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "ItemId": item,
+                "MediaSourceId": presentation,
+                "PlaySessionId": Uuid::new_v4(),
+                "PositionTicks": 0,
+                "UserId": Uuid::new_v4()
+            }),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        assert_eq!(
+            post(
+                &app.router,
+                "/Sessions/Playing",
+                &token,
+                invalid.to_string(),
+            )
+            .await
+            .status(),
+            expected
+        );
+    }
+    assert_eq!(repository.revision(user).await.unwrap(), None);
+
+    for _ in 0..2 {
+        assert_eq!(
+            post(&app.router, "/Sessions/Playing", &token, event(10))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    let data = repository.get(user, item).await.unwrap().unwrap();
+    assert_eq!(data.play_count, 1);
+    assert_eq!(data.playback_position_ticks, 10);
+    assert_eq!(repository.revision(user).await.unwrap(), Some(1));
+    assert_eq!(
+        tjxy_db::PlaystateRepository::new(&app.database)
+            .last_presentation_key(user, item)
+            .await
+            .unwrap(),
+        Some(tjxy_common::PresentationKey::from_uuid(presentation))
+    );
+    let response = get(
+        &app.router,
+        &format!("/UserItems/{item}/UserData"),
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let user_data: Value = serde_json::from_slice(&body).unwrap();
+    assert!(user_data["LastPlayedDate"].as_str().is_some());
+
+    for _ in 0..2 {
+        assert_eq!(
+            post(&app.router, "/Sessions/Playing/Progress", &token, event(20),)
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(repository.revision(user).await.unwrap(), Some(2));
+    assert_eq!(
+        post(
+            &app.router,
+            &format!("/Sessions/Playing/Ping?playSessionId={play_session}"),
+            &token,
+            Body::empty(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(repository.revision(user).await.unwrap(), Some(2));
+
+    for _ in 0..2 {
+        assert_eq!(
+            post(&app.router, "/Sessions/Playing/Stopped", &token, event(30),)
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    let data = repository.get(user, item).await.unwrap().unwrap();
+    assert_eq!(data.play_count, 1);
+    assert_eq!(data.playback_position_ticks, 30);
+    assert_eq!(repository.revision(user).await.unwrap(), Some(3));
+
+    assert_eq!(
+        post(&app.router, "/Sessions/Playing/Progress", &token, event(40),)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(repository.revision(user).await.unwrap(), Some(3));
+    assert_eq!(
+        post(
+            &app.router,
+            &format!("/Sessions/Playing/Ping?playSessionId={play_session}"),
+            &token,
+            Body::empty(),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let resume_path =
+        format!("/UserItems/Resume?userId={user_id}&mediaTypes=Video&limit=10&enableUserData=true");
+    assert_eq!(
+        get(&app.router, &resume_path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &resume_path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Id"], item.to_string());
+    assert_eq!(result["Items"][0]["UserData"]["PlaybackPositionTicks"], 30);
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "POST",
+            &format!("/Users/{user_id}/PlayedItems/{item}"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let response = get(&app.router, &resume_path, Some(&token)).await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 0);
+}
+
+#[tokio::test]
+async fn playstate_accepts_optional_jellyfin_identity_fields_and_derives_missing_session_state() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+    let repository = tjxy_db::UserDataRepository::new(&app.database);
+    let user = tjxy_common::UserId::from_uuid(user_id);
+
+    for path in [
+        "/Sessions/Playing",
+        "/Sessions/Playing/Progress",
+        "/Sessions/Playing/Stopped",
+    ] {
+        assert_eq!(
+            post(
+                &app.router,
+                path,
+                &token,
+                json!({"CanSeek": true}).to_string()
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT,
+            "{path} accepts schema-valid telemetry without an item identity"
+        );
+    }
+    assert_eq!(repository.revision(user).await.unwrap(), None);
+
+    for (path, position) in [
+        ("/Sessions/Playing", 10_i64),
+        ("/Sessions/Playing/Progress", 20_i64),
+        ("/Sessions/Playing/Stopped", 30_i64),
+    ] {
+        assert_eq!(
+            post(
+                &app.router,
+                path,
+                &token,
+                json!({"ItemId": item, "PositionTicks": position}).to_string(),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT,
+            "{path} derives the preferred source and a stable fallback session"
+        );
+    }
+    let data = repository.get(user, item).await.unwrap().unwrap();
+    assert_eq!(data.play_count, 1);
+    assert_eq!(data.playback_position_ticks, 30);
+    assert_eq!(repository.revision(user).await.unwrap(), Some(3));
 }

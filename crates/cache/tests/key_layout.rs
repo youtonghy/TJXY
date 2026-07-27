@@ -1,12 +1,14 @@
-use tjxy_cache::{CacheKeyBuilder, CacheProjection, PlaybackProbeDigest};
+use tjxy_cache::{CacheKeyBuilder, CacheProjection, CacheQueryDigest, PlaybackProbeDigest};
 
 #[test]
 fn user_scoped_keys_include_catalog_and_user_revisions() {
     let keys = CacheKeyBuilder::new("tjxy").unwrap();
 
-    let key = keys.user_scoped(42, "user-7", 11, CacheProjection::Resume, "query-a1");
+    let digest = CacheQueryDigest::from_bytes(b"resume:start=0:limit=20");
+    let key = keys.user_scoped(42, "user-7", 11, CacheProjection::Resume, &digest);
 
-    assert_eq!(key, "tjxy:v1:g:42:u:user-7:r:11:resume:query-a1");
+    assert_eq!(key.len(), "tjxy:v1:g:42:u:user-7:r:11:resume:".len() + 64);
+    assert!(key.starts_with("tjxy:v1:g:42:u:user-7:r:11:resume:"));
 }
 
 #[test]
@@ -24,6 +26,18 @@ fn non_user_and_playback_keys_keep_generation_and_probe_digest() {
         ),
         "tjxy:v1:g:9:u:user-7:r:11:playback:item-2:p:source-a=3,source-b=8"
     );
+}
+
+#[test]
+fn generation_registry_is_exact_and_bounded_to_the_prefix() {
+    let keys = CacheKeyBuilder::new("tjxy").unwrap();
+
+    assert_eq!(keys.generation_registry(42).unwrap(), "tjxy:v1:g:42:keys");
+    assert!(keys.generation_registry(-1).is_err());
+    assert!(CacheKeyBuilder::new("tjxy*").is_err());
+    assert!(CacheKeyBuilder::new("tjxy?").is_err());
+    assert!(CacheKeyBuilder::new("tjxy[old]").is_err());
+    assert!(CacheKeyBuilder::new("tjxy\\").is_err());
 }
 
 #[test]

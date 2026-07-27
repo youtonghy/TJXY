@@ -1,10 +1,17 @@
+use std::collections::BTreeMap;
+
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult,
     sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement},
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tjxy_common::{CatalogItemId, UserId};
+use tjxy_common::{
+    CatalogItemId, ImageType, PublicationId, StorageObjectRecordId, StorageRootId, UserId,
+};
 use uuid::Uuid;
+
+use crate::MetadataRequirement;
 
 const MAX_PAGE_SIZE: u64 = 200;
 
@@ -17,6 +24,7 @@ pub enum BrowseParent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogItemType {
     Movie,
+    Audio,
     Series,
     Season,
     Episode,
@@ -27,6 +35,31 @@ impl CatalogItemType {
     const fn as_database_value(self) -> &'static str {
         match self {
             Self::Movie => "Movie",
+            Self::Audio => "Audio",
+            Self::Series => "Series",
+            Self::Season => "Season",
+            Self::Episode => "Episode",
+            Self::Folder => "Folder",
+        }
+    }
+
+    fn from_database_value(value: &str) -> Result<Self, CatalogQueryError> {
+        match value {
+            "Movie" => Ok(Self::Movie),
+            "Audio" => Ok(Self::Audio),
+            "Series" => Ok(Self::Series),
+            "Season" => Ok(Self::Season),
+            "Episode" => Ok(Self::Episode),
+            "Folder" => Ok(Self::Folder),
+            _ => Err(CatalogQueryError::InvalidItemType),
+        }
+    }
+
+    #[must_use]
+    pub const fn cache_name(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie",
+            Self::Audio => "Audio",
             Self::Series => "Series",
             Self::Season => "Season",
             Self::Episode => "Episode",
@@ -79,13 +112,36 @@ impl CatalogPageRequest {
     pub fn has_item_type_filter(&self) -> bool {
         !self.item_types.is_empty()
     }
+
+    #[must_use]
+    pub fn item_types(&self) -> &[CatalogItemType] {
+        &self.item_types
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryViewRecord {
     id: Uuid,
     name: String,
     collection_type: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheRevisions {
+    catalog_generation: i64,
+    user_revision: i64,
+}
+
+impl CacheRevisions {
+    #[must_use]
+    pub const fn catalog_generation(self) -> i64 {
+        self.catalog_generation
+    }
+
+    #[must_use]
+    pub const fn user_revision(self) -> i64 {
+        self.user_revision
+    }
 }
 
 impl LibraryViewRecord {
@@ -105,7 +161,7 @@ impl LibraryViewRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CatalogItemRecord {
     id: CatalogItemId,
     parent_id: Option<CatalogItemId>,
@@ -117,6 +173,7 @@ pub struct CatalogItemRecord {
     is_played: bool,
     play_count: i32,
     playback_position_ticks: i64,
+    image_tags: BTreeMap<String, String>,
 }
 
 impl CatalogItemRecord {
@@ -169,9 +226,56 @@ impl CatalogItemRecord {
     pub const fn playback_position_ticks(&self) -> i64 {
         self.playback_position_ticks
     }
+
+    #[must_use]
+    pub const fn image_tags(&self) -> &BTreeMap<String, String> {
+        &self.image_tags
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetRecord {
+    sha256: String,
+    mime_type: String,
+    width: Option<i32>,
+    height: Option<i32>,
+    byte_size: u64,
+    local_relative_path: String,
+}
+
+impl AssetRecord {
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    #[must_use]
+    pub fn mime_type(&self) -> &str {
+        &self.mime_type
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> Option<i32> {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> Option<i32> {
+        self.height
+    }
+
+    #[must_use]
+    pub const fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    #[must_use]
+    pub fn local_relative_path(&self) -> &str {
+        &self.local_relative_path
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CatalogPage {
     items: Vec<CatalogItemRecord>,
     total_record_count: u64,
@@ -197,6 +301,113 @@ impl CatalogPage {
 
 pub struct CatalogQueryRepository<'connection> {
     database: &'connection DatabaseConnection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LazyCatalogWorkTarget {
+    item_type: CatalogItemType,
+    metadata_revision: i64,
+    metadata_resolved_revision: i64,
+    metadata_resolved_requirement: Option<MetadataRequirement>,
+    structure_revision: i64,
+    source_revision: i64,
+    has_current_structure: bool,
+    has_current_sources: bool,
+    storage_scope: Option<LazyStorageScope>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LazyStorageScope {
+    storage_root_id: StorageRootId,
+    storage_object_id: StorageObjectRecordId,
+    children_indexed: bool,
+    children_revision: i64,
+    reconciled_revision: i64,
+    facts_reconciled: bool,
+}
+
+impl LazyStorageScope {
+    #[must_use]
+    pub const fn storage_root_id(self) -> StorageRootId {
+        self.storage_root_id
+    }
+
+    #[must_use]
+    pub const fn storage_object_id(self) -> StorageObjectRecordId {
+        self.storage_object_id
+    }
+
+    #[must_use]
+    pub const fn children_revision(self) -> i64 {
+        self.children_revision
+    }
+
+    #[must_use]
+    pub const fn reconciled_revision(self) -> i64 {
+        self.reconciled_revision
+    }
+
+    #[must_use]
+    pub const fn metadata_input_revision(self) -> i64 {
+        if self.children_indexed {
+            self.children_revision
+        } else {
+            self.reconciled_revision
+        }
+    }
+
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        self.children_indexed
+            && self.reconciled_revision >= self.children_revision
+            && self.facts_reconciled
+    }
+}
+
+impl LazyCatalogWorkTarget {
+    #[must_use]
+    pub const fn item_type(self) -> CatalogItemType {
+        self.item_type
+    }
+
+    #[must_use]
+    pub const fn metadata_revision(self) -> i64 {
+        self.metadata_revision
+    }
+
+    #[must_use]
+    pub const fn needs_metadata_resolution(self, requirement: MetadataRequirement) -> bool {
+        self.metadata_resolved_revision < self.metadata_revision
+            || match self.metadata_resolved_requirement {
+                Some(current) => current.as_i32() < requirement.as_i32(),
+                None => true,
+            }
+    }
+
+    #[must_use]
+    pub const fn structure_revision(self) -> i64 {
+        self.structure_revision
+    }
+
+    #[must_use]
+    pub const fn source_revision(self) -> i64 {
+        self.source_revision
+    }
+
+    #[must_use]
+    pub const fn has_current_structure(self) -> bool {
+        self.has_current_structure
+    }
+
+    #[must_use]
+    pub const fn has_current_sources(self) -> bool {
+        self.has_current_sources
+    }
+
+    #[must_use]
+    pub const fn storage_scope(self) -> Option<LazyStorageScope> {
+        self.storage_scope
+    }
 }
 
 impl<'connection> CatalogQueryRepository<'connection> {
@@ -229,6 +440,49 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .iter()
             .map(library_from_row)
             .collect()
+    }
+
+    /// Reads the SQL revisions that isolate user-scoped cache keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] for SQL or row-decoding failures.
+    pub async fn cache_revisions(
+        &self,
+        user_id: UserId,
+    ) -> Result<CacheRevisions, CatalogQueryError> {
+        let catalog = Alias::new("cache_catalog_state");
+        let user = Alias::new("cache_user_state");
+        let query = Query::select()
+            .expr_as(
+                Expr::col((catalog.clone(), Alias::new("generation"))),
+                Alias::new("catalog_generation"),
+            )
+            .expr_as(
+                Expr::col((user.clone(), Alias::new("revision"))).if_null(0_i64),
+                Alias::new("user_revision"),
+            )
+            .from_as(Alias::new("catalog_state"), catalog.clone())
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_catalog_state"),
+                user,
+                Expr::col((Alias::new("cache_user_state"), Alias::new("user_id")))
+                    .eq(user_id.as_uuid()),
+            )
+            .and_where(Expr::col((catalog, Alias::new("id"))).eq(1_i32))
+            .limit(1)
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        let row = self
+            .database
+            .query_one(backend.build(&query))
+            .await?
+            .ok_or(CatalogQueryError::MissingCatalogState)?;
+        Ok(CacheRevisions {
+            catalog_generation: row.try_get("", "catalog_generation")?,
+            user_revision: row.try_get("", "user_revision")?,
+        })
     }
 
     /// Resolves a Jellyfin parent UUID without exposing disabled libraries or
@@ -282,11 +536,13 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
             .limit(1)
             .to_owned();
-        let is_item = self
+        let explicitly_visible = self
             .database
             .query_one(backend.build(&visible_item))
             .await?
             .is_some();
+        let projected_publication = active_structure_publication(self.database, id).await?;
+        let is_item = explicitly_visible || projected_publication.is_some();
 
         match (is_library, is_item) {
             (true, true) => Err(CatalogQueryError::AmbiguousParent(id)),
@@ -307,7 +563,85 @@ impl<'connection> CatalogQueryRepository<'connection> {
         parent: BrowseParent,
         page: CatalogPageRequest,
     ) -> Result<CatalogPage, CatalogQueryError> {
-        let mut count = item_query(user_id, parent, &page.item_types);
+        let source = match parent {
+            BrowseParent::Library(_) => ItemQuerySource::Catalog,
+            BrowseParent::Item(parent_id) => {
+                active_structure_publication(self.database, parent_id.as_uuid())
+                    .await?
+                    .map_or(ItemQuerySource::Catalog, ItemQuerySource::Publication)
+            }
+        };
+        let mut count = item_query(user_id, parent, &page.item_types, source);
+        count.expr_as(source.id_expr().count(), Alias::new("count"));
+        let backend = self.database.get_database_backend();
+        let total: i64 = self
+            .database
+            .query_one(backend.build(&count))
+            .await?
+            .ok_or(CatalogQueryError::MissingCount)?
+            .try_get("", "count")?;
+        let total_record_count =
+            u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
+
+        let mut query = item_query(user_id, parent, &page.item_types, source);
+        select_item_columns(&mut query, source);
+        query
+            .order_by_expr(source.sort_expr().into(), Order::Asc)
+            .order_by_expr(source.id_expr().into(), Order::Asc)
+            .offset(page.start_index)
+            .limit(page.limit);
+        let mut items = self
+            .database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(CatalogPage {
+            items,
+            total_record_count,
+            start_index: page.start_index,
+        })
+    }
+
+    /// Returns a stable page of visible catalog items matching a name fragment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn search_hints(
+        &self,
+        user_id: UserId,
+        search_term: &str,
+        page: CatalogPageRequest,
+    ) -> Result<CatalogPage, CatalogQueryError> {
+        const DEFAULT_ITEM_TYPES: [CatalogItemType; 6] = [
+            CatalogItemType::Movie,
+            CatalogItemType::Audio,
+            CatalogItemType::Series,
+            CatalogItemType::Season,
+            CatalogItemType::Episode,
+            CatalogItemType::Folder,
+        ];
+
+        let requested_types = if page.item_types.is_empty() {
+            &DEFAULT_ITEM_TYPES[..]
+        } else {
+            &page.item_types
+        };
+        let item_types = requested_types
+            .iter()
+            .map(|item_type| item_type.as_database_value())
+            .collect::<Vec<_>>();
+        let pattern = format!("%{search_term}%");
+        let query = || {
+            let mut query = home_item_query(user_id, &item_types, None);
+            query.and_where(Expr::col((Alias::new("ci"), Alias::new("name"))).like(&pattern));
+            query
+        };
+
+        let mut count = query();
         count.expr_as(
             Expr::col((Alias::new("ci"), Alias::new("id"))).count(),
             Alias::new("count"),
@@ -322,25 +656,539 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let total_record_count =
             u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
 
-        let mut query = item_query(user_id, parent, &page.item_types);
-        select_item_columns(&mut query);
+        let mut query = query();
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
         query
-            .order_by((Alias::new("ci"), Alias::new("sort_key")), Order::Asc)
-            .order_by((Alias::new("ci"), Alias::new("id")), Order::Asc)
+            .order_by_expr(
+                Expr::col((Alias::new("ci"), Alias::new("sort_key"))).into(),
+                Order::Asc,
+            )
+            .order_by_expr(
+                Expr::col((Alias::new("ci"), Alias::new("id"))).into(),
+                Order::Asc,
+            )
             .offset(page.start_index)
             .limit(page.limit);
-        let items = self
+        let mut items = self
             .database
             .query_all(backend.build(&query))
             .await?
             .iter()
             .map(item_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
         Ok(CatalogPage {
             items,
             total_record_count,
             start_index: page.start_index,
         })
+    }
+
+    /// Returns visible, unfinished items with a saved playback position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn resume_items(
+        &self,
+        user_id: UserId,
+        page: CatalogPageRequest,
+    ) -> Result<CatalogPage, CatalogQueryError> {
+        let ci = Alias::new("ci");
+        let ud = Alias::new("ud");
+        let base = || {
+            let mut query = Query::select();
+            query
+                .from_as(Alias::new("catalog_items"), ci.clone())
+                .join_as(
+                    JoinType::InnerJoin,
+                    Alias::new("user_data"),
+                    ud.clone(),
+                    Condition::all()
+                        .add(
+                            Expr::col((ud.clone(), Alias::new("catalog_item_id")))
+                                .equals((ci.clone(), Alias::new("id"))),
+                        )
+                        .add(Expr::col((ud.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
+                )
+                .and_where(
+                    Expr::col((ci.clone(), Alias::new("item_type"))).is_in(["Movie", "Episode"]),
+                )
+                .and_where(Expr::col((ci.clone(), Alias::new("is_present"))).eq(true))
+                .and_where(
+                    Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"),
+                )
+                .and_where(Expr::col((ud.clone(), Alias::new("playback_position_ticks"))).gt(0))
+                .and_where(Expr::col((ud.clone(), Alias::new("is_played"))).eq(false))
+                .cond_where(
+                    Condition::any()
+                        .add(Expr::exists(enabled_membership_for_item(&ci)))
+                        .add(Expr::exists(projected_enabled_membership(&ci))),
+                );
+            query
+        };
+        let mut count = base();
+        count.expr_as(
+            Expr::col((ci.clone(), Alias::new("id"))).count(),
+            Alias::new("count"),
+        );
+        let backend = self.database.get_database_backend();
+        let total: i64 = self
+            .database
+            .query_one(backend.build(&count))
+            .await?
+            .ok_or(CatalogQueryError::MissingCount)?
+            .try_get("", "count")?;
+        let total_record_count =
+            u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
+
+        let mut query = base();
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
+        query
+            .order_by_expr(
+                Expr::cust("CASE WHEN ud.last_played_at IS NULL THEN 1 ELSE 0 END"),
+                Order::Asc,
+            )
+            .order_by((ud, Alias::new("last_played_at")), Order::Desc)
+            .order_by((ci, Alias::new("id")), Order::Asc)
+            .offset(page.start_index)
+            .limit(page.limit);
+        let mut items = self
+            .database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(CatalogPage {
+            items,
+            total_record_count,
+            start_index: page.start_index,
+        })
+    }
+
+    /// Returns the newest visible media, optionally scoped to one enabled library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn latest_items(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        item_types: &[CatalogItemType],
+        limit: u64,
+    ) -> Result<Vec<CatalogItemRecord>, CatalogQueryError> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(CatalogQueryError::InvalidPage);
+        }
+        let ci = Alias::new("ci");
+        let default_types = [
+            CatalogItemType::Movie,
+            CatalogItemType::Audio,
+            CatalogItemType::Series,
+            CatalogItemType::Episode,
+        ];
+        let item_types = if item_types.is_empty() {
+            default_types.as_slice()
+        } else {
+            item_types
+        };
+        let database_types = item_types
+            .iter()
+            .map(|item_type| item_type.as_database_value())
+            .collect::<Vec<_>>();
+        let mut query = home_item_query(user_id, &database_types, library_id);
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
+        query
+            .order_by((ci.clone(), Alias::new("date_created")), Order::Desc)
+            .order_by((ci, Alias::new("id")), Order::Asc)
+            .limit(limit);
+        let backend = self.database.get_database_backend();
+        let mut items = self
+            .database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(items)
+    }
+
+    /// Returns at most one earliest unplayed episode from each visible Series.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn next_up_items(
+        &self,
+        user_id: UserId,
+        series_id: Option<CatalogItemId>,
+        include_resumable: bool,
+        page: CatalogPageRequest,
+    ) -> Result<CatalogPage, CatalogQueryError> {
+        let ci = Alias::new("ci");
+        let ud = Alias::new("ud");
+        let base = || next_up_query(user_id, series_id, include_resumable);
+        let mut count = base();
+        count.expr_as(
+            Expr::col((ci.clone(), Alias::new("id"))).count(),
+            Alias::new("count"),
+        );
+        let backend = self.database.get_database_backend();
+        let total: i64 = self
+            .database
+            .query_one(backend.build(&count))
+            .await?
+            .ok_or(CatalogQueryError::MissingCount)?
+            .try_get("", "count")?;
+        let total_record_count =
+            u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
+
+        let mut query = base();
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
+        query
+            .order_by_expr(
+                Expr::cust("CASE WHEN ud.last_played_at IS NULL THEN 1 ELSE 0 END"),
+                Order::Asc,
+            )
+            .order_by((ud, Alias::new("last_played_at")), Order::Desc)
+            .order_by(
+                (ci.clone(), Alias::new("structure_owner_item_id")),
+                Order::Asc,
+            )
+            .order_by((ci, Alias::new("id")), Order::Asc)
+            .offset(page.start_index)
+            .limit(page.limit);
+        let mut items = self
+            .database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(CatalogPage {
+            items,
+            total_record_count,
+            start_index: page.start_index,
+        })
+    }
+
+    /// Returns one published item only when it is visible through an enabled library.
+    ///
+    /// Active Structure projection metadata takes precedence over the canonical
+    /// identity row. Staging and retired publications are never read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn item(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+    ) -> Result<Option<CatalogItemRecord>, CatalogQueryError> {
+        let active = active_structure_publication(self.database, item_id.as_uuid()).await?;
+        if let Some(publication_id) = active
+            && let Some(item) = self
+                .projected_item(user_id, item_id, publication_id)
+                .await?
+        {
+            return Ok(Some(item));
+        }
+        self.canonical_item(user_id, item_id).await
+    }
+
+    /// Returns the visible item's durable revisions used to join lazy work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] for database or stored-value corruption.
+    pub async fn lazy_work_target(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+    ) -> Result<Option<LazyCatalogWorkTarget>, CatalogQueryError> {
+        self.lazy_work_target_with_root(user_id, item_id, None)
+            .await
+    }
+
+    /// Returns one visible lazy-work target restricted to a selected storage root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] for database, ambiguity, or stored-value corruption.
+    pub async fn lazy_work_target_in_storage_root(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+        storage_root: StorageRootId,
+    ) -> Result<Option<LazyCatalogWorkTarget>, CatalogQueryError> {
+        self.lazy_work_target_with_root(user_id, item_id, Some(storage_root))
+            .await
+    }
+
+    async fn lazy_work_target_with_root(
+        &self,
+        _user_id: UserId,
+        item_id: CatalogItemId,
+        storage_root: Option<StorageRootId>,
+    ) -> Result<Option<LazyCatalogWorkTarget>, CatalogQueryError> {
+        let item = Alias::new("lazy_work_item");
+        let query = Query::select()
+            .columns([
+                (item.clone(), Alias::new("item_type")),
+                (item.clone(), Alias::new("metadata_revision")),
+                (item.clone(), Alias::new("metadata_resolved_revision")),
+                (item.clone(), Alias::new("metadata_resolved_requirement")),
+                (item.clone(), Alias::new("structure_expansion_revision")),
+                (item.clone(), Alias::new("source_index_revision")),
+            ])
+            .expr_as(
+                Expr::exists(current_publication_at_revision(
+                    &item,
+                    "active_structure_publication_id",
+                    "structure_expansion_revision",
+                    "Structure",
+                )),
+                Alias::new("has_current_structure"),
+            )
+            .expr_as(
+                Expr::exists(current_effective_source_publication(&item)),
+                Alias::new("has_current_sources"),
+            )
+            .from_as(Alias::new("catalog_items"), item.clone())
+            .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+            .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
+            .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::exists(enabled_membership_for_item(&item)))
+                    .add(Expr::exists(projected_enabled_membership(&item))),
+            )
+            .limit(1)
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        let target = self
+            .database
+            .query_one(backend.build(&query))
+            .await?
+            .map(|row| {
+                Ok::<LazyCatalogWorkTarget, CatalogQueryError>(LazyCatalogWorkTarget {
+                    item_type: CatalogItemType::from_database_value(
+                        &row.try_get::<String>("", "item_type")?,
+                    )?,
+                    metadata_revision: row.try_get("", "metadata_revision")?,
+                    metadata_resolved_revision: row.try_get("", "metadata_resolved_revision")?,
+                    metadata_resolved_requirement: row
+                        .try_get::<Option<i32>>("", "metadata_resolved_requirement")?
+                        .map(MetadataRequirement::from_database)
+                        .transpose()
+                        .map_err(|_| CatalogQueryError::InvalidMetadataRequirement)?,
+                    structure_revision: row.try_get("", "structure_expansion_revision")?,
+                    source_revision: row.try_get("", "source_index_revision")?,
+                    has_current_structure: row.try_get("", "has_current_structure")?,
+                    has_current_sources: row.try_get("", "has_current_sources")?,
+                    storage_scope: None,
+                })
+            })
+            .transpose()?;
+        let Some(mut target) = target else {
+            return Ok(None);
+        };
+        target.storage_scope = self.lazy_storage_scope(item_id, storage_root).await?;
+        Ok(Some(target))
+    }
+
+    async fn lazy_storage_scope(
+        &self,
+        item_id: CatalogItemId,
+        storage_root: Option<StorageRootId>,
+    ) -> Result<Option<LazyStorageScope>, CatalogQueryError> {
+        let scope = crate::catalog_storage_scope::resolve_catalog_storage_scope(
+            self.database,
+            item_id,
+            storage_root,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::catalog_storage_scope::CatalogStorageScopeError::Ambiguous => {
+                CatalogQueryError::AmbiguousStorageScope(item_id.as_uuid())
+            }
+            crate::catalog_storage_scope::CatalogStorageScopeError::Database(error) => {
+                CatalogQueryError::Database(error)
+            }
+        })?;
+        let facts_reconciled = match scope {
+            Some(scope) => {
+                crate::catalog_storage_scope::storage_scope_is_reconciled(
+                    self.database,
+                    scope,
+                    true,
+                )
+                .await?
+            }
+            None => false,
+        };
+        Ok(scope.map(|scope| LazyStorageScope {
+            storage_root_id: scope.storage_root_id(),
+            storage_object_id: scope.storage_object_id(),
+            children_indexed: scope.children_indexed(),
+            children_revision: scope.children_revision(),
+            reconciled_revision: scope.reconciled_revision(),
+            facts_reconciled,
+        }))
+    }
+
+    async fn projected_item(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+        publication_id: PublicationId,
+    ) -> Result<Option<CatalogItemRecord>, CatalogQueryError> {
+        let pci = Alias::new("pci");
+        let ud = Alias::new("ud");
+        let mut query = Query::select();
+        query
+            .from_as(Alias::new("publication_catalog_items"), pci.clone())
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_data"),
+                ud.clone(),
+                Condition::all()
+                    .add(
+                        Expr::col((ud.clone(), Alias::new("catalog_item_id")))
+                            .equals((pci.clone(), Alias::new("catalog_item_id"))),
+                    )
+                    .add(Expr::col((ud, Alias::new("user_id"))).eq(user_id.as_uuid())),
+            )
+            .and_where(
+                Expr::col((pci.clone(), Alias::new("publication_id"))).eq(publication_id.as_uuid()),
+            )
+            .and_where(Expr::col((pci, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+            .and_where(Expr::exists(current_structure_publication_visible(
+                publication_id,
+            )))
+            .limit(1);
+        select_item_columns(&mut query, ItemQuerySource::Publication(publication_id));
+        self.item_from_query(query).await
+    }
+
+    async fn canonical_item(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+    ) -> Result<Option<CatalogItemRecord>, CatalogQueryError> {
+        let ci = Alias::new("ci");
+        let ud = Alias::new("ud");
+        let mut query = Query::select();
+        query
+            .from_as(Alias::new("catalog_items"), ci.clone())
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_data"),
+                ud.clone(),
+                Condition::all()
+                    .add(
+                        Expr::col((ud.clone(), Alias::new("catalog_item_id")))
+                            .equals((ci.clone(), Alias::new("id"))),
+                    )
+                    .add(Expr::col((ud, Alias::new("user_id"))).eq(user_id.as_uuid())),
+            )
+            .and_where(Expr::col((ci.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+            .and_where(Expr::col((ci.clone(), Alias::new("is_present"))).eq(true))
+            .and_where(Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::exists(enabled_membership_for_item(&ci)))
+                    .add(Expr::exists(projected_enabled_membership(&ci))),
+            )
+            .limit(1);
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
+        self.item_from_query(query).await
+    }
+
+    async fn item_from_query(
+        &self,
+        query: SelectStatement,
+    ) -> Result<Option<CatalogItemRecord>, CatalogQueryError> {
+        let backend = self.database.get_database_backend();
+        let Some(row) = self.database.query_one(backend.build(&query)).await? else {
+            return Ok(None);
+        };
+        let mut items = vec![item_from_row(&row)?];
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(items.pop())
+    }
+
+    /// Resolves an image only when its item is visible through an enabled library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn image(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: u32,
+    ) -> Result<Option<AssetRecord>, CatalogQueryError> {
+        let priority = i32::try_from(priority).map_err(|_| CatalogQueryError::InvalidPriority)?;
+        let item = Alias::new("item");
+        let asset = Alias::new("asset");
+        let blob = Alias::new("blob");
+        let enabled_membership = enabled_membership_for_item(&item);
+        let projected_membership = projected_enabled_membership(&item);
+
+        let mut query = Query::select();
+        query
+            .from_as(Alias::new("catalog_items"), item.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("item_assets"),
+                asset.clone(),
+                Expr::col((asset.clone(), Alias::new("item_id")))
+                    .equals((item.clone(), Alias::new("id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("asset_blobs"),
+                blob.clone(),
+                Expr::col((blob.clone(), Alias::new("id")))
+                    .equals((asset.clone(), Alias::new("asset_blob_id"))),
+            )
+            .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+            .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
+            .and_where(Expr::col((item, Alias::new("classification_state"))).eq("Matched"))
+            .and_where(Expr::col((asset.clone(), Alias::new("image_type"))).eq(image_type.as_str()))
+            .and_where(Expr::col((asset, Alias::new("priority"))).eq(priority))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::exists(enabled_membership))
+                    .add(Expr::exists(projected_membership)),
+            )
+            .limit(1);
+        for column in [
+            "sha256",
+            "mime_type",
+            "width",
+            "height",
+            "byte_size",
+            "local_relative_path",
+        ] {
+            query.expr_as(
+                Expr::col((blob.clone(), Alias::new(column))),
+                Alias::new(column),
+            );
+        }
+        let backend = self.database.get_database_backend();
+        self.database
+            .query_one(backend.build(&query))
+            .await?
+            .as_ref()
+            .map(asset_from_row)
+            .transpose()
     }
 }
 
@@ -350,18 +1198,56 @@ pub enum CatalogQueryError {
     InvalidPage,
     #[error("catalog count row is missing")]
     MissingCount,
+    #[error("catalog generation row is missing")]
+    MissingCatalogState,
     #[error("catalog count is outside the supported range")]
     InvalidCount,
+    #[error("image priority is outside the supported range")]
+    InvalidPriority,
+    #[error("asset byte size is outside the supported range")]
+    InvalidAssetSize,
+    #[error("catalog item type is invalid")]
+    InvalidItemType,
+    #[error("catalog metadata completion requirement is invalid")]
+    InvalidMetadataRequirement,
     #[error("parent UUID exists in both library and catalog item namespaces: {0}")]
     AmbiguousParent(Uuid),
+    #[error("catalog item appears in more than one active structure publication: {0}")]
+    AmbiguousStructurePublication(Uuid),
+    #[error("catalog item resolves to more than one authorized storage scope: {0}")]
+    AmbiguousStorageScope(Uuid),
+    #[error("catalog source publication query failed: {0}")]
+    Publication(#[from] crate::CatalogPublicationError),
     #[error("catalog query failed: {0}")]
     Database(#[from] DbErr),
 }
 
-fn item_query(
+#[derive(Clone, Copy)]
+enum ItemQuerySource {
+    Catalog,
+    Publication(PublicationId),
+}
+
+impl ItemQuerySource {
+    fn id_expr(self) -> Expr {
+        match self {
+            Self::Catalog => Expr::col((Alias::new("ci"), Alias::new("id"))),
+            Self::Publication(_) => Expr::col((Alias::new("pci"), Alias::new("catalog_item_id"))),
+        }
+    }
+
+    fn sort_expr(self) -> Expr {
+        match self {
+            Self::Catalog => Expr::col((Alias::new("ci"), Alias::new("sort_key"))),
+            Self::Publication(_) => Expr::col((Alias::new("pci"), Alias::new("sort_key"))),
+        }
+    }
+}
+
+fn home_item_query(
     user_id: UserId,
-    parent: BrowseParent,
-    item_types: &[CatalogItemType],
+    item_types: &[&str],
+    library_id: Option<Uuid>,
 ) -> SelectStatement {
     let ci = Alias::new("ci");
     let ud = Alias::new("ud");
@@ -379,19 +1265,511 @@ fn item_query(
                 )
                 .add(Expr::col((ud, Alias::new("user_id"))).eq(user_id.as_uuid())),
         )
+        .and_where(
+            Expr::col((ci.clone(), Alias::new("item_type"))).is_in(item_types.iter().copied()),
+        )
         .and_where(Expr::col((ci.clone(), Alias::new("is_present"))).eq(true))
-        .and_where(Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"));
-    if !item_types.is_empty() {
-        query.and_where(
-            Expr::col((ci.clone(), Alias::new("item_type"))).is_in(
-                item_types
-                    .iter()
-                    .map(|item_type| item_type.as_database_value()),
-            ),
+        .and_where(Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"))
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(enabled_membership_for_item_in_library(
+                    &ci, library_id,
+                )))
+                .add(Expr::exists(projected_enabled_membership_in_library(
+                    &ci, library_id,
+                ))),
+        );
+    query
+}
+
+fn next_up_query(
+    user_id: UserId,
+    series_id: Option<CatalogItemId>,
+    include_resumable: bool,
+) -> SelectStatement {
+    let ci = Alias::new("ci");
+    let ud = Alias::new("ud");
+    let earlier = Alias::new("earlier_episode");
+    let earlier_ud = Alias::new("earlier_user_data");
+    let mut earlier_query = Query::select();
+    earlier_query
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_items"), earlier.clone())
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("user_data"),
+            earlier_ud.clone(),
+            Condition::all()
+                .add(
+                    Expr::col((earlier_ud.clone(), Alias::new("catalog_item_id")))
+                        .equals((earlier.clone(), Alias::new("id"))),
+                )
+                .add(Expr::col((earlier_ud.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
+        )
+        .and_where(Expr::col((earlier.clone(), Alias::new("item_type"))).eq("Episode"))
+        .and_where(Expr::col((earlier.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((earlier.clone(), Alias::new("classification_state"))).eq("Matched"))
+        .and_where(
+            Expr::col((earlier.clone(), Alias::new("structure_owner_item_id")))
+                .equals((ci.clone(), Alias::new("structure_owner_item_id"))),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(enabled_membership_for_item(&earlier)))
+                .add(Expr::exists(projected_enabled_membership(&earlier))),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((earlier_ud.clone(), Alias::new("is_played"))).is_null())
+                .add(Expr::col((earlier_ud, Alias::new("is_played"))).eq(false)),
+        )
+        .cond_where(
+            Condition::any()
+                .add(
+                    Expr::col((earlier.clone(), Alias::new("sort_key")))
+                        .lt(Expr::col((ci.clone(), Alias::new("sort_key")))),
+                )
+                .add(
+                    Condition::all()
+                        .add(
+                            Expr::col((earlier.clone(), Alias::new("sort_key")))
+                                .equals((ci.clone(), Alias::new("sort_key"))),
+                        )
+                        .add(
+                            Expr::col((earlier, Alias::new("id")))
+                                .lt(Expr::col((ci.clone(), Alias::new("id")))),
+                        ),
+                ),
+        );
+
+    let mut query = home_item_query(user_id, &["Episode"], None);
+    query
+        .and_where(Expr::col((ci.clone(), Alias::new("structure_owner_item_id"))).is_not_null())
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((ud.clone(), Alias::new("is_played"))).is_null())
+                .add(Expr::col((ud, Alias::new("is_played"))).eq(false)),
+        )
+        .and_where(Expr::exists(earlier_query).not());
+    if !include_resumable {
+        query.cond_where(
+            Condition::any()
+                .add(Expr::col((Alias::new("ud"), Alias::new("playback_position_ticks"))).is_null())
+                .add(
+                    Expr::col((Alias::new("ud"), Alias::new("playback_position_ticks"))).eq(0_i64),
+                ),
         );
     }
-    apply_parent(&mut query, &ci, parent);
+    if let Some(series_id) = series_id {
+        query.and_where(
+            Expr::col((ci, Alias::new("structure_owner_item_id"))).eq(series_id.as_uuid()),
+        );
+    }
+    query
+}
+
+fn item_query(
+    user_id: UserId,
+    parent: BrowseParent,
+    item_types: &[CatalogItemType],
+    source: ItemQuerySource,
+) -> SelectStatement {
+    let ud = Alias::new("ud");
+    let mut query = Query::select();
+    match source {
+        ItemQuerySource::Catalog => {
+            let ci = Alias::new("ci");
+            query.from_as(Alias::new("catalog_items"), ci.clone());
+            query.join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_data"),
+                ud.clone(),
+                Condition::all()
+                    .add(
+                        Expr::col((ud.clone(), Alias::new("catalog_item_id")))
+                            .equals((ci.clone(), Alias::new("id"))),
+                    )
+                    .add(Expr::col((ud.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
+            );
+            query
+                .and_where(Expr::col((ci.clone(), Alias::new("is_present"))).eq(true))
+                .and_where(
+                    Expr::col((ci.clone(), Alias::new("classification_state"))).eq("Matched"),
+                );
+            if !item_types.is_empty() {
+                query.and_where(
+                    Expr::col((ci.clone(), Alias::new("item_type"))).is_in(
+                        item_types
+                            .iter()
+                            .map(|item_type| item_type.as_database_value()),
+                    ),
+                );
+            }
+            apply_parent(&mut query, &ci, parent);
+        }
+        ItemQuerySource::Publication(publication_id) => {
+            let pci = Alias::new("pci");
+            let BrowseParent::Item(parent_id) = parent else {
+                unreachable!("library browse cannot use a structure publication")
+            };
+            query.from_as(Alias::new("publication_catalog_items"), pci.clone());
+            query.join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_data"),
+                ud.clone(),
+                Condition::all()
+                    .add(
+                        Expr::col((ud.clone(), Alias::new("catalog_item_id")))
+                            .equals((pci.clone(), Alias::new("catalog_item_id"))),
+                    )
+                    .add(Expr::col((ud.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
+            );
+            query
+                .and_where(
+                    Expr::col((pci.clone(), Alias::new("publication_id")))
+                        .eq(publication_id.as_uuid()),
+                )
+                .and_where(
+                    Expr::col((pci.clone(), Alias::new("parent_catalog_item_id")))
+                        .eq(parent_id.as_uuid()),
+                )
+                .and_where(Expr::exists(current_structure_publication_visible(
+                    publication_id,
+                )));
+            if !item_types.is_empty() {
+                query.and_where(
+                    Expr::col((pci, Alias::new("item_type"))).is_in(
+                        item_types
+                            .iter()
+                            .map(|item_type| item_type.as_database_value()),
+                    ),
+                );
+            }
+        }
+    }
     query.clone()
+}
+
+async fn active_structure_publication(
+    database: &DatabaseConnection,
+    parent_id: Uuid,
+) -> Result<Option<PublicationId>, CatalogQueryError> {
+    let publication = Alias::new("active_publication");
+    let owner = Alias::new("publication_owner");
+    let membership = Alias::new("owner_membership");
+    let library = Alias::new("owner_library");
+    let member = Alias::new("publication_parent");
+    let mut contains_parent = Query::select();
+    contains_parent
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("publication_catalog_items"), member.clone())
+        .and_where(
+            Expr::col((member.clone(), Alias::new("publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((member, Alias::new("catalog_item_id"))).eq(parent_id));
+    let query = Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((publication.clone(), Alias::new("id"))),
+            Alias::new("publication_id"),
+        )
+        .from_as(Alias::new("catalog_publications"), publication.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner.clone(), Alias::new("active_structure_publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                .equals((owner.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership, Alias::new("library_id"))),
+        )
+        .and_where(Expr::col((publication.clone(), Alias::new("publication_kind"))).eq("Structure"))
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
+        .and_where(Expr::col((owner.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((owner.clone(), Alias::new("classification_state"))).eq("Matched"))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((owner, Alias::new("id"))).eq(parent_id))
+                .add(Expr::exists(contains_parent)),
+        )
+        .limit(2)
+        .to_owned();
+    let backend = database.get_database_backend();
+    let rows = database.query_all(backend.build(&query)).await?;
+    match rows.as_slice() {
+        [] => Ok(None),
+        [row] => Ok(Some(PublicationId::from_uuid(
+            row.try_get("", "publication_id")?,
+        ))),
+        _ => Err(CatalogQueryError::AmbiguousStructurePublication(parent_id)),
+    }
+}
+
+fn projected_enabled_membership(item: &Alias) -> SelectStatement {
+    projected_enabled_membership_in_library(item, None)
+}
+
+fn projected_enabled_membership_in_library(
+    item: &Alias,
+    library_id: Option<Uuid>,
+) -> SelectStatement {
+    let projection = Alias::new("image_projection");
+    let publication = Alias::new("image_publication");
+    let owner = Alias::new("image_publication_owner");
+    let membership = Alias::new("image_owner_membership");
+    let library = Alias::new("image_owner_library");
+    let mut query = Query::select();
+    query
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("publication_catalog_items"), projection.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_publications"),
+            publication.clone(),
+            Expr::col((publication.clone(), Alias::new("id")))
+                .equals((projection.clone(), Alias::new("publication_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner.clone(), Alias::new("active_structure_publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                .equals((owner.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership, Alias::new("library_id"))),
+        )
+        .and_where(
+            Expr::col((projection, Alias::new("catalog_item_id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((publication.clone(), Alias::new("publication_kind"))).eq("Structure"))
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
+        .and_where(Expr::col((owner.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((owner, Alias::new("classification_state"))).eq("Matched"))
+        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true));
+    if let Some(library_id) = library_id {
+        query.and_where(Expr::col((library, Alias::new("id"))).eq(library_id));
+    }
+    query.clone()
+}
+
+fn enabled_membership_for_item(item: &Alias) -> SelectStatement {
+    enabled_membership_for_item_in_library(item, None)
+}
+
+fn enabled_membership_for_item_in_library(
+    item: &Alias,
+    library_id: Option<Uuid>,
+) -> SelectStatement {
+    let membership = Alias::new("enabled_item_membership");
+    let library = Alias::new("enabled_item_library");
+    let mut query = Query::select();
+    query
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("library_catalog_items"), membership.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership.clone(), Alias::new("library_id"))),
+        )
+        .and_where(
+            Expr::col((membership, Alias::new("catalog_item_id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true));
+    if let Some(library_id) = library_id {
+        query.and_where(Expr::col((library, Alias::new("id"))).eq(library_id));
+    }
+    query.clone()
+}
+
+fn current_structure_publication_visible(publication_id: PublicationId) -> SelectStatement {
+    let publication = Alias::new("current_structure_publication");
+    let owner = Alias::new("current_structure_owner");
+    let membership = Alias::new("current_structure_membership");
+    let library = Alias::new("current_structure_library");
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_publications"), publication.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner.clone(), Alias::new("active_structure_publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                .equals((owner.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership, Alias::new("library_id"))),
+        )
+        .and_where(Expr::col((publication.clone(), Alias::new("id"))).eq(publication_id.as_uuid()))
+        .and_where(Expr::col((publication.clone(), Alias::new("publication_kind"))).eq("Structure"))
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
+        .and_where(Expr::col((owner.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((owner, Alias::new("classification_state"))).eq("Matched"))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .to_owned()
+}
+
+fn current_publication_at_revision(
+    item: &Alias,
+    pointer_column: &str,
+    revision_column: &str,
+    publication_kind: &str,
+) -> SelectStatement {
+    let publication = Alias::new(format!("current_{pointer_column}"));
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_publications"), publication.clone())
+        .and_where(
+            Expr::col((publication.clone(), Alias::new("id")))
+                .equals((item.clone(), Alias::new(pointer_column))),
+        )
+        .and_where(
+            Expr::col((publication.clone(), Alias::new("expected_revision")))
+                .equals((item.clone(), Alias::new(revision_column))),
+        )
+        .and_where(
+            Expr::col((publication.clone(), Alias::new("publication_kind"))).eq(publication_kind),
+        )
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
+        .to_owned()
+}
+
+#[allow(clippy::too_many_lines)] // Mirrors generation-aware direct/aggregate source selection in one correlated fence.
+fn current_effective_source_publication(item: &Alias) -> SelectStatement {
+    let candidate = Alias::new("current_source_item");
+    let owner = Alias::new("current_source_structure_owner");
+    let direct = Alias::new("current_direct_source_publication");
+    let structure = Alias::new("current_structure_source_publication");
+    let projection = Alias::new("current_structure_source_projection");
+    let direct_selected = Condition::all()
+        .add(Expr::col((direct.clone(), Alias::new("id"))).is_not_null())
+        .add(
+            Expr::col((direct.clone(), Alias::new("expected_revision")))
+                .equals((candidate.clone(), Alias::new("source_index_revision"))),
+        )
+        .add(
+            Condition::any()
+                .add(Expr::col((structure.clone(), Alias::new("id"))).is_null())
+                .add(
+                    Expr::col((direct.clone(), Alias::new("activated_generation"))).gt(Expr::col(
+                        (structure.clone(), Alias::new("activated_generation")),
+                    )),
+                ),
+        );
+    let structure_selected = Condition::all()
+        .add(Expr::col((structure.clone(), Alias::new("id"))).is_not_null())
+        .add(Expr::col((projection.clone(), Alias::new("source_state"))).eq("Indexed"))
+        .add(
+            Expr::col((projection.clone(), Alias::new("source_index_revision")))
+                .equals((candidate.clone(), Alias::new("source_index_revision"))),
+        )
+        .add(
+            Condition::any()
+                .add(Expr::col((direct.clone(), Alias::new("id"))).is_null())
+                .add(
+                    Expr::col((structure.clone(), Alias::new("activated_generation"))).gte(
+                        Expr::col((direct.clone(), Alias::new("activated_generation"))),
+                    ),
+                ),
+        );
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_items"), candidate.clone())
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner.clone(), Alias::new("id")))
+                .equals((candidate.clone(), Alias::new("structure_owner_item_id"))),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("catalog_publications"),
+            direct.clone(),
+            Condition::all()
+                .add(Expr::col((direct.clone(), Alias::new("id"))).equals((
+                    candidate.clone(),
+                    Alias::new("active_source_publication_id"),
+                )))
+                .add(Expr::col((direct.clone(), Alias::new("publication_kind"))).eq("Sources"))
+                .add(Expr::col((direct.clone(), Alias::new("state"))).eq("Active")),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("catalog_publications"),
+            structure.clone(),
+            Condition::all()
+                .add(
+                    Expr::col((structure.clone(), Alias::new("id")))
+                        .equals((owner, Alias::new("active_structure_publication_id"))),
+                )
+                .add(Expr::col((structure.clone(), Alias::new("publication_kind"))).eq("Structure"))
+                .add(Expr::col((structure.clone(), Alias::new("state"))).eq("Active")),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("publication_catalog_items"),
+            projection.clone(),
+            Condition::all()
+                .add(
+                    Expr::col((projection.clone(), Alias::new("publication_id")))
+                        .equals((structure.clone(), Alias::new("id"))),
+                )
+                .add(
+                    Expr::col((projection.clone(), Alias::new("catalog_item_id")))
+                        .equals((candidate.clone(), Alias::new("id"))),
+                ),
+        )
+        .and_where(
+            Expr::col((candidate.clone(), Alias::new("id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .cond_where(
+            Condition::any()
+                .add(direct_selected)
+                .add(structure_selected),
+        )
+        .to_owned()
 }
 
 fn apply_parent(query: &mut SelectStatement, ci: &Alias, parent: BrowseParent) {
@@ -468,21 +1846,137 @@ fn visible_item(item_id: CatalogItemId) -> SelectStatement {
         .to_owned()
 }
 
-fn select_item_columns(query: &mut SelectStatement) {
-    let ci = Alias::new("ci");
+pub(crate) async fn catalog_item_is_visible(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+) -> Result<bool, DbErr> {
+    let item = Alias::new("visible_catalog_item");
+    let query = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_items"), item.clone())
+        .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+        .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(enabled_membership_for_item(&item)))
+                .add(Expr::exists(projected_enabled_membership(&item))),
+        )
+        .limit(1)
+        .to_owned();
+    let backend = connection.get_database_backend();
+    connection
+        .query_one(backend.build(&query))
+        .await
+        .map(|row| row.is_some())
+}
+
+pub(crate) async fn lock_catalog_item_visibility(
+    transaction: &DatabaseTransaction,
+    item_id: CatalogItemId,
+) -> Result<bool, DbErr> {
+    let library = Alias::new("libraries");
+    let direct = Alias::new("locked_direct_membership");
+    let direct_membership = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("library_catalog_items"), direct.clone())
+        .and_where(
+            Expr::col((direct.clone(), Alias::new("library_id")))
+                .equals((library.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((direct, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .to_owned();
+    let projection = Alias::new("locked_projection");
+    let publication = Alias::new("locked_publication");
+    let owner = Alias::new("locked_owner");
+    let owner_membership = Alias::new("locked_owner_membership");
+    let projected_membership = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("publication_catalog_items"), projection.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_publications"),
+            publication.clone(),
+            Expr::col((publication.clone(), Alias::new("id")))
+                .equals((projection.clone(), Alias::new("publication_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner.clone(), Alias::new("active_structure_publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            owner_membership.clone(),
+            Expr::col((owner_membership.clone(), Alias::new("catalog_item_id")))
+                .equals((owner.clone(), Alias::new("id"))),
+        )
+        .and_where(
+            Expr::col((owner_membership, Alias::new("library_id")))
+                .equals((library.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((projection, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .and_where(Expr::col((publication.clone(), Alias::new("publication_kind"))).eq("Structure"))
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
+        .and_where(Expr::col((owner.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((owner, Alias::new("classification_state"))).eq("Matched"))
+        .to_owned();
+    let update = Query::update()
+        .table(library.clone())
+        .value(Alias::new("is_enabled"), true)
+        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
+        .and_where(Expr::exists(visible_item(item_id)))
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(direct_membership))
+                .add(Expr::exists(projected_membership)),
+        )
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    transaction
+        .execute(backend.build(&update))
+        .await
+        .map(|result| result.rows_affected() > 0)
+}
+
+fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
     let ud = Alias::new("ud");
-    for column in [
-        "id",
-        "parent_id",
-        "item_type",
-        "name",
-        "production_year",
-        "overview",
-    ] {
-        query.expr_as(
-            Expr::col((ci.clone(), Alias::new(column))),
-            Alias::new(column),
-        );
+    match source {
+        ItemQuerySource::Catalog => {
+            let ci = Alias::new("ci");
+            for column in [
+                "id",
+                "parent_id",
+                "item_type",
+                "name",
+                "production_year",
+                "overview",
+            ] {
+                query.expr_as(
+                    Expr::col((ci.clone(), Alias::new(column))),
+                    Alias::new(column),
+                );
+            }
+        }
+        ItemQuerySource::Publication(_) => {
+            let pci = Alias::new("pci");
+            for (column, alias) in [
+                ("catalog_item_id", "id"),
+                ("parent_catalog_item_id", "parent_id"),
+                ("item_type", "item_type"),
+                ("name", "name"),
+                ("production_year", "production_year"),
+                ("overview", "overview"),
+            ] {
+                query.expr_as(
+                    Expr::col((pci.clone(), Alias::new(column))),
+                    Alias::new(alias),
+                );
+            }
+        }
     }
     for column in [
         "is_favorite",
@@ -525,5 +2019,72 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         playback_position_ticks: row
             .try_get::<Option<i64>>("", "playback_position_ticks")?
             .unwrap_or(0),
+        image_tags: BTreeMap::new(),
+    })
+}
+
+async fn attach_image_tags(
+    database: &DatabaseConnection,
+    items: &mut [CatalogItemRecord],
+) -> Result<(), CatalogQueryError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let asset = Alias::new("asset");
+    let blob = Alias::new("blob");
+    let mut query = Query::select();
+    query
+        .from_as(Alias::new("item_assets"), asset.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("asset_blobs"),
+            blob.clone(),
+            Expr::col((blob.clone(), Alias::new("id")))
+                .equals((asset.clone(), Alias::new("asset_blob_id"))),
+        )
+        .expr_as(
+            Expr::col((asset.clone(), Alias::new("item_id"))),
+            Alias::new("item_id"),
+        )
+        .expr_as(
+            Expr::col((asset.clone(), Alias::new("image_type"))),
+            Alias::new("image_type"),
+        )
+        .expr_as(
+            Expr::col((blob, Alias::new("sha256"))),
+            Alias::new("sha256"),
+        )
+        .and_where(Expr::col((asset.clone(), Alias::new("priority"))).eq(0))
+        .and_where(
+            Expr::col((asset, Alias::new("item_id")))
+                .is_in(items.iter().map(|item| item.id.as_uuid())),
+        );
+    let backend = database.get_database_backend();
+    let rows = database.query_all(backend.build(&query)).await?;
+    let mut by_item = BTreeMap::<Uuid, BTreeMap<String, String>>::new();
+    for row in rows {
+        let item_id: Uuid = row.try_get("", "item_id")?;
+        let image_type: String = row.try_get("", "image_type")?;
+        let sha256: String = row.try_get("", "sha256")?;
+        by_item
+            .entry(item_id)
+            .or_default()
+            .insert(image_type, sha256);
+    }
+    for item in items {
+        item.image_tags = by_item.remove(&item.id.as_uuid()).unwrap_or_default();
+    }
+    Ok(())
+}
+
+fn asset_from_row(row: &QueryResult) -> Result<AssetRecord, CatalogQueryError> {
+    let byte_size: i64 = row.try_get("", "byte_size")?;
+    Ok(AssetRecord {
+        sha256: row.try_get("", "sha256")?,
+        mime_type: row.try_get("", "mime_type")?,
+        width: row.try_get("", "width")?,
+        height: row.try_get("", "height")?,
+        byte_size: u64::try_from(byte_size).map_err(|_| CatalogQueryError::InvalidAssetSize)?,
+        local_relative_path: row.try_get("", "local_relative_path")?,
     })
 }

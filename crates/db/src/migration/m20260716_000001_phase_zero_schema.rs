@@ -1,12 +1,14 @@
+use sea_orm::ConnectionTrait;
 use sea_orm_migration::{
     prelude::{
         Alias, ColumnDef, DbErr, DeriveMigrationName, ForeignKey, ForeignKeyCreateStatement, Index,
-        IndexCreateStatement, MigrationTrait, SchemaManager, Table, TableCreateStatement,
+        IndexCreateStatement, MigrationTrait, OnConflict, Query, SchemaManager, Table,
+        TableCreateStatement,
     },
     schema::{
-        big_integer, big_integer_null, boolean, integer, integer_null, json, string,
-        string_len_uniq, string_null, string_uniq, text, text_null, timestamp_with_time_zone_null,
-        uuid, uuid_null, uuid_uniq,
+        big_integer, big_integer_null, boolean, integer, integer_null, json, string, string_len,
+        string_len_null, string_len_uniq, string_null, string_uniq, text, text_null,
+        timestamp_with_time_zone_null, uuid, uuid_null, uuid_uniq,
     },
 };
 
@@ -35,8 +37,11 @@ const TABLES: &[&str] = &[
     "work_jobs",
     "work_staging_rows",
     "work_results",
-    "import_runs",
-    "import_legacy_ids",
+    "import_jobs",
+    "import_staging_items",
+    "legacy_item_mappings",
+    "import_conflicts",
+    "import_errors",
 ];
 
 #[derive(DeriveMigrationName)]
@@ -45,9 +50,37 @@ pub struct Migration;
 #[sea_orm_migration::async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        for table in tables() {
+        let mysql = manager.get_connection().get_database_backend() == sea_orm::DbBackend::MySql;
+        for table in tables(mysql) {
             manager.create_table(table).await?;
         }
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_user_data_catalog_item")
+                    .table(Alias::new("user_data"))
+                    .col(Alias::new("catalog_item_id"))
+                    .to_owned(),
+            )
+            .await?;
+        let conflict = if mysql {
+            // SeaQuery renders do_nothing() as the unsupported `ON DUPLICATE KEY IGNORE` on MySQL.
+            // Updating the primary key to its incoming value retains the seed's idempotent semantics.
+            OnConflict::column(Alias::new("id"))
+                .update_column(Alias::new("id"))
+                .to_owned()
+        } else {
+            OnConflict::column(Alias::new("id")).do_nothing().to_owned()
+        };
+        let insert = Query::insert()
+            .into_table(Alias::new("catalog_state"))
+            .columns([Alias::new("id"), Alias::new("generation")])
+            .values_panic([1.into(), 0_i64.into()])
+            .on_conflict(conflict)
+            .to_owned();
+        let connection = manager.get_connection();
+        let backend = connection.get_database_backend();
+        connection.execute(backend.build(&insert)).await?;
         Ok(())
     }
 
@@ -66,7 +99,7 @@ impl MigrationTrait for Migration {
     }
 }
 
-fn tables() -> Vec<TableCreateStatement> {
+fn tables(mysql: bool) -> Vec<TableCreateStatement> {
     vec![
         catalog_state(),
         users(),
@@ -78,10 +111,10 @@ fn tables() -> Vec<TableCreateStatement> {
         media_source_aliases(),
         storage_accounts(),
         storage_roots(),
-        storage_objects(),
+        storage_objects(mysql),
         media_locations(),
         media_streams(),
-        media_stream_index_map(),
+        media_stream_index_map(mysql),
         subtitles(),
         user_data(),
         storage_sync_cursors(),
@@ -92,8 +125,11 @@ fn tables() -> Vec<TableCreateStatement> {
         work_jobs(),
         work_staging_rows(),
         work_results(),
-        import_runs(),
-        import_legacy_ids(),
+        import_jobs(),
+        import_staging_items(mysql),
+        legacy_item_mappings(mysql),
+        import_conflicts(),
+        import_errors(),
     ]
 }
 
@@ -233,8 +269,8 @@ fn media_sources() -> TableCreateStatement {
         .col(string(Alias::new("probe_state")))
         .col(big_integer(Alias::new("probe_revision")))
         .col(uuid_null(Alias::new("probe_location_id")))
-        .col(string_null(Alias::new("probe_location_revision")))
-        .col(string_null(Alias::new("probe_content_identity")))
+        .col(string_len_null(Alias::new("probe_location_revision"), 2048))
+        .col(string_len_null(Alias::new("probe_content_identity"), 2048))
         .col(text_null(Alias::new("last_probe_error")))
         .index(&mut unique(
             "uq_media_sources_presentation",
@@ -292,14 +328,15 @@ fn storage_roots() -> TableCreateStatement {
         .to_owned()
 }
 
-fn storage_objects() -> TableCreateStatement {
-    base("storage_objects")
+fn storage_objects(mysql: bool) -> TableCreateStatement {
+    let mut table = base("storage_objects");
+    table
         .col(uuid(Alias::new("storage_account_id")))
-        .col(string(Alias::new("provider_drive_id")))
-        .col(string(Alias::new("provider_object_id")))
-        .col(string_null(Alias::new("provider_parent_id")))
-        .col(string(Alias::new("name")))
-        .col(string(Alias::new("normalized_name")))
+        .col(string_len(Alias::new("provider_drive_id"), 2048))
+        .col(string_len(Alias::new("provider_object_id"), 2048))
+        .col(string_len_null(Alias::new("provider_parent_id"), 2048))
+        .col(string_len(Alias::new("name"), 2048))
+        .col(string_len(Alias::new("normalized_name"), 2048))
         .col(string(Alias::new("object_type")))
         .col(big_integer_null(Alias::new("size")))
         .col(string_null(Alias::new("checksum")))
@@ -309,15 +346,24 @@ fn storage_objects() -> TableCreateStatement {
         .col(big_integer(Alias::new("children_index_revision")))
         .col(string(Alias::new("identity_quality")))
         .col(string(Alias::new("presence_state")))
-        .col(string_null(Alias::new("availability_reason")))
-        .index(&mut unique(
+        .col(string_null(Alias::new("availability_reason")));
+    if mysql {
+        table.col(string_len_null(Alias::new("identity_key"), 64));
+        table.index(&mut unique(
+            "uq_storage_objects_provider_identity",
+            &["storage_account_id", "identity_key"],
+        ));
+    } else {
+        table.index(&mut unique(
             "uq_storage_objects_provider_identity",
             &[
                 "storage_account_id",
                 "provider_drive_id",
                 "provider_object_id",
             ],
-        ))
+        ));
+    }
+    table
         .foreign_key(&mut fk(
             "fk_storage_objects_account",
             "storage_objects",
@@ -367,10 +413,15 @@ fn media_streams() -> TableCreateStatement {
         .to_owned()
 }
 
-fn media_stream_index_map() -> TableCreateStatement {
-    base("media_stream_index_map")
+fn media_stream_index_map(mysql: bool) -> TableCreateStatement {
+    let mut table = base("media_stream_index_map");
+    table
         .col(uuid(Alias::new("media_source_id")))
-        .col(string(Alias::new("stream_identity")))
+        .col(if mysql {
+            string_len(Alias::new("stream_identity"), 2057)
+        } else {
+            string(Alias::new("stream_identity"))
+        })
         .col(integer(Alias::new("delivery_index")))
         .col(integer_null(Alias::new("container_stream_index")))
         .col(string(Alias::new("stream_type")))
@@ -378,11 +429,21 @@ fn media_stream_index_map() -> TableCreateStatement {
         .index(&mut unique(
             "uq_stream_delivery_index",
             &["media_source_id", "delivery_index"],
-        ))
-        .index(&mut unique(
+        ));
+    if mysql {
+        table
+            .col(string_len(Alias::new("stream_identity_key"), 64))
+            .index(&mut unique(
+                "uq_stream_identity",
+                &["media_source_id", "stream_identity_key"],
+            ));
+    } else {
+        table.index(&mut unique(
             "uq_stream_identity",
             &["media_source_id", "stream_identity"],
-        ))
+        ));
+    }
+    table
         .foreign_key(&mut fk(
             "fk_stream_index_source",
             "media_stream_index_map",
@@ -612,37 +673,131 @@ fn work_results() -> TableCreateStatement {
         .to_owned()
 }
 
-fn import_runs() -> TableCreateStatement {
-    base("import_runs")
+fn import_jobs() -> TableCreateStatement {
+    base("import_jobs")
         .col(string(Alias::new("adapter_kind")))
+        .col(string_len(Alias::new("source_instance_id"), 2048))
         .col(string(Alias::new("state")))
         .col(boolean(Alias::new("dry_run")))
         .col(json(Alias::new("checkpoint")))
+        .col(json(Alias::new("counters")))
+        .col(integer(Alias::new("attempt_count")))
+        .col(string_null(Alias::new("lease_owner")))
+        .col(timestamp_with_time_zone_null(Alias::new(
+            "lease_expires_at",
+        )))
+        .col(timestamp_with_time_zone_null(Alias::new("available_at")))
         .col(text_null(Alias::new("last_error")))
         .to_owned()
 }
 
-fn import_legacy_ids() -> TableCreateStatement {
-    base("import_legacy_ids")
-        .col(uuid(Alias::new("import_run_id")))
-        .col(string(Alias::new("source_system")))
-        .col(string(Alias::new("legacy_id")))
-        .col(uuid(Alias::new("catalog_item_id")))
-        .index(&mut unique(
-            "uq_import_legacy_id",
-            &["source_system", "legacy_id"],
+fn import_staging_items(mysql: bool) -> TableCreateStatement {
+    let mut table = base("import_staging_items");
+    table
+        .col(uuid(Alias::new("import_job_id")))
+        .col(string(Alias::new("entity_kind")))
+        .col(string_len(Alias::new("legacy_item_id"), 2048))
+        .col(string_len_null(Alias::new("parent_legacy_item_id"), 2048))
+        .col(json(Alias::new("payload")))
+        .col(string_len(Alias::new("payload_sha256"), 64))
+        .col(string(Alias::new("validation_state")))
+        .col(string(Alias::new("publication_state")));
+    if mysql {
+        table.col(string_len(Alias::new("identity_key"), 64));
+        table.index(&mut unique(
+            "uq_import_staging_item",
+            &["import_job_id", "identity_key"],
+        ));
+    } else {
+        table.index(&mut unique(
+            "uq_import_staging_item",
+            &["import_job_id", "entity_kind", "legacy_item_id"],
+        ));
+    }
+    table
+        .foreign_key(&mut fk(
+            "fk_import_staging_job",
+            "import_staging_items",
+            "import_job_id",
+            "import_jobs",
+        ))
+        .to_owned()
+}
+
+fn legacy_item_mappings(mysql: bool) -> TableCreateStatement {
+    let mut table = base("legacy_item_mappings");
+    table
+        .col(uuid(Alias::new("import_job_id")))
+        .col(string_len(Alias::new("source_instance_id"), 2048))
+        .col(string_len(Alias::new("legacy_item_id"), 2048))
+        .col(uuid(Alias::new("catalog_item_id")));
+    if mysql {
+        table.col(string_len(Alias::new("identity_key"), 64));
+        table.index(&mut unique("uq_legacy_item_mapping", &["identity_key"]));
+    } else {
+        table.index(&mut unique(
+            "uq_legacy_item_mapping",
+            &["source_instance_id", "legacy_item_id"],
+        ));
+    }
+    table
+        .foreign_key(&mut fk(
+            "fk_legacy_item_mapping_job",
+            "legacy_item_mappings",
+            "import_job_id",
+            "import_jobs",
         ))
         .foreign_key(&mut fk(
-            "fk_import_legacy_ids_run",
-            "import_legacy_ids",
-            "import_run_id",
-            "import_runs",
-        ))
-        .foreign_key(&mut fk(
-            "fk_import_legacy_ids_item",
-            "import_legacy_ids",
+            "fk_legacy_item_mapping_item",
+            "legacy_item_mappings",
             "catalog_item_id",
             "catalog_items",
+        ))
+        .to_owned()
+}
+
+fn import_conflicts() -> TableCreateStatement {
+    base("import_conflicts")
+        .col(uuid(Alias::new("import_job_id")))
+        .col(uuid_null(Alias::new("staging_item_id")))
+        .col(string(Alias::new("conflict_kind")))
+        .col(json(Alias::new("details")))
+        .col(string(Alias::new("resolution_state")))
+        .col(json(Alias::new("resolution")))
+        .foreign_key(&mut fk(
+            "fk_import_conflict_job",
+            "import_conflicts",
+            "import_job_id",
+            "import_jobs",
+        ))
+        .foreign_key(&mut fk(
+            "fk_import_conflict_staging",
+            "import_conflicts",
+            "staging_item_id",
+            "import_staging_items",
+        ))
+        .to_owned()
+}
+
+fn import_errors() -> TableCreateStatement {
+    base("import_errors")
+        .col(uuid(Alias::new("import_job_id")))
+        .col(uuid_null(Alias::new("staging_item_id")))
+        .col(string(Alias::new("phase")))
+        .col(boolean(Alias::new("retryable")))
+        .col(text(Alias::new("message")))
+        .col(json(Alias::new("details")))
+        .foreign_key(&mut fk(
+            "fk_import_error_job",
+            "import_errors",
+            "import_job_id",
+            "import_jobs",
+        ))
+        .foreign_key(&mut fk(
+            "fk_import_error_staging",
+            "import_errors",
+            "staging_item_id",
+            "import_staging_items",
         ))
         .to_owned()
 }

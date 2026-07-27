@@ -13,6 +13,11 @@
         {
           "Codec": "srt",
           "Language": "eng",
+          "Width": null,
+          "Height": null,
+          "Channels": null,
+          "Profile": null,
+          "Level": null,
           "Type": "Subtitle",
           "Index": 3,
           "IsExternal": true,

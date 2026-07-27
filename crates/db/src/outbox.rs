@@ -74,6 +74,24 @@ pub struct OutboxCompletion {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackloggedStorageRoot {
+    root_id: StorageRootId,
+    expected_revision: i64,
+}
+
+impl BackloggedStorageRoot {
+    #[must_use]
+    pub const fn root_id(self) -> StorageRootId {
+        self.root_id
+    }
+
+    #[must_use]
+    pub const fn expected_revision(self) -> i64 {
+        self.expected_revision
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutboxFailureReason {
     TransientProvider,
     ProjectionConflict,
@@ -127,6 +145,63 @@ where
     #[must_use]
     pub const fn with_clock(database: &'connection DatabaseConnection, clock: Clock) -> Self {
         Self { database, clock }
+    }
+
+    /// Reads the durable reconciled watermark for one storage root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxRepositoryError::MissingRoot`] or a database failure.
+    pub async fn reconciled_revision(
+        &self,
+        storage_root_id: StorageRootId,
+    ) -> Result<i64, OutboxRepositoryError> {
+        read_root_revisions(self.database, storage_root_id)
+            .await?
+            .map(|(_, reconciled)| reconciled)
+            .ok_or(OutboxRepositoryError::MissingRoot)
+    }
+
+    /// Lists storage roots whose catalog projection watermark trails storage sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxRepositoryError::InvalidRootLimit`] for an unbounded request or a
+    /// database error when the backlog cannot be read.
+    pub async fn backlogged_roots(
+        &self,
+        after: Option<StorageRootId>,
+        limit: u64,
+    ) -> Result<Vec<BackloggedStorageRoot>, OutboxRepositoryError> {
+        if !(1..=1_000).contains(&limit) {
+            return Err(OutboxRepositoryError::InvalidRootLimit);
+        }
+        let mut query = Query::select();
+        query
+            .columns([Alias::new("id"), Alias::new("sync_revision")])
+            .from(Alias::new("storage_roots"))
+            .and_where(
+                Expr::col(Alias::new("sync_revision"))
+                    .gt(Expr::col(Alias::new("reconciled_sync_revision"))),
+            )
+            .order_by(Alias::new("id"), Order::Asc)
+            .limit(limit);
+        if let Some(after) = after {
+            query.and_where(Expr::col(Alias::new("id")).gt(after.as_uuid()));
+        }
+        let query = query.clone();
+        let backend = self.database.get_database_backend();
+        self.database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(BackloggedStorageRoot {
+                    root_id: StorageRootId::from_uuid(row.try_get("", "id")?),
+                    expected_revision: row.try_get("", "sync_revision")?,
+                })
+            })
+            .collect()
     }
 
     /// Claims the next event in the root's lowest unreconciled revision.
@@ -219,6 +294,8 @@ pub enum OutboxRepositoryError {
     EmptyLeaseOwner,
     #[error("lease owner must not exceed 128 characters")]
     LeaseOwnerTooLong,
+    #[error("outbox backlog root limit must be between 1 and 1000")]
+    InvalidRootLimit,
     #[error("lease duration must be positive")]
     InvalidLeaseDuration,
     #[error("retry backoff must not be negative")]
