@@ -11,17 +11,62 @@ The current foundation includes:
 - the initial SQLite/PostgreSQL-compatible SeaORM migration set;
 - transactional field-level UserData updates with per-user revisions;
 - a fenced, retryable storage outbox with contiguous reconciliation watermarks;
+- durable WorkJob single-flight/lease/staging primitives and replay-safe scoped
+  inventory page commits with root-local object state;
+- durable root-scoped title discovery and metadata resolution workers, including
+  SQL-only NFO selection, Naming fallback, and an optional bounded `TMDb` provider;
+- publication-owned Series structure projections with a validated seal step and
+  atomic active-pointer/catalog-generation switching;
+- publication-owned MediaSource/MediaLocation/Subtitle projections that retain
+  stable presentation keys and Probe state across atomic Source re-indexes;
+- a leased Filesystem Probe worker that reads bounded Matroska head/tail ranges,
+  persists canonical stream metadata, and retains tombstoned delivery indexes;
 - versioned catalog/user/probe cache key contracts;
 - a pinned direct-play `PlaybackInfo` JSON golden;
 - a root-confined `FilesystemBackend` with bounded byte-range streaming;
+- a native Google Drive adapter with server-side authorization-code/PKCE setup,
+  My Drive/Shared Drive scoping, OAuth refresh single-flight, Changes pagination,
+  strict Range reads, and `Retry-After`;
+- a native `OneDrive` Personal adapter with encrypted rotating OAuth credentials,
+  Delta pagination, same-origin continuation validation, and bearer-safe content redirects;
 - Argon2id local authentication with durable, digest-only session storage;
 - an Axum server with L0 discovery, L1 login/current-user, session capability
-  reporting, and SQL-backed L2 library/item browsing; and
+  reporting, SQL-backed L2 library/item browsing, and root-confined original
+  image streaming; and
 - health routes that probe the SQL source of truth.
 
-The server is not yet a complete Jellyfin implementation and no React admin is
-available. The compatibility matrix in [`docs/api-parity.md`](docs/api-parity.md)
-remains the authoritative record of implemented behavior.
+The server is not yet a complete Jellyfin implementation. A React Admin slice
+is available for sign-in, local-user, library, and durable-task management, and the Google
+Drive/OneDrive Personal OAuth and root-selection flows; the compatibility matrix in
+[`docs/api-parity.md`](docs/api-parity.md) remains the authoritative record of
+implemented behavior.
+
+## Build the Admin application
+
+The Admin application requires Node.js 22.12 or newer; CI pins Node.js 22.22.3.
+Install its locked dependencies and run the same static checks used by CI:
+
+```bash
+npm --prefix admin ci
+npm --prefix admin run typecheck
+npm --prefix admin run lint
+npm --prefix admin test -- --run
+npm --prefix admin run build
+```
+
+The production server serves the resulting application at `/admin/` from the
+same origin as the API. It reads `admin/dist` by default, or the directory named
+by `TJXY_ADMIN_DIST_DIR`, and fails startup explicitly when that distribution or
+its `index.html` is missing or invalid. Build the Admin application before
+starting the server. The current UI covers sign-in, Users list/create/edit/delete,
+Libraries list/create/rename/delete and versioned scan-policy editing, ScheduledTasks
+start/cancel, recent durable-job status, scoped Validate/Discover/Resolve/Expand/Index/Probe commands, device
+rename/revocation, API key lifecycle management, plus the Google Drive and OneDrive
+Personal authorization, folder-selection, and binding flows. Bootstrap setup remains
+environment-driven, and storage status/reauthorization, task-log/cache-state, metadata,
+migration, and conflict pages are not yet implemented. The browser session is
+stored in `sessionStorage`; logout clears that browser session but does not revoke
+the server-side token.
 
 ## Run the HTTP server
 
@@ -39,36 +84,431 @@ cargo run -p tjxy-server
 
 The default bind address is `127.0.0.1:8096`; override it with `TJXY_BIND`.
 The default database is `sqlite://tjxy.db?mode=rwc`; override it with
-`TJXY_DATABASE_URL`. The two bootstrap administrator variables must both be set
-for a new database, and the password must not be empty. They create an
+`TJXY_DATABASE_URL`. Original image assets default to `./data/assets`; override
+that root with `TJXY_ASSETS_DIR`. The asset store validates actual image format,
+encoded size, dimensions, pixel count, and decoder allocation before an
+fd-confined atomic SHA-256 write; JPEG, PNG, GIF, WebP, and BMP originals are
+accepted. Lazy Expand/Source requests wait up to 2500 ms
+for joined work by default; set `TJXY_LAZY_WAIT_MS` to `0..=30000` to override
+it. The production binary submits a lowest-priority policy-aware media refresh
+every 900 seconds by default. Set `TJXY_MEDIA_REFRESH_INTERVAL_SECONDS` to a
+value from `1..=2592000` to change the period, or `0` to disable the scheduler.
+The first refresh waits for one complete interval, and durable single-flight
+prevents overlapping scans for the same Library. Administrators can create a
+Filesystem-backed VirtualFolder by supplying
+one existing directory in the `paths` query parameter. TJXY canonicalizes and
+persists that root, creates its storage identity and initial sync job atomically,
+and reloads every active Filesystem root after restart. The legacy
+`TJXY_FILESYSTEM_ACCOUNT_ID` plus `TJXY_FILESYSTEM_ROOT` pair remains an explicit
+runtime override; both variables are required together. Each configured root
+starts an account-scoped inventory worker and shares the serial Probe worker. A
+native recursive filesystem event monitor is
+enabled by default; it coalesces event bursts for 500 ms and schedules durable
+inventory only for already-materialized parent directories. Set
+`TJXY_FILESYSTEM_REALTIME=false` to disable this hint path; explicit Validate
+remains the authoritative repair operation because platform watchers can lose or
+only partially describe rename events. The inventory worker claims only that account's
+durable scoped-sync jobs and persists paged object/outbox updates. The Probe
+worker reads at most 1 MiB from each end of an object and currently supports Matroska;
+unsupported or incomplete containers are recorded as terminal Probe failures.
+Remote metadata is disabled by default. Set
+`TJXY_ENABLE_REMOTE_PROVIDERS=true` and provide the secret
+`TJXY_TMDB_ACCESS_TOKEN` to enable `TMDb`; `TJXY_TMDB_LANGUAGE` defaults to
+`zh-CN`. A missing token keeps the provider disabled and performs no remote
+metadata requests. Selected Movie/Series posters are downloaded only from the
+fixed TMDb image host with redirects disabled and bounded time/bytes, validated
+by the asset store, and published as local Primary images. Image failures are
+recorded as work warnings without discarding usable text metadata.
+Native Google accounts reference an encrypted `storage_credentials` row and are
+loaded automatically. Supply only the deployment keyring through the secret
+environment variable `TJXY_CREDENTIAL_KEYRING`, for example
+`{"active_version":2,"keys":{"1":"<base64-32-bytes>","2":"<base64-32-bytes>"}}`.
+New writes use the active version while historical keys remain available for
+rotation. The same keyring encrypts recoverable API keys. A database with no API
+keys may start without it, but API key creation and listing return `503` until a
+valid keyring is configured. Once any API key exists, the keyring is required at
+startup, and every historical version still referenced by an API key envelope must
+remain configured. Configure the Google OAuth application only on the server by setting
+`TJXY_GOOGLE_OAUTH_CLIENT_ID`, `TJXY_GOOGLE_OAUTH_CLIENT_SECRET`, and
+`TJXY_GOOGLE_OAUTH_REDIRECT_URI` together. The redirect URI must exactly match
+`/Admin/Storage/OAuth/GoogleDrive/Callback` at the externally registered origin.
+The client secret is never accepted by an Admin DTO, and the resulting refresh
+token is stored only inside the AEAD payload. The same encrypted credential
+boundary applies to OneDrive Personal. Configure its Microsoft consumer OAuth
+application with `TJXY_ONEDRIVE_OAUTH_CLIENT_ID` and
+`TJXY_ONEDRIVE_OAUTH_REDIRECT_URI`, plus optional
+`TJXY_ONEDRIVE_OAUTH_CLIENT_SECRET`; the redirect URI must end in
+`/Admin/Storage/OAuth/OneDrive/Callback`. An active cloud binding without a
+valid keyring or credential envelope prevents readiness instead of silently
+starting an unusable backend.
+Authenticated administrators start Google authorization with
+`POST /Admin/Storage/OAuth/GoogleDrive/Start` and `TargetLibraryId`, then open
+the returned `AuthorizationUrl`. TJXY validates one-time `state` and S256 PKCE
+at the callback. After authorization, the same administrator can browse folders
+through `GET /Admin/Storage/OAuth/GoogleDrive/{state}/Directories`, enumerate
+paginated Shared Drives through the sibling `SharedDrives` route, and commit the
+chosen root through `POST /Admin/Storage/OAuth/GoogleDrive/{state}/Bind`.
+`Scope` is `MyDrive` or `SharedDrive`, with `SharedDriveId` only for the latter.
+The server obtains the account identity from Google, validates the selected
+root, obtains the initial Changes cursor, and atomically commits the encrypted
+credential, target-library root membership,
+and one non-recursive Strict Lazy inventory job. The response reports
+`InitialSyncJobId` and `RestartRequired: false`; the backend and its workers are
+activated in the current process immediately after the durable binding commits.
+The former Google endpoint that accepted `ClientSecret` and
+`RefreshToken` request fields no longer exists. OneDrive Personal follows the
+same session-bound authorization-code flow at
+`/Admin/Storage/OAuth/OneDrive/Start`, `Callback`, `{state}/Directories`, and
+`{state}/Bind`. Microsoft Graph derives the account, Personal drive ID, and
+root; the Admin submits only `DisplayName` and the chosen `RootObjectId`. The
+legacy direct OneDrive binding endpoint no longer exists. Business and
+SharePoint are rejected before binding.
+Emby migration uses the same keyring. `POST /Admin/Imports/Emby` accepts
+`BaseUrl`, `EmbyUserId`, `ApiKey`, `SourceInstanceId`, `DryRun`,
+`TargetLibraryId`, and `TargetUserId`; the API key is immediately wrapped in a
+versioned AEAD payload. The durable worker pages into replay-safe staging and
+renews its lease. Dry runs complete without Catalog writes. Non-dry runs stop at
+`ReadyToPublish`; review the status/counters before calling the explicit
+`Publish` command, which commits Catalog rows, normalized metadata, Legacy IDs,
+and UserData in one transaction.
+The two bootstrap administrator variables must
+both be set for a new database, and the password must not be empty. They create an
 administrator only when the database has no users; use one server replica for
 this first startup, then remove them from deployment configuration.
 Legacy `Emby` schemes and X-Emby/X-MediaBrowser token aliases are enabled by
 default; set `TJXY_LEGACY_AUTH=false` to require canonical MediaBrowser auth.
+
+Redis defaults to `auto` at `redis://127.0.0.1:6379`: a failed local probe
+continues without cache, while `TJXY_REDIS_MODE=enabled` makes connection/PING
+failure block startup. `disabled` never connects. Configure
+`TJXY_REDIS_URL`, `TJXY_REDIS_KEY_PREFIX`,
+`TJXY_REDIS_CONNECT_TIMEOUT_MS`, `TJXY_REDIS_HOME_TTL_SECONDS`,
+`TJXY_REDIS_ITEM_TTL_SECONDS`, and `TJXY_REDIS_EMPTY_TTL_SECONDS` as needed.
+Auto mode rejects non-loopback endpoints. Runtime Redis errors are cache misses,
+mark cache health degraded immediately, and open a short circuit after repeated
+failures; SQL remains authoritative.
 
 Set `TJXY_PUBLIC_ADDRESS` only from trusted deployment configuration when the
 discovery response should advertise an address. Readiness becomes true only
 after the database connection, migrations, and authentication service succeed,
 and each readiness request probes the database connection.
 Available compatibility routes now include `GET /System/Info/Public`,
+authenticated `GET /System/Endpoint`,
+`GET /Branding/Configuration`,
 `GET /System/Ping`, `POST /Users/AuthenticateByName`, and `GET /Users/Me`, plus
-`POST /Sessions/Capabilities/Full`, the Findroid-compatible legacy
-`POST /Sessions/Capabilities`, `GET /UserViews`, `GET /Items`,
+administrator local-user management at `GET /Users`, `GET|DELETE /Users/{userId}`,
+`POST /Users/New`, `POST /Users?userId=...`, and the `Password` and `Policy`
+commands,
+authenticated `GET /Sessions` and `POST /Sessions/Logout`,
+administrator `GET|DELETE /Devices`, `GET /Devices/Info`, and
+`GET|POST /Devices/Options`,
+administrator `GET|POST /Auth/Keys` and `DELETE /Auth/Keys/{accessToken}`,
+`POST /Sessions/Capabilities/Full`, the legacy client-compatible
+`POST /Sessions/Capabilities`, `GET /UserViews`, `GET /Search/Hints`, `GET /Items`,
+`GET /Items/{itemId}`,
+authenticated `GET|POST /DisplayPreferences/{displayPreferencesId}`,
+`GET|POST /Items/{itemId}/PlaybackInfo`,
+`GET|HEAD /Videos/{itemId}/stream?static=true&mediaSourceId=...`,
+`GET|HEAD /Audio/{itemId}/stream?static=true&mediaSourceId=...`,
+the two authenticated `/Videos/{itemId}/{mediaSourceId}/Subtitles/...` forms,
+`GET|POST /UserItems/{itemId}/UserData`,
+`GET /UserItems/Resume`,
+`GET /Items/Latest`, `GET /Shows/NextUp`,
+authenticated `GET /socket` WebSocket events,
+private playlist routes under `/Playlists` and authenticated shared collection reads under
+`/Collections` with administrator writes under `/Admin/Collections`,
+`GET|POST|DELETE /Library/VirtualFolders`,
+`POST /Library/VirtualFolders/LibraryOptions`,
+`POST /Library/VirtualFolders/Name`,
+`DELETE /Library/VirtualFolders/Paths`,
+the Google and OneDrive OAuth start/callback/directory/bind routes under
+`/Admin/Storage/OAuth/GoogleDrive/...` and `/Admin/Storage/OAuth/OneDrive/...`,
+administrator PathWeak relink review at
+`GET /Admin/Storage/RelinkCandidates` and
+`POST /Admin/Storage/RelinkCandidates/{id}/Confirm|Reject`,
+administrator Emby import routes at `POST /Admin/Imports/Emby`,
+`GET /Admin/Imports/{jobId}`, and the `Pause`, `Resume`, and `Publish` commands,
+administrator NFO metadata import at
+`POST /Admin/Items/{itemId}/Metadata/Nfo` with `application/xml` or `text/xml`,
+`GET /ScheduledTasks`, `GET /ScheduledTasks/{taskId}`,
+`POST|DELETE /ScheduledTasks/Running/{taskId}`, `POST /Library/Refresh`,
+the safe, bounded durable-job observation route `GET /Admin/Tasks/Jobs?Limit=...`,
+explicit administrator tasks at `POST /Admin/Tasks/ValidateStorage/{rootId}`,
+`POST /Admin/Tasks/DiscoverTitles/{rootId}`,
+`POST /Admin/Tasks/ResolveMetadata/{itemId}`, and
+`POST /Admin/Tasks/ProbeMedia/{itemId}`,
+Favorite/Played `POST|DELETE` routes,
+`POST /Sessions/Playing`, `/Progress`, `/Stopped`, and `/Ping`,
+`GET|HEAD /Items/{itemId}/Images/{type}`,
 `GET /health/live`, and `GET /health/ready`.
 
-The current browse slice is deliberately SQL-only. Every authenticated enabled
+Virtual-folder creation without `paths` creates an empty SQL library; attach native
+cloud roots through the storage-account binding routes. Supplying one existing
+directory creates a root-confined Filesystem-backed library. Deleting a virtual
+folder detaches its CatalogItem memberships and StorageRoot mappings but preserves
+those shared entities; active Emby import references block deletion with `409`.
+
+The current browse slice remains SQL-authoritative. Every authenticated enabled
 user sees every enabled library because per-library grants are not yet modeled.
 `/Items` supports root views, direct-parent browsing, item-type filtering,
-stable `SortName` ascending order, and bounded pagination. Recursive browsing,
-other sort modes, Lazy expansion, images, and Redis caching remain unimplemented
-and unsupported query shapes return `400` instead of being silently ignored.
+stable `SortName` ascending order, and bounded pagination. Published Series
+projections can be browsed recursively and inherit the active publication
+owner's enabled library memberships. Requests for an unexpanded Series enqueue
+or join one durable high-priority Expand job and wait for a bounded interval;
+timeouts continue to return only the current active publication. Other sort
+modes and image transforms remain unimplemented;
+unsupported query shapes return `400` instead of being silently ignored. Item
+pages expose priority-zero `ImageTags`; image GET/HEAD serves only authorized
+original `ItemAsset` files with strong ETags and private revalidation, including
+items visible through an active Series publication. Unix builds open each
+relative path component from a pinned root directory descriptor without
+following symlinks. Asset ingestion and SHA-256 deduplicating writes are not yet
+connected to local-image or migration downloaders; the TMDb Primary collector
+uses the bounded, format-validating, SHA-256-deduplicating atomic write service.
+
+When Redis is enabled, UserViews, Items pages, item details, Resume, and
+PlaybackInfo source metadata use cache-aside keys containing the SQL catalog
+generation and user revision. PlaybackInfo entries also carry a stable digest of
+the active MediaSource probe revisions, so a re-probe cannot reuse a prior
+source list.
+Query shapes are SHA-256 digests, concurrent misses share one bounded in-process
+fill, and invalid cache payloads are deleted before falling back to SQL.
+Generation or user revision changes make old keys unreachable without depending
+on Redis deletion. Every catalog generation commit also records a durable cache
+invalidation in the same SQL transaction. Cache writes register their key in a
+TTL-bounded generation set; a fenced startup worker atomically removes at most
+100 registered keys per batch without scanning the Redis keyspace. Disconnects
+retry with categorized backoff, while disabled Redis completes as an explicit no-op.
+After ready state is published, an enabled Redis runtime best-effort warms the
+default `UserViews`, global `Latest`, per-library `Latest` for at most 64 enabled
+libraries, `Resume`, and `NextUp` entries for at most 128 enabled users. Warmup
+uses the normal SQL-authoritative cache-aside queries and never reads media
+bytes; selection or per-user fill failures are logged and never block ready.
+
+Administrators can read Jellyfin-shaped VirtualFolders backed by the SQL
+Library/StorageRoot relationship. Locations are opaque
+`tjxy://storage-root/{id}` values and never expose local paths, provider object
+IDs, account identities, or credentials. LibraryOptions reads and updates the
+named scan profile plus all four effective policies using `profile_version`
+compare-and-swap; preset changes expand through the domain policy table, while
+advanced overrides must provide all four policies together.
+Filesystem creation stores the canonical path only in SQL/runtime configuration;
+VirtualFolders continues to return only `tjxy://storage-root/{id}`. Renaming
+updates the SQL sort key and catalog generation atomically. Root detach removes
+only the requested membership; the last detach disables the Filesystem account
+without deleting storage objects or user data, and reattaching the unchanged
+canonical root reuses its durable identities. Runtime activation takes effect
+in the current process immediately after the durable binding commits.
+
+`GET /Items/{itemId}` returns one authenticated, enabled-library-visible item
+from the canonical catalog or its active Structure publication. It does not read
+staging/retired rows. A visible Movie without active sources enqueues or joins a
+durable Source Index job and waits for the configured bounded interval; this
+path never performs Media Probe.
+
+PlaybackInfo accepts an optional request or session `DeviceProfile`; without one
+it returns every currently Probed and Available source, while an explicit profile
+filters sources to declared direct-play containers. The obsolete query form takes
+precedence over body `UserId`, `MediaSourceId`, and `EnableDirectPlay` values as
+required by the Jellyfin contract. Responses emit only authenticated local TJXY
+media/subtitle routes. Missing probes
+join durable MediaSource-scoped Probe jobs. When a Filesystem backend is
+configured, the leased worker parses bounded Matroska head/tail ranges and
+atomically publishes canonical stream metadata, stable delivery indexes, and a
+catalog generation. Until successful completion, the response safely contains
+no invented Direct Play source. Runtime-selected storage backends can be bound
+programmatically to an account and provider drive; each drive receives an
+isolated scoped-sync worker while media reads and Probe remain provider-neutral.
+Encrypted Google/OneDrive credential-store loading is automatic. MP4/M4V Probe
+parses ISO-BMFF movie and track metadata from the same bounded head/tail input
+used by other provider-neutral media inspection.
+
+External subtitle delivery resolves the active publication by stable media
+source ID and delivery index, then streams the indexed source format
+byte-for-byte. Format conversion and nonzero subtitle time offsets are rejected.
+UserData GET returns protocol defaults for visible items; field-level POST
+updates preserve omitted values and atomically lock enabled-library visibility,
+write SQL state, and increment the user's revision exactly once.
+Playback events use a durable `(auth session, PlaySessionId)` identity: retried
+starts do not increment `PlayCount` twice, unchanged progress does not bump the
+user revision, and a stopped session cannot accept later progress. Jellyfin's
+`ItemId`, `MediaSourceId`, and `PlaySessionId` are optional on these DTOs:
+telemetry without an item is accepted as a no-op, while an item-only event uses
+the preferred playable source and a deterministic session identity.
+
+NFO metadata import accepts at most 2 MiB, rejects DTDs and unknown entities,
+and supports Movie, Series, Season, and Episode documents. Basic fields and
+Provider IDs publish with field-level source references and value hashes in the
+same catalog-generation transaction. Partial NFO documents preserve unmentioned
+SQL fields and other provider identities. Reconciled title roots publish
+deterministic lightweight items and enqueue metadata without entering title
+directories. Later Source publication discovers direct-child NFO sidecars;
+`TMDb` can fill missing Movie/Series fields and a Primary poster before Naming
+fallback. Local image ingestion, Season/Episode parent-aware metadata, and
+association-field publication remain pending.
+
+The storage runner can inventory one explicitly requested backend directory,
+follow opaque pagination, atomically persist each page with an outbox marker,
+and complete its fenced WorkJob only after the final page. It does not recurse
+or infer deletion from an incomplete/failed page; after a complete scope, only
+direct children not observed in that claim attempt become root-local
+`ConfirmedAbsent`. Retry attempts use distinct page generations, so a changed
+first page cannot conflict with a partially committed earlier attempt.
+Filesystem and programmatically registered provider-drive scoped inventory are
+wired at startup; each completed scope projects its versioned outbox events, invalidates
+matched item revisions, and advances the contiguous reconciled watermark before
+the job completes. A backend-independent startup reconciler also resumes durable
+outbox backlog after a crash, scans roots with a bounded keyset cursor, and backs
+off failed events without blocking unrelated roots. Retryable storage failures use capped exponential backoff,
+and provider 429 responses preserve delta-seconds and HTTP-date `Retry-After`.
+Retryable inventory and validation listing failures atomically mark only the
+accessed root-local scope `TemporarilyUnavailable`, advance its durable outbox
+revision, clear its stale materialization marker, and keep the scope eligible
+for retry. The next successful inventory
+page restores `Present` in that page's transaction without invalidating Probe
+metadata for an availability-only transition.
+Ordinary media and subtitle range reads, Probe object checks, and NFO metadata
+reads use the same root-local availability protocol. A retryable stream failure
+before response headers returns `503`; a backend error yielded after headers
+terminates the response body because its status can no longer change. Read
+failures persist only a sanitized reason and project every affected root
+revision before exposing the failure. A successful object get or range open
+restores `Present`, while dropping a response body without a backend error does
+not change availability. A one-off backend `NotFound` is recorded as
+`backend-object-not-found-unconfirmed`, never as `ConfirmedAbsent`. Playback
+prefers an `Available` copy but may retry a `TemporarilyUnavailable` copy when
+no healthy location remains.
+Backends with a Changes capability run one low-frequency worker per provider
+drive: opaque cursors, object updates, confirmed removals, root revisions, and
+outbox markers commit atomically, while additions and moves are admitted only
+below already materialized parents. A known object moved below an unmaterialized
+parent keeps its global object fact `Present` but marks the old root relation
+`TemporarilyUnavailable`; move events invalidate both the old and new matched
+parents, and root-local presence is aggregated into canonical Location
+availability so stale paths are excluded from playback. A
+provider `410 Gone` pauses the cursor,
+captures a fresh cursor, and schedules one non-recursive root inventory; the
+cursor is reactivated only when that exact root-scoped `RecoverStorageCursor`
+job commits. Recovery jobs use a distinct natural key so they cannot join an
+inventory that started before cursor invalidation.
+Recovery completion invalidates deeper materialization markers so later access
+refills those scopes on demand. A terminal recovery failure atomically fails the
+WorkJob and changes the cursor to `RecoveryFailed` for operational diagnosis.
+After review, the application recovery API creates a newly fenced recovery job
+and atomically resumes that cursor. Explicit root validation recursively reuses
+the same paged inventory path, defers absence until every scope succeeds, and
+then confirms omitted relations plus every still-attached descendant in one
+root-revision transaction. This prevents a concurrently refreshed child from
+remaining playable below a directory that the completed validation proved absent.
+Structure publication is available as a repository primitive;
+Source publication has the same staged seal and short pointer-switch boundary,
+and Series Structure publications can atomically include every Episode's
+Source/Location/Subtitle graph. The request coordinator creates and joins the
+jobs. When a matched title StorageObject has not been reconciled, a browse request
+creates or joins Scoped Storage Sync first and waits for its result and watermarks.
+An explicit administrator Expand/Index command instead persists and returns the
+final Media job immediately with a durable sync dependency; the job cannot be
+claimed until the dependency revision is committed and reconciled, and a failed
+dependency terminally fails the waiting Media job without copying provider errors.
+The configured Filesystem worker executes
+request-triggered Scoped Sync, and the SQL-only Source Index worker publishes
+Movie/Episode video locations and matching external subtitles. The Series
+Expand worker recursively schedules missing directory inventories, derives
+restart-stable child identities from stable storage records, and atomically
+publishes every Season/Episode source graph.
+
+Full Media Scan runs as a low-priority durable, policy-aware orchestrator over
+the same SQL boundaries. It reads the persisted effective policy under the
+captured `profile_version`: `all_synced_objects` roots receive a fresh recursive
+validation, `title_layer` roots receive only a non-recursive root Scoped Sync,
+and `library_roots` performs no implicit inventory. Only `eager` expansion and
+probe policies schedule Index/Expand or Probe work. `basic` and `full` metadata
+policies schedule and wait for requirement-tagged Resolve work at the current
+metadata revision. A Basic job is atomically upgraded when Full joins the same
+active natural key, and an in-flight Basic publisher is fenced and retried when
+that upgrade wins. The resolved revision and attempted requirement advance in
+the same publication transaction; a usable `Partial` result does not fail the
+scan, while `metadata_policy=none` does not schedule automatic Resolve. The
+Full NFO resolutions additionally replace evaluated People/Genres/Studios
+relations atomically, while Basic leaves those relations untouched. Online
+providers still share the basic field pipeline, and versioned completeness
+evidence remains pending.
+Every child is recorded under the parent scan, child failures are propagated,
+and cancellation terminates children created by that scan. Discovery progress
+is stored per library-root binding, so an automatic scan cannot publish into a
+Manual library that shares the same storage root. Recursive validation keeps
+omitted relations live until its successful final sweep. Each parent/root fixes
+one inventory or validation child across retries even when that child advances
+the root revision. `title_layer` scans continue to process only explicit Library
+members after a Structure publication; only `all_synced_objects` scans absorb
+the published children into the same scan lifecycle. Hybrid background refresh
+selects at most 20 unexpanded Series from the Lazy title layer, ranks
+administrator pins, watching, engaged NextUp, and favorite signals ahead of
+recently added items, and schedules the same durable Expand work at lower
+priority than interactive requests. Engaged NextUp requires one user to have
+both a played Episode and an unplayed, unstarted Episode in the Series' active
+structure publication, so retired projections and unrelated users cannot create
+a false signal. The chosen batch is staged under the parent FullScan and remains
+fixed across worker retries, so one refresh cannot advance through successive
+batches. A production-process TCP smoke verifies that refresh completes the
+low-priority expansion before any Series browse. Signals on existing Episodes
+are attributed to their owning Series. Administrator-pinned background
+candidates are stored on the library membership and rank ahead of derived
+signals. Administrators can page, pin, and unpin them from the Libraries screen;
+changing away from `background` keeps the preference dormant, and unpinning does
+not cancel work that was already submitted. The production scheduler
+periodically submits the same policy-aware scan at the lowest queue priority and
+delays missed ticks instead of creating a catch-up burst.
+
+The explicit Probe command enqueues or joins one high-priority durable job for
+each active MediaSource with an available location, including sources that are
+already Probed. One request is bounded to 256 sources. It returns `409 Conflict`
+for an empty, unavailable, or oversized source set instead of implicitly indexing
+an item, so Manual stage boundaries remain explicit.
+
+The explicit `ExpandItem/{itemId}` command accepts Series items, and
+`IndexMediaSources/{itemId}` accepts Movie or Episode items. Both re-run their
+stage at the current item revision, preserve durable single-flight, and return
+`409 Conflict` for an incompatible item type. The explicit
+`FullScan/{libraryId}/{storageRootId}` command captures the current Library
+profile version and uses the `library_storage_roots.id` binding as its durable
+scope. It applies fixed Full command semantics without changing the Library's
+persisted Manual policy. Validate may share the physical root inventory, while
+Discover and target selection remain isolated to the selected binding.
 
 ## Development
 
-The workspace requires Rust 1.85 or newer.
+The workspace requires Rust 1.88 or newer.
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+Database contracts default to an isolated in-memory SQLite database. Migrated
+cross-database contracts can be run against a disposable PostgreSQL or MySQL
+database by setting `TJXY_TEST_DATABASE_URL`; each test connection creates its
+own `tjxy_test_*` database or schema so parallel tests do not share migrations
+or fixtures. Databases are retained for failed-test inspection and should only
+be created in a disposable local or CI database.
+
+```bash
+TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
+  cargo test -p tjxy-test-support -p tjxy-db --tests
+TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
+  cargo test -p tjxy-application --tests
+TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
+  cargo test -p tjxy-import --tests
+TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
+  cargo test -p tjxy-server --tests
+TJXY_TEST_DATABASE_URL=mysql://root:tjxy@127.0.0.1:3306/tjxy_test \
+  cargo test -p tjxy-test-support -p tjxy-db --tests
+```
+
+The `postgres-contracts` CI job runs all database, application, import, and
+server contracts on pinned PostgreSQL 17. This is the release gate for
+workspace tests that create a database fixture through `tjxy-test-support`.
+The independent `mysql-smoke` job runs only the test-support and database
+contracts on pinned MySQL 8.4, is allowed to fail, and is not a release gate or
+a production-support claim.
