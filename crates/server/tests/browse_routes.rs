@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
 };
 use bytes::Bytes;
 use chrono::{Duration, Utc};
@@ -1993,6 +1993,90 @@ async fn read_cloud_playback(
     }
 }
 
+fn assert_matching_cloud_delivery_headers(
+    actual: &HeaderMap,
+    expected: &HeaderMap,
+    include_content_range: bool,
+) {
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::ACCEPT_RANGES,
+        header::ETAG,
+        header::CONTENT_LENGTH,
+    ] {
+        assert_eq!(actual.get(&name), expected.get(&name), "{name} header");
+    }
+    if include_content_range {
+        assert_eq!(
+            actual.get(header::CONTENT_RANGE),
+            expected.get(header::CONTENT_RANGE),
+            "{} header",
+            header::CONTENT_RANGE
+        );
+    }
+}
+
+async fn assert_cloud_default_delivery(
+    client: &reqwest::Client,
+    server: &TcpTestServer,
+    authorization: &str,
+    direct_url: &str,
+    markers: &[String],
+) {
+    let full = client
+        .get(format!("{}{}", server.base_url, direct_url))
+        .header(header::AUTHORIZATION, authorization)
+        .send()
+        .await
+        .expect("default full media request");
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_headers_do_not_leak(full.headers(), markers, "default full media header");
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "17");
+    let full_headers = full.headers().clone();
+    assert_eq!(full.bytes().await.unwrap().as_ref(), CLOUD_DEFAULT_BYTES);
+
+    let head = client
+        .head(format!("{}{}", server.base_url, direct_url))
+        .header(header::AUTHORIZATION, authorization)
+        .send()
+        .await
+        .expect("default HEAD request");
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_headers_do_not_leak(head.headers(), markers, "default HEAD header");
+    assert_matching_cloud_delivery_headers(head.headers(), &full_headers, false);
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let range = client
+        .get(format!("{}{}", server.base_url, direct_url))
+        .header(header::AUTHORIZATION, authorization)
+        .header(header::RANGE, "bytes=6-9")
+        .send()
+        .await
+        .expect("default ranged media request");
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_headers_do_not_leak(range.headers(), markers, "default range header");
+    assert_eq!(range.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
+    assert_eq!(range.headers()[header::CONTENT_LENGTH], "4");
+    let range_headers = range.headers().clone();
+    assert_eq!(
+        range.bytes().await.unwrap().as_ref(),
+        &CLOUD_DEFAULT_BYTES[6..10]
+    );
+
+    let range_head = client
+        .head(format!("{}{}", server.base_url, direct_url))
+        .header(header::AUTHORIZATION, authorization)
+        .header(header::RANGE, "bytes=6-9")
+        .send()
+        .await
+        .expect("default ranged HEAD request");
+    assert_eq!(range_head.status(), StatusCode::PARTIAL_CONTENT);
+    assert_headers_do_not_leak(range_head.headers(), markers, "default range HEAD header");
+    assert_matching_cloud_delivery_headers(range_head.headers(), &range_headers, true);
+    assert!(range_head.bytes().await.unwrap().is_empty());
+}
+
 async fn assert_cloud_delivery(
     app: &TestApp,
     client: &reqwest::Client,
@@ -2002,58 +2086,14 @@ async fn assert_cloud_delivery(
     markers: &[String],
 ) {
     let authorization = token_header(token);
-    let full = client
-        .get(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
-        .header(header::AUTHORIZATION, &authorization)
-        .send()
-        .await
-        .expect("default full media request");
-    assert_eq!(full.status(), StatusCode::OK);
-    assert_headers_do_not_leak(full.headers(), markers, "default full media header");
-    assert_eq!(full.headers()[header::CONTENT_LENGTH], "17");
-    let full_etag = full.headers()[header::ETAG].clone();
-    assert_eq!(full.bytes().await.unwrap().as_ref(), CLOUD_DEFAULT_BYTES);
-
-    let head = client
-        .head(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
-        .header(header::AUTHORIZATION, &authorization)
-        .send()
-        .await
-        .expect("default HEAD request");
-    assert_eq!(head.status(), StatusCode::OK);
-    assert_headers_do_not_leak(head.headers(), markers, "default HEAD header");
-    assert_eq!(head.headers()[header::CONTENT_LENGTH], "17");
-    assert_eq!(head.headers()[header::ETAG], full_etag);
-    assert!(head.bytes().await.unwrap().is_empty());
-
-    let range = client
-        .get(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
-        .header(header::AUTHORIZATION, &authorization)
-        .header(header::RANGE, "bytes=6-9")
-        .send()
-        .await
-        .expect("default ranged media request");
-    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
-    assert_headers_do_not_leak(range.headers(), markers, "default range header");
-    assert_eq!(range.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
-    assert_eq!(range.headers()[header::CONTENT_LENGTH], "4");
-    assert_eq!(
-        range.bytes().await.unwrap().as_ref(),
-        &CLOUD_DEFAULT_BYTES[6..10]
-    );
-
-    let range_head = client
-        .head(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
-        .header(header::AUTHORIZATION, &authorization)
-        .header(header::RANGE, "bytes=6-9")
-        .send()
-        .await
-        .expect("default ranged HEAD request");
-    assert_eq!(range_head.status(), StatusCode::PARTIAL_CONTENT);
-    assert_headers_do_not_leak(range_head.headers(), markers, "default range HEAD header");
-    assert_eq!(range_head.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
-    assert_eq!(range_head.headers()[header::CONTENT_LENGTH], "4");
-    assert!(range_head.bytes().await.unwrap().is_empty());
+    assert_cloud_default_delivery(
+        client,
+        server,
+        &authorization,
+        &snapshot.direct_urls[0],
+        markers,
+    )
+    .await;
 
     let subtitle = client
         .get(format!("{}{}", server.base_url, snapshot.subtitle_url))
