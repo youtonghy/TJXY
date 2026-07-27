@@ -151,7 +151,7 @@ function UserEditPanels() {
 }
 
 export function UserEdit() {
-  return <Edit<UserRecord> title="Edit user" mutationMode="pessimistic" actions={false}><UserEditPanels /></Edit>;
+  return <Edit<UserRecord> title="Edit user" mutationMode="pessimistic" actions={false} component="div"><UserEditPanels /></Edit>;
 }
 
 function CommandPanel({ title, tone = 'default', children }: {
@@ -160,7 +160,7 @@ function CommandPanel({ title, tone = 'default', children }: {
   children: React.ReactNode;
 }) {
   return (
-    <Box component="section" sx={{ p: { xs: 2, sm: 3 }, border: 1, borderColor: tone === 'danger' ? 'error.light' : 'divider', borderRadius: 1 }}>
+    <Box component="section" sx={{ p: { xs: 2, sm: 3 }, border: 1, borderColor: tone === 'danger' ? 'error.light' : 'divider', borderRadius: 1, bgcolor: 'background.paper' }}>
       <Typography component="h2" variant="h3">{title}</Typography>
       <Divider sx={{ my: 2 }} />
       <Box>{children}</Box>

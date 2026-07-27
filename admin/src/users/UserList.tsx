@@ -42,7 +42,18 @@ export function UserList() {
       perPage={25}
       sort={{ field: 'Name', order: 'ASC' }}
       exporter={false}
-      sx={{ '& .RaList-main': { maxWidth: 1120 } }}
+      sx={{
+        '& .RaList-main': { maxWidth: 1120 },
+        '& .RaList-actions': {
+          minHeight: { xs: 0, sm: 'auto' },
+          height: { xs: 0, sm: 'auto' },
+          bgcolor: { xs: 'transparent', sm: 'background.paper' },
+        },
+        '& .RaList-actions .RaTopToolbar-root': {
+          minHeight: { xs: 0, sm: 'auto' },
+          height: { xs: 0, sm: 'auto' },
+        },
+      }}
     >
       <UserRows />
     </List>
