@@ -8,3 +8,4 @@
 /admin/test-results/
 /admin/playwright-report/
 /admin/output/
+/.worktrees/
