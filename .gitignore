@@ -7,3 +7,4 @@
 /admin/dist/
 /admin/test-results/
 /admin/playwright-report/
+/admin/output/
