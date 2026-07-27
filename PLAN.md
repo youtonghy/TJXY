@@ -3,7 +3,7 @@
 > 技术栈：Rust 服务端 + React 管理端
 > 协议契约：钉扎的 Jellyfin OpenAPI 12.0.0
 > 计划版本：v2.6
-> 状态：设计定稿，待实施；§20 四项开放问题均已锁定
+> 状态：实施中；§20 四项开放问题均已锁定，当前完成度以 `docs/api-parity.md` 和发布门禁为准
 
 ---
 
@@ -42,7 +42,7 @@ TJXY 将这些职责拆开：StorageBackend 负责对象和字节，Storage Sync
 
 | ID | 目标 | 验收标准 |
 |----|------|----------|
-| G1 | Jellyfin REST 核心契约 | 钉扎 OpenAPI 子集 golden + Findroid 自动化 smoke |
+| G1 | Jellyfin REST 核心契约 | 钉扎 Jellyfin OpenAPI 子集 golden + 通用 HTTP 契约 smoke |
 | G2 | Redis 热点缓存 | 首页预热；访问条目 cache-aside；Redis 故障正确回源 SQL |
 | G3 | 多数据库 | SQLite、PostgreSQL 同套发布门禁；MySQL 独立实验 smoke |
 | G4 | 媒体库与任务 | VirtualFolders、Storage Sync、Media Scan、进度和失败可观测 |
@@ -120,7 +120,7 @@ Filesystem 仍可使用 additions-only 快速扫描，但该假设不适用于�
 
 ### ADR-006：Direct Play only
 
-TJXY 的能力事实固定为 byte-for-byte 原文件传输：不 remux、不转码、不改容器，`SupportsTranscoding=false` 且 `TranscodingUrl=null`。协议基线是在客户端 DeviceProfile 支持源容器和编码时声明 `SupportsDirectPlay=true`、`SupportsDirectStream=false`；但 `Protocol`、`Path`、`DirectStreamUrl`、`IsRemote`、`SupportsDirectPlay`、`SupportsDirectStream` 和 `static=true` 的序列化组合必须通过固定版本 Findroid/Swiftfin fixture 实测后钉扎 golden。若某客户端只有在 `SupportsDirectStream=true` 时才接受 TJXY 的原字节 HTTP 路由，可以仅把该字段作为兼容方言调整，但实际响应仍必须 byte-for-byte、不得出现 remux/transcode pipeline，并须新增 ADR 和回归门禁。
+TJXY 的能力事实固定为 byte-for-byte 原文件传输：不 remux、不转码、不改容器，`SupportsTranscoding=false` 且 `TranscodingUrl=null`。协议基线是在客户端 DeviceProfile 支持源容器和编码时声明 `SupportsDirectPlay=true`、`SupportsDirectStream=false`；`Protocol`、`Path`、`DirectStreamUrl`、`IsRemote`、`SupportsDirectPlay`、`SupportsDirectStream` 和 `static=true` 的序列化组合通过钉扎 Jellyfin OpenAPI 请求/响应 golden 与服务端集成测试固定。仅当兼容方言可由 Jellyfin 官方字段表达且有回归测试时才允许调整；实际响应仍必须 byte-for-byte、不得出现 remux/transcode pipeline，并须新增 ADR 和回归门禁。
 
 ### ADR-007：ScheduledTasks 对齐
 
@@ -204,7 +204,7 @@ Adapter -> Staging -> Identity Resolution -> Validation -> Publish
 | ID | 决策 | 落地约束 |
 |----|------|----------|
 | PD-001 | 诚实 ProductName | 发布构建不默认伪装 Jellyfin/Emby |
-| PD-002 | Findroid 主门禁，Swiftfin 辅测 | 固定客户端版本和自动化链路 |
+| PD-002 | Jellyfin API 契约门禁 | 不钉扎客户端应用版本；真实客户端仅作非阻塞观察 |
 | PD-003 | 媒体消失后 detach | tombstone 保留 ItemId 和 UserData，显式 purge 才硬删 |
 | PD-004 | MySQL best-effort | 不作为发布门禁，不宣称生产支持 |
 | PD-005 | 本地 + 原生云存储 | Filesystem、Google Drive、OneDrive Personal 正式；Business/SharePoint 非 v1；SMB/NFS 可继续 OS 挂载 |
@@ -296,7 +296,7 @@ Movie 的 Source Indexing 由首次 `GET /Items/{movieId}` 详情触发，使用
 
 首次请求检查每个候选 MediaSource 的 Probe 状态。需要时执行高优先级 single-flight Probe；失败的 source 不得错误声明 Direct Play。
 
-所有对客户端交付的 MediaSource 使用 TJXY HTTP 路由。基线 DTO：`Protocol=Http`；`DirectStreamUrl` 为带 `static=true&mediaSourceId={stableId}` 的 TJXY `/Videos/.../stream` 或 `/Audio/.../stream`；`Path` 为空或为不含 backend 信息的安全展示值；`TranscodingUrl=null`；三个 Supports flag 按 ADR-006。DTO、响应 header 和日志不得出现本地真实路径、Google/Graph 下载域名、上游临时 URL 或 token。最终 flag 方言以 §18.10 固定客户端 golden 为准，但安全与 byte-for-byte 边界不可调整。
+所有对客户端交付的 MediaSource 使用 TJXY HTTP 路由。基线 DTO：`Protocol=Http`；`DirectStreamUrl` 为带 `static=true&mediaSourceId={stableId}` 的 TJXY `/Videos/.../stream` 或 `/Audio/.../stream`；`Path` 为空或为不含 backend 信息的安全展示值；`TranscodingUrl=null`；三个 Supports flag 按 ADR-006。DTO、响应 header 和日志不得出现本地真实路径、Google/Graph 下载域名、上游临时 URL 或 token。最终 flag 方言以 §18.10 钉扎的 Jellyfin OpenAPI 与通用客户端请求方言 golden 为准，但安全与 byte-for-byte 边界不可调整。
 
 PlaybackInfo **必须可返回多个 MediaSource**（禁止为迁就弱客户端而只返回单源）。客户端不提供版本 UI 或未传 `MediaSourceId` 时，服务器按以下**正式默认排序**选择默认源（列表仍完整返回）：
 
@@ -308,7 +308,7 @@ PlaybackInfo **必须可返回多个 MediaSource**（禁止为迁就弱客户端
 6. 编码兼容性；
 7. 存储账号健康状态。
 
-**v1 门禁**：Findroid L3 只要求默认源真播成功；客户端多版本选择 UI **不是**发布门禁。Swiftfin/Infuse 若有版本 UI，仅作 observation 记录（能否切换、是否传对 `MediaSourceId`），失败不阻塞发布。Admin 可设置默认 MediaSource、优先级与隐藏不可用源。
+**v1 门禁**：PlaybackInfo 必须返回完整多源列表，未指定源时按正式排序选择默认源；所选源的 GET/HEAD/Range 必须 byte-for-byte，外挂字幕路由必须返回原始内容。客户端多版本选择 UI 仅作 observation 记录，不阻塞发布。Admin 可设置默认 MediaSource、优先级与隐藏不可用源。
 
 ---
 
@@ -567,6 +567,7 @@ Provider：`filesystem`、`google_drive`、`onedrive_personal` 为 v1 正式实�
 - remote_revision
 - remote_modified_at
 - observed_sync_revision
+- facts_observed_storage_root_id
 - children_indexed
 - children_index_revision
 - identity_quality
@@ -582,6 +583,8 @@ Provider：`filesystem`、`google_drive`、`onedrive_personal` 为 v1 正式实�
 - OneDrive：account + drive ID + item ID。
 
 云盘路径不是身份。移动和重命名更新对象关系，不创建新的 CatalogItem。Filesystem event adapter 在同一 quiet window 内优先用稳定 file ID 配对 rename/move；无可靠 ID 时，新旧路径只通过 size、mtime、命名和可选 checksum 生成候选，不得自动认定同一对象。未确认候选保留原 CatalogItem/UserData tombstone，并进入 Admin relink/merge 队列；Validate 不得因弱路径身份直接 purge UserData。
+
+`observed_sync_revision` 必须与 `facts_observed_storage_root_id` 一起标识当前对象事实由哪个 root revision 写入；读取方只有在来源 root 的 `reconciled_sync_revision` 覆盖该 revision 后才能使用该事实。旧数据的空来源只允许在对象仅属于一个 root 时按该 root 校验；多 root 空来源必须重新同步，不能猜测归属。关系事实继续由 `storage_root_objects.storage_root_id + observed_sync_revision` 独立围栏。
 
 `presence_state` 固定为 `Present | TemporarilyUnavailable | ConfirmedAbsent`：成功 inventory/change/get 将对象置为 Present；认证失败、429、超时和 5xx 只置 TemporarilyUnavailable；Google Changes removed、OneDrive Delta deleted，或一次完整且成功的 backend validate 确认缺失后，才置 ConfirmedAbsent。普通对象读取的单次 404 不足以确认删除，必须经增量事件或 validate 复核。MediaLocation availability 从该状态派生，不能反向充当 Storage Sync SoT。
 
@@ -658,6 +661,7 @@ work_jobs
 - expected_revision
 - required_sync_job_id
 - input_sync_revision
+- storage_root_affinity
 - state
 - priority
 - attempt_count
@@ -683,9 +687,9 @@ work_results
 - error_summary
 ```
 
-`work_jobs` 对 active 状态建立 `(scope_id, task_kind, expected_revision)` 唯一约束。第一个请求创建任务，其他请求 join 同一 job 并等待通知/轮询；API wait timeout 只返回当前 active publication，绝不读取 staging。worker 通过 compare-and-swap 获取有期限 lease，崩溃后由其他 worker 接管；staging 按 natural key 幂等续写。
+`work_jobs` 对 active 状态建立 `(scope_type, scope_id, task_kind, expected_revision)` 唯一约束。binding-scoped root Full 派生的 Resolve/Expand/Index 必须持久化所选 `storage_root_affinity`，使调度、worker 重启和提交围栏始终保持同一 root 边界；由于 CatalogItem 只有一个 active publication 指针，不同 affinity 的同一 revision 请求视为不兼容，不能并发创建第二个 publication job。第一个兼容请求创建任务，其他请求 join 同一 job 并等待通知/轮询；API wait timeout 只返回当前 active publication，绝不读取 staging。worker 通过 compare-and-swap 获取有期限 lease，崩溃后由其他 worker 接管；staging 按 natural key 幂等续写。
 
-Structure Expansion 和 Source Indexing 可以把超大结果分批写入带 `publication_id` 的 staging/shadow rows。完整性校验通过后，最终短事务必须再次比较 expected revision，然后切换 CatalogItem 的 active publication pointer、更新状态、递增 catalog generation、写 cache invalidation 并标记 job completed。revision 已变化时整批结果作废并重排任务；旧 publication 延迟 GC。对外仍只观察到旧全集或新全集，不观察批次中间态。
+Structure Expansion 和 Source Indexing 可以把超大结果分批写入带 `publication_id` 的 staging/shadow rows。完整性校验通过后，最终短事务必须再次比较 expected revision，并复核 publication 引用的 scope、Location、Subtitle 对象事实仍已 reconciled；对象授权与事实协调必须由同一个 `(storage_object_id, storage_root_id)` pair 同时证明，禁止分别由不同 root 满足。随后才能切换 CatalogItem 的 active publication pointer、更新状态、递增 catalog generation、写 cache invalidation 并标记 job completed。revision 或相关存储事实已变化时整批结果作废并重排任务；无关 root revision 前进不得误判为 stale。旧 publication 延迟 GC。对外仍只观察到旧全集或新全集，不观察批次中间态。
 
 ---
 
@@ -801,7 +805,7 @@ empty_expansion_ttl_seconds = 3
 
 Storage Sync 只维护 StorageObject 事实，不执行标题匹配、metadata provider、Series 展开或媒体 Probe。
 
-Storage Sync 支持 root scope 和 subtree scope。每次成功提交对象页/批次时，在同一事务递增 `storage_roots.sync_revision`，写入该 revision 的对象和 outbox；scoped sync 仅在最后一页完成时将目标 parent 的 `children_indexed=true`、`children_index_revision=sync_revision`，并把该值写入 sync job result。
+Storage Sync 支持 root scope 和 subtree scope。每次成功提交对象页/批次时，在同一事务递增 `storage_roots.sync_revision`，写入该 revision 的对象和 outbox；非末页必须立即将目标 parent 标为 `children_indexed=false` 并推进 relation observation，禁止把部分分页结果声明为完整。scoped sync 仅在最后一页完成时将目标 parent 的 `children_indexed=true`、`children_index_revision=sync_revision`、`observed_sync_revision=sync_revision`，并把该值写入 sync job result。对象 reparent 必须在同一 revision 为旧 parent 写 `MovedOut`、为新 parent 写 `Upserted`，并将旧 parent 标为未完整索引，确保 projector 前后都不能遗漏旧 scope 失效。
 
 Structure Expansion/Source Indexing 遇到 `children_indexed=false` 时创建高优先级 `Scoped Storage Sync` 并保存 `required_sync_job_id`。Media job 只有在 sync job Completed、目标 parent 的 `children_index_revision >= result_sync_revision` 且 root `reconciled_sync_revision >= result_sync_revision` 后，才能写入自己的 `input_sync_revision`、捕获当前 item expected revision 并开始。这样“SQL 可见且已完成 catalog 对账”是唯一等待条件。scope 由 StorageObject ID 表达，不把路径或云端 URL 交给 Media Scan。
 
@@ -892,7 +896,7 @@ Full Media Scan 以前置成功的 Storage Inventory/Validate 为依赖，从 SQ
 
 首次进入 Movie：由详情请求触发；若子树未物化先等待 scoped Storage Sync，再从 SQL 对象建立版本、Location 和外挂字幕，不 Probe。PlaybackInfo 在 source 尚未索引时复用同一任务并等待。
 
-首次进入 Series：递归该 Series 已同步子树，识别全部 Season/Episode/Location/字幕；使用 publication staging 完整校验后一次切换 active publication，不 Probe。发布成功时所有已发现 Episode 的 `source_state=Indexed`，其 Source/Location/Subtitle 已可用但 Probe 仍为 NotProbed。所有 Expand Item，无论来自用户、Hybrid 后台或 Full 调度，都共用 `(catalog_item_id, task_kind, expected_revision)` 持久化 job 和相同的 staging/原子可见协议；失败不发布半成品。
+首次进入 Series：递归该 Series 已同步子树，识别全部 Season/Episode/Location/字幕；使用 publication staging 完整校验后一次切换 active publication，不 Probe。发布成功时所有已发现 Episode 的 `source_state=Indexed`，其 Source/Location/Subtitle 已可用但 Probe 仍为 NotProbed。所有 Expand Item，无论来自用户、Hybrid 后台或 Full 调度，都共用持久化 job 和相同的 staging/原子可见协议；普通任务使用 `(catalog_item_id, task_kind, expected_revision)`，binding-scoped root Full 派生任务还必须包含 `storage_root_affinity`；失败不发布半成品。
 
 首次 PlaybackInfo：若 Movie/Episode source 尚未索引，先等待对应 Source Index 任务；然后选择候选 MediaSource，Probe 数据不存在或 stale 时读取必要容器头/尾 Range，写 SQL 后返回。
 
@@ -904,7 +908,7 @@ Full Media Scan 以前置成功的 Storage Inventory/Validate 为依赖，从 SQ
 | Series | `GET /Items?ParentId=...`；Hybrid/Full | Expand Item | Series `structure_state`；子 Episode `source_state` | Season、Episode 及其 Source/Location/Subtitle；子 Episode 标记 Indexed |
 | Episode | 独立条目、Expand 未携带源、storage 变更或管理员 re-index；PlaybackInfo 可等待 | Index Media Sources | `source_state` | MediaSource、MediaLocation、Subtitle |
 
-两个任务都使用 `(catalog_item_id, task_kind, expected_revision)` 持久化 single-flight。Series 子树新增/删除/层级变化递增 Series `structure_expansion_revision` 并排 Expand；某 Episode 的媒体对象、sidecar 或 revision 变化递增该 Episode `source_index_revision` 并排 Index，除非该变化同时改变 Series 结构，此时两者都递增。Series Expand 发布时把每个子 Episode 的 source revision 记录为本次已同步 Storage revision；随后 PlaybackInfo 不重复 Index，只有 source 缺失或 revision stale 才走 Episode 任务。任务提交前必须再次比较 expected/current revision，不一致则丢弃 publication 并重试，禁止发布过期结果。成功发布必须递增 catalog generation。
+两个任务都使用 `(catalog_item_id, task_kind, expected_revision)` 持久化 single-flight；root Full 还把 `storage_root_affinity` 作为持久化输入和提交围栏，不同 affinity 的同 revision 请求不兼容。Series 子树新增/删除/层级变化递增 Series `structure_expansion_revision` 并排 Expand；某 Episode 的媒体对象、sidecar 或 revision 变化递增该 Episode `source_index_revision` 并排 Index，除非该变化同时改变 Series 结构，此时两者都递增。Series Expand 发布时把每个子 Episode 的 source revision 记录为本次已同步 Storage revision；随后 PlaybackInfo 不重复 Index，只有 source 缺失或 revision stale 才走 Episode 任务。任务提交前必须再次比较 expected/current revision，不一致则丢弃 publication 并重试，禁止发布过期结果。成功发布必须递增 catalog generation。
 
 Library membership 规则：标题层 CatalogItem 显式关联 library；Expand 发布子项时，Season/Episode 继承被展开 Series 当前全部 `library_catalog_items` 关联。Series 从某库移除时，仅移除该库对应子树关联；只要仍被其他库或 MediaSource 引用，就不删除共享 CatalogItem。库根查询走 membership join，树内查询同时校验父项在目标库的 membership。
 
@@ -931,6 +935,7 @@ Probe 只读取识别容器和轨道所需的有界头/尾 Range，不解码帧�
 - 所有结构化 metadata 写 SQL；NFO 是导入来源，不是运行时 SoT。
 - 每个字段可记录 `metadata_provenance`，用于冲突解释和重新匹配。
 - Lazy basic metadata 的来源按顺序为已导入/已迁移 SQL metadata、标题层可见 sidecar、已启用的 **TMDb**、命名解析 fallback。title/year 必须尽力产生；overview、Provider ID、Primary 海报在来源不可用时允许为空并将 `metadata_state=Partial`。测试 fixture 必须启用确定性 fake provider 或预置 sidecar，验证完整 basic 字段。
+- 平铺 Season 中的 Episode sidecar 必须按当前 active Source Location 的视频文件 stem 与 `.nfo` 文件 stem 做不区分 ASCII 大小写的精确匹配；无匹配时不使用 NFO，多个精确匹配必须报歧义，禁止借用同目录其他 Episode 或 `season.nfo`。
 - **v1 远程 provider 仅 TMDb**（Movie/Series/Season/Episode basic 字段与 Primary 图）。TVDB/OMDb/Fanart 等不进入 v1 实现；迁移/NFO 带来的 TVDB/IMDb 等 Provider ID 仍可存储并参与身份匹配。
 - 自建进程内 Rust `MetadataProvider` trait + provenance/confidence；**禁止** Jellyfin/Emby 插件宿主、动态 `.so` 插件或直接 vendoring 其 provider 大段源码。
 - TMDb 默认关闭：需显式 API key/`enable_remote_providers=true` 才发起远程请求；失败只影响对应条目的 `metadata_state`，不阻止轻量 CatalogItem 发布，也不失败整次 Storage Sync/Media Scan。
@@ -1085,6 +1090,7 @@ pregenerate_poster_widths = [300, 480]
 expand_wait_timeout_ms = 2500
 playback_probe_timeout_ms = 5000
 global_scan_concurrency = 4
+media_refresh_interval_seconds = 900 # 0 disables periodic refresh
 
 [proxy]
 stream_buffer_bytes = 262144
@@ -1163,9 +1169,9 @@ OAuth token 不出现在 TOML；配置只引用加密 credential store。
 - Staging、Legacy ID、UserData、图片去重和冲突处理。
 - dry-run、恢复、幂等、原子发布。
 
-### Phase 5：客户端兼容与优化
+### Phase 5：Jellyfin 客户端兼容与优化
 
-- Findroid 发布门禁、Swiftfin 辅测、Infuse 手工验证。
+- Jellyfin OpenAPI golden、通用客户端请求方言与 HTTP 集成门禁；具体客户端应用仅作非阻塞手工观察。
 - Direct Play flag 方言、稳定 MediaSourceId、外挂字幕拉取。
 - 多 MediaSource、Lazy Series、Probe 延迟。
 - Proxy Range 和云盘故障状态。
@@ -1220,9 +1226,9 @@ Initial Delta、nextLink、deltaLink、变更重放、删除、token 失效、�
 
 Dry-run、重复幂等、中断恢复、Legacy ID、图片去重、UserData、冲突、数量核对、publish 回滚。
 
-### 18.10 客户端门禁
+### 18.10 Jellyfin 客户端兼容契约
 
-Findroid 固定版本自动执行登录 -> 首页 -> 浏览 -> Lazy Series -> 详情 -> PlaybackInfo -> 播放 30 秒 -> 选择外挂字幕并拉取 -> 停止 -> Resume。对 Filesystem 和云端 fixture 保存 PlaybackInfo golden，逐字段验证 `Protocol/Path/DirectStreamUrl/TranscodingUrl/IsRemote/Supports*`，并断言实际传输 byte-for-byte、无 remux/transcode、所有 URL 为 TJXY。Swiftfin 跑同 fixture 辅测。多 MediaSource：断言 PlaybackInfo 可返回完整多源列表且默认源可播；客户端版本 UI 仅 observation，不作为门禁。MediaSource re-index 前后重复该链路，确认 `MediaSourceId` 和字幕 index 稳定。
+发布门禁不钉扎具体客户端应用或 UI 自动化版本。服务端集成测试自动执行认证 -> 首页 -> 浏览 -> Lazy Series -> 详情 -> PlaybackInfo -> 原文件 GET/HEAD/Range -> 外挂字幕拉取 -> Playing/Progress/Stopped -> Resume。对 Filesystem 和云端 fixture 保存 Jellyfin OpenAPI 请求/响应 golden，逐字段验证 `Protocol/Path/DirectStreamUrl/TranscodingUrl/IsRemote/Supports*`，并断言实际传输 byte-for-byte、无 remux/transcode、所有 URL 为 TJXY。多 MediaSource 必须返回完整列表且默认源可播；MediaSource re-index 前后重复该链路，确认 `MediaSourceId` 和字幕 index 稳定。真实 Jellyfin 客户端仅作非阻塞观察，不作为发布门禁。
 
 ---
 
@@ -1267,8 +1273,8 @@ Findroid 固定版本自动执行登录 -> 首页 -> 浏览 -> Lazy Series -> �
 
 - PlaybackInfo **始终可返回多个 MediaSource**；`MediaSourceId` = 稳定 `presentation_key`。
 - §4.4 默认排序升为**正式服务器行为**（非暂行）；无 UI / 未指定源时选排序第一的可 Direct Play 源。
-- **L3 门禁（Findroid）**：默认源真播即可；**不要求**版本选择 UI。
-- Swiftfin/Infuse 版本 UI 仅 observation，不阻塞发布。
+- **L3 门禁（通用 Jellyfin HTTP 契约）**：默认源的 GET/HEAD/Range 与字幕原始拉取成功；**不要求**客户端版本选择 UI。
+- 真实客户端的版本 UI 仅 observation，不阻塞发布。
 - Admin 可设默认源/优先级/隐藏不可用源。
 - **否决**：为弱客户端只返回单 MediaSource。
 
@@ -1303,7 +1309,7 @@ Findroid 固定版本自动执行登录 -> 首页 -> 浏览 -> Lazy Series -> �
 | 认证过期 | 自动刷新、重新授权、CatalogItem 不因单次失败删除 |
 | Series 首次展开过慢 | 高优先级、wait timeout、持久化 single-flight、分批 staging + 有界 active publication 切换 |
 | 客户端缓存空目录 | 空结果短 TTL、generation bump、P2 WebSocket |
-| Jellyfin Direct Play flag 方言差异 | 固定 Findroid/Swiftfin PlaybackInfo golden + 真播门禁；能力仍保持 byte-for-byte |
+| Jellyfin Direct Play flag 方言差异 | 钉扎 Jellyfin OpenAPI golden、代表性 DeviceProfile/body/query 方言与原字节路由集成门禁 |
 | 客户端请求字幕转换 | 只广告源格式，非源格式/时间轴重写返回 400/415，不增加转换或 burn-in |
 | 标题误匹配 | Provider ID 优先、置信度、低置信度人工确认 |
 | 同一作品错误合并 | 可拆分、provenance、禁止弱匹配强制合并 |
@@ -1334,7 +1340,7 @@ v2.6 核心原则必须全部可测试：
 8. 所有 Series Expand（用户、后台、Full、多实例）使用持久化 lease、幂等 staging 和 active publication 原子切换；子 Episode source 一并 Indexed。
 9. 视频信息第一次 PlaybackInfo 才 Probe，Full eager 配置除外。
 10. 云盘视频和音频始终由服务器原样 Range 代理；外挂字幕通过钉扎 Jellyfin 路由原格式代理。
-11. Findroid 必须用钉扎 PlaybackInfo flag golden 真播 30 秒并成功拉取外挂字幕，且全过程无 remux/transcode；多 MediaSource 时默认源可播即可，客户端版本 UI 非门禁。
+11. 通用 Jellyfin API 契约必须通过钉扎 PlaybackInfo golden，并实际验证默认源 GET/HEAD/Range 与外挂字幕原始字节；全过程无 remux/transcode，多 MediaSource 返回完整列表，客户端版本 UI 非门禁。
 12. 客户端 DTO/header 和日志不出现真实本地路径、云盘凭据或临时 URL。
 13. MediaSource re-index 后对外 ID 和未变化 stream delivery index 保持稳定；删除的 index 不复用，container/delivery index 冲突有确定映射。
 14. Library effective scan policy 持久化于 SQL，VirtualFolders、Admin 和调度器重启前后读取一致。
