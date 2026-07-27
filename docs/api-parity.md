@@ -88,7 +88,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | CatalogItem 与路径解耦 | ItemId 不由路径决定 | ⚠️ 领域类型、schema、active publication 详情/播放读取及 storage relink 后稳定 ItemId 已实现；跨来源自动 identity resolution 尚未完整接入 |
 | 跨库 CatalogItem 复用 | `library_catalog_items` 多对多 | ⚠️ 查询以 membership `EXISTS` 校验并防止跨库子项泄漏；写侧尚未实现 |
 | 多 MediaSource | 完整多源 DTO + §4.4 正式默认排序；客户端版本 UI 非门禁 | ⚠️ publication-owned SQL 投影、active-only 完整 DTO、DeviceProfile/上次使用、管理员默认与优先级、分辨率、编解码兼容、账号状态和 stable-key 默认排序均已实现；账号状态当前以 `Active > Ready > 其他` 表达，尚无运行时认证/限流健康模型 |
-| MediaSource re-index | 稳定对象/content identity/legacy mapping 保留对外 ID | ⚠️ 相同 stable identity 的 re-index 保留 MediaSourceId、presentation key 与 Probe 状态；管理员确认的 PathWeak relink 会建立 durable identity alias 并让 replacement 复用旧 MediaSourceId/presentation key；通用 content identity 与 alias 管理未实现 |
+| MediaSource re-index | 稳定对象/content identity/legacy mapping 保留对外 ID | ⚠️ 相同 stable identity 的 re-index 保留 MediaSourceId、presentation key、Probe 状态与字幕 delivery index；真实服务 TCP smoke 会在显式 `IndexMediaSources` 前后重复详情、PlaybackInfo、GET/HEAD/Range 和字幕原字节链路，并比较稳定 ID/URL/index。管理员确认的 PathWeak relink 会建立 durable identity alias 并让 replacement 复用旧 MediaSourceId/presentation key；通用 content identity 与 alias 管理未实现 |
 | 多 MediaLocation | 一个版本多个镜像 | ⚠️ publication relationship、全局 StorageObject identity、动态 presence、可用 location 选择及 provider-neutral 代理已实现；可信 content identity 跨镜像复用与完整健康排序未实现 |
 | StorageObject 稳定身份 | provider ID/可靠 file ID；Filesystem 路径 fallback 标为 weak | ✅ provider stable ID、Unix dev/inode 与非 Unix canonical-path `PathWeak` 已进入持久化 identity_quality；稳定 ID rename 保持对象身份，弱身份只生成待确认 relink candidate |
 | Items query/filter/sort/page | 索引 SQL + Redis cache-aside | ⚠️ SQL 类型过滤、`SortName` 升序、1..=200 分页及 cache-aside 已实现；其他排序未实现 |
@@ -137,7 +137,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | Probe 失败 | 不声明错误 Direct Play | ✅ 确定性解析失败原子写入 ProbeFailed、失败 WorkJob 与 generation；PlaybackInfo 仅声明 Probed source |
 | DeviceProfile Direct Play | 精确判断；钉扎 Jellyfin OpenAPI Supports/Protocol/Path/URL golden | ⚠️ 缺省/显式空 profile、container、视频/音频 codec、Width/Height/AudioChannels/VideoProfile/VideoLevel 条件，完整 source 列表与 `SupportsDirectPlay` 条件序列化，以及正式七层默认排序已实现；其余 Jellyfin 条件属性待补齐 |
 | Direct Stream / remux / transcode pipeline | ❌ 永久非目标；兼容 flag 不得改变 byte-for-byte 行为 | ❌ |
-| Filesystem GET/HEAD/Range | 原文件 byte-for-byte | ✅ secure openat、重启 identity 恢复、GET/HEAD/单 Range 合同测试已实现 |
+| Filesystem GET/HEAD/Range | 原文件 byte-for-byte | ✅ secure openat、重启 identity 恢复、GET/HEAD/单 Range 合同测试已实现；真实服务 TCP smoke 串联认证、首页/浏览、Lazy Series、详情、PlaybackInfo、完整 GET/HEAD、Range GET/HEAD、外挂字幕、Playing/Progress/Stopped 与 Resume，并在 re-index 后复验交付字节和稳定标识 |
 | Audio GET/HEAD/Range | `/Audio/{itemId}/stream` 原文件 byte-for-byte | ✅ 已存在的 Audio CatalogItem 可经浏览筛选与默认 Latest 投影；PlaybackInfo 仅广告本机 `/Audio/{itemId}/stream`，并与鉴权 GET/HEAD/单 Range 使用同一原始字节解析路径。自动音乐库发现、Audio Source Index 与 `MusicAlbum` 层级按 PLAN §5.2 属于后续扩展，不是 v1 门禁 |
 | 云盘服务器代理 | `Protocol=Http`，DirectStreamUrl 仅为 TJXY 路由；不重定向、不暴露 URL/token | ✅ runtime backend 经本地 TJXY 路由流式代理，云端 fake Range/字节一致与 provider/object/credential 不泄漏已验证 |
 | 206 / 416 / If-Range / ETag | ✅ | ✅ 单 Range、suffix/open-ended、If-Range mismatch 与 416 `bytes */size` 已覆盖 |

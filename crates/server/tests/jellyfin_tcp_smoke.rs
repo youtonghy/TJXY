@@ -41,6 +41,13 @@ struct TestServer {
     stderr_log: PathBuf,
 }
 
+#[derive(Debug)]
+struct PlaybackContractSnapshot {
+    source_id: String,
+    direct_stream_url: String,
+    external_subtitles: Vec<(i64, String)>,
+}
+
 impl TestServer {
     fn spawn(root: &Path) -> Self {
         let database_url = format!("sqlite://{}?mode=rwc", root.join("tjxy.db").display());
@@ -145,6 +152,39 @@ impl TestServer {
             .expect("read smoke job failure diagnostics")
             .and_then(|row| row.try_get::<Option<String>>("", "last_error").ok())
             .flatten()
+    }
+
+    async fn effective_source_publication(&self, item_id: &str) -> (Uuid, i64) {
+        let item_id = Uuid::parse_str(item_id).expect("catalog item ID is a UUID");
+        let database = Database::connect(&self.database_url)
+            .await
+            .expect("open smoke database for publication diagnostics");
+        let row = database
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT publication_id, activated_generation FROM (\
+                     SELECT p.id AS publication_id, p.activated_generation \
+                     FROM catalog_items c \
+                     INNER JOIN catalog_publications p ON p.id = c.active_source_publication_id \
+                     WHERE c.id = ? AND p.state = 'Active' AND p.publication_kind = 'Sources' \
+                     UNION ALL \
+                     SELECT p.id AS publication_id, p.activated_generation \
+                     FROM catalog_items c \
+                     INNER JOIN catalog_items owner ON owner.id = c.structure_owner_item_id \
+                     INNER JOIN catalog_publications p ON p.id = owner.active_structure_publication_id \
+                     WHERE c.id = ? AND p.state = 'Active' AND p.publication_kind = 'Structure'\
+                 ) candidates ORDER BY activated_generation DESC LIMIT 1",
+                [item_id.into(), item_id.into()],
+            ))
+            .await
+            .expect("read effective source publication")
+            .expect("catalog item has an effective source publication");
+        (
+            row.try_get("", "publication_id")
+                .expect("effective source publication ID"),
+            row.try_get("", "activated_generation")
+                .expect("effective source publication generation"),
+        )
     }
 
     fn stop(mut self) {
@@ -601,97 +641,44 @@ async fn tcp_filesystem_library_survives_restart_and_supports_jellyfin_playback_
     .await;
     let episode_id = episode["Id"].as_str().expect("episode id").to_owned();
 
-    let playback = json_response(
-        client
-            .post(format!(
-                "{}/Items/{episode_id}/PlaybackInfo",
-                second.base_url
-            ))
-            .header("Authorization", token_header(&token))
-            .json(&json!({
-                "DeviceProfile": {
-                    "DirectPlayProfiles": [{"Type": "Video", "Container": "mp4"}]
-                }
-            }))
-            .send()
-            .await
-            .expect("playback info request"),
-        StatusCode::OK,
-        "resolve direct-play playback info",
+    let initial_delivery =
+        assert_playback_delivery_contract(&client, &second, &token, &user_id, &episode_id).await;
+    let initial_publication = second.effective_source_publication(&episode_id).await;
+
+    let reindex_job = submit_manual_task(
+        &client,
+        &second,
+        &token,
+        &format!("/Admin/Tasks/IndexMediaSources/{episode_id}"),
+        "submit playback-contract source re-index",
     )
     .await;
-    let source = playback["MediaSources"]
-        .as_array()
-        .and_then(|sources| sources.first())
-        .unwrap_or_else(|| panic!("PlaybackInfo returned no media sources: {playback}"));
-    let source_id = source["Id"].as_str().expect("media source id").to_owned();
-    assert_eq!(source["Protocol"], "Http");
-    assert_eq!(source["Path"], Value::Null);
-    assert_eq!(source["IsRemote"], false);
-    assert_eq!(source["SupportsTranscoding"], false);
-    assert_eq!(source["SupportsDirectStream"], false);
-    assert_eq!(source["SupportsDirectPlay"], true);
-    assert_eq!(source["TranscodingUrl"], Value::Null);
-    let direct_stream = source["DirectStreamUrl"]
-        .as_str()
-        .expect("direct stream URL");
+    wait_for_job(
+        &client,
+        &second,
+        &token,
+        Some(&reindex_job),
+        "IndexMediaSources",
+        Some(&episode_id),
+        100,
+        "playback-contract source re-index",
+    )
+    .await;
+    let reindexed_delivery =
+        assert_playback_delivery_contract(&client, &second, &token, &user_id, &episode_id).await;
+    let reindexed_publication = second.effective_source_publication(&episode_id).await;
+    assert_ne!(reindexed_publication.0, initial_publication.0);
+    assert!(reindexed_publication.1 > initial_publication.1);
+    assert_eq!(reindexed_delivery.source_id, initial_delivery.source_id);
     assert_eq!(
-        direct_stream,
-        format!("/Videos/{episode_id}/stream?static=true&mediaSourceId={source_id}")
+        reindexed_delivery.direct_stream_url,
+        initial_delivery.direct_stream_url
     );
-    let subtitle = source["MediaStreams"]
-        .as_array()
-        .and_then(|streams| streams.iter().find(|stream| stream["IsExternal"] == true))
-        .and_then(|stream| stream["DeliveryUrl"].as_str())
-        .expect("external subtitle delivery URL");
-    assert!(direct_stream.starts_with('/'));
-    assert!(subtitle.starts_with('/'));
-
-    let stream = client
-        .get(format!("{}{}", second.base_url, direct_stream))
-        .header("Authorization", token_header(&token))
-        .header("Range", "bytes=0-15")
-        .send()
-        .await
-        .expect("range media request");
-    assert_eq!(stream.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
-        stream.bytes().await.expect("range response body").as_ref(),
-        &FIXTURE_MEDIA[..16]
+        reindexed_delivery.external_subtitles,
+        initial_delivery.external_subtitles
     );
-    let head = client
-        .head(format!("{}{}", second.base_url, direct_stream))
-        .header("Authorization", token_header(&token))
-        .header("Range", "bytes=0-15")
-        .send()
-        .await
-        .expect("range media HEAD request");
-    assert_eq!(head.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(head.headers()["content-length"], "16");
-    assert_eq!(
-        head.headers()["content-range"],
-        format!("bytes 0-15/{}", FIXTURE_MEDIA.len())
-    );
-    assert!(
-        head.bytes()
-            .await
-            .expect("range HEAD response body")
-            .is_empty()
-    );
-    let subtitle_response = client
-        .get(format!("{}{}", second.base_url, subtitle))
-        .header("Authorization", token_header(&token))
-        .send()
-        .await
-        .expect("subtitle request");
-    assert_eq!(subtitle_response.status(), StatusCode::OK);
-    assert_eq!(
-        subtitle_response
-            .text()
-            .await
-            .expect("subtitle response body"),
-        FIXTURE_SUBTITLE
-    );
+    let source_id = reindexed_delivery.source_id;
 
     for path in [
         "/Sessions/Playing",
@@ -765,6 +752,192 @@ async fn tcp_filesystem_library_survives_restart_and_supports_jellyfin_playback_
             .and_then(|item| item["UserData"]["PlaybackPositionTicks"].as_i64()),
         Some(3_000_000)
     );
+}
+
+#[allow(clippy::too_many_lines)] // Keeps the externally observable direct-play contract together.
+async fn assert_playback_delivery_contract(
+    client: &Client,
+    server: &TestServer,
+    token: &str,
+    user_id: &str,
+    episode_id: &str,
+) -> PlaybackContractSnapshot {
+    let detail = json_response(
+        client
+            .get(format!(
+                "{}/Items/{episode_id}?userId={user_id}",
+                server.base_url
+            ))
+            .header("Authorization", token_header(token))
+            .send()
+            .await
+            .expect("episode detail request"),
+        StatusCode::OK,
+        "read episode detail",
+    )
+    .await;
+    assert_eq!(detail["Id"], episode_id);
+    assert_eq!(detail["Type"], "Episode");
+
+    let playback = json_response(
+        client
+            .post(format!(
+                "{}/Items/{episode_id}/PlaybackInfo?userId={user_id}",
+                server.base_url
+            ))
+            .header("Authorization", token_header(token))
+            .json(&json!({
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{"Type": "Video", "Container": "mp4"}]
+                }
+            }))
+            .send()
+            .await
+            .expect("playback info request"),
+        StatusCode::OK,
+        "resolve direct-play playback info",
+    )
+    .await;
+    let sources = playback["MediaSources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("PlaybackInfo returned invalid media sources: {playback}"));
+    assert_eq!(
+        sources.len(),
+        1,
+        "fixture must expose its complete source list"
+    );
+    let source = &sources[0];
+    let source_id = source["Id"].as_str().expect("media source id").to_owned();
+    assert_eq!(source["Protocol"], "Http");
+    assert_eq!(source["Path"], Value::Null);
+    assert_eq!(source["IsRemote"], false);
+    assert_eq!(source["SupportsTranscoding"], false);
+    assert_eq!(source["SupportsDirectStream"], false);
+    assert_eq!(source["SupportsDirectPlay"], true);
+    assert_eq!(source["TranscodingUrl"], Value::Null);
+    let direct_stream_url = source["DirectStreamUrl"]
+        .as_str()
+        .expect("direct stream URL")
+        .to_owned();
+    assert_eq!(
+        direct_stream_url,
+        format!("/Videos/{episode_id}/stream?static=true&mediaSourceId={source_id}")
+    );
+    let external_subtitles = source["MediaStreams"]
+        .as_array()
+        .expect("media stream list")
+        .iter()
+        .filter(|stream| stream["IsExternal"] == true)
+        .map(|stream| {
+            assert_eq!(stream["Type"], "Subtitle");
+            assert_eq!(stream["DeliveryMethod"], "External");
+            assert_eq!(stream["IsExternalUrl"], false);
+            (
+                stream["Index"].as_i64().expect("subtitle delivery index"),
+                stream["DeliveryUrl"]
+                    .as_str()
+                    .expect("external subtitle delivery URL")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        external_subtitles.len(),
+        1,
+        "fixture must expose exactly one external subtitle"
+    );
+    let (subtitle_index, subtitle_url) = &external_subtitles[0];
+    assert_eq!(
+        subtitle_url,
+        &format!("/Videos/{episode_id}/{source_id}/Subtitles/{subtitle_index}/Stream.srt")
+    );
+    assert!(direct_stream_url.starts_with('/'));
+    assert!(subtitle_url.starts_with('/'));
+
+    let stream = client
+        .get(format!("{}{}", server.base_url, direct_stream_url))
+        .header("Authorization", token_header(token))
+        .send()
+        .await
+        .expect("full media request");
+    assert_eq!(stream.status(), StatusCode::OK);
+    assert_eq!(
+        stream
+            .bytes()
+            .await
+            .expect("full media response body")
+            .as_ref(),
+        FIXTURE_MEDIA
+    );
+    let head = client
+        .head(format!("{}{}", server.base_url, direct_stream_url))
+        .header("Authorization", token_header(token))
+        .send()
+        .await
+        .expect("full media HEAD request");
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers()["content-length"],
+        FIXTURE_MEDIA.len().to_string()
+    );
+    assert!(
+        head.bytes()
+            .await
+            .expect("full HEAD response body")
+            .is_empty()
+    );
+    let range = client
+        .get(format!("{}{}", server.base_url, direct_stream_url))
+        .header("Authorization", token_header(token))
+        .header("Range", "bytes=0-15")
+        .send()
+        .await
+        .expect("range media request");
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        range.bytes().await.expect("range response body").as_ref(),
+        &FIXTURE_MEDIA[..16]
+    );
+    let range_head = client
+        .head(format!("{}{}", server.base_url, direct_stream_url))
+        .header("Authorization", token_header(token))
+        .header("Range", "bytes=0-15")
+        .send()
+        .await
+        .expect("range media HEAD request");
+    assert_eq!(range_head.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(range_head.headers()["content-length"], "16");
+    assert_eq!(
+        range_head.headers()["content-range"],
+        format!("bytes 0-15/{}", FIXTURE_MEDIA.len())
+    );
+    assert!(
+        range_head
+            .bytes()
+            .await
+            .expect("range HEAD response body")
+            .is_empty()
+    );
+    let subtitle_response = client
+        .get(format!("{}{}", server.base_url, subtitle_url))
+        .header("Authorization", token_header(token))
+        .send()
+        .await
+        .expect("subtitle request");
+    assert_eq!(subtitle_response.status(), StatusCode::OK);
+    assert_eq!(
+        subtitle_response
+            .text()
+            .await
+            .expect("subtitle response body"),
+        FIXTURE_SUBTITLE
+    );
+
+    PlaybackContractSnapshot {
+        source_id,
+        direct_stream_url,
+        external_subtitles,
+    }
 }
 
 #[tokio::test]
