@@ -26,7 +26,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | 7 | 主页行 | Latest / Resume / NextUp | SQL + Redis user revision | ⚠️ Latest、Resume、NextUp 的 SQL 可见性、用户隔离、稳定排序/分页及 cache-aside 已实现；启动预热覆盖全局 Latest、最多 64 个 Library Latest 以及默认 Resume/NextUp；NextUp 高级筛选/重看模式未实现 |
 | 8 | 详情 | `GET /Items/{id}` | 不触发 Media Probe | ⚠️ 鉴权、用户边界、active publication 读取、DTO、cache-aside 及 Movie Source Index enqueue/join/有界等待已实现；生产 worker/fields 扩展未实现，且不会 Probe |
 | 9 | 图片 | `GET /Items/{id}/Images/{type}` | 内容寻址 AssetBlob | ⚠️ 鉴权原图 GET/HEAD、ImageTags、ETag/304、受限解码/原子内容寻址写入及 TMDb Primary 采集已实现；本地图/import 下载器与变换未接入 |
-| 10 | 播放信息 | `GET|POST /Items/{id}/PlaybackInfo` | 多 MediaSource；首次可惰性 Probe | ⚠️ 鉴权、DeviceProfile 容器门禁、多 active source、Probe single-flight、catalog/user/probe-revision 隔离的 source-metadata cache-aside 及 Filesystem Matroska/ISO-BMFF worker 已实现；provider-neutral 云端 fake 已验证 Probe 通过 runtime registry 使用对象元数据和有界 Range 后持久化结果，完整 stream 字段仍待补齐 |
+| 10 | 播放信息 | `GET|POST /Items/{id}/PlaybackInfo` | 多 MediaSource；首次可惰性 Probe | ⚠️ 鉴权、DeviceProfile 容器门禁、多 active source、Probe single-flight、catalog/user/probe-revision 隔离的 source-metadata cache-aside 及 Filesystem Matroska/ISO-BMFF worker 已实现；Filesystem 与 provider-neutral 云端请求/完整规范化响应 golden 已固定，云端 deterministic contract 通过真实 Source Index、双源 Probe、Admin 默认策略和 TCP 验证完整有序列表。完整 stream 字段仍待补齐 |
 | 11 | 原文件 | `GET|HEAD /Videos/{id}/stream` | 本地读取或云盘统一 Range 代理 | ✅ active source/location 鉴权、Filesystem/云端 provider-neutral 原文件 GET/HEAD、单 Range、206/416、ETag/If-Range、字节一致及上游身份隐藏已验证 |
 | 12 | 外挂字幕 | 两种 `/Videos/{id}/{mediaSourceId}/Subtitles/.../Stream.{format}` | 鉴权、本机路由、仅源格式 byte-for-byte | ⚠️ 两种路由、活动发布/索引/库授权、原格式直出已实现；转换与非零时间偏移明确拒绝，待真实客户端验证 |
 | 13 | 进度 | Sessions Playing/Progress/Stopped/Ping | SQL SoT + Redis 热点刷新 | ⚠️ 持久 playback session、Playing/Progress/Stopped 幂等写入与 Ping 活跃刷新已实现；Jellyfin OpenAPI 的可选 `ItemId`/`MediaSourceId`/`PlaySessionId` 可被兼容接受，无 item 的遥测 no-op，item-only 事件选择首选 source 并派生稳定 session；Redis、完成阈值和真实客户端验证未实现 |
@@ -88,7 +88,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | CatalogItem 与路径解耦 | ItemId 不由路径决定 | ⚠️ 领域类型、schema、active publication 详情/播放读取及 storage relink 后稳定 ItemId 已实现；跨来源自动 identity resolution 尚未完整接入 |
 | 跨库 CatalogItem 复用 | `library_catalog_items` 多对多 | ⚠️ 查询以 membership `EXISTS` 校验并防止跨库子项泄漏；写侧尚未实现 |
 | 多 MediaSource | 完整多源 DTO + §4.4 正式默认排序；客户端版本 UI 非门禁 | ⚠️ publication-owned SQL 投影、active-only 完整 DTO、DeviceProfile/上次使用、管理员默认与优先级、分辨率、编解码兼容、账号状态和 stable-key 默认排序均已实现；账号状态当前以 `Active > Ready > 其他` 表达，尚无运行时认证/限流健康模型 |
-| MediaSource re-index | 稳定对象/content identity/legacy mapping 保留对外 ID | ⚠️ 相同 stable identity 的 re-index 保留 MediaSourceId、presentation key、Probe 状态与字幕 delivery index；真实服务 TCP smoke 会在显式 `IndexMediaSources` 前后重复详情、PlaybackInfo、GET/HEAD/Range 和字幕原字节链路，并比较稳定 ID/URL/index。管理员确认的 PathWeak relink 会建立 durable identity alias 并让 replacement 复用旧 MediaSourceId/presentation key；通用 content identity 与 alias 管理未实现 |
+| MediaSource re-index | 稳定对象/content identity/legacy mapping 保留对外 ID | ⚠️ 相同 stable identity 的 re-index 保留 MediaSourceId、presentation key、Probe 状态与字幕 delivery index；Filesystem 真实进程 TCP smoke 与 provider-neutral 云端 real-TCP contract 都会在 replacement publication 前后重复完整 PlaybackInfo/交付链路，断言 publication ID/generation 前进而两源顺序、默认策略、presentation、URL、字幕 index 与原字节稳定。管理员确认的 PathWeak relink 会建立 durable identity alias 并让 replacement 复用旧 MediaSourceId/presentation key；source removal/tombstone、pointer switch 并发读取、通用 content identity 与 alias 管理未实现 |
 | 多 MediaLocation | 一个版本多个镜像 | ⚠️ publication relationship、全局 StorageObject identity、动态 presence、可用 location 选择及 provider-neutral 代理已实现；可信 content identity 跨镜像复用与完整健康排序未实现 |
 | StorageObject 稳定身份 | provider ID/可靠 file ID；Filesystem 路径 fallback 标为 weak | ✅ provider stable ID、Unix dev/inode 与非 Unix canonical-path `PathWeak` 已进入持久化 identity_quality；稳定 ID rename 保持对象身份，弱身份只生成待确认 relink candidate |
 | Items query/filter/sort/page | 索引 SQL + Redis cache-aside | ⚠️ SQL 类型过滤、`SortName` 升序、1..=200 分页及 cache-aside 已实现；其他排序未实现 |
@@ -129,7 +129,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | 能力 | v2.6 语义 | 状态 |
 |------|-----------|------|
 | PlaybackInfo GET + POST | ✅ | ⚠️ 鉴权 GET/POST、可选 session/request DeviceProfile、query 覆盖 body 的 UserId/MediaSourceId/EnableDirectPlay 与安全空降级已实现；其余可选选择字段待通用契约矩阵验证 |
-| 多 MediaSource DTO | ✅ 始终可多源；默认排序正式；客户端 UI 仅 observation | ⚠️ 全量可播放 source 列表、本机 URL、七层默认排序及管理员 `PUT /Admin/Items/{itemId}/MediaSources/{mediaSourceId}/PlaybackPolicy` 已实现；隐藏源同时拒绝 PlaybackInfo、视频、字幕和播放事件，账号健康当前为持久化账号状态代理 |
+| 多 MediaSource DTO | ✅ 始终可多源；默认排序正式；客户端 UI 仅 observation | ⚠️ 全量可播放 source 列表、本机 URL、七层默认排序及管理员 `PUT /Admin/Items/{itemId}/MediaSources/{mediaSourceId}/PlaybackPolicy` 已实现；deterministic cloud contract 固定两个 MKV source 的完整字段与顺序，按数据库 provider-object 语义归一化动态 ID，并证明显式 default 第一项可播、alternate 仍完整可取。隐藏源同时拒绝 PlaybackInfo、视频、字幕和播放事件，账号健康当前为持久化账号状态代理；真实客户端多版本选择 UI 仍仅作 observation |
 | 详情请求 Probe | ❌；只允许 Source Indexing | ✅ 仅 enqueue/join Source Index，不执行 Probe |
 | 首次 PlaybackInfo Probe | 有界头/尾 Range，single-flight | ⚠️ MediaSource-scope durable single-flight、精确 storage-root affinity、root-local 祖先/事实来源授权、Filesystem worker 与两端各最多 1 MiB 的 Matroska、ISO-BMFF MP4/M4V 解析，以及 AVC/HEVC profile/level 配置记录提取已实现；provider-neutral 云端 adapter 已覆盖 runtime registry、对象快照、有界 Range 与 Probe commit 门禁 |
 | Probe 持久化 | 单 Location 可 Probe；可信 content identity 相同的镜像才可复用；commit 后失效旧缓存 | ⚠️ 单 active Location 快照、首次对象读取前、每次 Range 前、最终对象读取前及 commit 时的重复授权/revision 校验、SQL 原子 commit/generation 已实现；跨镜像可信 content identity 复用与 Redis 失效未实现 |
@@ -137,14 +137,14 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | Probe 失败 | 不声明错误 Direct Play | ✅ 确定性解析失败原子写入 ProbeFailed、失败 WorkJob 与 generation；PlaybackInfo 仅声明 Probed source |
 | DeviceProfile Direct Play | 精确判断；钉扎 Jellyfin OpenAPI Supports/Protocol/Path/URL golden | ⚠️ 缺省/显式空 profile、container、视频/音频 codec、Width/Height/AudioChannels/VideoProfile/VideoLevel 条件，完整 source 列表与 `SupportsDirectPlay` 条件序列化，以及正式七层默认排序已实现；其余 Jellyfin 条件属性待补齐 |
 | Direct Stream / remux / transcode pipeline | ❌ 永久非目标；兼容 flag 不得改变 byte-for-byte 行为 | ❌ |
-| Filesystem GET/HEAD/Range | 原文件 byte-for-byte | ✅ secure openat、重启 identity 恢复、GET/HEAD/单 Range 合同测试已实现；真实服务 TCP smoke 串联认证、首页/浏览、Lazy Series、详情、PlaybackInfo、完整 GET/HEAD、Range GET/HEAD、外挂字幕、Playing/Progress/Stopped 与 Resume，并在 re-index 后复验交付字节和稳定标识 |
+| Filesystem GET/HEAD/Range | 原文件 byte-for-byte | ✅ secure openat、重启 identity 恢复、GET/HEAD/单 Range 合同测试已实现；真实服务 TCP smoke 使用 literal 请求与完整规范化响应 golden，串联认证、首页/浏览、Lazy Series、详情、PlaybackInfo、完整 GET/HEAD、Range GET/HEAD、外挂字幕、Playing/Progress/Stopped 与 Resume，并在 re-index 后复验交付字节和稳定标识 |
 | Audio GET/HEAD/Range | `/Audio/{itemId}/stream` 原文件 byte-for-byte | ✅ 已存在的 Audio CatalogItem 可经浏览筛选与默认 Latest 投影；PlaybackInfo 仅广告本机 `/Audio/{itemId}/stream`，并与鉴权 GET/HEAD/单 Range 使用同一原始字节解析路径。自动音乐库发现、Audio Source Index 与 `MusicAlbum` 层级按 PLAN §5.2 属于后续扩展，不是 v1 门禁 |
-| 云盘服务器代理 | `Protocol=Http`，DirectStreamUrl 仅为 TJXY 路由；不重定向、不暴露 URL/token | ✅ runtime backend 经本地 TJXY 路由流式代理，云端 fake Range/字节一致与 provider/object/credential 不泄漏已验证 |
+| 云盘服务器代理 | `Protocol=Http`，DirectStreamUrl 仅为 TJXY 路由；不重定向、不暴露 URL/token | ⚠️ runtime backend 经本地 TJXY 路由流式代理；provider-neutral deterministic real-TCP contract 已覆盖真实 Source Index/Probe、完整两源响应 golden、默认源完整 GET/HEAD/Range GET/HEAD、alternate 完整 GET、外挂字幕原字节、精确 backend range 序列，以及 PlaybackInfo body 与所有相关 HTTP response header 的 provider/object/drive/account/credential/upstream URL/token 排除。live Google/OneDrive adapter 与 server 的组合验收和生产 tracing 日志脱敏 capture 尚未完成 |
 | 206 / 416 / If-Range / ETag | ✅ | ✅ 单 Range、suffix/open-ended、If-Range mismatch 与 416 `bytes */size` 已覆盖 |
 | 下游断连取消上游 | ✅ | ⚠️ 响应 body 直接持有 backend stream，drop 会取消读取；待真实断连测试 |
 | 视频完整缓存 | ❌ | ❌ |
 | Range/segment cache | ❌ | ❌ |
-| 云端外挂字幕 | OpenAPI 12 路由；TJXY 鉴权、源格式 byte-for-byte，客户端渲染 | ✅ provider-neutral cloud backend 经鉴权本地路由按源格式 byte-for-byte 拉取已验证 |
+| 云端外挂字幕 | OpenAPI 12 路由；TJXY 鉴权、源格式 byte-for-byte，客户端渲染 | ✅ provider-neutral cloud backend 会从 PlaybackInfo 广告的本地 `DeliveryUrl` 经鉴权按源格式 byte-for-byte 拉取；delivery index/URL 在 replacement publication 前后保持稳定 |
 | 字幕转换/时间轴重写/burn-in | ❌；不同格式或非零偏移返回 400/415 | ❌ |
 
 ---
