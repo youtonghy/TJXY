@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use tjxy_application::{
     AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
     MediaInspector, MediaReadService, PlaystateService, ProbeInput, ProbeService,
-    ProbeServiceError, SystemClock, TaskService, UserDataService,
+    ProbeServiceError, SourceIndexService, SystemClock, TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
 use tjxy_server::{AppState, ServerIdentity, build_router};
@@ -37,6 +37,19 @@ use uuid::Uuid;
 const SERVER_ID: &str = "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11";
 const IDENTITY: &str =
     r#"MediaBrowser Client="Findroid", Device="Pixel", DeviceId="phone-1", Version="0.16.0""#;
+const CLOUD_DEFAULT_BYTES: &[u8] = b"cloud-byte-stream";
+const CLOUD_ALTERNATE_BYTES: &[u8] = b"other-byte-stream";
+const CLOUD_SUBTITLE_BYTES: &[u8] = b"1\n00:00:01,000 --> 00:00:02,000\nCloud\n\n\n";
+const CLOUD_PROVIDER: &str = "cloud-test";
+const CLOUD_DRIVE: &str = "drive-secret-marker";
+const CLOUD_ACCOUNT_IDENTITY: &str =
+    "https://upstream.invalid/secret?account=account-secret-marker";
+const CLOUD_DISPLAY_NAME: &str = "Cloud Secret Display";
+const CLOUD_CREDENTIAL_REF: &str = "credential-secret-marker:upstream-token-secret";
+const CLOUD_PLAYBACK_REQUEST: &str =
+    include_str!("golden/playback/cloud-multi-source-playback-info.request.json");
+const CLOUD_PLAYBACK_RESPONSE: &str =
+    include_str!("golden/playback/cloud-multi-source-playback-info.response.json");
 
 struct TestApp {
     router: axum::Router,
@@ -49,8 +62,59 @@ struct TestApp {
     subtitle_object_id: String,
     cloud_account: Uuid,
     cloud_object_id: String,
+    cloud_alternate_object_id: String,
     cloud_subtitle_object_id: String,
     cloud_backend: Arc<MemoryCloudBackend>,
+}
+
+struct TcpTestServer {
+    base_url: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+}
+
+impl TcpTestServer {
+    async fn start(router: axum::Router) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cloud playback test server");
+        let address = listener.local_addr().expect("read test server address");
+        let (shutdown, receiver) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = receiver.await;
+                })
+                .await
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            shutdown: Some(shutdown),
+            task: Some(task),
+        }
+    }
+
+    async fn stop(mut self) {
+        self.shutdown
+            .take()
+            .expect("shutdown sender")
+            .send(())
+            .expect("test server receives shutdown");
+        let task = self.task.take().expect("test server task");
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("test server stops before timeout")
+            .expect("test server task joins")
+            .expect("test server exits cleanly");
+    }
+}
+
+impl Drop for TcpTestServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
 }
 
 struct MemoryCloudBackend {
@@ -73,6 +137,10 @@ impl MemoryCloudBackend {
 
     fn ranges(&self) -> Vec<(String, u64, u64)> {
         self.ranges.lock().unwrap().clone()
+    }
+
+    fn take_ranges(&self) -> Vec<(String, u64, u64)> {
+        self.ranges.lock().unwrap().drain(..).collect()
     }
 }
 
@@ -200,22 +268,21 @@ async fn filesystem_fixture() -> (TempDir, Arc<FilesystemBackend>, String, Strin
     )
 }
 
-fn cloud_fixture() -> (Uuid, String, String, Arc<MemoryCloudBackend>) {
+fn cloud_fixture() -> (Uuid, String, String, String, Arc<MemoryCloudBackend>) {
     let account = Uuid::new_v4();
     let object = "remote-object-secret".to_owned();
+    let alternate = "remote-alternate-secret".to_owned();
     let subtitle = "remote-subtitle-secret".to_owned();
     let backend = Arc::new(MemoryCloudBackend {
         objects: HashMap::from([
-            (object.clone(), b"cloud-byte-stream".to_vec()),
-            (
-                subtitle.clone(),
-                b"1\n00:00:01,000 --> 00:00:02,000\nCloud\n\n\n".to_vec(),
-            ),
+            (object.clone(), CLOUD_DEFAULT_BYTES.to_vec()),
+            (alternate.clone(), CLOUD_ALTERNATE_BYTES.to_vec()),
+            (subtitle.clone(), CLOUD_SUBTITLE_BYTES.to_vec()),
         ]),
         reads: Mutex::new(VecDeque::new()),
         ranges: Mutex::new(Vec::new()),
     });
-    (account, object, subtitle, backend)
+    (account, object, alternate, subtitle, backend)
 }
 
 struct CloudProbeInspector;
@@ -269,7 +336,13 @@ async fn test_app() -> TestApp {
     let (media, backend, media_object_id, empty_media_object_id, subtitle_object_id) =
         filesystem_fixture().await;
     let media_account = Uuid::new_v4();
-    let (cloud_account, cloud_object_id, cloud_subtitle_object_id, cloud_backend) = cloud_fixture();
+    let (
+        cloud_account,
+        cloud_object_id,
+        cloud_alternate_object_id,
+        cloud_subtitle_object_id,
+        cloud_backend,
+    ) = cloud_fixture();
     let media_reader = Arc::new(
         MediaReadService::new(database.clone())
             .with_backend(media_account, backend)
@@ -302,6 +375,7 @@ async fn test_app() -> TestApp {
         subtitle_object_id,
         cloud_account,
         cloud_object_id,
+        cloud_alternate_object_id,
         cloud_subtitle_object_id,
         cloud_backend,
     }
@@ -442,6 +516,401 @@ async fn seed_item(
         .await
         .unwrap();
     id
+}
+
+struct CloudMultiSourceFixture {
+    item: CatalogItemId,
+    root: Uuid,
+    default_object: Uuid,
+    alternate_object: Uuid,
+    subtitle_object: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CloudPresentations {
+    default_source: tjxy_common::MediaSourceId,
+    default: Uuid,
+    alternate_source: tjxy_common::MediaSourceId,
+    alternate: Uuid,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CloudPlaybackSnapshot {
+    source_order: Vec<Uuid>,
+    direct_urls: Vec<String>,
+    subtitle_index: i64,
+    subtitle_url: String,
+}
+
+#[allow(clippy::too_many_lines)] // Mirrors one reconciled directory and its complete child inventory.
+async fn seed_cloud_multi_source_inventory(app: &TestApp) -> CloudMultiSourceFixture {
+    let library = seed_library(&app.database, "Cloud Movies", true).await;
+    let item = seed_item(&app.database, library, "Remote Default", "Movie").await;
+    let root = Uuid::new_v4();
+    let parent = Uuid::new_v4();
+    let default_object = Uuid::new_v4();
+    let alternate_object = Uuid::new_v4();
+    let subtitle_object = Uuid::new_v4();
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("source_state"), "NotIndexed")
+                    .value(Alias::new("source_index_revision"), 1_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("storage_accounts"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("provider"),
+                Alias::new("display_name"),
+                Alias::new("account_identity"),
+                Alias::new("credential_ref"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                app.cloud_account.into(),
+                CLOUD_PROVIDER.into(),
+                CLOUD_DISPLAY_NAME.into(),
+                CLOUD_ACCOUNT_IDENTITY.into(),
+                CLOUD_CREDENTIAL_REF.into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_root_id"),
+                Alias::new("sync_revision"),
+                Alias::new("reconciled_sync_revision"),
+            ])
+            .values_panic([
+                root.into(),
+                app.cloud_account.into(),
+                "cloud-root-secret".into(),
+                1_i64.into(),
+                1_i64.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("library_storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("library_id"),
+                Alias::new("storage_root_id"),
+            ])
+            .values_panic([Uuid::new_v4().into(), library.into(), root.into()])
+            .to_owned(),
+    ] {
+        app.database
+            .execute(backend.build(&statement))
+            .await
+            .unwrap();
+    }
+    for (id, provider_object_id, name, object_type, size) in [
+        (
+            parent,
+            "remote-directory-secret",
+            "Remote Default",
+            "Directory",
+            0_i64,
+        ),
+        (
+            default_object,
+            app.cloud_object_id.as_str(),
+            "Remote Default.mkv",
+            "File",
+            i64::try_from(CLOUD_DEFAULT_BYTES.len()).unwrap(),
+        ),
+        (
+            alternate_object,
+            app.cloud_alternate_object_id.as_str(),
+            "Remote Alternate.mkv",
+            "File",
+            i64::try_from(CLOUD_ALTERNATE_BYTES.len()).unwrap(),
+        ),
+        (
+            subtitle_object,
+            app.cloud_subtitle_object_id.as_str(),
+            "Remote Default.eng.srt",
+            "File",
+            i64::try_from(CLOUD_SUBTITLE_BYTES.len()).unwrap(),
+        ),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_account_id"),
+                            Alias::new("provider_drive_id"),
+                            Alias::new("provider_object_id"),
+                            Alias::new("name"),
+                            Alias::new("normalized_name"),
+                            Alias::new("object_type"),
+                            Alias::new("size"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("identity_quality"),
+                            Alias::new("presence_state"),
+                            Alias::new("facts_observed_storage_root_id"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            app.cloud_account.into(),
+                            CLOUD_DRIVE.into(),
+                            provider_object_id.into(),
+                            name.into(),
+                            name.to_lowercase().into(),
+                            object_type.into(),
+                            size.into(),
+                            1_i64.into(),
+                            (id == parent).into(),
+                            i64::from(id == parent).into(),
+                            "ProviderStable".into(),
+                            "Present".into(),
+                            root.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        app.database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_root_objects"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("parent_storage_object_id"),
+                            Alias::new("observed_sync_revision"),
+                            Alias::new("children_indexed"),
+                            Alias::new("children_index_revision"),
+                            Alias::new("presence_state"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            root.into(),
+                            id.into(),
+                            if id == parent { None } else { Some(parent) }.into(),
+                            1_i64.into(),
+                            (id == parent).into(),
+                            i64::from(id == parent).into(),
+                            "Present".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        parent.into(),
+                        item.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    CloudMultiSourceFixture {
+        item,
+        root,
+        default_object,
+        alternate_object,
+        subtitle_object,
+    }
+}
+
+async fn index_cloud_sources(
+    database: &DatabaseConnection,
+    item: CatalogItemId,
+    task_revision: i64,
+    input_sync_revision: i64,
+) -> i64 {
+    let jobs = tjxy_db::WorkJobRepository::new(database);
+    let submission = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::IndexMediaSources,
+                tjxy_db::WorkScope::CatalogItem(item),
+                task_revision,
+                100,
+            )
+            .unwrap()
+            .with_input_sync_revision(input_sync_revision)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::IndexMediaSources],
+            "cloud-multi-source-index",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), submission.job().id());
+    SourceIndexService::new(database.clone())
+        .execute(&claimed)
+        .await
+        .unwrap()
+}
+
+async fn cloud_presentations(
+    app: &TestApp,
+    fixture: &CloudMultiSourceFixture,
+) -> CloudPresentations {
+    let sources = tjxy_db::CatalogPublicationRepository::new(&app.database)
+        .active_sources(fixture.item)
+        .await
+        .unwrap();
+    let mut default = None;
+    let mut alternate = None;
+    for source in sources {
+        assert_eq!(source.locations().len(), 1);
+        let location = &source.locations()[0];
+        let provider_object_id: String = app
+            .database
+            .query_one(
+                app.database.get_database_backend().build(
+                    Query::select()
+                        .column(Alias::new("provider_object_id"))
+                        .from(Alias::new("storage_objects"))
+                        .and_where(
+                            Expr::col(Alias::new("id")).eq(location.storage_object_id().as_uuid()),
+                        ),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "provider_object_id")
+            .unwrap();
+        let value = (source.id(), source.presentation_key().as_uuid());
+        match provider_object_id.as_str() {
+            object if object == app.cloud_object_id => {
+                assert!(default.replace(value).is_none());
+            }
+            object if object == app.cloud_alternate_object_id => {
+                assert!(alternate.replace(value).is_none());
+            }
+            object => panic!("unexpected cloud provider object {object}"),
+        }
+    }
+    let (default_source, default) = default.expect("default cloud source");
+    let (alternate_source, alternate) = alternate.expect("alternate cloud source");
+    assert_ne!(default, alternate);
+    CloudPresentations {
+        default_source,
+        default,
+        alternate_source,
+        alternate,
+    }
+}
+
+async fn probe_cloud_sources(app: &TestApp, fixture: &CloudMultiSourceFixture) {
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    for (owner, use_default) in [
+        ("cloud-default-probe", true),
+        ("cloud-alternate-probe", false),
+    ] {
+        let current = cloud_presentations(app, fixture).await;
+        let source_id = if use_default {
+            current.default_source
+        } else {
+            current.alternate_source
+        };
+        let active = tjxy_db::CatalogPublicationRepository::new(&app.database)
+            .active_sources(fixture.item)
+            .await
+            .unwrap();
+        let expected_revision = active
+            .iter()
+            .find(|source| source.id() == source_id)
+            .expect("active Probe source")
+            .probe_revision();
+        let submission = jobs
+            .enqueue_or_join(
+                &tjxy_db::WorkJobSpec::new(
+                    tjxy_db::WorkTaskKind::ProbeMedia,
+                    tjxy_db::WorkScope::MediaSource(source_id),
+                    expected_revision,
+                    200,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let claimed = jobs
+            .claim_next(
+                &[tjxy_db::WorkTaskKind::ProbeMedia],
+                owner,
+                Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id(), submission.job().id());
+        ProbeService::new(app.database.clone())
+            .with_backend(app.cloud_account, Arc::clone(&app.cloud_backend))
+            .with_inspector(Arc::new(CloudProbeInspector))
+            .execute(&claimed)
+            .await
+            .unwrap_or_else(|error| panic!("{owner} failed: {error:?}"));
+    }
+}
+
+async fn effective_source_publication(
+    database: &DatabaseConnection,
+    item: CatalogItemId,
+) -> (Uuid, i64) {
+    let row = database
+        .query_one(Statement::from_sql_and_values(
+            database.get_database_backend(),
+            "SELECT p.id, p.activated_generation FROM catalog_items c \
+             INNER JOIN catalog_publications p ON p.id = c.active_source_publication_id \
+             WHERE c.id = ? AND p.state = 'Active' AND p.publication_kind = 'Sources'",
+            [item.as_uuid().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    (
+        row.try_get("", "id").unwrap(),
+        row.try_get("", "activated_generation").unwrap(),
+    )
 }
 
 async fn seed_hybrid_series(database: &DatabaseConnection) -> (Uuid, CatalogItemId) {
@@ -1294,6 +1763,342 @@ async fn stream_request(
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+fn token_header(token: &str) -> String {
+    format!(r#"MediaBrowser Token="{token}""#)
+}
+
+fn cloud_leak_markers(app: &TestApp, fixture: &CloudMultiSourceFixture) -> Vec<String> {
+    [
+        CLOUD_PROVIDER.to_owned(),
+        app.cloud_object_id.clone(),
+        app.cloud_alternate_object_id.clone(),
+        app.cloud_subtitle_object_id.clone(),
+        CLOUD_DRIVE.to_owned(),
+        app.cloud_account.to_string(),
+        CLOUD_ACCOUNT_IDENTITY.to_owned(),
+        "account-secret-marker".to_owned(),
+        CLOUD_DISPLAY_NAME.to_owned(),
+        CLOUD_CREDENTIAL_REF.to_owned(),
+        "credential-secret-marker".to_owned(),
+        "https://upstream.invalid/secret".to_owned(),
+        "upstream-token-secret".to_owned(),
+        fixture.root.to_string(),
+        fixture.default_object.to_string(),
+        fixture.alternate_object.to_string(),
+        fixture.subtitle_object.to_string(),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn assert_no_markers(encoded: &str, markers: &[String], context: &str) {
+    for marker in markers {
+        assert!(
+            !encoded.contains(marker),
+            "{context} leaked marker {marker:?}"
+        );
+    }
+}
+
+fn assert_headers_do_not_leak(
+    headers: &reqwest::header::HeaderMap,
+    markers: &[String],
+    context: &str,
+) {
+    let encoded = headers
+        .iter()
+        .map(|(name, value)| format!("{}:{}", name, value.to_str().unwrap_or("<binary>")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_no_markers(&encoded, markers, context);
+}
+
+async fn tcp_login(
+    client: &reqwest::Client,
+    server: &TcpTestServer,
+    markers: &[String],
+) -> (Uuid, String) {
+    let response = client
+        .post(format!("{}/Users/AuthenticateByName", server.base_url))
+        .header(header::AUTHORIZATION, IDENTITY)
+        .json(&json!({"Username": "alice", "Pw": "correct horse"}))
+        .send()
+        .await
+        .expect("authenticate cloud playback administrator");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_headers_do_not_leak(response.headers(), markers, "authentication header");
+    let authentication: Value = response.json().await.expect("authentication response JSON");
+    (
+        Uuid::parse_str(
+            authentication["User"]["Id"]
+                .as_str()
+                .expect("authenticated user ID"),
+        )
+        .expect("authenticated user ID is a UUID"),
+        authentication["AccessToken"]
+            .as_str()
+            .expect("authentication token")
+            .to_owned(),
+    )
+}
+
+fn normalize_cloud_playback(
+    playback: &mut Value,
+    item: CatalogItemId,
+    presentations: CloudPresentations,
+) {
+    let _play_session = playback["PlaySessionId"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("PlaybackInfo PlaySessionId is a UUID");
+    playback["PlaySessionId"] = json!("{{play_session_id}}");
+    let sources = playback["MediaSources"]
+        .as_array_mut()
+        .expect("PlaybackInfo media source list");
+    assert_eq!(sources.len(), 2, "complete cloud source list");
+    let mut seen = HashSet::new();
+    for source in sources {
+        let source_id = Uuid::parse_str(source["Id"].as_str().expect("media source ID"))
+            .expect("media source ID is a UUID");
+        assert!(seen.insert(source_id), "duplicate media source ID");
+        let placeholder = if source_id == presentations.default {
+            "{{default_source_id}}"
+        } else if source_id == presentations.alternate {
+            "{{alternate_source_id}}"
+        } else {
+            panic!("unknown media source ID {source_id}");
+        };
+        let expected_direct = format!(
+            "/Videos/{}/stream?static=true&mediaSourceId={source_id}",
+            item.as_uuid()
+        );
+        assert_eq!(
+            source["DirectStreamUrl"].as_str(),
+            Some(expected_direct.as_str())
+        );
+        source["Id"] = json!(placeholder);
+        source["DirectStreamUrl"] = json!(format!(
+            "/Videos/{{{{item_id}}}}/stream?static=true&mediaSourceId={placeholder}"
+        ));
+        for stream in source["MediaStreams"]
+            .as_array_mut()
+            .expect("media stream list")
+        {
+            if stream["IsExternal"] == true {
+                assert_eq!(source_id, presentations.default);
+                let index = stream["Index"].as_i64().expect("subtitle index");
+                let codec = stream["Codec"].as_str().expect("subtitle codec");
+                let expected_subtitle = format!(
+                    "/Videos/{}/{source_id}/Subtitles/{index}/Stream.{codec}",
+                    item.as_uuid()
+                );
+                assert_eq!(
+                    stream["DeliveryUrl"].as_str(),
+                    Some(expected_subtitle.as_str())
+                );
+                stream["DeliveryUrl"] = json!(format!(
+                    "/Videos/{{{{item_id}}}}/{placeholder}/Subtitles/{index}/Stream.{codec}"
+                ));
+            }
+        }
+    }
+    assert_eq!(seen.len(), 2);
+}
+
+async fn read_cloud_playback(
+    client: &reqwest::Client,
+    server: &TcpTestServer,
+    token: &str,
+    user: Uuid,
+    fixture: &CloudMultiSourceFixture,
+    presentations: CloudPresentations,
+    markers: &[String],
+) -> CloudPlaybackSnapshot {
+    let request: Value =
+        serde_json::from_str(CLOUD_PLAYBACK_REQUEST).expect("cloud PlaybackInfo request golden");
+    let response = client
+        .post(format!(
+            "{}/Items/{}/PlaybackInfo?userId={user}",
+            server.base_url,
+            fixture.item.as_uuid()
+        ))
+        .header(header::AUTHORIZATION, token_header(token))
+        .json(&request)
+        .send()
+        .await
+        .expect("cloud PlaybackInfo request");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_headers_do_not_leak(response.headers(), markers, "PlaybackInfo header");
+    let playback: Value = response
+        .json()
+        .await
+        .expect("cloud PlaybackInfo response JSON");
+    assert_no_markers(
+        &serde_json::to_string(&playback).unwrap(),
+        markers,
+        "PlaybackInfo JSON",
+    );
+    let sources = playback["MediaSources"]
+        .as_array()
+        .expect("PlaybackInfo media source list");
+    assert_eq!(sources.len(), 2);
+    let source_order = sources
+        .iter()
+        .map(|source| {
+            Uuid::parse_str(source["Id"].as_str().expect("media source ID"))
+                .expect("media source ID is a UUID")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source_order,
+        vec![presentations.default, presentations.alternate]
+    );
+    let direct_urls = sources
+        .iter()
+        .map(|source| {
+            source["DirectStreamUrl"]
+                .as_str()
+                .expect("direct stream URL")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let subtitles = sources
+        .iter()
+        .flat_map(|source| {
+            source["MediaStreams"]
+                .as_array()
+                .expect("media stream list")
+                .iter()
+                .filter(|stream| stream["IsExternal"] == true)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(subtitles.len(), 1);
+    let subtitle_index = subtitles[0]["Index"].as_i64().expect("subtitle index");
+    let subtitle_url = subtitles[0]["DeliveryUrl"]
+        .as_str()
+        .expect("subtitle URL")
+        .to_owned();
+    let mut normalized = playback;
+    normalize_cloud_playback(&mut normalized, fixture.item, presentations);
+    let expected: Value =
+        serde_json::from_str(CLOUD_PLAYBACK_RESPONSE).expect("cloud PlaybackInfo response golden");
+    assert_eq!(normalized, expected);
+    CloudPlaybackSnapshot {
+        source_order,
+        direct_urls,
+        subtitle_index,
+        subtitle_url,
+    }
+}
+
+async fn assert_cloud_delivery(
+    app: &TestApp,
+    client: &reqwest::Client,
+    server: &TcpTestServer,
+    token: &str,
+    snapshot: &CloudPlaybackSnapshot,
+    markers: &[String],
+) {
+    let authorization = token_header(token);
+    let full = client
+        .get(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
+        .header(header::AUTHORIZATION, &authorization)
+        .send()
+        .await
+        .expect("default full media request");
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_headers_do_not_leak(full.headers(), markers, "default full media header");
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "17");
+    let full_etag = full.headers()[header::ETAG].clone();
+    assert_eq!(full.bytes().await.unwrap().as_ref(), CLOUD_DEFAULT_BYTES);
+
+    let head = client
+        .head(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
+        .header(header::AUTHORIZATION, &authorization)
+        .send()
+        .await
+        .expect("default HEAD request");
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_headers_do_not_leak(head.headers(), markers, "default HEAD header");
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], "17");
+    assert_eq!(head.headers()[header::ETAG], full_etag);
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let range = client
+        .get(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
+        .header(header::AUTHORIZATION, &authorization)
+        .header(header::RANGE, "bytes=6-9")
+        .send()
+        .await
+        .expect("default ranged media request");
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_headers_do_not_leak(range.headers(), markers, "default range header");
+    assert_eq!(range.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
+    assert_eq!(range.headers()[header::CONTENT_LENGTH], "4");
+    assert_eq!(
+        range.bytes().await.unwrap().as_ref(),
+        &CLOUD_DEFAULT_BYTES[6..10]
+    );
+
+    let range_head = client
+        .head(format!("{}{}", server.base_url, snapshot.direct_urls[0]))
+        .header(header::AUTHORIZATION, &authorization)
+        .header(header::RANGE, "bytes=6-9")
+        .send()
+        .await
+        .expect("default ranged HEAD request");
+    assert_eq!(range_head.status(), StatusCode::PARTIAL_CONTENT);
+    assert_headers_do_not_leak(range_head.headers(), markers, "default range HEAD header");
+    assert_eq!(range_head.headers()[header::CONTENT_RANGE], "bytes 6-9/17");
+    assert_eq!(range_head.headers()[header::CONTENT_LENGTH], "4");
+    assert!(range_head.bytes().await.unwrap().is_empty());
+
+    let subtitle = client
+        .get(format!("{}{}", server.base_url, snapshot.subtitle_url))
+        .header(header::AUTHORIZATION, &authorization)
+        .send()
+        .await
+        .expect("advertised cloud subtitle request");
+    assert_eq!(subtitle.status(), StatusCode::OK);
+    assert_headers_do_not_leak(subtitle.headers(), markers, "subtitle header");
+    assert_eq!(
+        subtitle.headers()[header::CONTENT_LENGTH],
+        CLOUD_SUBTITLE_BYTES.len().to_string()
+    );
+    assert_eq!(
+        subtitle.bytes().await.unwrap().as_ref(),
+        CLOUD_SUBTITLE_BYTES
+    );
+
+    let alternate = client
+        .get(format!("{}{}", server.base_url, snapshot.direct_urls[1]))
+        .header(header::AUTHORIZATION, &authorization)
+        .send()
+        .await
+        .expect("alternate full media request");
+    assert_eq!(alternate.status(), StatusCode::OK);
+    assert_headers_do_not_leak(alternate.headers(), markers, "alternate media header");
+    assert_eq!(alternate.headers()[header::CONTENT_LENGTH], "17");
+    assert_eq!(
+        alternate.bytes().await.unwrap().as_ref(),
+        CLOUD_ALTERNATE_BYTES
+    );
+
+    assert_eq!(
+        app.cloud_backend.take_ranges(),
+        vec![
+            (app.cloud_object_id.clone(), 0, 17),
+            (app.cloud_object_id.clone(), 6, 10),
+            (
+                app.cloud_subtitle_object_id.clone(),
+                0,
+                u64::try_from(CLOUD_SUBTITLE_BYTES.len()).unwrap(),
+            ),
+            (app.cloud_alternate_object_id.clone(), 0, 17),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -2884,6 +3689,160 @@ async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
             .to_bytes()
             .is_empty()
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the full cloud publication and HTTP contract together.
+async fn cloud_multi_source_playback_is_complete_local_and_stable_across_reindex() {
+    let app = test_app().await;
+    let fixture = seed_cloud_multi_source_inventory(&app).await;
+    assert_eq!(
+        index_cloud_sources(&app.database, fixture.item, 1, 1).await,
+        1
+    );
+    let indexed = cloud_presentations(&app, &fixture).await;
+    probe_cloud_sources(&app, &fixture).await;
+    let presentations = cloud_presentations(&app, &fixture).await;
+    assert_eq!(presentations, indexed);
+    assert_eq!(
+        app.cloud_backend.take_ranges(),
+        vec![
+            (app.cloud_object_id.clone(), 0, 17),
+            (app.cloud_alternate_object_id.clone(), 0, 17),
+        ]
+    );
+    let active = tjxy_db::CatalogPublicationRepository::new(&app.database)
+        .active_sources(fixture.item)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 2);
+    for source in &active {
+        assert_eq!(source.probe_state(), "Probed");
+        assert_eq!(source.container(), Some("mkv"));
+        assert_eq!(source.streams().len(), 1);
+        assert_eq!(source.streams()[0].stream_type(), "Video");
+        assert_eq!(source.streams()[0].codec(), Some("h264"));
+        assert_eq!(source.streams()[0].width(), Some(1920));
+        assert_eq!(source.streams()[0].height(), Some(1080));
+    }
+    let default_source = active
+        .iter()
+        .find(|source| source.presentation_key().as_uuid() == presentations.default)
+        .unwrap();
+    assert_eq!(default_source.subtitles().len(), 1);
+    assert_eq!(default_source.subtitles()[0].format(), "srt");
+    assert_eq!(default_source.subtitles()[0].language(), Some("eng"));
+    assert_eq!(
+        default_source.subtitles()[0].storage_object_id().as_uuid(),
+        fixture.subtitle_object
+    );
+    let alternate_source = active
+        .iter()
+        .find(|source| source.presentation_key().as_uuid() == presentations.alternate)
+        .unwrap();
+    assert!(alternate_source.subtitles().is_empty());
+
+    let server = TcpTestServer::start(app.router.clone()).await;
+    let client = reqwest::Client::new();
+    let markers = cloud_leak_markers(&app, &fixture);
+    let (user, token) = tcp_login(&client, &server, &markers).await;
+    let policy = client
+        .put(format!(
+            "{}/Admin/Items/{}/MediaSources/{}/PlaybackPolicy",
+            server.base_url,
+            fixture.item.as_uuid(),
+            presentations.default
+        ))
+        .header(header::AUTHORIZATION, token_header(&token))
+        .json(&json!({
+            "AdminPriority": 100,
+            "IsDefault": true,
+            "IsHidden": false
+        }))
+        .send()
+        .await
+        .expect("set cloud default playback policy");
+    assert_eq!(policy.status(), StatusCode::NO_CONTENT);
+    assert_headers_do_not_leak(policy.headers(), &markers, "playback policy header");
+    let detail = client
+        .get(format!(
+            "{}/Items/{}?userId={user}",
+            server.base_url,
+            fixture.item.as_uuid()
+        ))
+        .header(header::AUTHORIZATION, token_header(&token))
+        .send()
+        .await
+        .expect("read cloud Movie detail");
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_headers_do_not_leak(detail.headers(), &markers, "Movie detail header");
+    let detail: Value = detail.json().await.expect("cloud Movie detail JSON");
+    assert_eq!(detail["Id"], fixture.item.as_uuid().to_string());
+    assert_eq!(detail["Type"], "Movie");
+
+    let before_publication = effective_source_publication(&app.database, fixture.item).await;
+    let before = read_cloud_playback(
+        &client,
+        &server,
+        &token,
+        user,
+        &fixture,
+        presentations,
+        &markers,
+    )
+    .await;
+    assert_cloud_delivery(&app, &client, &server, &token, &before, &markers).await;
+
+    app.database
+        .execute(
+            app.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("source_index_revision"), 2_i64)
+                    .value(Alias::new("source_state"), "Stale")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let reindex_generation = index_cloud_sources(&app.database, fixture.item, 2, 1).await;
+    let after_publication = effective_source_publication(&app.database, fixture.item).await;
+    assert_ne!(before_publication.0, after_publication.0);
+    assert!(after_publication.1 > before_publication.1);
+    assert_eq!(reindex_generation, after_publication.1);
+    let reindexed_presentations = cloud_presentations(&app, &fixture).await;
+    assert_eq!(reindexed_presentations, presentations);
+    let active = tjxy_db::CatalogPublicationRepository::new(&app.database)
+        .active_sources(fixture.item)
+        .await
+        .unwrap();
+    let default_source = active
+        .iter()
+        .find(|source| source.presentation_key().as_uuid() == presentations.default)
+        .unwrap();
+    let alternate_source = active
+        .iter()
+        .find(|source| source.presentation_key().as_uuid() == presentations.alternate)
+        .unwrap();
+    assert!(default_source.is_default());
+    assert_eq!(default_source.admin_priority(), 100);
+    assert!(!default_source.is_hidden());
+    assert!(!alternate_source.is_default());
+    assert!(app.cloud_backend.take_ranges().is_empty());
+
+    let after = read_cloud_playback(
+        &client,
+        &server,
+        &token,
+        user,
+        &fixture,
+        reindexed_presentations,
+        &markers,
+    )
+    .await;
+    assert_eq!(after, before);
+    assert_cloud_delivery(&app, &client, &server, &token, &after, &markers).await;
+    server.stop().await;
 }
 
 #[tokio::test]
