@@ -62,7 +62,7 @@ starting the server. The current UI covers sign-in, Users list/create/edit/delet
 Libraries list/create/rename/delete and versioned scan-policy editing, ScheduledTasks
 start/cancel, recent durable-job status, scoped Validate/Discover/Resolve/Expand/Index/Probe commands, device
 rename/revocation, API key lifecycle management, plus the Google Drive and OneDrive
-Personal authorization, folder-selection, and binding flows. Bootstrap setup remains
+Personal authorization, paginated folder-selection, and binding flows. Bootstrap setup remains
 environment-driven, and storage status/reauthorization, task-log/cache-state, metadata,
 migration, and conflict pages are not yet implemented. The browser session is
 stored in `sessionStorage`; logout clears that browser session but does not revoke
@@ -144,11 +144,14 @@ starting an unusable backend.
 Authenticated administrators start Google authorization with
 `POST /Admin/Storage/OAuth/GoogleDrive/Start` and `TargetLibraryId`, then open
 the returned `AuthorizationUrl`. TJXY validates one-time `state` and S256 PKCE
-at the callback. After authorization, the same administrator can browse folders
+at the callback. After authorization, the same administrator can browse all folder pages
 through `GET /Admin/Storage/OAuth/GoogleDrive/{state}/Directories`, enumerate
 paginated Shared Drives through the sibling `SharedDrives` route, and commit the
 chosen root through `POST /Admin/Storage/OAuth/GoogleDrive/{state}/Bind`.
 `Scope` is `MyDrive` or `SharedDrive`, with `SharedDriveId` only for the latter.
+Directory responses expose only a session-bound UUID `NextPageToken`; supplying it as
+`PageToken` resumes the opaque provider page without exposing Google tokens to Admin.
+The Shared Drive list retains its existing provider-token pagination contract.
 The server obtains the account identity from Google, validates the selected
 root, obtains the initial Changes cursor, and atomically commits the encrypted
 credential, target-library root membership,
@@ -159,7 +162,7 @@ The former Google endpoint that accepted `ClientSecret` and
 `RefreshToken` request fields no longer exists. OneDrive Personal follows the
 same session-bound authorization-code flow at
 `/Admin/Storage/OAuth/OneDrive/Start`, `Callback`, `{state}/Directories`, and
-`{state}/Bind`. Microsoft Graph derives the account, Personal drive ID, and
+`{state}/Bind`, including UUID-cursor pagination of every folder page. Microsoft Graph derives the account, Personal drive ID, and
 root; the Admin submits only `DisplayName` and the chosen `RootObjectId`. The
 legacy direct OneDrive binding endpoint no longer exists. Business and
 SharePoint are rejected before binding.

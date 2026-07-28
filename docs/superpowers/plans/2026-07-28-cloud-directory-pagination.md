@@ -27,12 +27,52 @@
 
 ## Status
 
-Design approved and implementation plan prepared. No production or test code from this
-plan has been changed yet. Update this section with each red/green command, commit, review
-finding, and residual risk during execution.
+Implemented through Tasks 1-5 on 2026-07-28 in commits `2de9308`, `831f46d`,
+`aa57324`, `0a1a9a4`, and `d2d97ac`. The server now owns bounded, replayable,
+context-bound UUID cursors; Google and OneDrive directory handlers keep provider tokens
+server-side and avoid holding the OAuth-session lock during provider I/O. React Admin uses
+one strict page boundary and preserves pages/cursors across successful append, deduplication,
+retry, and navigation reset behavior.
 
-Plan self-review: every approved design requirement maps to Tasks 1-6; the placeholder
-scan is clean; registry, server DTO, frontend DTO, and component method signatures agree.
+TDD evidence: the registry and both route suites were observed red before implementation;
+frontend adapter, Google, OneDrive, and shared deduplication tests were likewise observed red
+before their production changes. Focused green runs passed: cursor registry 2/2,
+`storage_admin_routes` 5/5, `startup` 16/16, OneDrive storage 12/12, and Admin 21 files / 116
+tests. `npm run typecheck`, `npm run lint`, `npm run build`, workspace Clippy with warnings
+denied, Rust formatting, and `git diff --check` passed.
+
+The serialized Rust workspace run initially hit the previously documented non-reproducible
+SQLite `database is locked` race in
+`initialization_starts_the_provider_drive_scoped_inventory_worker`. The exact test and its
+full 16-test owning target passed immediately; a fresh complete rerun then passed all 505
+tests (503 passed, 2 environment-dependent tests ignored). No production workaround was
+added without a reproducible cause.
+
+Playwright inspected the real Admin build at 1440x900 and 390x844 with deterministic API
+responses. Google appended a second page while removing a duplicate; OneDrive retained
+`Load more` on an empty nonterminal page and loaded its successor. Mobile document width
+remained 390px and the clean run ended with 0 console errors and 0 warnings. Screenshots are
+under `output/playwright/cloud-directory-pagination/.playwright-cli/` and are intentionally
+not release artifacts.
+
+Independent two-axis review found no Critical issue and one Important UI state-consistency
+issue: failed Google scope/Shared Drive navigation committed the selection before its page.
+Commit `8027e4a` now commits scope, drive, path, items, and cursor only after success, with
+three failure regressions and pending-control coverage. The reviewer also noted one remaining
+Minor gap: route-level expiry coverage would require a controllable OAuth-session clock;
+unknown/mismatched/cross-state/wrong-owner rejection before provider I/O is covered.
+
+Residual evidence gaps and risks: no live Google/Microsoft acceptance was run; the two
+ignored workspace tests still require disposable Redis and macOS FSEvents admission; the
+Admin install reports three existing high-severity npm audit findings; the intermittent
+startup SQLite lock race remains outside this slice; and session-expiry rejection lacks a
+route-level clock-controlled test.
+
+The next PLAN slice was re-audited: image delivery already implements and tests
+`If-None-Match`/304, while the shared video/audio `stream.rs` path and real-TCP playback
+contracts cover ETag/Range/`If-Range` but not conditional GET/HEAD. Media stream conditional
+requests therefore remain the next evidence-backed slice; downstream disconnect cancellation
+stays second.
 
 ---
 
@@ -69,7 +109,7 @@ scan is clean; registry, server DTO, frontend DTO, and component method signatur
 - Consumes: `tjxy_storage::PageToken`, `uuid::Uuid`, and any `Context: Eq`.
 - Produces: `DirectoryPageCursorRegistry<Context>::resolve(Option<Uuid>, &Context) -> Result<Option<PageToken>, DirectoryPageCursorError>` and `register(Context, Option<PageToken>) -> Option<Uuid>`.
 
-- [ ] **Step 1: Register the module and write failing registry contracts**
+- [x] **Step 1: Register the module and write failing registry contracts**
 
 Add `mod storage_admin_cursor;` next to `mod storage_admin;` in `lib.rs`. Create the module with tests that reference the not-yet-defined registry:
 
@@ -125,13 +165,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the focused unit test to prove red**
+- [x] **Step 2: Run the focused unit test to prove red**
 
 Run: `cargo test -p tjxy-server storage_admin_cursor --locked`
 
 Expected: compilation fails because `DirectoryPageCursorRegistry` and `DirectoryPageCursorError` do not exist.
 
-- [ ] **Step 3: Implement the private bounded registry**
+- [x] **Step 3: Implement the private bounded registry**
 
 Use a `HashMap` plus `VecDeque`; do not introduce an LRU dependency or a fallible counter:
 
@@ -207,7 +247,7 @@ impl<Context: Eq> DirectoryPageCursorRegistry<Context> {
 }
 ```
 
-- [ ] **Step 4: Run registry tests and formatting**
+- [x] **Step 4: Run registry tests and formatting**
 
 Run: `cargo test -p tjxy-server storage_admin_cursor --locked`
 
@@ -217,7 +257,7 @@ Run: `cargo fmt --all -- --check`
 
 Expected: pass after applying `cargo fmt --all` if the check reports formatting differences.
 
-- [ ] **Step 5: Commit the registry**
+- [x] **Step 5: Commit the registry**
 
 ```bash
 git add crates/server/src/lib.rs crates/server/src/storage_admin_cursor.rs
@@ -238,7 +278,7 @@ git commit -m "feat: add bounded storage admin cursors"
 - Consumes: `DirectoryPageCursorRegistry<GoogleDirectoryPageContext>` and `DirectoryPageCursorRegistry<OneDriveDirectoryPageContext>` from Task 1.
 - Produces: optional UUID `PageToken` query fields and `{ Items, NextPageToken }` responses for both existing directory routes.
 
-- [ ] **Step 1: Make deterministic fake providers expose three pages and record child requests**
+- [x] **Step 1: Make deterministic fake providers expose three pages and record child requests**
 
 Replace each fake's form-only state with a state that also records child queries. Google page 1 returns raw token `google-provider-page-2`, page 2 returns one duplicate folder plus `google-provider-page-3`, and page 3 is terminal. Microsoft page 1 returns a complete loopback `@odata.nextLink`, page 2 returns a second link, and page 3 is terminal.
 
@@ -284,7 +324,7 @@ origin.
 Expose the same `child_queries` `Arc` on `FakeGoogle` and `FakeMicrosoft` themselves so
 route assertions can inspect counts after the server has been started.
 
-- [ ] **Step 2: Write failing route assertions before server changes**
+- [x] **Step 2: Write failing route assertions before server changes**
 
 Extend both OAuth tests to assert:
 
@@ -354,7 +394,7 @@ assert_eq!(wrong_owner.status(), StatusCode::FORBIDDEN);
 
 Add replay, final-page, malformed UUID, wrong parent/scope, second OAuth state, and second login-session assertions. Compare fake query counts before and after every invalid request to prove failure occurs before provider I/O. Mirror the same contract for OneDrive and assert no response contains the loopback `@odata.nextLink`, `$skiptoken`, or fake Graph base URL.
 
-- [ ] **Step 3: Run the two route tests to prove red**
+- [x] **Step 3: Run the two route tests to prove red**
 
 Run:
 
@@ -365,7 +405,7 @@ cargo test -p tjxy-server --test storage_admin_routes onedrive_oauth_derives_per
 
 Expected: fail because directory responses lack `NextPageToken` and UUID `PageToken` is ignored/rejected.
 
-- [ ] **Step 4: Add provider-specific cursor contexts and session registries**
+- [x] **Step 4: Add provider-specific cursor contexts and session registries**
 
 Import the registry and define exact contexts:
 
@@ -446,7 +486,7 @@ async fn register_directory_page(
 ) -> Result<Option<Uuid>, StorageAdminError>;
 ```
 
-- [ ] **Step 5: Implement strict query and response contracts**
+- [x] **Step 5: Implement strict query and response contracts**
 
 Change both directory query DTOs and the shared response:
 
@@ -477,7 +517,7 @@ struct GoogleDriveDirectoryResponse {
 
 Each handler must normalize `StorageObjectId` and context, prepare credentials/token, call `backend.list_children(&parent, provider_page).await` without a session lock, register `page.next_page`, and serialize only directory objects plus the TJXY cursor. Destructure `ObjectPage` before consuming objects so the next token is never dropped.
 
-- [ ] **Step 6: Run focused route and surrounding server tests**
+- [x] **Step 6: Run focused route and surrounding server tests**
 
 Run: `cargo test -p tjxy-server --test storage_admin_routes --locked`
 
@@ -487,7 +527,7 @@ Run: `cargo test -p tjxy-server --test startup --locked`
 
 Expected: startup/OAuth construction remains green.
 
-- [ ] **Step 7: Commit server pagination**
+- [x] **Step 7: Commit server pagination**
 
 ```bash
 git add crates/server/src/storage_admin.rs crates/server/tests/storage_admin_routes.rs
@@ -506,7 +546,7 @@ git commit -m "feat: paginate cloud storage directories"
 - Consumes: server `{ Items, NextPageToken }` with UUID directory cursors.
 - Produces: `StorageChoicePage`, `GoogleDirectoryRequest.pageToken`, `OneDriveDirectoryRequest`, and page-returning list functions.
 
-- [ ] **Step 1: Write failing API adapter tests**
+- [x] **Step 1: Write failing API adapter tests**
 
 Change directory mocks and expectations to pages:
 
@@ -540,13 +580,13 @@ for (const nextPageToken of [undefined, 'provider-token', 'bad\ncursor', 42, {}]
 }
 ```
 
-- [ ] **Step 2: Run the adapter test to prove red**
+- [x] **Step 2: Run the adapter test to prove red**
 
 Run: `cd admin && npm test -- --run src/storage/googleDriveApi.test.ts`
 
 Expected: fail because both directory functions return arrays and accept no cursor field/object.
 
-- [ ] **Step 3: Implement one strict directory-page parser**
+- [x] **Step 3: Implement one strict directory-page parser**
 
 Import `validUuid` from `../api/responseValidation` and add:
 
@@ -588,7 +628,7 @@ existing scope/parent fields. Make
 directory parser. Keep `listSharedDrives` on its existing provider-token parser because
 that contract is explicitly out of scope.
 
-- [ ] **Step 4: Run adapter tests, typecheck, and lint**
+- [x] **Step 4: Run adapter tests, typecheck, and lint**
 
 Run:
 
@@ -603,7 +643,7 @@ component consumers after this boundary change, the full typecheck is expected t
 only the old array-return assumptions in `GoogleDrivePage`/`OneDrivePage` and their tests;
 it must pass after Task 5.
 
-- [ ] **Step 5: Commit the frontend HTTP boundary**
+- [x] **Step 5: Commit the frontend HTTP boundary**
 
 ```bash
 git add admin/src/storage/googleDriveApi.ts admin/src/storage/googleDriveApi.test.ts
@@ -624,7 +664,7 @@ git commit -m "feat(admin): expose cloud directory pages"
 - Consumes: `listGoogleDirectories(...): Promise<StorageChoicePage>` from Task 3.
 - Produces: append/dedupe/load-more behavior with cursor reset on folder, scope, and Shared Drive navigation.
 
-- [ ] **Step 1: Update fixture pages and write failing interaction tests**
+- [x] **Step 1: Update fixture pages and write failing interaction tests**
 
 Use UUID cursors and add a pagination contract:
 
@@ -677,13 +717,13 @@ it('keeps first-seen folder order while removing duplicate identifiers', () => {
 });
 ```
 
-- [ ] **Step 2: Run the Google component test to prove red**
+- [x] **Step 2: Run the Google component test to prove red**
 
 Run: `cd admin && npm test -- --run src/storage/GoogleDrivePage.test.tsx`
 
 Expected: fail because the page does not store or render directory continuation state.
 
-- [ ] **Step 3: Implement Google directory pagination**
+- [x] **Step 3: Implement Google directory pagination**
 
 Make busy states unambiguous:
 
@@ -718,7 +758,7 @@ Render an outlined MUI button below the folder box:
 
 Show `No folders on this page.` when items are empty but a cursor exists, and `No child folders.` only when both are empty. Preserve list dimensions and keep the separate Shared Drive button tied to `shared-more`.
 
-- [ ] **Step 4: Run Google component and frontend gates**
+- [x] **Step 4: Run Google component and frontend gates**
 
 Run:
 
@@ -731,7 +771,7 @@ cd admin && npm run lint
 Expected: focused Google tests and lint pass. Full typecheck may still report only the
 unmigrated OneDrive consumer from Task 5; it must pass after Task 5.
 
-- [ ] **Step 5: Commit Google interaction**
+- [x] **Step 5: Commit Google interaction**
 
 ```bash
 git add admin/src/storage/directoryChoices.ts admin/src/storage/directoryChoices.test.ts admin/src/storage/GoogleDrivePage.tsx admin/src/storage/GoogleDrivePage.test.tsx
@@ -750,7 +790,7 @@ git commit -m "feat(admin): paginate Google Drive folders"
 - Consumes: `listOneDriveDirectories(state, OneDriveDirectoryRequest): Promise<StorageChoicePage>` from Task 3.
 - Produces: OneDrive empty-page continuation, append/dedupe, final-page, retry, and navigation-reset behavior.
 
-- [ ] **Step 1: Update existing mocks and write failing empty-page/failure contracts**
+- [x] **Step 1: Update existing mocks and write failing empty-page/failure contracts**
 
 First prove that a folder page containing only provider files remains navigable:
 
@@ -791,13 +831,13 @@ expect(screen.getByRole('button', { name: 'Shows' })).toBeVisible();
 expect(notify).toHaveBeenCalledWith(expect.any(String), { type: 'error' });
 ```
 
-- [ ] **Step 2: Run the OneDrive component test to prove red**
+- [x] **Step 2: Run the OneDrive component test to prove red**
 
 Run: `cd admin && npm test -- --run src/storage/OneDrivePage.test.tsx`
 
 Expected: fail because the component still consumes arrays and has no load-more control.
 
-- [ ] **Step 3: Implement OneDrive page state and UI**
+- [x] **Step 3: Implement OneDrive page state and UI**
 
 Add `'more'` to `BusyOperation`, `nextDirectoryPage` state, and the same append/dedupe
 semantics as Google. Import `uniqueChoices` from `directoryChoices.ts`; do not create a
@@ -816,7 +856,7 @@ setNextDirectoryPage(page.nextPageToken);
 
 Add the same `aria-label="Load more folders"` button under the existing list. During load more, retain existing rows and disable navigation/binding. Do not show `No subfolders` until the cursor is null.
 
-- [ ] **Step 4: Run all frontend tests and production checks**
+- [x] **Step 4: Run all frontend tests and production checks**
 
 Run:
 
@@ -829,7 +869,7 @@ cd admin && npm run build
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit OneDrive interaction**
+- [x] **Step 5: Commit OneDrive interaction**
 
 ```bash
 git add admin/src/storage/OneDrivePage.tsx admin/src/storage/OneDrivePage.test.tsx
@@ -849,7 +889,7 @@ git commit -m "feat(admin): paginate OneDrive folders"
 - Consumes: verified server and Admin pagination behavior from Tasks 1-5.
 - Produces: accurate compatibility evidence and a reviewed, release-ready slice.
 
-- [ ] **Step 1: Update nearby compatibility documentation**
+- [x] **Step 1: Update nearby compatibility documentation**
 
 Record that My Drive, Shared Drive, and OneDrive Personal folder pickers now paginate with server-owned OAuth-session cursors. Keep these limitations explicit:
 
@@ -860,7 +900,7 @@ Record that My Drive, Shared Drive, and OneDrive Personal folder pickers now pag
 
 Do not change a `⚠️` row to `✅` when the row still contains unrelated incomplete storage behavior.
 
-- [ ] **Step 2: Run focused Rust and frontend verification**
+- [x] **Step 2: Run focused Rust and frontend verification**
 
 Run:
 
@@ -876,7 +916,7 @@ cd admin && npm run build
 
 Expected: all pass. Record exact counts and any ignored tests in this plan's status section.
 
-- [ ] **Step 3: Run workspace quality gates**
+- [x] **Step 3: Run workspace quality gates**
 
 Run:
 
@@ -889,11 +929,11 @@ git diff --check
 
 Expected: all pass. Use serialized workspace tests because the preceding completed slice documented non-reproducible shared-database/background-worker races under default parallel execution.
 
-- [ ] **Step 4: Inspect the UI if layout behavior changed unexpectedly**
+- [x] **Step 4: Inspect the UI if layout behavior changed unexpectedly**
 
 If component output, build warnings, or a manual code review indicates wrapping/overlap risk, start the Admin development server and use the repository Playwright workflow to inspect desktop and mobile screenshots. Otherwise record that no new viewport structure was introduced: the new button uses the already-covered storage-wizard stack and stable folder container.
 
-- [ ] **Step 5: Perform independent two-axis review**
+- [x] **Step 5: Perform independent two-axis review**
 
 Use `superpowers:requesting-code-review` after all gates pass. Require reviewers to check:
 
@@ -902,14 +942,14 @@ Use `superpowers:requesting-code-review` after all gates pass. Require reviewers
 
 Fix every Critical or Important finding with a focused regression test and rerun affected gates. Record Minor findings and residual risk explicitly.
 
-- [ ] **Step 6: Commit documentation and evidence**
+- [x] **Step 6: Commit documentation and evidence**
 
 ```bash
 git add docs/api-parity.md README.md docs/superpowers/plans/2026-07-28-cloud-directory-pagination.md
 git commit -m "docs: record cloud directory pagination"
 ```
 
-- [ ] **Step 7: Re-audit the next PLAN slice**
+- [x] **Step 7: Re-audit the next PLAN slice**
 
 Confirm this slice closes only cloud directory truncation. Then select the next evidence-backed item from the completed audit in this order unless new evidence changes priority:
 
