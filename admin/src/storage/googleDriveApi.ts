@@ -1,4 +1,5 @@
 import { ApiError, apiRequest } from '../api/httpClient';
+import { validUuid } from '../api/responseValidation';
 
 export type { LibraryOption, ScanProfile } from '../libraries/libraryApi';
 export { listLibraries } from '../libraries/libraryApi';
@@ -15,7 +16,7 @@ export interface GoogleOAuthStart {
   authorizationUrl: string;
 }
 
-export interface GoogleDrivePage {
+export interface StorageChoicePage {
   items: GoogleDriveChoice[];
   nextPageToken: string | null;
 }
@@ -24,6 +25,12 @@ export interface GoogleDirectoryRequest {
   scope: GoogleDriveScope;
   sharedDriveId?: string;
   parentId?: string;
+  pageToken?: string;
+}
+
+export interface OneDriveDirectoryRequest {
+  parentId?: string;
+  pageToken?: string;
 }
 
 export interface GoogleDriveBindingRequest {
@@ -60,7 +67,7 @@ export async function startGoogleDriveOAuth(libraryId: string): Promise<GoogleOA
 export async function listSharedDrives(
   state: string,
   pageToken?: string,
-): Promise<GoogleDrivePage> {
+): Promise<StorageChoicePage> {
   const path = oauthPath(state, 'SharedDrives');
   const query = new URLSearchParams();
   if (pageToken !== undefined) query.set('PageToken', requireText(pageToken, 'A page token is required.'));
@@ -78,7 +85,7 @@ export async function listSharedDrives(
 export async function listGoogleDirectories(
   state: string,
   request: GoogleDirectoryRequest,
-): Promise<GoogleDriveChoice[]> {
+): Promise<StorageChoicePage> {
   validateScope(request.scope, request.sharedDriveId);
   const query = new URLSearchParams({ Scope: request.scope });
   if (request.sharedDriveId !== undefined) {
@@ -87,9 +94,11 @@ export async function listGoogleDirectories(
   if (request.parentId !== undefined) {
     query.set('ParentId', requireText(request.parentId, 'A parent folder is required.'));
   }
+  if (request.pageToken !== undefined) {
+    query.set('PageToken', requireUuid(request.pageToken, 'A valid page token is required.'));
+  }
   const value = await apiRequest<unknown>(withQuery(oauthPath(state, 'Directories'), query));
-  if (!isRecord(value) || !Array.isArray(value.Items)) throw invalidResponse('directory list');
-  return value.Items.map(toChoice);
+  return toDirectoryPage(value, 'directory list');
 }
 
 export async function bindGoogleDrive(
@@ -140,15 +149,17 @@ export async function startOneDriveOAuth(libraryId: string): Promise<GoogleOAuth
 
 export async function listOneDriveDirectories(
   state: string,
-  parentId?: string,
-): Promise<GoogleDriveChoice[]> {
+  request: OneDriveDirectoryRequest = {},
+): Promise<StorageChoicePage> {
   const query = new URLSearchParams();
-  if (parentId !== undefined) {
-    query.set('ParentId', requireText(parentId, 'A parent folder is required.'));
+  if (request.parentId !== undefined) {
+    query.set('ParentId', requireText(request.parentId, 'A parent folder is required.'));
+  }
+  if (request.pageToken !== undefined) {
+    query.set('PageToken', requireUuid(request.pageToken, 'A valid page token is required.'));
   }
   const value = await apiRequest<unknown>(withQuery(oneDriveOAuthPath(state, 'Directories'), query));
-  if (!isRecord(value) || !Array.isArray(value.Items)) throw invalidResponse('OneDrive directory list');
-  return value.Items.map(toChoice);
+  return toDirectoryPage(value, 'OneDrive directory list');
 }
 
 export async function bindOneDrive(
@@ -208,9 +219,26 @@ function toChoice(value: unknown): GoogleDriveChoice {
   return { id: value.Id, name: value.Name };
 }
 
+function toDirectoryPage(value: unknown, subject: string): StorageChoicePage {
+  if (!isRecord(value) || !Array.isArray(value.Items)) throw invalidResponse(subject);
+  const nextPageToken = value.NextPageToken;
+  if (nextPageToken !== null && !validUuid(nextPageToken)) {
+    throw invalidResponse(`${subject} pagination`);
+  }
+  return {
+    items: value.Items.map(toChoice),
+    nextPageToken,
+  };
+}
+
 function requireText(value: string, message: string): string {
   if (!validText(value)) throw new ApiError(400, 'validation', message);
   return value.trim();
+}
+
+function requireUuid(value: string, message: string): string {
+  if (!validUuid(value)) throw new ApiError(400, 'validation', message);
+  return value;
 }
 
 function validText(value: unknown): value is string {

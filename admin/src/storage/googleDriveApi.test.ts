@@ -107,15 +107,23 @@ it('preserves Shared Drive pagination without exposing credentials', async () =>
 });
 
 it('builds scoped directory queries and filters server records', async () => {
-  requestMock.mockResolvedValue({ Items: [{ Id: 'folder-1', Name: 'Shows' }] });
+  const next = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
+  requestMock.mockResolvedValue({
+    Items: [{ Id: 'folder-1', Name: 'Shows' }],
+    NextPageToken: next,
+  });
 
   await expect(listGoogleDirectories('oauth-state', {
     scope: 'SharedDrive',
     sharedDriveId: 'drive-1',
     parentId: 'parent/1',
-  })).resolves.toEqual([{ id: 'folder-1', name: 'Shows' }]);
+    pageToken: next,
+  })).resolves.toEqual({
+    items: [{ id: 'folder-1', name: 'Shows' }],
+    nextPageToken: next,
+  });
   expect(requestMock).toHaveBeenCalledWith(
-    '/Admin/Storage/OAuth/GoogleDrive/oauth-state/Directories?Scope=SharedDrive&SharedDriveId=drive-1&ParentId=parent%2F1',
+    `/Admin/Storage/OAuth/GoogleDrive/oauth-state/Directories?Scope=SharedDrive&SharedDriveId=drive-1&ParentId=parent%2F1&PageToken=${next}`,
   );
 });
 
@@ -143,20 +151,28 @@ it('binds the selected root without accepting browser-supplied identity or crede
 });
 
 it('browses and binds OneDrive without browser-supplied credential fields', async () => {
+  const next = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
   requestMock
-    .mockResolvedValueOnce({ Items: [{ Id: 'folder-1', Name: 'Shows' }] })
+    .mockResolvedValueOnce({
+      Items: [{ Id: 'folder-1', Name: 'Shows' }],
+      NextPageToken: next,
+    })
     .mockResolvedValueOnce({
       AccountId: 'account-1', RootId: 'root-1', InitialSyncJobId: 'job-1', RestartRequired: false,
     });
 
-  await expect(listOneDriveDirectories('oauth-state', 'parent/1')).resolves.toEqual([
-    { id: 'folder-1', name: 'Shows' },
-  ]);
+  await expect(listOneDriveDirectories('oauth-state', {
+    parentId: 'parent/1',
+    pageToken: next,
+  })).resolves.toEqual({
+    items: [{ id: 'folder-1', name: 'Shows' }],
+    nextPageToken: next,
+  });
   await bindOneDrive('oauth-state', { displayName: 'OneDrive Shows', rootObjectId: 'folder-1' });
 
   expect(requestMock).toHaveBeenNthCalledWith(
     1,
-    '/Admin/Storage/OAuth/OneDrive/oauth-state/Directories?ParentId=parent%2F1',
+    `/Admin/Storage/OAuth/OneDrive/oauth-state/Directories?ParentId=parent%2F1&PageToken=${next}`,
   );
   expect(requestMock).toHaveBeenNthCalledWith(
     2,
@@ -182,4 +198,13 @@ it('rejects malformed successful responses', async () => {
   await expect(listSharedDrives('oauth-state')).rejects.toMatchObject({
     category: 'invalid-response',
   });
+});
+
+it('rejects missing or malformed directory pagination cursors', async () => {
+  for (const nextPageToken of [undefined, 'provider-token', 'bad\ncursor', 42, {}]) {
+    requestMock.mockResolvedValueOnce({ Items: [], NextPageToken: nextPageToken });
+    await expect(listOneDriveDirectories('oauth-state')).rejects.toMatchObject({
+      category: 'invalid-response',
+    });
+  }
 });

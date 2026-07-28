@@ -598,7 +598,10 @@ cd admin && npm run typecheck
 cd admin && npm run lint
 ```
 
-Expected: pass.
+Expected: adapter tests and lint pass. Because Tasks 4-5 deliberately migrate the two
+component consumers after this boundary change, the full typecheck is expected to report
+only the old array-return assumptions in `GoogleDrivePage`/`OneDrivePage` and their tests;
+it must pass after Task 5.
 
 - [ ] **Step 5: Commit the frontend HTTP boundary**
 
