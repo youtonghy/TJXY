@@ -28,6 +28,7 @@ import {
 import { useEffect, useState } from 'react';
 import { Title, useNotify } from 'react-admin';
 
+import { uniqueChoices } from './directoryChoices';
 import type { GoogleDriveChoice, GoogleOAuthStart, LibraryOption, StorageBindingResult } from './googleDriveApi';
 import {
   bindOneDrive,
@@ -36,7 +37,7 @@ import {
   startOneDriveOAuth,
 } from './googleDriveApi';
 
-type BusyOperation = 'start' | 'verify' | 'browse' | 'bind' | null;
+type BusyOperation = 'start' | 'verify' | 'browse' | 'more' | 'bind' | null;
 
 export function OneDrivePage() {
   const notify = useNotify();
@@ -48,6 +49,7 @@ export function OneDrivePage() {
   const [authorized, setAuthorized] = useState(false);
   const [path, setPath] = useState<GoogleDriveChoice[]>([]);
   const [directories, setDirectories] = useState<GoogleDriveChoice[]>([]);
+  const [nextDirectoryPage, setNextDirectoryPage] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyOperation>(null);
   const [binding, setBinding] = useState<StorageBindingResult | null>(null);
 
@@ -98,9 +100,12 @@ export function OneDrivePage() {
     if (oauth === null || busy !== null) return;
     setBusy('browse');
     try {
-      const folders = await listOneDriveDirectories(oauth.state, folder.id === 'root' ? undefined : folder.id);
+      const page = await listOneDriveDirectories(oauth.state, {
+        ...(folder.id === 'root' ? {} : { parentId: folder.id }),
+      });
       setPath(nextPath);
-      setDirectories(folders);
+      setDirectories(page.items);
+      setNextDirectoryPage(page.nextPageToken);
     } catch (error: unknown) {
       notifyError(notify, error, 'The folder could not be opened.');
     } finally {
@@ -112,16 +117,39 @@ export function OneDrivePage() {
     if (oauth === null || busy !== null) return;
     setBusy('verify');
     try {
-      const folders = await listOneDriveDirectories(oauth.state);
+      const page = await listOneDriveDirectories(oauth.state);
       setAuthorized(true);
       setPath([{ id: 'root', name: 'OneDrive' }]);
-      setDirectories(folders);
+      setDirectories(page.items);
+      setNextDirectoryPage(page.nextPageToken);
     } catch (error: unknown) {
       if (errorCategory(error) === 'conflict') {
         notify('Microsoft authorization has not completed yet.', { type: 'warning' });
       } else {
         notifyError(notify, error, 'Microsoft authorization could not be verified.');
       }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const loadMoreDirectories = async () => {
+    if (
+      oauth === null
+      || currentFolder === undefined
+      || nextDirectoryPage === null
+      || busy !== null
+    ) return;
+    setBusy('more');
+    try {
+      const page = await listOneDriveDirectories(oauth.state, {
+        ...(currentFolder.id === 'root' ? {} : { parentId: currentFolder.id }),
+        pageToken: nextDirectoryPage,
+      });
+      setDirectories((current) => uniqueChoices([...current, ...page.items]));
+      setNextDirectoryPage(page.nextPageToken);
+    } catch (error: unknown) {
+      notifyError(notify, error, 'More folders could not be loaded.');
     } finally {
       setBusy(null);
     }
@@ -224,8 +252,26 @@ export function OneDrivePage() {
                   <ListItemText primary={folder.name} />
                 </ListItemButton>
               ))}
-              {directories.length === 0 && <ListItemText sx={{ px: 2, py: 1 }} primary="No subfolders" />}
+              {directories.length === 0 && (
+                <ListItemText
+                  sx={{ px: 2, py: 1 }}
+                  primary={nextDirectoryPage === null
+                    ? 'No subfolders'
+                    : 'No folders on this page.'}
+                />
+              )}
             </List>
+            {nextDirectoryPage !== null && (
+              <Button
+                variant="outlined"
+                aria-label="Load more folders"
+                startIcon={busy === 'more' ? <CircularProgress size={18} /> : <RefreshOutlined />}
+                disabled={busy !== null}
+                onClick={() => void loadMoreDirectories()}
+              >
+                Load more
+              </Button>
+            )}
             <TextField
               label="Storage name"
               value={displayName}
