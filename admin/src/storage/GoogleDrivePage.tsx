@@ -30,6 +30,7 @@ import {
 import { useEffect, useState } from 'react';
 import { Title, useNotify } from 'react-admin';
 
+import { uniqueChoices } from './directoryChoices';
 import type {
   GoogleDriveChoice,
   GoogleDriveScope,
@@ -45,7 +46,14 @@ import {
   startGoogleDriveOAuth,
 } from './googleDriveApi';
 
-type BusyOperation = 'start' | 'verify' | 'browse' | 'more' | 'bind' | null;
+type BusyOperation =
+  | 'start'
+  | 'verify'
+  | 'browse'
+  | 'shared-more'
+  | 'directory-more'
+  | 'bind'
+  | null;
 
 type FolderLocation = GoogleDriveChoice;
 
@@ -63,6 +71,7 @@ export function GoogleDrivePage() {
   const [sharedDriveId, setSharedDriveId] = useState('');
   const [path, setPath] = useState<FolderLocation[]>([]);
   const [directories, setDirectories] = useState<GoogleDriveChoice[]>([]);
+  const [nextDirectoryPage, setNextDirectoryPage] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyOperation>(null);
   const [binding, setBinding] = useState<StorageBindingResult | null>(null);
 
@@ -125,7 +134,8 @@ export function GoogleDrivePage() {
       setNextSharedPage(drives.nextPageToken);
       setSharedDriveId(drives.items[0]?.id ?? '');
       setPath([{ id: 'root', name: 'My Drive' }]);
-      setDirectories(folders);
+      setDirectories(folders.items);
+      setNextDirectoryPage(folders.nextPageToken);
     } catch (error: unknown) {
       if (errorCategory(error) === 'conflict') {
         notify('Google authorization has not completed yet.', { type: 'warning' });
@@ -146,13 +156,14 @@ export function GoogleDrivePage() {
     if (oauth === null || busy !== null) return;
     setBusy('browse');
     try {
-      const folders = await listGoogleDirectories(oauth.state, {
+      const page = await listGoogleDirectories(oauth.state, {
         scope: targetScope,
         ...(targetSharedDriveId === undefined ? {} : { sharedDriveId: targetSharedDriveId }),
         ...(folder.id === 'root' ? {} : { parentId: folder.id }),
       });
       setPath(nextPath);
-      setDirectories(folders);
+      setDirectories(page.items);
+      setNextDirectoryPage(page.nextPageToken);
     } catch (error: unknown) {
       notifyError(notify, error, 'The folder could not be opened.');
     } finally {
@@ -187,13 +198,37 @@ export function GoogleDrivePage() {
 
   const loadMoreSharedDrives = async () => {
     if (oauth === null || nextSharedPage === null || busy !== null) return;
-    setBusy('more');
+    setBusy('shared-more');
     try {
       const page = await listSharedDrives(oauth.state, nextSharedPage);
       setSharedDrives((current) => uniqueChoices([...current, ...page.items]));
       setNextSharedPage(page.nextPageToken);
     } catch (error: unknown) {
       notifyError(notify, error, 'More Shared Drives could not be loaded.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const loadMoreDirectories = async () => {
+    if (
+      oauth === null
+      || currentFolder === undefined
+      || nextDirectoryPage === null
+      || busy !== null
+    ) return;
+    setBusy('directory-more');
+    try {
+      const page = await listGoogleDirectories(oauth.state, {
+        scope,
+        ...(scope === 'SharedDrive' ? { sharedDriveId } : {}),
+        ...(currentFolder.id === 'root' ? {} : { parentId: currentFolder.id }),
+        pageToken: nextDirectoryPage,
+      });
+      setDirectories((current) => uniqueChoices([...current, ...page.items]));
+      setNextDirectoryPage(page.nextPageToken);
+    } catch (error: unknown) {
+      notifyError(notify, error, 'More folders could not be loaded.');
     } finally {
       setBusy(null);
     }
@@ -312,7 +347,7 @@ export function GoogleDrivePage() {
                 {nextSharedPage !== null && (
                   <Button
                     variant="outlined"
-                    startIcon={busy === 'more' ? <CircularProgress size={18} /> : <RefreshOutlined />}
+                    startIcon={busy === 'shared-more' ? <CircularProgress size={18} /> : <RefreshOutlined />}
                     disabled={busy !== null}
                     onClick={() => void loadMoreSharedDrives()}
                   >
@@ -342,7 +377,9 @@ export function GoogleDrivePage() {
               {busy === 'browse' ? (
                 <Stack sx={{ alignItems: 'center', py: 4 }}><CircularProgress size={24} /></Stack>
               ) : directories.length === 0 ? (
-                <Typography color="text.secondary" sx={{ p: 2 }}>No child folders.</Typography>
+                <Typography color="text.secondary" sx={{ p: 2 }}>
+                  {nextDirectoryPage === null ? 'No child folders.' : 'No folders on this page.'}
+                </Typography>
               ) : (
                 <List disablePadding aria-label="Folders">
                   {directories.map((folder, index) => (
@@ -365,6 +402,19 @@ export function GoogleDrivePage() {
                 </List>
               )}
             </Box>
+            {nextDirectoryPage !== null && (
+              <Button
+                variant="outlined"
+                aria-label="Load more folders"
+                startIcon={busy === 'directory-more'
+                  ? <CircularProgress size={18} />
+                  : <RefreshOutlined />}
+                disabled={busy !== null}
+                onClick={() => void loadMoreDirectories()}
+              >
+                Load more
+              </Button>
+            )}
             <TextField
               label="Display name"
               value={displayName}
@@ -396,15 +446,6 @@ export function GoogleDrivePage() {
       </Stack>
     </Box>
   );
-}
-
-function uniqueChoices(items: GoogleDriveChoice[]): GoogleDriveChoice[] {
-  const seen = new Set<string>();
-  return items.filter((item) => {
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  });
 }
 
 function errorCategory(error: unknown): string | undefined {

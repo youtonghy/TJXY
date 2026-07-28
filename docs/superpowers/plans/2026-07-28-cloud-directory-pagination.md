@@ -728,7 +728,8 @@ cd admin && npm run typecheck
 cd admin && npm run lint
 ```
 
-Expected: pass.
+Expected: focused Google tests and lint pass. Full typecheck may still report only the
+unmigrated OneDrive consumer from Task 5; it must pass after Task 5.
 
 - [ ] **Step 5: Commit Google interaction**
 
