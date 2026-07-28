@@ -162,7 +162,7 @@ impl<Context> Default for DirectoryPageCursorRegistry<Context> {
     }
 }
 
-impl<Context: Clone + Eq> DirectoryPageCursorRegistry<Context> {
+impl<Context: Eq> DirectoryPageCursorRegistry<Context> {
     pub(crate) fn resolve(
         &self,
         cursor: Option<Uuid>,
