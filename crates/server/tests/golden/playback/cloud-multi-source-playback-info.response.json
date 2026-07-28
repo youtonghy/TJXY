@@ -1,0 +1,84 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "Http",
+      "Id": "{{default_source_id}}",
+      "Path": null,
+      "Container": "mkv",
+      "IsRemote": false,
+      "SupportsTranscoding": false,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": true,
+      "MediaStreams": [
+        {
+          "Codec": "h264",
+          "Language": null,
+          "Width": 1920,
+          "Height": 1080,
+          "Channels": null,
+          "Profile": null,
+          "Level": null,
+          "Type": "Video",
+          "Index": 0,
+          "IsExternal": false,
+          "DeliveryMethod": "Embed",
+          "DeliveryUrl": null,
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": false,
+          "SupportsExternalStream": false
+        },
+        {
+          "Codec": "srt",
+          "Language": "eng",
+          "Width": null,
+          "Height": null,
+          "Channels": null,
+          "Profile": null,
+          "Level": null,
+          "Type": "Subtitle",
+          "Index": 1,
+          "IsExternal": true,
+          "DeliveryMethod": "External",
+          "DeliveryUrl": "/Videos/{{item_id}}/{{default_source_id}}/Subtitles/1/Stream.srt",
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": true,
+          "SupportsExternalStream": true
+        }
+      ],
+      "TranscodingUrl": null,
+      "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{default_source_id}}"
+    },
+    {
+      "Protocol": "Http",
+      "Id": "{{alternate_source_id}}",
+      "Path": null,
+      "Container": "mkv",
+      "IsRemote": false,
+      "SupportsTranscoding": false,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": true,
+      "MediaStreams": [
+        {
+          "Codec": "h264",
+          "Language": null,
+          "Width": 1920,
+          "Height": 1080,
+          "Channels": null,
+          "Profile": null,
+          "Level": null,
+          "Type": "Video",
+          "Index": 0,
+          "IsExternal": false,
+          "DeliveryMethod": "Embed",
+          "DeliveryUrl": null,
+          "IsExternalUrl": false,
+          "IsTextSubtitleStream": false,
+          "SupportsExternalStream": false
+        }
+      ],
+      "TranscodingUrl": null,
+      "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{alternate_source_id}}"
+    }
+  ],
+  "PlaySessionId": "{{play_session_id}}"
+}
