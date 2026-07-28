@@ -20,6 +20,7 @@ mod socket;
 mod source_admin;
 mod startup;
 mod storage_admin;
+mod storage_admin_cursor;
 mod stream;
 mod subtitle;
 mod task;
