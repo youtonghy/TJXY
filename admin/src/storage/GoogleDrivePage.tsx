@@ -161,6 +161,8 @@ export function GoogleDrivePage() {
         ...(targetSharedDriveId === undefined ? {} : { sharedDriveId: targetSharedDriveId }),
         ...(folder.id === 'root' ? {} : { parentId: folder.id }),
       });
+      setScope(targetScope);
+      if (targetSharedDriveId !== undefined) setSharedDriveId(targetSharedDriveId);
       setPath(nextPath);
       setDirectories(page.items);
       setNextDirectoryPage(page.nextPageToken);
@@ -173,7 +175,6 @@ export function GoogleDrivePage() {
 
   const changeScope = (nextScope: GoogleDriveScope | null) => {
     if (nextScope === null || nextScope === scope || busy !== null) return;
-    setScope(nextScope);
     if (nextScope === 'MyDrive') {
       void loadFolder('MyDrive', undefined, { id: 'root', name: 'My Drive' }, [
         { id: 'root', name: 'My Drive' },
@@ -185,14 +186,12 @@ export function GoogleDrivePage() {
       notify('No Shared Drives are available.', { type: 'info' });
       return;
     }
-    setSharedDriveId(drive.id);
     void loadFolder('SharedDrive', drive.id, drive, [drive]);
   };
 
   const changeSharedDrive = (driveId: string) => {
     const drive = sharedDrives.find((item) => item.id === driveId);
     if (drive === undefined || busy !== null) return;
-    setSharedDriveId(drive.id);
     void loadFolder('SharedDrive', drive.id, drive, [drive]);
   };
 
@@ -314,6 +313,7 @@ export function GoogleDrivePage() {
               exclusive
               size="small"
               value={scope}
+              disabled={busy !== null}
               onChange={(_, value: GoogleDriveScope | null) => {
                 changeScope(value);
               }}
@@ -387,6 +387,7 @@ export function GoogleDrivePage() {
                       key={folder.id}
                       divider={index < directories.length - 1}
                       aria-label={`Open ${folder.name}`}
+                      disabled={busy !== null}
                       onClick={() => void loadFolder(
                         scope,
                         scope === 'SharedDrive' ? sharedDriveId : undefined,
@@ -418,6 +419,7 @@ export function GoogleDrivePage() {
             <TextField
               label="Display name"
               value={displayName}
+              disabled={busy !== null}
               onChange={(event) => {
                 setDisplayName(event.target.value);
               }}

@@ -1,5 +1,5 @@
 import { ThemeProvider } from '@mui/material/styles';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { theme } from '../theme';
@@ -177,6 +177,42 @@ it('preserves folders and the cursor when loading another page fails', async () 
   });
 });
 
+it('disables navigation and binding controls while another page is loading', async () => {
+  const cursor = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
+  let finishPage: (() => void) | undefined;
+  const pendingPage = new Promise<{ items: []; nextPageToken: null }>((resolve) => {
+    finishPage = () => {
+      resolve({ items: [], nextPageToken: null });
+    };
+  });
+  directoriesMock.mockReset();
+  directoriesMock
+    .mockResolvedValueOnce({
+      items: [{ id: 'folder-1', name: 'Shows' }],
+      nextPageToken: cursor,
+    })
+    .mockReturnValueOnce(pendingPage);
+  render(<ThemeProvider theme={theme}><GoogleDrivePage /></ThemeProvider>);
+  const user = userEvent.setup();
+
+  await screen.findByRole('combobox', { name: 'Target library' });
+  await user.click(screen.getByRole('button', { name: 'Authorize Google Drive' }));
+  await user.click(screen.getByRole('button', { name: 'Check authorization' }));
+  await user.click(await screen.findByRole('button', { name: 'Load more folders' }));
+
+  expect(within(screen.getByRole('group', { name: 'Drive scope' }))
+    .getByRole('button', { name: 'Shared Drive' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Open Shows' }))
+    .toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('textbox', { name: 'Display name' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Bind this folder' })).toBeDisabled();
+
+  finishPage?.();
+  await waitFor(() => {
+    expect(screen.queryByRole('button', { name: 'Load more folders' })).not.toBeInTheDocument();
+  });
+});
+
 it('uses the opened folder cursor instead of the previous root cursor', async () => {
   const rootCursor = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
   const folderCursor = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f12';
@@ -203,4 +239,96 @@ it('uses the opened folder cursor instead of the previous root cursor', async ()
   expect(directoriesMock).toHaveBeenLastCalledWith('oauth-state', {
     scope: 'MyDrive', parentId: 'folder-1', pageToken: folderCursor,
   });
+});
+
+it('keeps the My Drive context when switching to Shared Drive fails', async () => {
+  const cursor = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
+  sharedDrivesMock.mockResolvedValue({
+    items: [{ id: 'drive-1', name: 'Team Drive' }],
+    nextPageToken: null,
+  });
+  directoriesMock.mockReset();
+  directoriesMock
+    .mockResolvedValueOnce({
+      items: [{ id: 'folder-1', name: 'Shows' }],
+      nextPageToken: cursor,
+    })
+    .mockRejectedValueOnce(new Error('Temporary failure'))
+    .mockResolvedValueOnce({ items: [], nextPageToken: null });
+  render(<ThemeProvider theme={theme}><GoogleDrivePage /></ThemeProvider>);
+  const user = userEvent.setup();
+
+  await screen.findByRole('combobox', { name: 'Target library' });
+  await user.click(screen.getByRole('button', { name: 'Authorize Google Drive' }));
+  await user.click(screen.getByRole('button', { name: 'Check authorization' }));
+  await user.click(await screen.findByRole('button', { name: 'Shared Drive' }));
+
+  await waitFor(() => {
+    expect(notify).toHaveBeenCalledWith('Temporary failure', { type: 'error' });
+  });
+  expect(within(screen.getByRole('group', { name: 'Drive scope' }))
+    .getByRole('button', { name: 'My Drive' })).toHaveAttribute('aria-pressed', 'true');
+  await user.click(screen.getByRole('button', { name: 'Load more folders' }));
+  expect(directoriesMock).toHaveBeenLastCalledWith('oauth-state', {
+    scope: 'MyDrive', pageToken: cursor,
+  });
+});
+
+it('keeps the current Shared Drive when selecting another drive fails', async () => {
+  const cursor = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
+  sharedDrivesMock.mockResolvedValue({
+    items: [
+      { id: 'drive-1', name: 'First Drive' },
+      { id: 'drive-2', name: 'Second Drive' },
+    ],
+    nextPageToken: null,
+  });
+  directoriesMock.mockReset();
+  directoriesMock
+    .mockResolvedValueOnce({ items: [], nextPageToken: null })
+    .mockResolvedValueOnce({
+      items: [{ id: 'folder-1', name: 'Shows' }],
+      nextPageToken: cursor,
+    })
+    .mockRejectedValueOnce(new Error('Temporary failure'))
+    .mockResolvedValueOnce({ items: [], nextPageToken: null });
+  render(<ThemeProvider theme={theme}><GoogleDrivePage /></ThemeProvider>);
+  const user = userEvent.setup();
+
+  await screen.findByRole('combobox', { name: 'Target library' });
+  await user.click(screen.getByRole('button', { name: 'Authorize Google Drive' }));
+  await user.click(screen.getByRole('button', { name: 'Check authorization' }));
+  await user.click(await screen.findByRole('button', { name: 'Shared Drive' }));
+  expect(await screen.findByRole('button', { name: 'Open Shows' })).toBeVisible();
+  await user.click(screen.getByRole('combobox', { name: 'Shared Drive' }));
+  await user.click(screen.getByRole('option', { name: 'Second Drive' }));
+
+  await waitFor(() => {
+    expect(notify).toHaveBeenCalledWith('Temporary failure', { type: 'error' });
+  });
+  expect(screen.getByRole('combobox', { name: 'Shared Drive' })).toHaveTextContent('First Drive');
+  await user.click(screen.getByRole('button', { name: 'Load more folders' }));
+  expect(directoriesMock).toHaveBeenLastCalledWith('oauth-state', {
+    scope: 'SharedDrive', sharedDriveId: 'drive-1', parentId: 'drive-1', pageToken: cursor,
+  });
+});
+
+it('keeps My Drive selected when no Shared Drives are available', async () => {
+  directoriesMock.mockReset();
+  directoriesMock.mockResolvedValue({
+    items: [{ id: 'folder-1', name: 'Shows' }],
+    nextPageToken: null,
+  });
+  render(<ThemeProvider theme={theme}><GoogleDrivePage /></ThemeProvider>);
+  const user = userEvent.setup();
+
+  await screen.findByRole('combobox', { name: 'Target library' });
+  await user.click(screen.getByRole('button', { name: 'Authorize Google Drive' }));
+  await user.click(screen.getByRole('button', { name: 'Check authorization' }));
+  await user.click(await screen.findByRole('button', { name: 'Shared Drive' }));
+
+  expect(notify).toHaveBeenCalledWith('No Shared Drives are available.', { type: 'info' });
+  expect(within(screen.getByRole('group', { name: 'Drive scope' }))
+    .getByRole('button', { name: 'My Drive' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('button', { name: 'Open Shows' })).toBeVisible();
 });
