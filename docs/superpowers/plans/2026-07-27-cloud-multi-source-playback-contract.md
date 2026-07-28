@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust 1.88.0, Axum 0.8.9, Tokio, Reqwest, SeaORM/SeaQuery 1.1.19, SQLite test databases, Serde JSON, TJXY Source Index/Probe/media services.
 
+**Status:** Complete on 2026-07-28. Required focused checks, controlled mutations, and the serialized workspace gate passed; independent review findings for redirect handling, absolute delivery headers, and binary-safe header scanning were addressed before closure. The default-parallel workspace gate exposed two non-reproducible existing races (`startup` SQLite write locking and Hybrid background catalog revision invalidation); each exact test and complete owning target passed on rerun, and no related production or test code changed in this slice.
+
 ## Global Constraints
 
 - Follow `docs/superpowers/specs/2026-07-27-cloud-multi-source-playback-contract-design.md` exactly.
@@ -52,7 +54,7 @@
 - Consumes: the existing `TestServer`, `assert_playback_delivery_contract`, item UUID, effective presentation UUID, and real HTTP response.
 - Produces: a normalized complete `serde_json::Value` whose only placeholders are `{{item_id}}`, `{{source_id}}`, and `{{play_session_id}}`.
 
-- [ ] **Step 1: Add literal request and expected-response constants**
+- [x] **Step 1: Add literal request and expected-response constants**
 
 Use `include_str!` so missing or invalid fixtures fail the test binary deterministically:
 
@@ -77,7 +79,7 @@ The request fixture is the existing representative client profile, moved without
 
 Parse the fixture once per assertion with `serde_json::from_str::<Value>` and pass it to Reqwest with `.json(&request)`.
 
-- [ ] **Step 2: Add structured semantic normalization**
+- [x] **Step 2: Add structured semantic normalization**
 
 Add a test-only helper beside `PlaybackContractSnapshot`:
 
@@ -126,7 +128,7 @@ fn normalize_filesystem_playback(
 
 Before replacing either URL, assert its original value exactly equals the route constructed from `item_id`, `source_id`, and the advertised subtitle index. This prevents normalization from hiding a malformed or upstream URL.
 
-- [ ] **Step 3: Compare the complete response in the existing delivery helper**
+- [x] **Step 3: Compare the complete response in the existing delivery helper**
 
 In `assert_playback_delivery_contract`, retain all current field and byte assertions. Clone the actual response before extracting URLs, normalize the clone, parse the expected fixture, and compare complete JSON values:
 
@@ -146,7 +148,7 @@ Build the response golden from one observed response, then manually reconcile ev
 
 Because the helper already runs before and after Admin `IndexMediaSources`, this single comparison proves both generations against the same golden while the surrounding test continues to prove a new publication and stable presentation identity.
 
-- [ ] **Step 4: Run the focused Filesystem contract**
+- [x] **Step 4: Run the focused Filesystem contract**
 
 Run with loopback-bind permission:
 
@@ -156,13 +158,13 @@ cargo test -p tjxy-server --test jellyfin_tcp_smoke tcp_filesystem_library_survi
 
 Expected: PASS, with the existing full GET, HEAD, Range GET, Range HEAD, subtitle, restart, re-index, playstate, and Resume assertions unchanged.
 
-- [ ] **Step 5: Prove the golden is sensitive**
+- [x] **Step 5: Prove the golden is sensitive**
 
 Temporarily change `SupportsDirectPlay` from `true` to `false` in the response fixture and rerun Step 4. Expected: FAIL at the complete golden comparison. Restore the fixture.
 
 Temporarily change the expected subtitle `Index` and matching URL index to a different integer and rerun Step 4. Expected: FAIL at the complete golden comparison. Restore the fixture and rerun Step 4 to green.
 
-- [ ] **Step 6: Verify and commit Task 1**
+- [x] **Step 6: Verify and commit Task 1**
 
 ```bash
 cargo fmt --all -- --check
@@ -186,7 +188,7 @@ git commit -m "test: pin filesystem playback HTTP golden"
 - Produces: `CloudMultiSourceFixture` containing item, root, default/alternate StorageObject IDs, provider object IDs, and literal bytes.
 - Consumes: `SourceIndexService`, `ProbeService`, `WorkJobRepository`, `WorkJobSpec`, `WorkScope`, `WorkTaskKind`, and `CatalogPublicationRepository`.
 
-- [ ] **Step 1: Extend the provider-neutral backend with distinct objects and range draining**
+- [x] **Step 1: Extend the provider-neutral backend with distinct objects and range draining**
 
 Define literal data once:
 
@@ -209,7 +211,7 @@ fn take_ranges(&self) -> Vec<(String, u64, u64)> {
 
 Retain `ranges()` because existing tests use its non-destructive behavior.
 
-- [ ] **Step 2: Insert reconciled inventory without a source publication**
+- [x] **Step 2: Insert reconciled inventory without a source publication**
 
 Add a `seed_cloud_multi_source_inventory` helper modeled on `source_index_publishes_video_and_sidecar_from_sql_inventory`. Reuse `seed_library` and `seed_item`, then insert:
 
@@ -240,7 +242,7 @@ substrings (`account-secret-marker`, `credential-secret-marker`, and
 
 Return typed record IDs from the helper. Do not insert `media_sources`, `media_locations`, streams, subtitles, or publications.
 
-- [ ] **Step 3: Execute Source Index through the work contract**
+- [x] **Step 3: Execute Source Index through the work contract**
 
 Add a helper whose two revision parameters remain explicit:
 
@@ -283,7 +285,7 @@ async fn index_cloud_sources(
 
 Use task revision 1 for the first publication and 2 for re-index, while both executions consume reconciled sync revision 1.
 
-- [ ] **Step 4: Resolve semantic identities and Probe both active sources**
+- [x] **Step 4: Resolve semantic identities and Probe both active sources**
 
 Query active source/location/object relationships into a small `CloudPresentations` value:
 
@@ -309,7 +311,7 @@ ProbeService::new(app.database.clone())
 
 After both jobs complete, assert through `CatalogPublicationRepository::active_sources` that there are exactly two sources, both are `Probed`, both are MKV/H.264 1920x1080, only the default-object source owns the English SRT, and presentation IDs match the semantic query.
 
-- [ ] **Step 5: Run the server test target as a compilation and regression checkpoint**
+- [x] **Step 5: Run the server test target as a compilation and regression checkpoint**
 
 ```bash
 cargo test -p tjxy-server --test browse_routes cloud_source_probe_uses_the_registered_backend_and_a_bounded_range --locked -- --exact
@@ -317,7 +319,7 @@ cargo test -p tjxy-server --test browse_routes cloud_source_probe_uses_the_regis
 
 Expected: PASS. This checkpoint confirms the extended fixture did not alter existing cloud behavior. The new helpers become exercised by the end-to-end contract in Task 3 rather than by a redundant service-only test.
 
-- [ ] **Step 6: Format but do not commit the incomplete cross-task file**
+- [x] **Step 6: Format but do not commit the incomplete cross-task file**
 
 ```bash
 cargo fmt --all -- --check
@@ -339,7 +341,7 @@ Task 2 and Task 3 intentionally share `browse_routes.rs`; keep them in one worki
 - Produces: one bounded real-TCP contract covering authenticated request parsing, ordered complete response, byte delivery, policy, leakage, and re-index stability.
 - Consumes: Task 2's inventory/service helpers and semantic `CloudPresentations` mapping.
 
-- [ ] **Step 1: Add a bounded test-only Axum TCP owner**
+- [x] **Step 1: Add a bounded test-only Axum TCP owner**
 
 Use a one-shot shutdown channel and retain the join handle:
 
@@ -396,7 +398,7 @@ impl Drop for TcpTestServer {
 The `Drop` path makes assertion unwinding stop acceptance; the explicit `stop` path still
 proves bounded task completion. Do not use `abort()` on the success path.
 
-- [ ] **Step 2: Add the literal cloud request and normalized complete response**
+- [x] **Step 2: Add the literal cloud request and normalized complete response**
 
 The request fixture pins direct-play compatibility for MKV:
 
@@ -421,7 +423,7 @@ The response fixture must contain exactly two complete MediaSources in policy or
 
 Pin all serialized `MediaSourceInfo` and `MediaStream` fields, explicit nulls, default-source subtitle ownership/index, and local paths. Both sources must state `Protocol=Http`, `Path=null`, `IsRemote=false`, `SupportsTranscoding=false`, `SupportsDirectStream=false`, and `SupportsDirectPlay=true`.
 
-- [ ] **Step 3: Normalize from database semantics without sorting**
+- [x] **Step 3: Normalize from database semantics without sorting**
 
 Add `normalize_cloud_playback(playback, item_id, presentations)` that:
 
@@ -434,37 +436,38 @@ Add `normalize_cloud_playback(playback, item_id, presentations)` that:
 
 Reject an unknown or repeated source ID. This makes a swapped semantic mapping fail even when both sources otherwise have identical probe metadata.
 
-- [ ] **Step 4: Add reusable response leak and delivery assertions**
+- [x] **Step 4: Add reusable response leak and delivery assertions**
 
 Define the marker set in the fixture, including provider, both provider object IDs, subtitle object ID, drive ID, account UUID/string identity, display name, credential reference, `https://upstream.invalid/secret`, and `upstream-token-secret`.
 
-For `PlaybackInfo`, serialize the complete JSON value and scan it. For each delivery response, scan all header names and values before consuming the body:
+For `PlaybackInfo`, serialize the complete JSON value and scan it. Build the Reqwest client with redirects disabled so an intermediate redirect cannot hide its status or `Location`. For each delivery response, scan all raw header-name and header-value bytes before consuming the body; use lossy text conversion only in assertion diagnostics:
 
 ```rust
 fn assert_headers_do_not_leak(headers: &reqwest::header::HeaderMap, markers: &[String]) {
-    let encoded = headers
-        .iter()
-        .map(|(name, value)| format!("{}:{}", name, value.to_str().unwrap_or("<binary>")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for marker in markers {
-        assert!(!encoded.contains(marker), "response header leaked marker {marker:?}");
+    for (name, value) in headers {
+        for marker in markers {
+            let marker = marker.as_bytes();
+            assert!(!marker.is_empty());
+            for encoded in [name.as_str().as_bytes(), value.as_bytes()] {
+                assert!(!encoded.windows(marker.len()).any(|part| part == marker));
+            }
+        }
     }
 }
 ```
 
 Consume only URLs returned by `PlaybackInfo` and verify:
 
-- default full GET: 200, exact content length, exact `CLOUD_DEFAULT_BYTES`;
-- default HEAD: 200, same representation headers, empty body;
+- default full GET: 200, exact content type/cache/range/length/ETag contract, no `Content-Range`, and exact `CLOUD_DEFAULT_BYTES`;
+- default HEAD: 200, the same pinned representation headers, no `Content-Range`, and an empty body;
 - default Range GET `bytes=6-9`: 206, `Content-Range: bytes 6-9/17`, exact four bytes;
-- default Range HEAD `bytes=6-9`: 206, same range headers, empty body;
+- default Range HEAD `bytes=6-9`: 206, the same pinned range headers, empty body;
 - advertised default subtitle GET: 200 and exact `CLOUD_SUBTITLE_BYTES`;
 - alternate full GET: 200 and exact `CLOUD_ALTERNATE_BYTES`.
 
 Assert the drained backend range list exactly from the above operations using provider object IDs and `bytes.len()` bounds. HEAD requests must not create backend reads; GET and subtitle reads must appear once in request order.
 
-- [ ] **Step 5: Execute the complete pre-/post-re-index scenario**
+- [x] **Step 5: Execute the complete pre-/post-re-index scenario**
 
 Add one `#[tokio::test]` with a descriptive contract name. Its sequence is:
 
@@ -485,7 +488,7 @@ Keep the server owner in scope for the whole assertion body so its `Drop` sends 
 during unwinding. On the success path, call `stop().await` and do not ignore the bounded
 shutdown result.
 
-- [ ] **Step 6: Run the focused cloud contract and surrounding target**
+- [x] **Step 6: Run the focused cloud contract and surrounding target**
 
 Run with loopback-bind permission:
 
@@ -496,7 +499,7 @@ cargo test -p tjxy-server --test browse_routes --locked
 
 Expected: both commands exit 0. Rename the exact test filter in this plan if implementation chooses a clearer final test name.
 
-- [ ] **Step 7: Prove the cloud golden and semantic mapping are sensitive**
+- [x] **Step 7: Prove the cloud golden and semantic mapping are sensitive**
 
 Perform each mutation separately, rerun the exact focused test, confirm the intended failure, and restore before the next mutation:
 
@@ -507,7 +510,7 @@ Perform each mutation separately, rerun the exact focused test, confirm the inte
 
 Expected: the first, second, and fourth mutations fail the complete golden comparison; the semantic swap fails the ID/URL/byte routing assertions. Restore all files, rerun the focused test to green, and verify `git diff` contains no mutation residue.
 
-- [ ] **Step 8: Verify and commit Tasks 2-3 together**
+- [x] **Step 8: Verify and commit Tasks 2-3 together**
 
 ```bash
 cargo fmt --all -- --check
@@ -532,7 +535,7 @@ git commit -m "test: prove cloud multi-source playback contract"
 - Produces: an evidence statement aligned with actual deterministic coverage and explicit residual gaps.
 - Consumes: passing Task 1 and Task 3 contracts.
 
-- [ ] **Step 1: Update the nearest compatibility evidence**
+- [x] **Step 1: Update the nearest compatibility evidence**
 
 In `docs/api-parity.md`, record that the following are now covered:
 
@@ -543,7 +546,7 @@ In `docs/api-parity.md`, record that the following are now covered:
 
 Keep production log-redaction, live provider server integration, source removal/tombstones, concurrent pointer switching, and multi-instance behavior explicitly incomplete. State that body/header checks do not substitute for production tracing capture.
 
-- [ ] **Step 2: Run focused server verification**
+- [x] **Step 2: Run focused server verification**
 
 Run with loopback-bind permission:
 
@@ -554,7 +557,7 @@ cargo test -p tjxy-server --test jellyfin_tcp_smoke --locked
 
 Expected: both integration-test binaries pass in full.
 
-- [ ] **Step 3: Run workspace verification**
+- [x] **Step 3: Run workspace verification**
 
 ```bash
 cargo test --workspace --locked
@@ -565,7 +568,7 @@ git diff --check
 
 Expected: every command exits 0. If an environment-only test cannot run, record the exact command, error, and remaining risk rather than marking the gate complete.
 
-- [ ] **Step 4: Review the integrated change for quality and scope**
+- [x] **Step 4: Review the integrated change for quality and scope**
 
 Inspect:
 
@@ -588,7 +591,7 @@ Confirm that:
 - documentation does not overstate the remaining release gates;
 - only `.pi/` and `.playwright-cli/` remain as unrelated untracked content.
 
-- [ ] **Step 5: Commit documentation**
+- [x] **Step 5: Commit documentation**
 
 ```bash
 git add docs/api-parity.md
@@ -597,6 +600,6 @@ git diff --cached
 git commit -m "docs: record multi-source playback evidence"
 ```
 
-- [ ] **Step 6: Report completion**
+- [x] **Step 6: Report completion**
 
 Summarize the behavior proven, why semantic normalization was used, every verification command and result, controlled mutation results, commit IDs, and residual gaps. Do not mark the plan complete unless all required checks pass or each omitted check is explicitly documented.

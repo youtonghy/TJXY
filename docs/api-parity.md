@@ -24,7 +24,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | 5 | 首页 | `GET /UserViews` | Redis 预热，miss 回源 SQL | ⚠️ SQL SoT、generation/user-revision cache-aside、miss/损坏/断连回源已实现；Redis 启用时 ready 后异步预热最多 128 个启用用户，失败只记录且不阻断 ready；ACL 未实现 |
 | 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⚠️ 根视图、父项、active publication 递归读取、类型过滤、稳定分页、generation/user-revision cache-aside、高优先级协调及递归 SQL Structure worker 已实现；更完整命名分类未实现 |
 | 7 | 主页行 | Latest / Resume / NextUp | SQL + Redis user revision | ⚠️ Latest、Resume、NextUp 的 SQL 可见性、用户隔离、稳定排序/分页及 cache-aside 已实现；启动预热覆盖全局 Latest、最多 64 个 Library Latest 以及默认 Resume/NextUp；NextUp 高级筛选/重看模式未实现 |
-| 8 | 详情 | `GET /Items/{id}` | 不触发 Media Probe | ⚠️ 鉴权、用户边界、active publication 读取、DTO、cache-aside 及 Movie Source Index enqueue/join/有界等待已实现；生产 worker/fields 扩展未实现，且不会 Probe |
+| 8 | 详情 | `GET /Items/{id}` | 不触发 Media Probe | ⚠️ 鉴权、用户边界、active publication 读取、DTO、cache-aside 及 Movie Source Index enqueue/join/有界等待和生产 worker 已实现；更完整 fields 扩展未实现，且不会 Probe |
 | 9 | 图片 | `GET /Items/{id}/Images/{type}` | 内容寻址 AssetBlob | ⚠️ 鉴权原图 GET/HEAD、ImageTags、ETag/304、受限解码/原子内容寻址写入及 TMDb Primary 采集已实现；本地图/import 下载器与变换未接入 |
 | 10 | 播放信息 | `GET|POST /Items/{id}/PlaybackInfo` | 多 MediaSource；首次可惰性 Probe | ⚠️ 鉴权、DeviceProfile 容器门禁、多 active source、Probe single-flight、catalog/user/probe-revision 隔离的 source-metadata cache-aside 及 Filesystem Matroska/ISO-BMFF worker 已实现；Filesystem 与 provider-neutral 云端请求/完整规范化响应 golden 已固定，云端 deterministic contract 通过真实 Source Index、双源 Probe、Admin 默认策略和 TCP 验证完整有序列表。完整 stream 字段仍待补齐 |
 | 11 | 原文件 | `GET|HEAD /Videos/{id}/stream` | 本地读取或云盘统一 Range 代理 | ✅ active source/location 鉴权、Filesystem/云端 provider-neutral 原文件 GET/HEAD、单 Range、206/416、ETag/If-Range、字节一致及上游身份隐藏已验证 |
