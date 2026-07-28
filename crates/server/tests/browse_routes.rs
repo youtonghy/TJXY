@@ -896,14 +896,25 @@ async fn effective_source_publication(
     database: &DatabaseConnection,
     item: CatalogItemId,
 ) -> (Uuid, i64) {
+    let catalog_item = Alias::new("catalog_items");
+    let publication = Alias::new("catalog_publications");
+    let query = Query::select()
+        .column((publication.clone(), Alias::new("id")))
+        .column((publication.clone(), Alias::new("activated_generation")))
+        .from(catalog_item.clone())
+        .inner_join(
+            publication.clone(),
+            Expr::col((publication.clone(), Alias::new("id"))).equals((
+                catalog_item.clone(),
+                Alias::new("active_source_publication_id"),
+            )),
+        )
+        .and_where(Expr::col((catalog_item, Alias::new("id"))).eq(item.as_uuid()))
+        .and_where(Expr::col((publication.clone(), Alias::new("state"))).eq("Active"))
+        .and_where(Expr::col((publication, Alias::new("publication_kind"))).eq("Sources"))
+        .to_owned();
     let row = database
-        .query_one(Statement::from_sql_and_values(
-            database.get_database_backend(),
-            "SELECT p.id, p.activated_generation FROM catalog_items c \
-             INNER JOIN catalog_publications p ON p.id = c.active_source_publication_id \
-             WHERE c.id = ? AND p.state = 'Active' AND p.publication_kind = 'Sources'",
-            [item.as_uuid().into()],
-        ))
+        .query_one(database.get_database_backend().build(&query))
         .await
         .unwrap()
         .unwrap();
