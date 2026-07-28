@@ -791,7 +791,7 @@ impl OneDriveBackend {
         let link = response
             .delta_link
             .ok_or_else(|| invalid("OneDrive latest Delta response omitted deltaLink"))?;
-        validate_graph_continuation(&link)?;
+        validate_graph_continuation(&link, &self.api_base)?;
         ChangeCursor::new(link)
     }
 
@@ -829,7 +829,7 @@ impl StorageBackend for OneDriveBackend {
     ) -> Result<ObjectPage, BackendError> {
         let parent_id = validate_object_id(parent)?;
         let target = if let Some(page) = page {
-            validate_graph_continuation(page.as_str())?;
+            validate_graph_continuation(page.as_str(), &self.api_base)?;
             page.as_str().to_owned()
         } else {
             item_target(&self.drive_id, parent_id, Some("children"))
@@ -853,7 +853,7 @@ impl StorageBackend for OneDriveBackend {
         let next_page = response
             .next_link
             .map(|link| {
-                validate_graph_continuation(&link)?;
+                validate_graph_continuation(&link, &self.api_base)?;
                 PageToken::new(link)
             })
             .transpose()?;
@@ -861,7 +861,7 @@ impl StorageBackend for OneDriveBackend {
     }
 
     async fn list_changes(&self, cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
-        validate_graph_continuation(cursor.as_str())?;
+        validate_graph_continuation(cursor.as_str(), &self.api_base)?;
         let token = self.token().await?;
         let value = self
             .transport
@@ -875,11 +875,11 @@ impl StorageBackend for OneDriveBackend {
             .collect::<Result<Vec<_>, _>>()?;
         match (response.next_link, response.delta_link) {
             (Some(link), _) => {
-                validate_graph_continuation(&link)?;
+                validate_graph_continuation(&link, &self.api_base)?;
                 Ok(ChangePage::continuation(changes, ChangeCursor::new(link)?))
             }
             (None, Some(link)) => {
-                validate_graph_continuation(&link)?;
+                validate_graph_continuation(&link, &self.api_base)?;
                 Ok(ChangePage::new(changes, ChangeCursor::new(link)?))
             }
             (None, None) => Err(invalid("OneDrive Delta response omitted continuation link")),
@@ -1149,8 +1149,8 @@ async fn send_range(
 }
 
 fn endpoint(api_base: &Url, target: &str) -> Result<Url, BackendError> {
-    if target.starts_with("https://") {
-        validate_graph_continuation(target)?;
+    if target.starts_with("https://") || target.starts_with("http://") {
+        validate_graph_continuation(target, api_base)?;
         return Url::parse(target).map_err(|_| invalid("Microsoft Graph URL is invalid"));
     }
     if target.is_empty() || target.starts_with('/') || target.contains("..") {
@@ -1161,14 +1161,15 @@ fn endpoint(api_base: &Url, target: &str) -> Result<Url, BackendError> {
         .map_err(|_| invalid("Microsoft Graph endpoint could not be constructed"))
 }
 
-fn validate_graph_continuation(value: &str) -> Result<(), BackendError> {
+fn validate_graph_continuation(value: &str, api_base: &Url) -> Result<(), BackendError> {
     let url = Url::parse(value).map_err(|_| invalid("Microsoft Graph continuation is invalid"))?;
-    if url.scheme() != "https"
-        || url.host_str() != Some("graph.microsoft.com")
-        || url.port_or_known_default() != Some(443)
-        || !url.path().starts_with("/v1.0/")
+    if url.scheme() != api_base.scheme()
+        || url.host_str() != api_base.host_str()
+        || url.port_or_known_default() != api_base.port_or_known_default()
+        || !url.path().starts_with(api_base.path())
         || url.username() != ""
         || url.password().is_some()
+        || url.fragment().is_some()
     {
         return Err(invalid("Microsoft Graph continuation has an unsafe origin"));
     }

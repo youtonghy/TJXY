@@ -334,6 +334,26 @@ async fn graph_continuation_urls_reject_cross_origin_bearer_leaks() {
 }
 
 #[tokio::test]
+async fn graph_continuation_urls_accept_the_configured_safe_origin_unchanged() {
+    let continuation =
+        "http://127.0.0.1:43117/graph/v1.0/drives/drive-id/items/folder/children?$skiptoken=opaque";
+    let captured = Arc::new(Captured::new(json!({"value": []})));
+    let backend = OneDriveBackend::new(Token, OneDriveScope::Personal, "drive-id")
+        .unwrap()
+        .with_api_base("http://127.0.0.1:43117/graph/v1.0/")
+        .unwrap()
+        .with_transport(captured.clone());
+    let parent = StorageObjectId::new("onedrive", "folder").unwrap();
+
+    backend
+        .list_children(&parent, Some(PageToken::new(continuation).unwrap()))
+        .await
+        .unwrap();
+
+    assert_eq!(captured.requests.lock().unwrap()[0].target, continuation);
+}
+
+#[tokio::test]
 async fn content_redirect_forwards_range_but_never_forwards_bearer_token() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

@@ -391,6 +391,148 @@ async fn google_drive_oauth_uses_server_side_pkce_and_persists_only_encrypted_cr
         directories["Items"],
         json!([{"Id":"media-folder","Name":"Media"}])
     );
+    let first_cursor = Uuid::parse_str(directories["NextPageToken"].as_str().unwrap()).unwrap();
+    assert!(!directories.to_string().contains("google-provider-page-2"));
+
+    let second = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value =
+        serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        second["Items"],
+        json!([
+            {"Id":"media-folder","Name":"Media duplicate"},
+            {"Id":"archive-folder","Name":"Archive"}
+        ])
+    );
+    let second_cursor = Uuid::parse_str(second["NextPageToken"].as_str().unwrap()).unwrap();
+    assert!(!second.to_string().contains("google-provider-page-3"));
+
+    let replay = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    let replay: Value =
+        serde_json::from_slice(&replay.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(replay["NextPageToken"], second_cursor.to_string());
+
+    let final_page = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&PageToken={second_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    let final_page: Value =
+        serde_json::from_slice(&final_page.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(final_page, json!({"Items":[],"NextPageToken":null}));
+
+    for invalid_uri in [
+        format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&ParentId=other&PageToken={first_cursor}"
+        ),
+        format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=SharedDrive&SharedDriveId=team-drive&PageToken={first_cursor}"
+        ),
+        format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&PageToken=not-a-uuid"
+        ),
+    ] {
+        let calls_before_invalid = fake.child_queries.lock().await.len();
+        let invalid = json_request(&app, "GET", &invalid_uri, Some(&token), None).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(fake.child_queries.lock().await.len(), calls_before_invalid);
+    }
+
+    let (other_token, _) = login_with_user(&app).await;
+    let calls_before_wrong_owner = fake.child_queries.lock().await.len();
+    let wrong_owner = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{oauth_state}/Directories?Scope=MyDrive&PageToken={first_cursor}"
+        ),
+        Some(&other_token),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_owner.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        fake.child_queries.lock().await.len(),
+        calls_before_wrong_owner
+    );
+
+    let other_start = json_request(
+        &app,
+        "POST",
+        "/Admin/Storage/OAuth/GoogleDrive/Start",
+        Some(&token),
+        Some(json!({"TargetLibraryId":library_id})),
+    )
+    .await;
+    let other_start: Value =
+        serde_json::from_slice(&other_start.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let other_oauth_state = other_start["State"].as_str().unwrap();
+    let calls_before_pending = fake.child_queries.lock().await.len();
+    let pending = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{other_oauth_state}/Directories?Scope=MyDrive&PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(pending.status(), StatusCode::CONFLICT);
+    assert_eq!(fake.child_queries.lock().await.len(), calls_before_pending);
+    let other_callback = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/Callback?state={other_oauth_state}&code=other-authorization-code"
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(other_callback.status(), StatusCode::NO_CONTENT);
+    let calls_before_other_state = fake.child_queries.lock().await.len();
+    let wrong_state = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/GoogleDrive/{other_oauth_state}/Directories?Scope=MyDrive&PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_state.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fake.child_queries.lock().await.len(),
+        calls_before_other_state
+    );
 
     let browser_supplied_identity = json_request(
         &app,
@@ -566,6 +708,146 @@ async fn onedrive_oauth_derives_personal_identity_and_never_accepts_browser_cred
         directories["Items"],
         json!([{"Id":"media-folder","Name":"Media"}])
     );
+    let first_cursor = Uuid::parse_str(directories["NextPageToken"].as_str().unwrap()).unwrap();
+    assert!(!directories.to_string().contains("@odata.nextLink"));
+    assert!(!directories.to_string().contains("$skiptoken"));
+    assert!(!directories.to_string().contains(&fake.base_url));
+
+    let second = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value =
+        serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        second["Items"],
+        json!([
+            {"Id":"media-folder","Name":"Media duplicate"},
+            {"Id":"archive-folder","Name":"Archive"}
+        ])
+    );
+    let second_cursor = Uuid::parse_str(second["NextPageToken"].as_str().unwrap()).unwrap();
+    assert!(!second.to_string().contains("$skiptoken"));
+    assert!(!second.to_string().contains(&fake.base_url));
+
+    let replay = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    let replay: Value =
+        serde_json::from_slice(&replay.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(replay["NextPageToken"], second_cursor.to_string());
+
+    let final_page = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?PageToken={second_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    let final_page: Value =
+        serde_json::from_slice(&final_page.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(final_page, json!({"Items":[],"NextPageToken":null}));
+
+    for invalid_uri in [
+        format!(
+            "/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?ParentId=other&PageToken={first_cursor}"
+        ),
+        format!("/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?PageToken=not-a-uuid"),
+    ] {
+        let calls_before_invalid = fake.child_queries.lock().await.len();
+        let invalid = json_request(&app, "GET", &invalid_uri, Some(&token), None).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(fake.child_queries.lock().await.len(), calls_before_invalid);
+    }
+
+    let other_token = login(&app).await;
+    let calls_before_wrong_owner = fake.child_queries.lock().await.len();
+    let wrong_owner = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{oauth_state}/Directories?PageToken={first_cursor}"
+        ),
+        Some(&other_token),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_owner.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        fake.child_queries.lock().await.len(),
+        calls_before_wrong_owner
+    );
+
+    let other_start = json_request(
+        &app,
+        "POST",
+        "/Admin/Storage/OAuth/OneDrive/Start",
+        Some(&token),
+        Some(json!({"TargetLibraryId":library_id})),
+    )
+    .await;
+    let other_start: Value =
+        serde_json::from_slice(&other_start.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let other_oauth_state = other_start["State"].as_str().unwrap();
+    let calls_before_pending = fake.child_queries.lock().await.len();
+    let pending = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{other_oauth_state}/Directories?PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(pending.status(), StatusCode::CONFLICT);
+    assert_eq!(fake.child_queries.lock().await.len(), calls_before_pending);
+    let other_callback = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/Callback?state={other_oauth_state}&code=other-microsoft-code"
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(other_callback.status(), StatusCode::NO_CONTENT);
+    let calls_before_other_state = fake.child_queries.lock().await.len();
+    let wrong_state = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/Admin/Storage/OAuth/OneDrive/{other_oauth_state}/Directories?PageToken={first_cursor}"
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_state.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fake.child_queries.lock().await.len(),
+        calls_before_other_state
+    );
 
     let forged = json_request(
         &app,
@@ -636,14 +918,27 @@ async fn onedrive_oauth_derives_personal_identity_and_never_accepts_browser_cred
 struct FakeGoogle {
     base_url: String,
     forms: FakeGoogleForms,
+    child_queries: FakeChildQueries,
     server: tokio::task::JoinHandle<()>,
 }
 
 type FakeGoogleForms = Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>;
+type FakeChildQueries = Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>;
+
+#[derive(Clone)]
+struct FakeGoogleState {
+    forms: FakeGoogleForms,
+    child_queries: FakeChildQueries,
+}
 
 impl FakeGoogle {
     async fn start() -> Self {
         let forms = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let child_queries = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let state = FakeGoogleState {
+            forms: Arc::clone(&forms),
+            child_queries: Arc::clone(&child_queries),
+        };
         let router = Router::new()
             .route("/token", route_post(fake_google_token))
             .route("/drive/v3/about", get(fake_google_about))
@@ -654,7 +949,7 @@ impl FakeGoogle {
                 "/drive/v3/changes/startPageToken",
                 get(fake_google_start_page_token),
             )
-            .with_state(Arc::clone(&forms));
+            .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -663,6 +958,7 @@ impl FakeGoogle {
         Self {
             base_url: format!("http://{address}"),
             forms,
+            child_queries,
             server,
         }
     }
@@ -675,10 +971,10 @@ impl Drop for FakeGoogle {
 }
 
 async fn fake_google_token(
-    State(forms): State<FakeGoogleForms>,
+    State(state): State<FakeGoogleState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Json<Value> {
-    forms.lock().await.push(form.clone());
+    state.forms.lock().await.push(form.clone());
     if form
         .get("grant_type")
         .is_some_and(|value| value == "authorization_code")
@@ -718,13 +1014,28 @@ async fn fake_google_shared_drives(
     }
 }
 
-async fn fake_google_children() -> Json<Value> {
-    Json(json!({
-        "files":[
-            {"id":"media-folder","name":"Media","mimeType":"application/vnd.google-apps.folder","trashed":false},
-            {"id":"movie-file","name":"Movie.mkv","mimeType":"video/x-matroska","size":"1","trashed":false}
-        ]
-    }))
+async fn fake_google_children(
+    State(state): State<FakeGoogleState>,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+) -> Json<Value> {
+    state.child_queries.lock().await.push(query.clone());
+    match query.get("pageToken").map(String::as_str) {
+        Some("google-provider-page-2") => Json(json!({
+            "files":[
+                {"id":"media-folder","name":"Media duplicate","mimeType":"application/vnd.google-apps.folder","trashed":false},
+                {"id":"archive-folder","name":"Archive","mimeType":"application/vnd.google-apps.folder","trashed":false}
+            ],
+            "nextPageToken":"google-provider-page-3"
+        })),
+        Some("google-provider-page-3") => Json(json!({"files":[]})),
+        _ => Json(json!({
+            "files":[
+                {"id":"media-folder","name":"Media","mimeType":"application/vnd.google-apps.folder","trashed":false},
+                {"id":"movie-file","name":"Movie.mkv","mimeType":"video/x-matroska","size":"1","trashed":false}
+            ],
+            "nextPageToken":"google-provider-page-2"
+        })),
+    }
 }
 
 async fn fake_google_start_page_token() -> Json<Value> {
@@ -734,12 +1045,29 @@ async fn fake_google_start_page_token() -> Json<Value> {
 struct FakeMicrosoft {
     base_url: String,
     forms: FakeGoogleForms,
+    child_queries: FakeChildQueries,
     server: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct FakeMicrosoftState {
+    forms: FakeGoogleForms,
+    child_queries: FakeChildQueries,
+    graph_api_base: String,
 }
 
 impl FakeMicrosoft {
     async fn start() -> Self {
         let forms = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let child_queries = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let state = FakeMicrosoftState {
+            forms: Arc::clone(&forms),
+            child_queries: Arc::clone(&child_queries),
+            graph_api_base: format!("{base_url}/graph/v1.0/"),
+        };
         let router = Router::new()
             .route("/token", route_post(fake_microsoft_token))
             .route("/graph/v1.0/me", get(fake_microsoft_me))
@@ -757,15 +1085,14 @@ impl FakeMicrosoft {
                 "/graph/v1.0/drives/{drive_id}/root/delta",
                 get(fake_microsoft_delta),
             )
-            .with_state(Arc::clone(&forms));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+            .with_state(state);
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
         Self {
-            base_url: format!("http://{address}"),
+            base_url,
             forms,
+            child_queries,
             server,
         }
     }
@@ -778,10 +1105,10 @@ impl Drop for FakeMicrosoft {
 }
 
 async fn fake_microsoft_token(
-    State(forms): State<FakeGoogleForms>,
+    State(state): State<FakeMicrosoftState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Json<Value> {
-    forms.lock().await.push(form.clone());
+    state.forms.lock().await.push(form.clone());
     if form
         .get("grant_type")
         .is_some_and(|value| value == "authorization_code")
@@ -814,20 +1141,37 @@ async fn fake_microsoft_item(Path((_drive_id, item_id)): Path<(String, String)>)
 }
 
 async fn fake_microsoft_children(
+    State(state): State<FakeMicrosoftState>,
     Path((_drive_id, _item_id)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
 ) -> Json<Value> {
-    Json(json!({
-        "value":[
-            {"id":"media-folder","name":"Media","folder":{},"parentReference":{"driveId":"personal-drive"}},
-            {"id":"movie-file","name":"Movie.mkv","size":1,"file":{},"parentReference":{"driveId":"personal-drive"}}
-        ]
-    }))
+    state.child_queries.lock().await.push(query.clone());
+    match query.get("$skiptoken").map(String::as_str) {
+        Some("page-2") => Json(json!({
+            "value":[
+                {"id":"media-folder","name":"Media duplicate","folder":{},"parentReference":{"driveId":"personal-drive"}},
+                {"id":"archive-folder","name":"Archive","folder":{},"parentReference":{"driveId":"personal-drive"}}
+            ],
+            "@odata.nextLink":format!("{}drives/personal-drive/items/root-item/children?$skiptoken=page-3", state.graph_api_base)
+        })),
+        Some("page-3") => Json(json!({"value":[]})),
+        _ => Json(json!({
+            "value":[
+                {"id":"media-folder","name":"Media","folder":{},"parentReference":{"driveId":"personal-drive"}},
+                {"id":"movie-file","name":"Movie.mkv","size":1,"file":{},"parentReference":{"driveId":"personal-drive"}}
+            ],
+            "@odata.nextLink":format!("{}drives/personal-drive/items/root-item/children?$skiptoken=page-2", state.graph_api_base)
+        })),
+    }
 }
 
-async fn fake_microsoft_delta(Path(_drive_id): Path<String>) -> Json<Value> {
+async fn fake_microsoft_delta(
+    State(state): State<FakeMicrosoftState>,
+    Path(_drive_id): Path<String>,
+) -> Json<Value> {
     Json(json!({
         "value":[],
-        "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/personal-drive/root/delta?token=cursor-1"
+        "@odata.deltaLink":format!("{}drives/personal-drive/root/delta?token=cursor-1", state.graph_api_base)
     }))
 }
 

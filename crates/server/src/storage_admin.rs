@@ -36,7 +36,7 @@ use tjxy_storage_onedrive::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{AppState, auth};
+use crate::{AppState, auth, storage_admin_cursor::DirectoryPageCursorRegistry};
 
 pub(crate) struct StorageAdminService {
     database: DatabaseConnection,
@@ -299,7 +299,14 @@ struct GoogleOAuthSession {
     target_library_id: LibraryId,
     expires_at: Instant,
     code_verifier: Zeroizing<String>,
+    directory_cursors: DirectoryPageCursorRegistry<GoogleDirectoryPageContext>,
     status: GoogleOAuthSessionStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GoogleDirectoryPageContext {
+    scope: GoogleDriveScope,
+    parent_id: String,
 }
 
 enum GoogleOAuthSessionStatus {
@@ -345,6 +352,7 @@ impl GoogleDriveOAuthService {
                 target_library_id,
                 expires_at: Instant::now() + GOOGLE_OAUTH_SESSION_TTL,
                 code_verifier,
+                directory_cursors: DirectoryPageCursorRegistry::default(),
                 status: GoogleOAuthSessionStatus::AwaitingCallback,
             },
         );
@@ -440,6 +448,52 @@ impl GoogleDriveOAuthService {
         Ok((credentials, account_identity, session.target_library_id))
     }
 
+    async fn prepare_directory_page(
+        &self,
+        state: Uuid,
+        owner_session_id: Uuid,
+        context: &GoogleDirectoryPageContext,
+        cursor: Option<Uuid>,
+    ) -> Result<(GoogleOAuthCredentials, Option<PageToken>), StorageAdminError> {
+        let mut sessions = self.sessions.lock().await;
+        purge_expired(&mut sessions);
+        let session = sessions
+            .get_mut(&state)
+            .ok_or(StorageAdminError::InvalidRequest)?;
+        if session.owner_session_id != owner_session_id {
+            return Err(StorageAdminError::Forbidden);
+        }
+        let GoogleOAuthSessionStatus::Authorized { credentials, .. } = &session.status else {
+            return Err(StorageAdminError::Conflict);
+        };
+        let provider_page = session
+            .directory_cursors
+            .resolve(cursor, context)
+            .map_err(|_| StorageAdminError::InvalidRequest)?;
+        Ok((credentials.clone(), provider_page))
+    }
+
+    async fn register_directory_page(
+        &self,
+        state: Uuid,
+        owner_session_id: Uuid,
+        context: GoogleDirectoryPageContext,
+        provider_token: Option<PageToken>,
+    ) -> Result<Option<Uuid>, StorageAdminError> {
+        let mut sessions = self.sessions.lock().await;
+        purge_expired(&mut sessions);
+        let session = sessions
+            .get_mut(&state)
+            .ok_or(StorageAdminError::InvalidRequest)?;
+        if session.owner_session_id != owner_session_id {
+            return Err(StorageAdminError::Forbidden);
+        }
+        if !matches!(session.status, GoogleOAuthSessionStatus::Authorized { .. }) {
+            return Err(StorageAdminError::Conflict);
+        }
+        Ok(session.directory_cursors.register(context, provider_token))
+    }
+
     fn google_backend(
         &self,
         credentials: GoogleOAuthCredentials,
@@ -482,7 +536,22 @@ struct OneDriveOAuthSession {
     target_library_id: LibraryId,
     expires_at: Instant,
     code_verifier: Zeroizing<String>,
+    directory_cursors: DirectoryPageCursorRegistry<OneDriveDirectoryPageContext>,
     status: OneDriveOAuthSessionStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OneDriveDirectoryPageContext {
+    drive_id: String,
+    parent_id: String,
+}
+
+struct PreparedOneDriveDirectoryPage {
+    credentials: MicrosoftOAuthCredentials,
+    drive_id: String,
+    parent: StorageObjectId,
+    context: OneDriveDirectoryPageContext,
+    provider_page: Option<PageToken>,
 }
 
 enum OneDriveOAuthSessionStatus {
@@ -527,6 +596,7 @@ impl OneDriveOAuthService {
                 target_library_id,
                 expires_at: Instant::now() + GOOGLE_OAUTH_SESSION_TTL,
                 code_verifier,
+                directory_cursors: DirectoryPageCursorRegistry::default(),
                 status: OneDriveOAuthSessionStatus::AwaitingCallback,
             },
         );
@@ -574,38 +644,6 @@ impl OneDriveOAuthService {
         Ok(())
     }
 
-    async fn with_authorized_session<ResultValue>(
-        &self,
-        state: Uuid,
-        owner_session_id: Uuid,
-        action: impl FnOnce(
-            &MicrosoftOAuthCredentials,
-            &MicrosoftPersonalDrive,
-            LibraryId,
-        ) -> ResultValue,
-    ) -> Result<ResultValue, StorageAdminError> {
-        let mut sessions = self.sessions.lock().await;
-        purge_expired_onedrive(&mut sessions);
-        let session = sessions
-            .get_mut(&state)
-            .ok_or(StorageAdminError::InvalidRequest)?;
-        if session.owner_session_id != owner_session_id {
-            return Err(StorageAdminError::Forbidden);
-        }
-        let OneDriveOAuthSessionStatus::Authorized {
-            credentials,
-            personal_drive,
-        } = &session.status
-        else {
-            return Err(StorageAdminError::Conflict);
-        };
-        Ok(action(
-            credentials,
-            personal_drive,
-            session.target_library_id,
-        ))
-    }
-
     async fn take_authorized_session(
         &self,
         state: Uuid,
@@ -630,6 +668,74 @@ impl OneDriveOAuthService {
             return Err(StorageAdminError::Conflict);
         };
         Ok((credentials, personal_drive, session.target_library_id))
+    }
+
+    async fn prepare_directory_page(
+        &self,
+        state: Uuid,
+        owner_session_id: Uuid,
+        parent_id: Option<String>,
+        cursor: Option<Uuid>,
+    ) -> Result<PreparedOneDriveDirectoryPage, StorageAdminError> {
+        let mut sessions = self.sessions.lock().await;
+        purge_expired_onedrive(&mut sessions);
+        let session = sessions
+            .get_mut(&state)
+            .ok_or(StorageAdminError::InvalidRequest)?;
+        if session.owner_session_id != owner_session_id {
+            return Err(StorageAdminError::Forbidden);
+        }
+        let OneDriveOAuthSessionStatus::Authorized {
+            credentials,
+            personal_drive,
+        } = &session.status
+        else {
+            return Err(StorageAdminError::Conflict);
+        };
+        let drive_id = personal_drive.drive_id().to_owned();
+        let parent = StorageObjectId::new(
+            "onedrive",
+            parent_id.unwrap_or_else(|| personal_drive.root_id().to_owned()),
+        )?;
+        let context = OneDriveDirectoryPageContext {
+            drive_id: drive_id.clone(),
+            parent_id: parent.provider_object_id().to_owned(),
+        };
+        let provider_page = session
+            .directory_cursors
+            .resolve(cursor, &context)
+            .map_err(|_| StorageAdminError::InvalidRequest)?;
+        Ok(PreparedOneDriveDirectoryPage {
+            credentials: credentials.clone(),
+            drive_id,
+            parent,
+            context,
+            provider_page,
+        })
+    }
+
+    async fn register_directory_page(
+        &self,
+        state: Uuid,
+        owner_session_id: Uuid,
+        context: OneDriveDirectoryPageContext,
+        provider_token: Option<PageToken>,
+    ) -> Result<Option<Uuid>, StorageAdminError> {
+        let mut sessions = self.sessions.lock().await;
+        purge_expired_onedrive(&mut sessions);
+        let session = sessions
+            .get_mut(&state)
+            .ok_or(StorageAdminError::InvalidRequest)?;
+        if session.owner_session_id != owner_session_id {
+            return Err(StorageAdminError::Forbidden);
+        }
+        if !matches!(
+            session.status,
+            OneDriveOAuthSessionStatus::Authorized { .. }
+        ) {
+            return Err(StorageAdminError::Conflict);
+        }
+        Ok(session.directory_cursors.register(context, provider_token))
     }
 
     fn onedrive_backend(
@@ -699,6 +805,7 @@ struct OneDriveOAuthStartDto {
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub(crate) struct OneDriveDirectoryQuery {
     parent_id: Option<String>,
+    page_token: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -736,6 +843,7 @@ pub(crate) struct GoogleDriveDirectoryQuery {
     scope: GoogleScope,
     shared_drive_id: Option<String>,
     parent_id: Option<String>,
+    page_token: Option<Uuid>,
 }
 
 #[derive(Default, Deserialize)]
@@ -783,6 +891,7 @@ struct GoogleDriveOAuthStartResponse {
 #[serde(rename_all = "PascalCase")]
 struct GoogleDriveDirectoryResponse {
     items: Vec<GoogleDriveDirectoryDto>,
+    next_page_token: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -884,40 +993,43 @@ pub(crate) async fn onedrive_directories(
     let Some(oauth) = service.onedrive_oauth.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let (credentials, drive_id, root_id) = match oauth
-        .with_authorized_session(oauth_state, session_id, |credentials, drive, _| {
-            (
-                credentials.clone(),
-                drive.drive_id().to_owned(),
-                drive.root_id().to_owned(),
-            )
-        })
+    let prepared = match oauth
+        .prepare_directory_page(oauth_state, session_id, query.parent_id, query.page_token)
         .await
     {
         Ok(value) => value,
         Err(error) => return oauth_response(&error),
     };
-    let parent_id = query.parent_id.unwrap_or(root_id);
-    let backend = match oauth.onedrive_backend(credentials, &drive_id) {
+    let backend = match oauth.onedrive_backend(prepared.credentials, &prepared.drive_id) {
         Ok(backend) => backend,
         Err(error) => return oauth_response(&StorageAdminError::Backend(error)),
     };
-    let Ok(parent) = StorageObjectId::new("onedrive", parent_id) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    match backend.list_children(&parent, None).await {
-        Ok(page) => Json(GoogleDriveDirectoryResponse {
-            items: page
-                .objects
-                .into_iter()
-                .filter(|item| item.object_type() == ObjectType::Directory)
-                .map(|item| GoogleDriveDirectoryDto {
-                    id: item.id().provider_object_id().to_owned(),
-                    name: item.name().to_owned(),
-                })
-                .collect(),
-        })
-        .into_response(),
+    match backend
+        .list_children(&prepared.parent, prepared.provider_page)
+        .await
+    {
+        Ok(page) => {
+            let tjxy_storage::ObjectPage { objects, next_page } = page;
+            let next_page_token = match oauth
+                .register_directory_page(oauth_state, session_id, prepared.context, next_page)
+                .await
+            {
+                Ok(cursor) => cursor,
+                Err(error) => return oauth_response(&error),
+            };
+            Json(GoogleDriveDirectoryResponse {
+                items: objects
+                    .into_iter()
+                    .filter(|item| item.object_type() == ObjectType::Directory)
+                    .map(|item| GoogleDriveDirectoryDto {
+                        id: item.id().provider_object_id().to_owned(),
+                        name: item.name().to_owned(),
+                    })
+                    .collect(),
+                next_page_token,
+            })
+            .into_response()
+        }
         Err(error) => oauth_response(&StorageAdminError::Backend(error)),
     }
 }
@@ -1059,40 +1171,52 @@ pub(crate) async fn google_drive_directories(
         Ok(scope) => scope,
         Err(error) => return oauth_response(&error),
     };
-    let (credentials, _) = match oauth
-        .with_authorized_session(oauth_state, session_id, |credentials, _, library| {
-            (credentials.clone(), library)
-        })
+    let parent_id = query.parent_id.unwrap_or_else(|| match &scope {
+        GoogleDriveScope::MyDrive => "root".to_owned(),
+        GoogleDriveScope::SharedDrive(id) => id.clone(),
+    });
+    let parent = match StorageObjectId::new("google-drive", parent_id) {
+        Ok(parent) => parent,
+        Err(error) => return oauth_response(&StorageAdminError::Backend(error)),
+    };
+    let context = GoogleDirectoryPageContext {
+        scope: scope.clone(),
+        parent_id: parent.provider_object_id().to_owned(),
+    };
+    let (credentials, provider_page) = match oauth
+        .prepare_directory_page(oauth_state, session_id, &context, query.page_token)
         .await
     {
         Ok(value) => value,
         Err(error) => return oauth_response(&error),
     };
-    let parent_id = query.parent_id.unwrap_or_else(|| match &scope {
-        GoogleDriveScope::MyDrive => "root".to_owned(),
-        GoogleDriveScope::SharedDrive(id) => id.clone(),
-    });
     let backend = match oauth.google_backend(credentials, scope) {
         Ok(backend) => backend,
         Err(error) => return oauth_response(&StorageAdminError::Backend(error)),
     };
-    let parent = match StorageObjectId::new("google-drive", parent_id) {
-        Ok(parent) => parent,
-        Err(error) => return oauth_response(&StorageAdminError::Backend(error)),
-    };
-    match backend.list_children(&parent, None).await {
-        Ok(page) => Json(GoogleDriveDirectoryResponse {
-            items: page
-                .objects
-                .into_iter()
-                .filter(|object| object.object_type() == ObjectType::Directory)
-                .map(|object| GoogleDriveDirectoryDto {
-                    id: object.id().provider_object_id().to_owned(),
-                    name: object.name().to_owned(),
-                })
-                .collect(),
-        })
-        .into_response(),
+    match backend.list_children(&parent, provider_page).await {
+        Ok(page) => {
+            let tjxy_storage::ObjectPage { objects, next_page } = page;
+            let next_page_token = match oauth
+                .register_directory_page(oauth_state, session_id, context, next_page)
+                .await
+            {
+                Ok(cursor) => cursor,
+                Err(error) => return oauth_response(&error),
+            };
+            Json(GoogleDriveDirectoryResponse {
+                items: objects
+                    .into_iter()
+                    .filter(|object| object.object_type() == ObjectType::Directory)
+                    .map(|object| GoogleDriveDirectoryDto {
+                        id: object.id().provider_object_id().to_owned(),
+                        name: object.name().to_owned(),
+                    })
+                    .collect(),
+                next_page_token,
+            })
+            .into_response()
+        }
         Err(error) => oauth_response(&StorageAdminError::Backend(error)),
     }
 }

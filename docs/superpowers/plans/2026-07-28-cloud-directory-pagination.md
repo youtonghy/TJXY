@@ -42,6 +42,8 @@ scan is clean; registry, server DTO, frontend DTO, and component method signatur
 - Modify `crates/server/src/lib.rs`: register the new private module only.
 - Modify `crates/server/src/storage_admin.rs`: provider-specific cursor contexts, OAuth-session ownership, query/response DTOs, and two paginated handlers.
 - Modify `crates/server/tests/storage_admin_routes.rs`: deterministic Google/Graph pagination, leakage, replay, context, and owner contracts.
+- Modify `crates/storage-onedrive/src/lib.rs`: validate opaque Graph continuation URLs against the configured safe API origin.
+- Modify `crates/storage-onedrive/tests/onedrive_contract.rs`: configured-origin continuation and cross-origin rejection contracts.
 - Modify `admin/src/storage/googleDriveApi.ts`: common directory-page DTO parsing and query encoding.
 - Modify `admin/src/storage/googleDriveApi.test.ts`: frontend HTTP-boundary contracts.
 - Modify `admin/src/storage/GoogleDrivePage.tsx`: Google folder-page state and interaction.
@@ -229,6 +231,8 @@ git commit -m "feat: add bounded storage admin cursors"
 **Files:**
 - Modify: `crates/server/src/storage_admin.rs:291-805,865-1102`
 - Modify: `crates/server/tests/storage_admin_routes.rs:251-805`
+- Modify: `crates/storage-onedrive/src/lib.rs:780-885,1151-1176`
+- Modify: `crates/storage-onedrive/tests/onedrive_contract.rs:318`
 
 **Interfaces:**
 - Consumes: `DirectoryPageCursorRegistry<GoogleDirectoryPageContext>` and `DirectoryPageCursorRegistry<OneDriveDirectoryPageContext>` from Task 1.
