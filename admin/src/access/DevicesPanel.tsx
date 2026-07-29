@@ -1,31 +1,23 @@
-import { DeleteOutlineOutlined, EditOutlined, RefreshOutlined, SaveOutlined } from '@mui/icons-material';
 import {
   Button,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogContentText,
-  DialogTitle,
-  IconButton,
-  Stack,
+  Input,
+  Label,
+  Modal,
+  Skeleton,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   TextField,
   Tooltip,
-  Typography,
-} from '@mui/material';
-import { useCallback, useState } from 'react';
-import { useNotify } from 'react-admin';
+} from '@heroui/react';
+import { LoaderCircle, Pencil, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
+import { useCallback, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
 
+import { AsyncContent } from '../ui/AsyncContent';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { ResponsiveCollection } from '../ui/ResponsiveCollection';
 import type { DeviceInfo } from './deviceApi';
 import { deleteDevice, listDevices, updateDeviceName } from './deviceApi';
 import { formatAccessDate } from './formatAccessDate';
-import { ResponsiveTableCell } from './ResponsiveTableCell';
 import { useAuthoritativeLoad } from './useAuthoritativeLoad';
 
 type LoadResult = { records: DeviceInfo[] } | { error: unknown };
@@ -33,21 +25,43 @@ type BusyOperation = 'rename' | 'revoke' | null;
 
 export function DevicesPanel() {
   const notify = useNotify();
+  const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<NonNullable<unknown> | null>(null);
+  const [authRedirecting, setAuthRedirecting] = useState(false);
   const [busy, setBusy] = useState<BusyOperation>(null);
   const [editing, setEditing] = useState<DeviceInfo | null>(null);
   const [customName, setCustomName] = useState('');
-  const [revoking, setRevoking] = useState<DeviceInfo | null>(null);
+  const operationRef = useRef<BusyOperation>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
-  const applyLoadResult = useCallback((result: LoadResult) => {
-    if ('records' in result) setDevices(result.records);
-    else notify('Devices could not be loaded.', { type: 'error' });
-  }, [notify]);
+  const applyLoadResult = useCallback(async (result: LoadResult) => {
+    if ('records' in result) {
+      setDevices(result.records);
+      setHasLoaded(true);
+      setLoadError(null);
+      setAuthRedirecting(false);
+      return;
+    }
+    if (await logoutIfAccessDenied(result.error)) {
+      setAuthRedirecting(true);
+      return;
+    }
+    setLoadError(result.error ?? new Error('Device loading failed.'));
+  }, [logoutIfAccessDenied]);
 
   const { isMounted, loading, reload } = useAuthoritativeLoad(fetchDevices, applyLoadResult);
 
-  const saveName = async () => {
-    if (editing === null || busy !== null) return;
+  const openRename = (device: DeviceInfo) => {
+    setEditing(device);
+    setCustomName(device.customName ?? '');
+  };
+
+  const saveName = async (event?: SyntheticEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (editing === null || operationRef.current !== null) return;
+    operationRef.current = 'rename';
     setBusy('rename');
     try {
       const nextName = customName.trim();
@@ -56,170 +70,299 @@ export function DevicesPanel() {
       notify('Device name saved.', { type: 'success' });
       setEditing(null);
       await reload();
-    } catch {
-      if (isMounted()) notify('The device name could not be saved.', { type: 'error' });
+    } catch (caught: unknown) {
+      if (!isMounted()) return;
+      if (!(await logoutIfAccessDenied(caught)) && isMounted()) {
+        notify('The device name could not be saved.', { type: 'error' });
+      }
     } finally {
+      operationRef.current = null;
       if (isMounted()) setBusy(null);
     }
   };
 
-  const revoke = async () => {
-    if (revoking === null || busy !== null) return;
+  const revoke = async (device: DeviceInfo) => {
+    if (operationRef.current !== null) return;
+    operationRef.current = 'revoke';
     setBusy('revoke');
     try {
-      await deleteDevice(revoking.id);
+      await deleteDevice(device.id);
       if (!isMounted()) return;
       notify('Device access revoked.', { type: 'success' });
-      setRevoking(null);
       await reload();
-    } catch {
-      if (isMounted()) notify('Device access could not be revoked.', { type: 'error' });
+      window.setTimeout(() => { headingRef.current?.focus(); }, 0);
+    } catch (caught: unknown) {
+      if (!isMounted()) return;
+      if (await logoutIfAccessDenied(caught)) return;
+      if (!isMounted()) return;
+      notify('Device access could not be revoked.', { type: 'error' });
+      throw caught;
     } finally {
+      operationRef.current = null;
       if (isMounted()) setBusy(null);
     }
   };
 
+  if (authRedirecting) return null;
+
+  const isLocked = loading || busy !== null;
   return (
-    <Stack spacing={2}>
-      <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
-        <Typography component="h2" variant="h2">Devices</Typography>
-        <Tooltip title="Reload devices">
-          <span>
-            <IconButton
-              aria-label="Reload devices"
-              disabled={loading || busy !== null}
-              onClick={() => void reload()}
-            >
-              <RefreshOutlined />
-            </IconButton>
-          </span>
+    <section aria-labelledby="devices-heading" className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2
+            className="text-lg font-semibold text-foreground"
+            id="devices-heading"
+            ref={headingRef}
+            tabIndex={-1}
+          >Devices</h2>
+          <p className="mt-1 text-sm text-muted">Sessions currently associated with this server.</p>
+        </div>
+        <Tooltip>
+          <Button
+            aria-label="Reload devices"
+            isDisabled={isLocked}
+            isIconOnly
+            onPress={() => { void reload(); }}
+            size="sm"
+            variant="ghost"
+          >
+            <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
+          </Button>
+          <Tooltip.Content>Reload devices</Tooltip.Content>
         </Tooltip>
-      </Stack>
-      <TableContainer sx={{ maxWidth: '100%', overflow: 'hidden' }}>
-        <Table aria-label="Devices" sx={{ tableLayout: 'fixed', width: '100%' }}>
-          <TableHead sx={{ display: { xs: 'none', sm: 'table-header-group' } }}>
-            <TableRow>
-              <TableCell>Device</TableCell>
-              <TableCell>Application</TableCell>
-              <TableCell>Last user</TableCell>
-              <TableCell>Last activity</TableCell>
-              <TableCell align="right" sx={{ width: 104 }}>Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {devices.map((device) => {
-              const label = effectiveName(device);
-              return (
-                <TableRow
-                  key={device.id}
-                  hover
-                  sx={{
-                    display: { xs: 'block', sm: 'table-row' },
-                    borderBottom: { xs: '1px solid', sm: 0 },
-                    borderColor: { xs: 'divider' },
-                    py: { xs: 1 },
-                  }}
-                >
-                  <ResponsiveTableCell label="Device">
-                    <Typography component="span" sx={{ fontWeight: 650, overflowWrap: 'anywhere' }}>{label}</Typography>
-                    {device.customName !== null && (
-                      <Typography color="text.secondary" component="span" sx={{ overflowWrap: 'anywhere' }} variant="body2">{device.name}</Typography>
-                    )}
-                  </ResponsiveTableCell>
-                  <ResponsiveTableCell label="Application">{device.appName} {device.appVersion}</ResponsiveTableCell>
-                  <ResponsiveTableCell label="Last user">{device.lastUserName}</ResponsiveTableCell>
-                  <ResponsiveTableCell label="Last activity">{formatAccessDate(device.dateLastActivity)}</ResponsiveTableCell>
-                  <TableCell
-                    align="right"
-                    sx={{ border: 0, display: { xs: 'block', sm: 'table-cell' }, px: { xs: 0, sm: 2 }, py: 1 }}
-                  >
-                    <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'flex-end' }}>
-                      <Tooltip title={`Edit ${label}`}>
-                        <span>
-                          <IconButton
-                            aria-label={`Edit ${label}`}
-                            disabled={loading || busy !== null}
-                            onClick={() => {
-                              setEditing(device);
-                              setCustomName(device.customName ?? '');
-                            }}
-                          >
-                            <EditOutlined />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                      <Tooltip title={`Revoke ${label}`}>
-                        <span>
-                          <IconButton
-                            aria-label={`Revoke ${label}`}
-                            disabled={loading || busy !== null}
-                            onClick={() => { setRevoking(device); }}
-                          >
-                            <DeleteOutlineOutlined />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    </Stack>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </TableContainer>
-      {loading && <CircularProgress size={28} aria-label="Loading devices" sx={{ alignSelf: 'center' }} />}
-      {!loading && devices.length === 0 && (
-        <Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>No devices are active.</Typography>
+      </div>
+
+      {loading && hasLoaded && (
+        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing devices...</p>
       )}
 
-      <Dialog open={editing !== null} onClose={() => { if (busy === null) setEditing(null); }} fullWidth maxWidth="xs">
-        <DialogTitle>Edit {editing === null ? 'device' : effectiveName(editing)}</DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            fullWidth
-            label="Custom device name"
-            value={customName}
-            disabled={busy !== null}
-            onChange={(event) => { setCustomName(event.target.value); }}
-            slotProps={{ htmlInput: { maxLength: 256 } }}
-            sx={{ mt: 1 }}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button disabled={busy !== null} onClick={() => { setEditing(null); }}>Cancel</Button>
-          <Button
-            variant="contained"
-            startIcon={busy === 'rename' ? <CircularProgress color="inherit" size={18} /> : <SaveOutlined />}
-            disabled={busy !== null}
-            onClick={() => void saveName()}
-          >
-            Save device name
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <AsyncContent
+        empty={<EmptyDevices />}
+        error={loadError}
+        hasData={hasLoaded}
+        isEmpty={hasLoaded && devices.length === 0}
+        isPending={loading}
+        loading={<DeviceSkeleton />}
+        onRetry={() => { void reload(); }}
+      >
+        <ResponsiveCollection
+          ariaLabel="Devices collection"
+          desktop={<DeviceTable devices={devices} isLocked={isLocked} onRename={openRename} onRevoke={revoke} />}
+          mobile={<DeviceMobileList devices={devices} isLocked={isLocked} onRename={openRename} onRevoke={revoke} />}
+        />
+      </AsyncContent>
 
-      <Dialog open={revoking !== null} onClose={() => { if (busy === null) setRevoking(null); }} fullWidth maxWidth="xs">
-        <DialogTitle>Revoke device</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Revoke all active sessions for {revoking === null ? 'this device' : effectiveName(revoking)}?
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button disabled={busy !== null} onClick={() => { setRevoking(null); }}>Cancel</Button>
+      <RenameDeviceModal
+        customName={customName}
+        device={editing}
+        isPending={busy === 'rename'}
+        onClose={() => { setEditing(null); }}
+        onNameChange={setCustomName}
+        onSubmit={saveName}
+      />
+    </section>
+  );
+}
+
+interface DeviceCollectionProps {
+  devices: DeviceInfo[];
+  isLocked: boolean;
+  onRename: (device: DeviceInfo) => void;
+  onRevoke: (device: DeviceInfo) => Promise<void>;
+}
+
+function DeviceTable({ devices, isLocked, onRename, onRevoke }: DeviceCollectionProps) {
+  return (
+    <Table variant="secondary">
+      <Table.ScrollContainer>
+        <Table.Content aria-label="Devices" className="table-fixed">
+          <Table.Header>
+            <Table.Column isRowHeader>Device</Table.Column>
+            <Table.Column>Application</Table.Column>
+            <Table.Column>Last user</Table.Column>
+            <Table.Column>Last activity</Table.Column>
+            <Table.Column className="w-24 text-right">Actions</Table.Column>
+          </Table.Header>
+          <Table.Body>
+            {devices.map((device) => (
+              <Table.Row id={device.id} key={device.id}>
+                <Table.Cell><DeviceName device={device} /></Table.Cell>
+                <Table.Cell><span className="break-words">{device.appName} {device.appVersion}</span></Table.Cell>
+                <Table.Cell><span className="break-words">{device.lastUserName}</span></Table.Cell>
+                <Table.Cell>{formatAccessDate(device.dateLastActivity)}</Table.Cell>
+                <Table.Cell>
+                  <DeviceActions device={device} isLocked={isLocked} onRename={onRename} onRevoke={onRevoke} />
+                </Table.Cell>
+              </Table.Row>
+            ))}
+          </Table.Body>
+        </Table.Content>
+      </Table.ScrollContainer>
+    </Table>
+  );
+}
+
+function DeviceMobileList({ devices, isLocked, onRename, onRevoke }: DeviceCollectionProps) {
+  return (
+    <ul aria-label="Devices mobile" className="divide-y divide-border border-y border-border">
+      {devices.map((device) => {
+        const label = effectiveName(device);
+        return (
+          <li aria-label={label} className="space-y-4 py-4" key={device.id}>
+            <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
+              <MobileField label="Device"><DeviceName device={device} /></MobileField>
+              <MobileField label="Application"><span className="break-words">{device.appName} {device.appVersion}</span></MobileField>
+              <MobileField label="Last user"><span className="break-words">{device.lastUserName}</span></MobileField>
+              <MobileField label="Last activity">{formatAccessDate(device.dateLastActivity)}</MobileField>
+            </dl>
+            <DeviceActions device={device} isLocked={isLocked} onRename={onRename} onRevoke={onRevoke} />
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function DeviceName({ device }: { device: DeviceInfo }) {
+  const hasCustomName = (device.customName?.trim().length ?? 0) > 0;
+  return (
+    <div className="min-w-0 py-1">
+      <p className="break-words font-semibold text-foreground">{effectiveName(device)}</p>
+      {hasCustomName && (
+        <p className="break-words text-xs text-muted">{device.name}</p>
+      )}
+    </div>
+  );
+}
+
+function DeviceActions({ device, isLocked, onRename, onRevoke }: Omit<DeviceCollectionProps, 'devices'> & { device: DeviceInfo }) {
+  const label = effectiveName(device);
+  return (
+    <div aria-label={`Actions for ${label}`} className="flex justify-end gap-1">
+      <Tooltip>
+        <Button
+          aria-label={`Edit ${label}`}
+          isDisabled={isLocked}
+          isIconOnly
+          onPress={() => { onRename(device); }}
+          size="sm"
+          variant="ghost"
+        >
+          <Pencil aria-hidden="true" className="size-4" />
+        </Button>
+        <Tooltip.Content>Edit device name</Tooltip.Content>
+      </Tooltip>
+      <ConfirmDialog
+        confirmLabel="Revoke device"
+        description={<>Revoke all active sessions for <strong>{label}</strong>?</>}
+        isPending={isLocked}
+        onConfirm={() => onRevoke(device)}
+        title="Revoke device"
+        trigger={(
           <Button
-            color="error"
-            variant="contained"
-            startIcon={busy === 'revoke' ? <CircularProgress color="inherit" size={18} /> : <DeleteOutlineOutlined />}
-            disabled={busy !== null}
-            onClick={() => void revoke()}
+            aria-label={`Revoke ${label}`}
+            isDisabled={isLocked}
+            isIconOnly
+            size="sm"
+            variant="ghost"
           >
-            Revoke device
+            <Trash2 aria-hidden="true" className="size-4" />
           </Button>
-        </DialogActions>
-      </Dialog>
-    </Stack>
+        )}
+      />
+    </div>
+  );
+}
+
+function RenameDeviceModal({
+  customName,
+  device,
+  isPending,
+  onClose,
+  onNameChange,
+  onSubmit,
+}: {
+  customName: string;
+  device: DeviceInfo | null;
+  isPending: boolean;
+  onClose: () => void;
+  onNameChange: (name: string) => void;
+  onSubmit: (event?: SyntheticEvent<HTMLFormElement>) => void | Promise<void>;
+}) {
+  return (
+    <Modal
+      isOpen={device !== null}
+      onOpenChange={(isOpen) => { if (!isOpen && !isPending) onClose(); }}
+    >
+      <Modal.Backdrop isDismissable={!isPending} isKeyboardDismissDisabled={isPending}>
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog>
+            <Modal.CloseTrigger aria-label="Close" isDisabled={isPending} />
+            <Modal.Header>
+              <Modal.Heading>Edit device name</Modal.Heading>
+            </Modal.Header>
+            <Modal.Body>
+              <p className="mb-4 text-sm text-muted">
+                Set a recognizable name for {device === null ? 'this device' : effectiveName(device)}.
+              </p>
+              <form id="rename-device-form" onSubmit={(event) => { void onSubmit(event); }}>
+                <TextField fullWidth name="customName">
+                  <Label>Custom device name</Label>
+                  <Input
+                    autoFocus
+                    disabled={isPending}
+                    maxLength={256}
+                    onChange={(event) => { onNameChange(event.target.value); }}
+                    value={customName}
+                  />
+                </TextField>
+              </form>
+            </Modal.Body>
+            <Modal.Footer>
+              <Button isDisabled={isPending} onPress={onClose} variant="tertiary">Cancel</Button>
+              <Button
+                aria-busy={isPending}
+                form="rename-device-form"
+                isDisabled={isPending}
+                type="submit"
+              >
+                {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Save aria-hidden="true" className="size-4" />}
+                <span className="inline-flex min-h-5 items-center">Save device name</span>
+              </Button>
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
+  );
+}
+
+function MobileField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="font-medium text-muted">{label}</dt>
+      <dd className="min-w-0 text-foreground">{children}</dd>
+    </>
+  );
+}
+
+function DeviceSkeleton() {
+  return (
+    <div aria-label="Loading devices" className="space-y-3" role="status">
+      <Skeleton className="h-10 w-full" />
+      <Skeleton className="h-16 w-full" />
+      <Skeleton className="h-16 w-full" />
+    </div>
+  );
+}
+
+function EmptyDevices() {
+  return (
+    <div className="border-y border-border py-10 text-center">
+      <p className="font-medium text-foreground">No active devices</p>
+      <p className="mt-1 text-sm text-muted">Signed-in devices will appear here.</p>
+    </div>
   );
 }
 
@@ -228,7 +371,7 @@ function effectiveName(device: DeviceInfo): string {
   return customName === undefined || customName.length === 0 ? device.name : customName;
 }
 
-async function fetchDevices(signal?: AbortSignal): Promise<LoadResult> {
+async function fetchDevices(signal: AbortSignal): Promise<LoadResult> {
   try {
     return { records: await listDevices(signal) };
   } catch (error: unknown) {

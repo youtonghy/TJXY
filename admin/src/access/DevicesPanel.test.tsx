@@ -1,14 +1,13 @@
-import { ThemeProvider } from '@mui/material/styles';
-import { render, screen, waitFor } from '@testing-library/react';
+import { Toast } from '@heroui/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import { theme } from '../theme';
+import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmin';
+import { AdminNotifications } from '../ui/AdminNotifications';
 import type { DeviceInfo } from './deviceApi';
 import { deleteDevice, listDevices, updateDeviceName } from './deviceApi';
 import { DevicesPanel } from './DevicesPanel';
 
-const notify = vi.fn();
-vi.mock('react-admin', () => ({ useNotify: () => notify }));
 vi.mock('./deviceApi', () => ({
   deleteDevice: vi.fn(),
   listDevices: vi.fn(),
@@ -39,8 +38,21 @@ const device = {
   iconUrl: null,
 } satisfies DeviceInfo;
 
+function renderDevices(authProvider = defaultTestAuthProvider) {
+  return renderWithAdmin(
+    <>
+      <DevicesPanel />
+      <AdminNotifications />
+    </>,
+    { authProvider, initialEntries: ['/admin/access'] },
+  );
+}
+
+async function devicesGrid() {
+  return await screen.findByRole('grid', { name: 'Devices' });
+}
+
 beforeEach(() => {
-  notify.mockReset();
   listMock.mockReset();
   updateMock.mockReset();
   deleteMock.mockReset();
@@ -49,12 +61,14 @@ beforeEach(() => {
   deleteMock.mockResolvedValue(undefined);
 });
 
-it('renames a device and refetches the authoritative list', async () => {
-  render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
-  const user = userEvent.setup();
+afterEach(() => { vi.restoreAllMocks(); });
 
-  await screen.findByText('Living room');
-  await user.click(screen.getByRole('button', { name: 'Edit Living room' }));
+it('renames a device, supports clearing the custom name, and refetches authoritative data', async () => {
+  renderDevices();
+  const user = userEvent.setup();
+  const grid = await devicesGrid();
+
+  await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   const name = screen.getByRole('textbox', { name: 'Custom device name' });
   await user.clear(name);
   await user.type(name, 'Bedroom');
@@ -62,102 +76,154 @@ it('renames a device and refetches the authoritative list', async () => {
 
   expect(updateMock).toHaveBeenCalledWith('Phone', 'Bedroom');
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
+
+  await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
+  await user.clear(screen.getByRole('textbox', { name: 'Custom device name' }));
+  await user.click(screen.getByRole('button', { name: 'Save device name' }));
+  expect(updateMock).toHaveBeenLastCalledWith('Phone', null);
 });
 
 it('confirms revocation by effective name and reloads after success', async () => {
-  render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+  listMock.mockResolvedValueOnce([device]).mockResolvedValueOnce([]);
+  renderDevices();
   const user = userEvent.setup();
+  const grid = await devicesGrid();
 
-  await screen.findByText('Living room');
-  await user.click(screen.getByRole('button', { name: 'Revoke Living room' }));
-  expect(screen.getByRole('dialog')).toHaveTextContent('Living room');
-  expect(screen.getByRole('dialog')).not.toHaveTextContent('Phone');
-  await user.click(screen.getByRole('button', { name: 'Revoke device' }));
+  await user.click(within(grid).getByRole('button', { name: 'Revoke Living room' }));
+  const dialog = screen.getByRole('dialog', { name: 'Revoke device' });
+  expect(dialog).toHaveTextContent('Living room');
+  expect(dialog).not.toHaveTextContent('Phone');
+  await user.click(within(dialog).getByRole('button', { name: 'Revoke device' }));
 
   expect(deleteMock).toHaveBeenCalledWith('Phone');
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
+  await waitFor(() => {
+    expect(screen.getByRole('heading', { name: 'Devices' })).toHaveFocus();
+  });
 });
 
-it('preserves editable state after a failed rename and aborts an unmounted load', async () => {
-  updateMock.mockRejectedValue(new Error('failed'));
-  let loadSignal: AbortSignal | undefined;
-  listMock.mockImplementation((signal) => {
-    loadSignal = signal;
-    return Promise.resolve([device]);
-  });
-  const view = render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+it('preserves the rename draft and reports only safe copy after failure', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('rename-error');
+  updateMock.mockRejectedValue(new Error('private-device-detail'));
+  renderDevices();
   const user = userEvent.setup();
+  const grid = await devicesGrid();
 
-  await screen.findByText('Living room');
-  await user.click(screen.getByRole('button', { name: 'Edit Living room' }));
+  await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   const name = screen.getByRole('textbox', { name: 'Custom device name' });
   await user.clear(name);
   await user.type(name, 'Bedroom');
   await user.click(screen.getByRole('button', { name: 'Save device name' }));
-  await waitFor(() => { expect(updateMock).toHaveBeenCalled(); });
-  expect(name).toHaveValue('Bedroom');
-  expect(screen.getByRole('dialog')).toBeVisible();
 
-  view.unmount();
-  expect(loadSignal?.aborted).toBe(true);
+  await waitFor(() => {
+    expect(dangerToast).toHaveBeenCalledWith(
+      'The device name could not be saved.',
+      expect.any(Object),
+    );
+  });
+  expect(name).toHaveValue('Bedroom');
+  expect(screen.getByRole('dialog', { name: 'Edit device name' })).toBeVisible();
+  expect(screen.queryByText('private-device-detail')).not.toBeInTheDocument();
 });
 
-it('disables rename controls while the mutation is pending', async () => {
+it('locks rename controls while the mutation is pending', async () => {
   let finishRename: (() => void) | undefined;
   updateMock.mockReturnValue(new Promise((resolve) => { finishRename = resolve; }));
-  render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+  renderDevices();
   const user = userEvent.setup();
+  const grid = await devicesGrid();
 
-  await screen.findByText('Living room');
-  await user.click(screen.getByRole('button', { name: 'Edit Living room' }));
+  await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   await user.click(screen.getByRole('button', { name: 'Save device name' }));
   expect(screen.getByRole('button', { name: 'Save device name' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
   finishRename?.();
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
 });
 
-it('aborts the current reload on unmount and disables stale-row actions while loading', async () => {
+it('aborts a reload on unmount and disables stale record actions while refreshing', async () => {
   let reloadSignal: AbortSignal | undefined;
-  let finishReload: ((records: DeviceInfo[]) => void) | undefined;
   listMock
     .mockResolvedValueOnce([device])
     .mockImplementationOnce((signal) => {
       reloadSignal = signal;
-      return new Promise((resolve) => { finishReload = resolve; });
+      return new Promise(() => undefined);
     });
-  const view = render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+  const view = renderDevices();
   const user = userEvent.setup();
+  const grid = await devicesGrid();
 
-  await screen.findByText('Living room');
   await user.click(screen.getByRole('button', { name: 'Reload devices' }));
-  await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
-  expect(screen.getByRole('button', { name: 'Edit Living room' })).toBeDisabled();
+  expect(await screen.findByRole('status')).toHaveTextContent('Refreshing devices');
+  expect(within(grid).getByRole('button', { name: 'Edit Living room' })).toBeDisabled();
   view.unmount();
   expect(reloadSignal?.aborted).toBe(true);
-  finishReload?.([device]);
 });
 
-it('uses a fixed-width table and permits long device fields to wrap', async () => {
+it('retains device records and uses an inline safe error after a failed refresh', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  listMock
+    .mockResolvedValueOnce([device])
+    .mockRejectedValueOnce(new Error('private-refresh-detail'));
+  renderDevices();
+  const user = userEvent.setup();
+  const grid = await devicesGrid();
+
+  await user.click(screen.getByRole('button', { name: 'Reload devices' }));
+
+  expect(await screen.findByText('Showing the last available data')).toBeVisible();
+  expect(within(grid).getByText('Living room')).toBeVisible();
+  expect(screen.queryByText('private-refresh-detail')).not.toBeInTheDocument();
+  expect(dangerToast).not.toHaveBeenCalled();
+});
+
+it('renders fixed HeroUI desktop data and a complete mobile record', async () => {
   const longName = 'device'.repeat(60);
   listMock.mockResolvedValue([{ ...device, customName: longName }]);
-  render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+  renderDevices();
 
-  const name = await screen.findByText(longName);
-  expect(screen.getByRole('table', { name: 'Devices' })).toHaveStyle({ tableLayout: 'fixed' });
-  expect(name).toHaveStyle({ overflowWrap: 'anywhere' });
+  const grid = await devicesGrid();
+  expect(grid).toHaveClass('table-fixed');
+  expect(within(grid).getByText(longName)).toHaveClass('break-words');
+  const mobile = screen.getByRole('list', { name: 'Devices mobile' });
+  const record = within(mobile).getByRole('listitem', { name: longName });
+  expect(record).toHaveTextContent('Application');
+  expect(record).toHaveTextContent('Last user');
+  expect(record).toHaveTextContent('Last activity');
 });
 
-it('keeps the revoke dialog open and reports a nonsecret error after failure', async () => {
+it('keeps revoke confirmation open and never exposes a raw server error', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('revoke-error');
   deleteMock.mockRejectedValue(new Error('internal-device-id'));
-  render(<ThemeProvider theme={theme}><DevicesPanel /></ThemeProvider>);
+  renderDevices();
   const user = userEvent.setup();
+  const grid = await devicesGrid();
 
-  await screen.findByText('Living room');
-  await user.click(screen.getByRole('button', { name: 'Revoke Living room' }));
-  await user.click(screen.getByRole('button', { name: 'Revoke device' }));
-  await waitFor(() => { expect(deleteMock).toHaveBeenCalled(); });
-  expect(screen.getByRole('dialog')).toBeVisible();
-  expect(notify).toHaveBeenCalledWith('Device access could not be revoked.', { type: 'error' });
+  await user.click(within(grid).getByRole('button', { name: 'Revoke Living room' }));
+  const dialog = screen.getByRole('dialog', { name: 'Revoke device' });
+  await user.click(within(dialog).getByRole('button', { name: 'Revoke device' }));
+
+  expect(await within(dialog).findByText('Review the current state and try again.')).toBeVisible();
+  expect(dialog).toBeVisible();
+  expect(dangerToast).toHaveBeenCalledWith(
+    'Device access could not be revoked.',
+    expect.any(Object),
+  );
   expect(screen.queryByText('internal-device-id')).not.toBeInTheDocument();
+});
+
+it('delegates authorization failures without showing a local error or toast', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  listMock.mockRejectedValue({ status: 403, message: 'private-auth-detail' });
+  renderDevices({ ...defaultTestAuthProvider, checkError });
+
+  await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  await waitFor(() => {
+    expect(screen.queryByRole('status', { name: 'Loading devices' })).not.toBeInTheDocument();
+  });
+  expect(screen.queryByRole('heading', { name: 'Unable to load this content' })).not.toBeInTheDocument();
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(screen.queryByText('private-auth-detail')).not.toBeInTheDocument();
 });

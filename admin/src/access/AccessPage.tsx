@@ -1,48 +1,55 @@
-import { SecurityOutlined } from '@mui/icons-material';
-import { Box, Stack, Tab, Tabs, Typography } from '@mui/material';
-import { useState } from 'react';
-import { Title } from 'react-admin';
+import { Tabs } from '@heroui/react';
+import { useSearchParams } from 'react-router-dom';
 
+import { PageHeader } from '../ui/PageHeader';
 import { ApiKeysPanel } from './ApiKeysPanel';
 import { DevicesPanel } from './DevicesPanel';
 
 type AccessTab = 'devices' | 'api-keys';
 
 export function AccessPage() {
-  const [tab, setTab] = useState<AccessTab>('devices');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = parseAccessTab(searchParams);
+
+  const selectTab = (key: React.Key) => {
+    if (key !== 'devices' && key !== 'api-keys') return;
+    const next = new URLSearchParams(searchParams);
+    if (key === 'devices') next.delete('tab');
+    else next.set('tab', key);
+    setSearchParams(next);
+  };
+
   return (
-    <Box sx={{ boxSizing: 'border-box', maxWidth: 1120, minWidth: 0, p: { xs: 2, sm: 3 }, width: '100%' }}>
-      <Title title="Access" />
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 2 }}>
-        <SecurityOutlined color="primary" />
-        <Typography component="h1" variant="h1">Access</Typography>
-      </Stack>
+    <div className="space-y-6">
+      <PageHeader
+        description="Review signed-in devices and manage credentials used by external applications."
+        title="Access"
+      />
+
       <Tabs
         aria-label="Access management"
-        value={tab}
-        onChange={(_, value: AccessTab) => { setTab(value); }}
-        sx={{ borderBottom: '1px solid', borderColor: 'divider', mb: 2 }}
+        onSelectionChange={selectTab}
+        selectedKey={tab}
+        variant="secondary"
       >
-        <Tab
-          id="access-tab-devices"
-          aria-controls="access-panel-devices"
-          label="Devices"
-          value="devices"
-        />
-        <Tab
-          id="access-tab-api-keys"
-          aria-controls="access-panel-api-keys"
-          label="API Keys"
-          value="api-keys"
-        />
+        <Tabs.List>
+          <Tabs.Tab id="devices">
+            Devices
+            <Tabs.Indicator />
+          </Tabs.Tab>
+          <Tabs.Tab id="api-keys">
+            API Keys
+            <Tabs.Indicator />
+          </Tabs.Tab>
+        </Tabs.List>
+        <Tabs.Panel className="pt-6" id={tab} key={tab}>
+          {tab === 'devices' ? <DevicesPanel /> : <ApiKeysPanel />}
+        </Tabs.Panel>
       </Tabs>
-      <Box
-        id={tab === 'devices' ? 'access-panel-devices' : 'access-panel-api-keys'}
-        aria-labelledby={tab === 'devices' ? 'access-tab-devices' : 'access-tab-api-keys'}
-        role="tabpanel"
-      >
-        {tab === 'devices' ? <DevicesPanel /> : <ApiKeysPanel />}
-      </Box>
-    </Box>
+    </div>
   );
+}
+
+function parseAccessTab(searchParams: URLSearchParams): AccessTab {
+  return searchParams.get('tab') === 'api-keys' ? 'api-keys' : 'devices';
 }

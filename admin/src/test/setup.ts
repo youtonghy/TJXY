@@ -23,6 +23,11 @@ function installMatchMedia() {
 
 installMatchMedia();
 
+Object.defineProperty(Element.prototype, 'getAnimations', {
+  configurable: true,
+  value: () => [],
+});
+
 afterEach(() => {
   act(() => { Toast.toast.clear(); });
   document.querySelectorAll('[data-overlay-container="true"], [data-slot="toast-region"]')

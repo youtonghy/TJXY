@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export function useAuthoritativeLoad<Result>(
   fetchResult: (signal: AbortSignal) => Promise<Result>,
-  applyResult: (result: Result) => void,
+  applyResult: (result: Result) => void | Promise<void>,
 ) {
   const [loading, setLoading] = useState(true);
   const requestSequence = useRef(0);
@@ -15,16 +15,28 @@ export function useAuthoritativeLoad<Result>(
     const abort = new AbortController();
     activeRequest.current = abort;
     const sequence = ++requestSequence.current;
+    const isCurrentRequest = () => (
+      mounted.current
+      && !abort.signal.aborted
+      && sequence === requestSequence.current
+    );
     setLoading(true);
-    const result = await fetchResult(abort.signal);
-    if (abort.signal.aborted || sequence !== requestSequence.current) return;
-    applyResult(result);
-    setLoading(false);
+    try {
+      const result = await fetchResult(abort.signal);
+      if (!isCurrentRequest()) return;
+      await applyResult(result);
+      if (!isCurrentRequest()) return;
+    } finally {
+      if (isCurrentRequest()) {
+        if (activeRequest.current === abort) activeRequest.current = null;
+        setLoading(false);
+      }
+    }
   }, [applyResult, fetchResult]);
 
   useEffect(() => {
     mounted.current = true;
-    void reload();
+    void reload().catch(() => undefined);
     return () => {
       mounted.current = false;
       requestSequence.current += 1;

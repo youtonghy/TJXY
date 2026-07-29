@@ -27,6 +27,7 @@ export function ConfirmDialog({
   const [hasSubmissionError, setHasSubmissionError] = useState(false);
   const triggerContainerRef = useRef<HTMLSpanElement>(null);
   const shouldRestoreFocusRef = useRef(false);
+  const submissionRef = useRef(false);
   const isLocked = isPending || isSubmitting;
 
   useEffect(() => {
@@ -44,7 +45,8 @@ export function ConfirmDialog({
   };
 
   const handleConfirm = async () => {
-    if (isLocked) return;
+    if (isLocked || submissionRef.current) return;
+    submissionRef.current = true;
     setHasSubmissionError(false);
     setIsSubmitting(true);
     try {
@@ -54,6 +56,7 @@ export function ConfirmDialog({
     } catch {
       setHasSubmissionError(true);
     } finally {
+      submissionRef.current = false;
       setIsSubmitting(false);
     }
   };
