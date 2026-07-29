@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+@import "./theme.css";
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  html,
+  body {
+    overflow-x: clip;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+
+  :where(p, td, th, dd, a) {
+    overflow-wrap: anywhere;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  .skip-link {
+    position: fixed;
+    top: 1rem;
+    left: 1rem;
+    z-index: 1000;
+    transform: translateY(-200%);
+  }
+
+  .skip-link:focus {
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
