@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export function useAuthoritativeLoad<Result>(
   fetchResult: (signal: AbortSignal) => Promise<Result>,
-  applyResult: (result: Result) => void | Promise<void>,
+  prepareResult: (result: Result) => (() => void) | Promise<() => void>,
 ) {
   const [loading, setLoading] = useState(true);
   const requestSequence = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const mounted = useRef(false);
+  const effectSequence = useRef(0);
 
   const reload = useCallback(async () => {
     if (!mounted.current) return;
@@ -24,26 +25,38 @@ export function useAuthoritativeLoad<Result>(
     try {
       const result = await fetchResult(abort.signal);
       if (!isCurrentRequest()) return;
-      await applyResult(result);
+      const commitResult = await prepareResult(result);
       if (!isCurrentRequest()) return;
+      commitResult();
     } finally {
       if (isCurrentRequest()) {
         if (activeRequest.current === abort) activeRequest.current = null;
         setLoading(false);
       }
     }
-  }, [applyResult, fetchResult]);
+  }, [fetchResult, prepareResult]);
+
+  const refreshWhenIdle = useCallback(async () => {
+    if (activeRequest.current !== null) return;
+    await reload();
+  }, [reload]);
 
   useEffect(() => {
     mounted.current = true;
-    void reload().catch(() => undefined);
+    const effect = ++effectSequence.current;
+    void Promise.resolve().then(async () => {
+      if (!mounted.current || effect !== effectSequence.current) return;
+      await reload();
+    }).catch(() => undefined);
     return () => {
       mounted.current = false;
+      effectSequence.current += 1;
       requestSequence.current += 1;
       activeRequest.current?.abort();
+      activeRequest.current = null;
     };
   }, [reload]);
 
   const isMounted = useCallback(() => mounted.current, []);
-  return { isMounted, loading, reload };
+  return { isMounted, loading, refreshWhenIdle, reload };
 }

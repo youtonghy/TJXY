@@ -49,6 +49,14 @@ async function apiKeysGrid() {
   return await screen.findByRole('grid', { name: 'API Keys' });
 }
 
+function documentContainsRawToken() {
+  return document.body.textContent.includes(rawToken);
+}
+
+function serializedValueContainsRawToken(value: unknown) {
+  return JSON.stringify(value).includes(rawToken);
+}
+
 beforeEach(() => {
   listMock.mockReset();
   createMock.mockReset();
@@ -71,22 +79,22 @@ it('masks, reveals, hides, copies, and clears reveal state on refetch', async ()
   writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
   const grid = await apiKeysGrid();
 
-  expect(within(grid).queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
   await user.click(within(grid).getByRole('button', { name: 'Show key for Kodi Sync' }));
-  expect(within(grid).getByText(rawToken)).toBeVisible();
+  expect(within(grid).getByLabelText('Visible API key').textContent === rawToken).toBe(true);
   await user.click(within(grid).getByRole('button', { name: 'Copy key for Kodi Sync' }));
-  expect(writeText).toHaveBeenCalledWith(rawToken);
+  expect(serializedValueContainsRawToken(writeText.mock.calls)).toBe(true);
   await user.click(within(grid).getByRole('button', { name: 'Hide key for Kodi Sync' }));
-  expect(within(grid).queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
 
   await user.click(within(grid).getByRole('button', { name: 'Show key for Kodi Sync' }));
   await user.click(screen.getByRole('button', { name: 'Reload API keys' }));
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
-  expect(window.location.href).not.toContain(rawToken);
+  expect(documentContainsRawToken()).toBe(false);
+  expect(window.location.href.includes(rawToken)).toBe(false);
   for (const storage of [sessionStorage, localStorage]) {
     for (let index = 0; index < storage.length; index += 1) {
-      expect(storage.getItem(storage.key(index) ?? '')).not.toContain(rawToken);
+      expect((storage.getItem(storage.key(index) ?? '') ?? '').includes(rawToken)).toBe(false);
     }
   }
 });
@@ -112,9 +120,9 @@ it('creates and deletes by app name confirmation, then refetches', async () => {
   await user.click(within(grid).getByRole('button', { name: 'Delete key for Kodi Sync' }));
   const dialog = screen.getByRole('dialog', { name: 'Delete API key' });
   expect(dialog).toHaveTextContent('Kodi Sync');
-  expect(dialog).not.toHaveTextContent(rawToken);
+  expect(dialog.textContent.includes(rawToken)).toBe(false);
   await user.click(within(dialog).getByRole('button', { name: 'Delete key' }));
-  expect(deleteMock).toHaveBeenCalledWith(rawToken);
+  expect(serializedValueContainsRawToken(deleteMock.mock.calls)).toBe(true);
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(3); });
   await waitFor(() => {
     expect(screen.getByRole('heading', { name: 'API Keys' })).toHaveFocus();
@@ -129,18 +137,19 @@ it('does not render a secret from failed operations and resets it after unmount'
   let grid = await apiKeysGrid();
 
   await user.click(within(grid).getByRole('button', { name: 'Show key for Kodi Sync' }));
-  expect(within(grid).getByText(rawToken)).toBeVisible();
+  expect(within(grid).getByLabelText('Visible API key').textContent === rawToken).toBe(true);
   view.unmount();
 
   renderApiKeys();
   grid = await apiKeysGrid();
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
   await user.click(within(grid).getByRole('button', { name: 'Delete key for Kodi Sync' }));
   const dialog = screen.getByRole('dialog', { name: 'Delete API key' });
   await user.click(within(dialog).getByRole('button', { name: 'Delete key' }));
   expect(await within(dialog).findByText('Review the current state and try again.')).toBeVisible();
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
-  expect(JSON.stringify(dangerToast.mock.calls)).not.toContain(rawToken);
+  expect(documentContainsRawToken()).toBe(false);
+  expect(serializedValueContainsRawToken(dangerToast.mock.calls)).toBe(false);
+  expect(dangerToast).not.toHaveBeenCalled();
 });
 
 it('locks create controls while the mutation is pending', async () => {
@@ -153,7 +162,8 @@ it('locks create controls while the mutation is pending', async () => {
   await user.click(screen.getByRole('button', { name: 'Create API key' }));
   await user.type(screen.getByRole('textbox', { name: 'Application name' }), 'Automation');
   await user.click(screen.getByRole('button', { name: 'Create key' }));
-  expect(screen.getByRole('button', { name: 'Create key' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Create key' })).toHaveAttribute('data-pending', 'true');
+  expect(screen.getByRole('button', { name: 'Create key' })).toHaveAttribute('aria-disabled', 'true');
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
 
   finishCreate?.();
@@ -173,13 +183,14 @@ it('disables creation during loading and aborts a current reload on unmount', as
   const user = userEvent.setup();
 
   expect(screen.getByRole('button', { name: 'Create API key' })).toBeDisabled();
+  await waitFor(() => { expect(listMock).toHaveBeenCalledOnce(); });
   finishInitial?.([apiKey]);
   const grid = await apiKeysGrid();
   await user.click(within(grid).getByRole('button', { name: 'Show key for Kodi Sync' }));
-  expect(within(grid).getByText(rawToken)).toBeVisible();
+  expect(within(grid).getByLabelText('Visible API key').textContent === rawToken).toBe(true);
   await user.click(screen.getByRole('button', { name: 'Reload API keys' }));
   expect(await screen.findByRole('status')).toHaveTextContent('Refreshing API keys');
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
   expect(within(grid).getByRole('button', { name: 'Delete key for Kodi Sync' })).toBeDisabled();
   view.unmount();
   expect(reloadSignal?.aborted).toBe(true);
@@ -214,7 +225,7 @@ it('reports clipboard failure with safe copy and never renders the token', async
       expect.any(Object),
     );
   });
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
 });
 
 it('delegates authorization failures without showing a local error or toast', async () => {
@@ -229,5 +240,45 @@ it('delegates authorization failures without showing a local error or toast', as
   });
   expect(screen.queryByRole('heading', { name: 'Unable to load this content' })).not.toBeInTheDocument();
   expect(dangerToast).not.toHaveBeenCalled();
-  expect(screen.queryByText(rawToken)).not.toBeInTheDocument();
+  expect(documentContainsRawToken()).toBe(false);
+});
+
+it('delegates create authorization failures and preserves the draft without local feedback', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  createMock.mockRejectedValue({ status: 403, message: rawToken });
+  renderApiKeys({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+
+  await apiKeysGrid();
+  await user.click(screen.getByRole('button', { name: 'Create API key' }));
+  const appName = screen.getByRole('textbox', { name: 'Application name' });
+  await user.type(appName, 'Automation');
+  await user.click(screen.getByRole('button', { name: 'Create key' }));
+
+  await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  expect(appName).toHaveValue('Automation');
+  expect(screen.getByRole('dialog', { name: 'Create API key' })).toBeVisible();
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(documentContainsRawToken()).toBe(false);
+});
+
+it('delegates delete authorization failures and closes confirmation without local feedback', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  deleteMock.mockRejectedValue({ status: 401, message: rawToken });
+  renderApiKeys({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+  const grid = await apiKeysGrid();
+
+  await user.click(within(grid).getByRole('button', { name: 'Delete key for Kodi Sync' }));
+  const dialog = screen.getByRole('dialog', { name: 'Delete API key' });
+  await user.click(within(dialog).getByRole('button', { name: 'Delete key' }));
+
+  await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: 'Delete API key' })).not.toBeInTheDocument();
+  });
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(documentContainsRawToken()).toBe(false);
 });

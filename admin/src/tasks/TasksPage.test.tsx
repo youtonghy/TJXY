@@ -1,6 +1,7 @@
 import { Toast } from '@heroui/react';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useLocation } from 'react-router-dom';
 
 import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmin';
 import { AdminNotifications } from '../ui/AdminNotifications';
@@ -89,9 +90,15 @@ function renderTasks(authProvider = defaultTestAuthProvider) {
     <>
       <TasksPage />
       <AdminNotifications />
+      <CurrentRoute />
     </>,
-    { authProvider, initialEntries: ['/admin/tasks'] },
+    { authProvider, initialEntries: ['/admin/tasks'], strict: true },
   );
+}
+
+function CurrentRoute() {
+  const location = useLocation();
+  return <span data-testid="current-route">{location.pathname}{location.search}</span>;
 }
 
 beforeEach(() => {
@@ -129,7 +136,8 @@ it('shows a stable skeleton during the initial snapshot request', () => {
   renderTasks();
 
   expect(screen.getByRole('status', { name: 'Loading tasks' })).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Reload tasks' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Reload tasks' })).toHaveAttribute('data-pending', 'true');
+  expect(screen.getByRole('button', { name: 'Reload tasks' })).toHaveAttribute('aria-disabled', 'true');
 });
 
 it('renders explicit successful empty states and the root guidance', async () => {
@@ -188,7 +196,34 @@ it('retains valid data after a failed poll and cleans up the timer and request',
   expect(snapshotMock).toHaveBeenCalledTimes(callsBeforeUnmount);
 });
 
-it('keeps records visible and disables reload while a manual refresh is pending', async () => {
+it('does not abort or restart a snapshot request that exceeds the polling interval', async () => {
+  vi.useFakeTimers();
+  let initialSignal: AbortSignal | undefined;
+  let finishInitial: ((value: TaskSnapshot) => void) | undefined;
+  snapshotMock
+    .mockImplementationOnce((signal) => {
+      initialSignal = signal;
+      return new Promise((resolve) => { finishInitial = resolve; });
+    })
+    .mockResolvedValueOnce(snapshot);
+  renderTasks();
+
+  await act(async () => { await Promise.resolve(); });
+  expect(snapshotMock).toHaveBeenCalledOnce();
+  act(() => { vi.advanceTimersByTime(15_000); });
+  expect(snapshotMock).toHaveBeenCalledOnce();
+  expect(initialSignal?.aborted).toBe(false);
+
+  await act(async () => {
+    finishInitial?.(snapshot);
+    await Promise.resolve();
+  });
+  act(() => { vi.advanceTimersByTime(5_000); });
+  await act(async () => { await Promise.resolve(); });
+  expect(snapshotMock).toHaveBeenCalledTimes(2);
+});
+
+it('keeps records visible and preserves reload focus while a manual refresh is pending', async () => {
   let finishReload: ((value: TaskSnapshot) => void) | undefined;
   snapshotMock
     .mockResolvedValueOnce(snapshot)
@@ -198,12 +233,15 @@ it('keeps records visible and disables reload while a manual refresh is pending'
 
   const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
   await user.click(screen.getByRole('button', { name: 'Reload tasks' }));
-  expect(screen.getByRole('button', { name: 'Reload tasks' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Reload tasks' })).toHaveAttribute('data-pending', 'true');
+  expect(screen.getByRole('button', { name: 'Reload tasks' })).toHaveFocus();
   expect(screen.getByRole('status')).toHaveTextContent('Refreshing tasks');
   expect(scheduled).toHaveTextContent('Scan Media Library');
 
   finishReload?.(snapshot);
-  await waitFor(() => { expect(screen.getByRole('button', { name: 'Reload tasks' })).toBeEnabled(); });
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Reload tasks' })).not.toHaveAttribute('data-pending');
+  });
 });
 
 it('starts idle scheduled work and refreshes authoritative state', async () => {
@@ -236,10 +274,7 @@ it('confirms cancellation and keeps the dialog open with safe copy after failure
 
   expect(cancelMock).toHaveBeenCalledWith(runningTaskId);
   expect(await within(dialog).findByText('Review the current state and try again.')).toBeVisible();
-  expect(dangerToast).toHaveBeenCalledWith(
-    'The task command could not be completed.',
-    expect.any(Object),
-  );
+  expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('private-cancel-detail')).not.toBeInTheDocument();
 });
 
@@ -301,7 +336,10 @@ it('isolates pending state per command and reports the durable job count', async
 
   await screen.findByRole('list', { name: 'Scheduled tasks' });
   await user.click(screen.getByRole('button', { name: 'Validate storage' }));
-  expect(screen.getByRole('button', { name: 'Validate storage' })).toBeDisabled();
+  const pendingButton = screen.getByRole('button', { name: 'Validate storage' });
+  expect(pendingButton).toHaveAttribute('data-pending', 'true');
+  expect(pendingButton).toHaveAttribute('aria-disabled', 'true');
+  expect(pendingButton).toHaveFocus();
   expect(screen.getByRole('button', { name: 'Discover titles' })).toBeEnabled();
   await user.click(screen.getByRole('button', { name: 'Discover titles' }));
   expect(discoverMock).toHaveBeenCalledWith(rootId);
@@ -334,50 +372,132 @@ it('renders exhaustive visible status tones and readable identifiers', async () 
   snapshotMock.mockResolvedValue({ ...snapshot, scheduled: [idleTask, runningTask], jobs });
   renderTasks();
 
-  await screen.findByRole('list', { name: 'Scheduled tasks' });
-  const expectedTones = new Map<string, string>([
-    ['Idle', 'neutral'],
-    ['Running', 'accent'],
+  const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
+  expect(within(scheduled).getByText('Idle').closest('[data-tone="neutral"]')).not.toBeNull();
+  expect(within(scheduled).getByText('Running').closest('[data-tone="accent"]')).not.toBeNull();
+
+  const jobsGrid = screen.getByRole('grid', { name: 'Recent durable jobs' });
+  const jobTones = new Map<string, string>([
     ['Pending', 'neutral'],
     ['Retrying', 'warning'],
+    ['Running', 'accent'],
     ['Completed', 'success'],
     ['Cancelled', 'neutral'],
     ['Failed', 'danger'],
   ]);
-  for (const [label, tone] of expectedTones) {
-    const matches = screen.getAllByText(label);
-    expect(matches.some((match) => match.closest(`[data-tone="${tone}"]`) !== null)).toBe(true);
+  for (const [label, tone] of jobTones) {
+    expect(within(jobsGrid).getByText(label).closest(`[data-tone="${tone}"]`)).not.toBeNull();
   }
   expect(screen.getByText('Pending Media Scan')).toBeVisible();
   expect(screen.getByText('PendingMediaScan')).toBeVisible();
 });
 
-it('delegates authorization failures without showing local task errors or toasts', async () => {
+it('redirects an initial 403 without showing local task errors or toasts', async () => {
   const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
-  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  const checkError = vi.fn().mockRejectedValue({
+    logoutUser: false,
+    message: false,
+    redirectTo: '/admin/access-denied',
+  });
   snapshotMock.mockRejectedValue({ status: 403, message: 'private-auth-detail' });
   renderTasks({ ...defaultTestAuthProvider, checkError });
 
   await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
-  await waitFor(() => {
-    expect(screen.queryByRole('status', { name: 'Loading tasks' })).not.toBeInTheDocument();
-  });
+  await waitFor(() => { expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/access-denied'); });
   expect(screen.queryByRole('heading', { name: 'Unable to load this content' })).not.toBeInTheDocument();
   expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('private-auth-detail')).not.toBeInTheDocument();
 });
 
-it('delegates command authorization failures without showing a command error toast', async () => {
+it('redirects a 403 from manual refresh without replacing the current snapshot', async () => {
   const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
-  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
-  startMock.mockRejectedValue({ status: 401, message: 'private-command-auth-detail' });
+  const checkError = vi.fn().mockRejectedValue({
+    logoutUser: false,
+    message: false,
+    redirectTo: '/admin/access-denied',
+  });
+  snapshotMock
+    .mockResolvedValueOnce(snapshot)
+    .mockRejectedValueOnce({ status: 403, message: 'private-refresh-auth-detail' });
   renderTasks({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+  const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
+
+  await user.click(screen.getByRole('button', { name: 'Reload tasks' }));
+
+  await waitFor(() => { expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/access-denied'); });
+  expect(scheduled).toHaveTextContent('Scan Media Library');
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(screen.queryByText('private-refresh-auth-detail')).not.toBeInTheDocument();
+});
+
+it('redirects a 403 raised by background polling', async () => {
+  vi.useFakeTimers();
+  const checkError = vi.fn().mockRejectedValue({
+    logoutUser: false,
+    message: false,
+    redirectTo: '/admin/access-denied',
+  });
+  snapshotMock
+    .mockResolvedValueOnce(snapshot)
+    .mockRejectedValueOnce({ status: 403, message: 'private-poll-auth-detail' });
+  const view = renderTasks({ ...defaultTestAuthProvider, checkError });
+  await act(async () => { await Promise.resolve(); });
+
+  await act(async () => {
+    vi.advanceTimersByTime(5_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(checkError).toHaveBeenCalled();
+  expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/access-denied');
+  expect(screen.queryByText('private-poll-auth-detail')).not.toBeInTheDocument();
+  view.unmount();
+  act(() => { vi.advanceTimersByTime(0); });
+});
+
+it('logs out after a 401 task command without showing a command error toast', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const logout = vi.fn().mockResolvedValue(undefined);
+  const checkError = vi.fn().mockRejectedValue({ message: false });
+  startMock.mockRejectedValue({ status: 401, message: 'private-command-auth-detail' });
+  renderTasks({ ...defaultTestAuthProvider, checkError, logout });
   const user = userEvent.setup();
   const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
 
   await user.click(within(scheduled).getByRole('button', { name: 'Start Scan Media Library' }));
 
   await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  await waitFor(() => { expect(logout).toHaveBeenCalled(); });
+  await waitFor(() => { expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/login'); });
   expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('private-command-auth-detail')).not.toBeInTheDocument();
+});
+
+it('redirects a 403 cancellation and closes its confirmation without local feedback', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({
+    logoutUser: false,
+    message: false,
+    redirectTo: '/admin/access-denied',
+  });
+  const runningTask: ScheduledTask = { ...idleTask, id: runningTaskId, name: 'Refresh Guide', state: 'Running' };
+  snapshotMock.mockResolvedValue({ ...snapshot, scheduled: [runningTask] });
+  cancelMock.mockRejectedValue({ status: 403, message: 'private-cancel-auth-detail' });
+  renderTasks({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+  const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
+
+  await user.click(within(scheduled).getByRole('button', { name: 'Cancel Refresh Guide' }));
+  const dialog = screen.getByRole('dialog', { name: 'Cancel scheduled task' });
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel task' }));
+
+  await waitFor(() => { expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/access-denied'); });
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: 'Cancel scheduled task' })).not.toBeInTheDocument();
+  });
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(screen.queryByText('private-cancel-auth-detail')).not.toBeInTheDocument();
 });

@@ -49,7 +49,8 @@ describe('ConfirmDialog', () => {
 
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
     const confirm = screen.getByRole('button', { name: 'Delete user' });
-    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute('data-pending', 'true');
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
     expect(within(confirm).getByText('Delete user')).toHaveClass('min-h-5');
     expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
     await user.keyboard('{Escape}');

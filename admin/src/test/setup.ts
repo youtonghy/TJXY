@@ -28,6 +28,15 @@ Object.defineProperty(Element.prototype, 'getAnimations', {
   value: () => [],
 });
 
+Object.defineProperty(globalThis, 'ResizeObserver', {
+  configurable: true,
+  value: class ResizeObserver {
+    disconnect = () => undefined;
+    observe = () => undefined;
+    unobserve = () => undefined;
+  },
+});
+
 afterEach(() => {
   act(() => { Toast.toast.clear(); });
   document.querySelectorAll('[data-overlay-container="true"], [data-slot="toast-region"]')

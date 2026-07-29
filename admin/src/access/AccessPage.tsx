@@ -32,16 +32,18 @@ export function AccessPage() {
         selectedKey={tab}
         variant="secondary"
       >
-        <Tabs.List>
-          <Tabs.Tab id="devices">
-            Devices
-            <Tabs.Indicator />
-          </Tabs.Tab>
-          <Tabs.Tab id="api-keys">
-            API Keys
-            <Tabs.Indicator />
-          </Tabs.Tab>
-        </Tabs.List>
+        <Tabs.ListContainer>
+          <Tabs.List>
+            <Tabs.Tab id="devices">
+              Devices
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="api-keys">
+              API Keys
+              <Tabs.Indicator />
+            </Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
         <Tabs.Panel className="pt-6" id={tab} key={tab}>
           {tab === 'devices' ? <DevicesPanel /> : <ApiKeysPanel />}
         </Tabs.Panel>

@@ -66,7 +66,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 it('renames a device, supports clearing the custom name, and refetches authoritative data', async () => {
   renderDevices();
   const user = userEvent.setup();
-  const grid = await devicesGrid();
+  let grid = await devicesGrid();
 
   await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   const name = screen.getByRole('textbox', { name: 'Custom device name' });
@@ -77,6 +77,7 @@ it('renames a device, supports clearing the custom name, and refetches authorita
   expect(updateMock).toHaveBeenCalledWith('Phone', 'Bedroom');
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
 
+  grid = await devicesGrid();
   await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   await user.clear(screen.getByRole('textbox', { name: 'Custom device name' }));
   await user.click(screen.getByRole('button', { name: 'Save device name' }));
@@ -135,7 +136,8 @@ it('locks rename controls while the mutation is pending', async () => {
 
   await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
   await user.click(screen.getByRole('button', { name: 'Save device name' }));
-  expect(screen.getByRole('button', { name: 'Save device name' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save device name' })).toHaveAttribute('data-pending', 'true');
+  expect(screen.getByRole('button', { name: 'Save device name' })).toHaveAttribute('aria-disabled', 'true');
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
 
   finishRename?.();
@@ -206,11 +208,49 @@ it('keeps revoke confirmation open and never exposes a raw server error', async 
 
   expect(await within(dialog).findByText('Review the current state and try again.')).toBeVisible();
   expect(dialog).toBeVisible();
-  expect(dangerToast).toHaveBeenCalledWith(
-    'Device access could not be revoked.',
-    expect.any(Object),
-  );
+  expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('internal-device-id')).not.toBeInTheDocument();
+});
+
+it('delegates rename authorization failures and preserves the draft without a local toast', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  updateMock.mockRejectedValue({ status: 403, message: 'private-rename-auth-detail' });
+  renderDevices({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+  const grid = await devicesGrid();
+
+  await user.click(within(grid).getByRole('button', { name: 'Edit Living room' }));
+  const name = screen.getByRole('textbox', { name: 'Custom device name' });
+  await user.clear(name);
+  await user.type(name, 'Bedroom');
+  await user.click(screen.getByRole('button', { name: 'Save device name' }));
+
+  await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  expect(name).toHaveValue('Bedroom');
+  expect(screen.getByRole('dialog', { name: 'Edit device name' })).toBeVisible();
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(screen.queryByText('private-rename-auth-detail')).not.toBeInTheDocument();
+});
+
+it('delegates revoke authorization failures and closes confirmation without local feedback', async () => {
+  const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
+  const checkError = vi.fn().mockRejectedValue({ logoutUser: false, message: false });
+  deleteMock.mockRejectedValue({ status: 401, message: 'private-revoke-auth-detail' });
+  renderDevices({ ...defaultTestAuthProvider, checkError });
+  const user = userEvent.setup();
+  const grid = await devicesGrid();
+
+  await user.click(within(grid).getByRole('button', { name: 'Revoke Living room' }));
+  const dialog = screen.getByRole('dialog', { name: 'Revoke device' });
+  await user.click(within(dialog).getByRole('button', { name: 'Revoke device' }));
+
+  await waitFor(() => { expect(checkError).toHaveBeenCalled(); });
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: 'Revoke device' })).not.toBeInTheDocument();
+  });
+  expect(dangerToast).not.toHaveBeenCalled();
+  expect(screen.queryByText('private-revoke-auth-detail')).not.toBeInTheDocument();
 });
 
 it('delegates authorization failures without showing a local error or toast', async () => {

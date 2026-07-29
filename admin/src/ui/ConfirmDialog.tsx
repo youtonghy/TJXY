@@ -1,9 +1,9 @@
 import { Alert, Button, Modal } from '@heroui/react';
 import { TriangleAlert } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 
 export interface ConfirmDialogProps {
-  trigger: ReactNode;
+  trigger: ReactElement;
   title: string;
   description: ReactNode;
   /** Caller-vetted copy for known failures; never pass a raw server message. */
@@ -25,7 +25,7 @@ export function ConfirmDialog({
   const [isOpen, setIsOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [hasSubmissionError, setHasSubmissionError] = useState(false);
-  const triggerContainerRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
   const shouldRestoreFocusRef = useRef(false);
   const submissionRef = useRef(false);
   const isLocked = isPending || isSubmitting;
@@ -33,13 +33,14 @@ export function ConfirmDialog({
   useEffect(() => {
     if (isOpen || !shouldRestoreFocusRef.current) return;
     shouldRestoreFocusRef.current = false;
-    triggerContainerRef.current
-      ?.querySelector<HTMLElement>('button, [href], [tabindex]:not([tabindex="-1"])')
-      ?.focus();
+    triggerRef.current?.focus();
   }, [isOpen]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (isLocked) return;
+    if (nextOpen && document.activeElement instanceof HTMLElement) {
+      triggerRef.current = document.activeElement;
+    }
     setIsOpen(nextOpen);
     if (nextOpen) setHasSubmissionError(false);
   };
@@ -63,7 +64,7 @@ export function ConfirmDialog({
 
   return (
     <Modal isOpen={isOpen} onOpenChange={handleOpenChange}>
-      <span className="contents" ref={triggerContainerRef}>{trigger}</span>
+      {trigger}
       <Modal.Backdrop
         isDismissable={!isLocked}
         isKeyboardDismissDisabled={isLocked}
@@ -95,8 +96,7 @@ export function ConfirmDialog({
                 Cancel
               </Button>
               <Button
-                aria-busy={isLocked}
-                isDisabled={isLocked}
+                isPending={isLocked}
                 onPress={() => { void handleConfirm(); }}
                 variant="danger"
               >

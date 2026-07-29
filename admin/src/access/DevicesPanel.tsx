@@ -36,22 +36,24 @@ export function DevicesPanel() {
   const operationRef = useRef<BusyOperation>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
-  const applyLoadResult = useCallback(async (result: LoadResult) => {
+  const prepareLoadResult = useCallback(async (result: LoadResult) => {
     if ('records' in result) {
-      setDevices(result.records);
-      setHasLoaded(true);
-      setLoadError(null);
-      setAuthRedirecting(false);
-      return;
+      return () => {
+        setDevices(result.records);
+        setHasLoaded(true);
+        setLoadError(null);
+        setAuthRedirecting(false);
+      };
     }
     if (await logoutIfAccessDenied(result.error)) {
-      setAuthRedirecting(true);
-      return;
+      return () => { setAuthRedirecting(true); };
     }
-    setLoadError(result.error ?? new Error('Device loading failed.'));
+    return () => {
+      setLoadError(result.error ?? new Error('Device loading failed.'));
+    };
   }, [logoutIfAccessDenied]);
 
-  const { isMounted, loading, reload } = useAuthoritativeLoad(fetchDevices, applyLoadResult);
+  const { isMounted, loading, reload } = useAuthoritativeLoad(fetchDevices, prepareLoadResult);
 
   const openRename = (device: DeviceInfo) => {
     setEditing(device);
@@ -95,7 +97,6 @@ export function DevicesPanel() {
       if (!isMounted()) return;
       if (await logoutIfAccessDenied(caught)) return;
       if (!isMounted()) return;
-      notify('Device access could not be revoked.', { type: 'error' });
       throw caught;
     } finally {
       operationRef.current = null;
@@ -182,7 +183,7 @@ function DeviceTable({ devices, isLocked, onRename, onRevoke }: DeviceCollection
             <Table.Column>Application</Table.Column>
             <Table.Column>Last user</Table.Column>
             <Table.Column>Last activity</Table.Column>
-            <Table.Column className="w-24 text-right">Actions</Table.Column>
+            <Table.Column className="w-40 text-right">Actions</Table.Column>
           </Table.Header>
           <Table.Body>
             {devices.map((device) => (
@@ -262,12 +263,13 @@ function DeviceActions({ device, isLocked, onRename, onRevoke }: Omit<DeviceColl
         trigger={(
           <Button
             aria-label={`Revoke ${label}`}
+            className="min-w-24"
             isDisabled={isLocked}
-            isIconOnly
             size="sm"
-            variant="ghost"
+            variant="danger-soft"
           >
             <Trash2 aria-hidden="true" className="size-4" />
+            Revoke
           </Button>
         )}
       />
@@ -322,9 +324,8 @@ function RenameDeviceModal({
             <Modal.Footer>
               <Button isDisabled={isPending} onPress={onClose} variant="tertiary">Cancel</Button>
               <Button
-                aria-busy={isPending}
                 form="rename-device-form"
-                isDisabled={isPending}
+                isPending={isPending}
                 type="submit"
               >
                 {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Save aria-hidden="true" className="size-4" />}

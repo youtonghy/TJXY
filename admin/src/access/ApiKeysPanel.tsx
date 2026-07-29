@@ -49,22 +49,24 @@ export function ApiKeysPanel() {
 
   const resetReveals = useCallback(() => { setRevealed(new Set()); }, []);
 
-  const applyLoadResult = useCallback(async (result: LoadResult) => {
+  const prepareLoadResult = useCallback(async (result: LoadResult) => {
     if ('records' in result) {
-      setKeys(result.records);
-      setHasLoaded(true);
-      setLoadError(null);
-      setAuthRedirecting(false);
-      return;
+      return () => {
+        setKeys(result.records);
+        setHasLoaded(true);
+        setLoadError(null);
+        setAuthRedirecting(false);
+      };
     }
     if (await logoutIfAccessDenied(result.error)) {
-      setAuthRedirecting(true);
-      return;
+      return () => { setAuthRedirecting(true); };
     }
-    setLoadError(result.error ?? new Error('API key loading failed.'));
+    return () => {
+      setLoadError(result.error ?? new Error('API key loading failed.'));
+    };
   }, [logoutIfAccessDenied]);
 
-  const { isMounted, loading, reload: loadKeys } = useAuthoritativeLoad(fetchApiKeys, applyLoadResult);
+  const { isMounted, loading, reload: loadKeys } = useAuthoritativeLoad(fetchApiKeys, prepareLoadResult);
 
   const reload = useCallback(async () => {
     resetReveals();
@@ -109,7 +111,6 @@ export function ApiKeysPanel() {
       if (!isMounted()) return;
       if (await logoutIfAccessDenied(caught)) return;
       if (!isMounted()) return;
-      notify('The API key could not be deleted.', { type: 'error' });
       throw caught;
     } finally {
       operationRef.current = null;
@@ -226,7 +227,7 @@ function ApiKeyTable(props: ApiKeyCollectionProps) {
             <Table.Column>Key</Table.Column>
             <Table.Column>Created</Table.Column>
             <Table.Column>Last used</Table.Column>
-            <Table.Column className="w-36 text-right">Actions</Table.Column>
+            <Table.Column className="w-48 text-right">Actions</Table.Column>
           </Table.Header>
           <Table.Body>
             {props.keys.map((key) => (
@@ -317,12 +318,13 @@ function ApiKeyActions({
         trigger={(
           <Button
             aria-label={`Delete key for ${apiKey.appName}`}
+            className="min-w-24"
             isDisabled={isLocked}
-            isIconOnly
             size="sm"
-            variant="ghost"
+            variant="danger-soft"
           >
             <Trash2 aria-hidden="true" className="size-4" />
+            Delete
           </Button>
         )}
       />
@@ -373,9 +375,9 @@ function CreateApiKeyModal({
             <Modal.Footer>
               <Button isDisabled={isPending} onPress={onClose} variant="tertiary">Cancel</Button>
               <Button
-                aria-busy={isPending}
                 form="create-api-key-form"
-                isDisabled={isPending || appName.trim().length === 0}
+                isDisabled={appName.trim().length === 0}
+                isPending={isPending}
                 type="submit"
               >
                 {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Plus aria-hidden="true" className="size-4" />}

@@ -84,32 +84,41 @@ export function TasksPage() {
   const [busyOperations, setBusyOperations] = useState<ReadonlySet<string>>(() => new Set());
   const operationRef = useRef(new Set<string>());
 
-  const applyLoadResult = useCallback(async (result: LoadResult) => {
+  const prepareLoadResult = useCallback(async (result: LoadResult) => {
     if ('snapshot' in result) {
-      setSnapshot(result.snapshot);
-      setSelectedRoot((current) => (
-        result.snapshot.roots.some((root) => root.key === current)
-          ? current
-          : result.snapshot.roots[0]?.key ?? ''
-      ));
-      setHasLoaded(true);
-      setLoadError(null);
-      setAuthRedirecting(false);
-      return;
+      return () => {
+        setSnapshot(result.snapshot);
+        setSelectedRoot((current) => (
+          result.snapshot.roots.some((root) => root.key === current)
+            ? current
+            : result.snapshot.roots[0]?.key ?? ''
+        ));
+        setHasLoaded(true);
+        setLoadError(null);
+        setAuthRedirecting(false);
+      };
     }
     if (await logoutIfAccessDenied(result.error)) {
-      setAuthRedirecting(true);
-      return;
+      return () => { setAuthRedirecting(true); };
     }
-    setLoadError(result.error ?? new Error('Task loading failed.'));
+    return () => {
+      setLoadError(result.error ?? new Error('Task loading failed.'));
+    };
   }, [logoutIfAccessDenied]);
 
-  const { isMounted, loading, reload } = useAuthoritativeLoad(fetchTaskSnapshot, applyLoadResult);
+  const {
+    isMounted,
+    loading,
+    refreshWhenIdle,
+    reload,
+  } = useAuthoritativeLoad(fetchTaskSnapshot, prepareLoadResult);
 
   useEffect(() => {
-    const timer = window.setInterval(() => { void reload().catch(() => undefined); }, POLL_INTERVAL_MS);
+    const timer = window.setInterval(() => {
+      void refreshWhenIdle().catch(() => undefined);
+    }, POLL_INTERVAL_MS);
     return () => { window.clearInterval(timer); };
-  }, [reload]);
+  }, [refreshWhenIdle]);
 
   const setOperationBusy = (operation: string, isBusy: boolean) => {
     if (isBusy) operationRef.current.add(operation);
@@ -121,6 +130,7 @@ export function TasksPage() {
     operation: string,
     command: () => Promise<unknown>,
     success: string,
+    failureFeedback: 'toast' | 'inline' = 'toast',
   ): Promise<CommandResult> => {
     if (operationRef.current.has(operation)) return 'failed';
     setOperationBusy(operation, true);
@@ -137,7 +147,9 @@ export function TasksPage() {
       if (!isMounted()) return 'handled';
       if (await logoutIfAccessDenied(error)) return 'handled';
       if (!isMounted()) return 'handled';
-      notify('The task command could not be completed.', { type: 'error' });
+      if (failureFeedback === 'toast') {
+        notify('The task command could not be completed.', { type: 'error' });
+      }
       return 'failed';
     } finally {
       if (isMounted()) setOperationBusy(operation, false);
@@ -155,8 +167,8 @@ export function TasksPage() {
           <Tooltip>
             <Button
               aria-label="Reload tasks"
-              isDisabled={loading}
               isIconOnly
+              isPending={loading}
               onPress={() => { void reload(); }}
               size="sm"
               variant="ghost"
@@ -212,7 +224,12 @@ function ScheduledTasks({
   tasks,
 }: {
   busyOperations: ReadonlySet<string>;
-  onRun: (operation: string, command: () => Promise<unknown>, success: string) => Promise<CommandResult>;
+  onRun: (
+    operation: string,
+    command: () => Promise<unknown>,
+    success: string,
+    failureFeedback?: 'toast' | 'inline',
+  ) => Promise<CommandResult>;
   tasks: ScheduledTask[];
 }) {
   return (
@@ -249,6 +266,7 @@ function ScheduledTasks({
                           operation,
                           () => cancelScheduledTask(task.id),
                           'Scheduled task cancelled.',
+                          'inline',
                         );
                         if (result === 'failed') throw new Error('Task cancellation failed.');
                         if (result === 'succeeded') focusScheduledHeading();
@@ -258,7 +276,7 @@ function ScheduledTasks({
                         <Button
                           aria-label={`Cancel ${task.name}`}
                           className="min-w-24"
-                          isDisabled={isPending}
+                          isPending={isPending}
                           size="sm"
                           variant="danger-soft"
                         >
@@ -271,7 +289,7 @@ function ScheduledTasks({
                     <Button
                       aria-label={`Start ${task.name}`}
                       className="min-w-24"
-                      isDisabled={isPending}
+                      isPending={isPending}
                       onPress={() => {
                         void onRun(
                           operation,
@@ -478,9 +496,9 @@ function CommandButton({
 }) {
   return (
     <Button
-      aria-busy={isPending}
       className="min-w-32"
-      isDisabled={isDisabled || isPending}
+      isDisabled={isDisabled}
+      isPending={isPending}
       onPress={onPress}
       size="sm"
       variant="secondary"
