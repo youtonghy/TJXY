@@ -63,6 +63,7 @@ it('renders a stable skeleton followed by readable desktop and mobile records', 
 
   expect(screen.getByRole('status', { name: 'Loading libraries' })).toBeVisible();
   expect(screen.getByRole('button', { name: 'Reload libraries' })).toHaveAttribute('data-pending', 'true');
+  await waitFor(() => { expect(listMock).toHaveBeenCalledOnce(); });
   finishLoad?.([movies]);
 
   const grid = await screen.findByRole('grid', { name: 'Libraries' });
