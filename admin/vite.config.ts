@@ -15,8 +15,8 @@ export default defineConfig(({ mode }) => {
         output: {
           codeSplitting: {
             groups: [
-              { name: 'mui', test: /node_modules[\\/](@mui|@emotion)[\\/]/ },
-              { name: 'react-admin', test: /node_modules[\\/](react-admin|ra-core|ra-ui-materialui|ra-i18n-polyglot|@tanstack)[\\/]/ },
+              { name: 'heroui', test: /node_modules[\\/](@heroui|react-aria|@react-aria|tailwind-variants)[\\/]/ },
+              { name: 'ra-core', test: /node_modules[\\/](ra-core|@tanstack|react-hook-form)[\\/]/ },
               { name: 'react', test: /node_modules[\\/](react|react-dom|react-router)[\\/]/ },
             ],
           },
