@@ -6,6 +6,7 @@ import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
 import { LoginPage } from './auth/LoginPage';
 import { AdminLayout } from './layout/AdminLayout';
+import { LibraryEditPage } from './libraries/LibraryEditPage';
 import { LibrariesPage } from './libraries/LibrariesPage';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
@@ -54,6 +55,7 @@ export function App() {
                 <Route element={<AccessPage />} path="/access" />
                 <Route element={<TasksPage />} path="/tasks" />
                 <Route element={<LibrariesPage />} path="/libraries" />
+                <Route element={<LibraryEditPage />} path="/libraries/:id" />
                 <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
                 <Route element={<OneDrivePage />} path="/storage/onedrive" />
               </CustomRoutes>

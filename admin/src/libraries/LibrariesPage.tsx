@@ -1,654 +1,273 @@
-import {
-  AddOutlined,
-  DeleteOutlineOutlined,
-  EditOutlined,
-  FolderCopyOutlined,
-  PushPinOutlined,
-  RefreshOutlined,
-} from '@mui/icons-material';
-import {
-  Alert,
-  Box,
-  Button,
-  Checkbox,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  FormControl,
-  FormControlLabel,
-  IconButton,
-  InputLabel,
-  MenuItem,
-  Paper,
-  Select,
-  Stack,
-  Switch,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  TextField,
-  Tooltip,
-  Typography,
-} from '@mui/material';
-import { useCallback, useEffect, useState } from 'react';
-import { Title, useNotify } from 'react-admin';
+import { Button, Skeleton, Table, Tooltip } from '@heroui/react';
+import { FolderKanban, Pencil, Plus, RefreshCw } from 'lucide-react';
+import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
+import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 
-import { HybridCandidatesDialog } from './HybridCandidatesDialog';
-import type {
-  CreateLibraryRequest,
-  EffectiveLibraryPolicy,
-  ExpansionPolicy,
-  LibraryCollectionType,
-  LibraryOption,
-  MetadataPolicy,
-  ObjectSelectionScope,
-  ProbePolicy,
-  ScanProfile,
-  UpdateLibraryPolicyRequest,
-} from './libraryApi';
+import { AsyncContent } from '../ui/AsyncContent';
+import { PageHeader } from '../ui/PageHeader';
+import { ResponsiveCollection } from '../ui/ResponsiveCollection';
+import { StatusChip } from '../ui/StatusChip';
+import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
+import { LibraryCreateDialog } from './LibraryCreateDialog';
+import type { CreateLibraryRequest, LibraryOption } from './libraryApi';
+import { createLibrary, listLibraries } from './libraryApi';
 import {
-  createLibrary,
-  deleteLibrary,
-  listLibraries,
-  renameLibrary,
-  updateLibraryPolicy,
-} from './libraryApi';
+  collectionLabel,
+  expansionPolicyOptions,
+  metadataPolicyOptions,
+  objectScopeOptions,
+  optionLabel,
+  probePolicyOptions,
+} from './libraryUi';
 
-type BusyOperation = 'create' | 'rename' | 'policy' | 'delete' | null;
 type LibraryLoadResult = { records: LibraryOption[] } | { error: unknown };
 
-const PROFILES: ScanProfile[] = ['Full', 'Lazy', 'Hybrid', 'Manual'];
-const COLLECTION_TYPES: { value: LibraryCollectionType; label: string }[] = [
-  { value: 'mixed', label: 'Mixed content' },
-  { value: 'movies', label: 'Movies' },
-  { value: 'tvshows', label: 'TV shows' },
-  { value: 'music', label: 'Music' },
-  { value: 'homevideos', label: 'Home videos' },
-];
+const editLinkClassName = [
+  'inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold',
+  'text-accent hover:bg-accent/10',
+  'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+].join(' ');
 
 export function LibrariesPage() {
   const notify = useNotify();
+  const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [libraries, setLibraries] = useState<LibraryOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<BusyOperation>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<NonNullable<unknown> | null>(null);
+  const [authRedirecting, setAuthRedirecting] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [selected, setSelected] = useState<LibraryOption | null>(null);
-  const [candidateLibrary, setCandidateLibrary] = useState<LibraryOption | null>(null);
+  const [createPending, setCreatePending] = useState(false);
+  const createRef = useRef(false);
 
-  const applyLoadResult = useCallback((result: LibraryLoadResult) => {
-    if ('records' in result) setLibraries(result.records);
-    else notifyError(notify, result.error, 'Libraries could not be loaded.');
-    setLoading(false);
-  }, [notify]);
+  const prepareLoadResult = useCallback(async (result: LibraryLoadResult) => {
+    if ('records' in result) {
+      return () => {
+        setLibraries(result.records);
+        setHasLoaded(true);
+        setLoadError(null);
+        setAuthRedirecting(false);
+      };
+    }
+    if (await logoutIfAccessDenied(result.error)) {
+      return () => { setAuthRedirecting(true); };
+    }
+    return () => { setLoadError(result.error ?? new Error('Library loading failed.')); };
+  }, [logoutIfAccessDenied]);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    applyLoadResult(await fetchLibraryResult());
-  }, [applyLoadResult]);
-
-  useEffect(() => {
-    const abort = new AbortController();
-    void fetchLibraryResult(abort.signal).then((result) => {
-      if (!abort.signal.aborted) applyLoadResult(result);
-    });
-    return () => {
-      abort.abort();
-    };
-  }, [applyLoadResult]);
+  const { isMounted, loading, reload } = useAuthoritativeLoad(fetchLibraries, prepareLoadResult);
 
   const create = async (request: CreateLibraryRequest): Promise<boolean> => {
-    if (busy !== null) return false;
-    setBusy('create');
+    if (createRef.current) return false;
+    createRef.current = true;
+    setCreatePending(true);
     try {
       await createLibrary(request);
+      if (!isMounted()) return false;
       notify('Library created.', { type: 'success' });
       setCreateOpen(false);
       await reload();
       return true;
     } catch (error: unknown) {
-      notifyError(notify, error, 'The library could not be created.');
+      if (!isMounted()) return false;
+      if (await logoutIfAccessDenied(error)) return false;
+      if (isMounted()) notify('The library could not be created.', { type: 'error' });
       return false;
     } finally {
-      setBusy(null);
+      createRef.current = false;
+      if (isMounted()) setCreatePending(false);
     }
   };
 
-  const rename = async (library: LibraryOption, nextName: string): Promise<void> => {
-    if (busy !== null) return;
-    setBusy('rename');
-    try {
-      await renameLibrary(library.name, nextName);
-      notify('Library renamed.', { type: 'success' });
-      setSelected(null);
-      await reload();
-    } catch (error: unknown) {
-      notifyError(notify, error, 'The library could not be renamed.');
-    } finally {
-      setBusy(null);
-    }
-  };
+  if (authRedirecting) return null;
 
-  const savePolicy = async (request: UpdateLibraryPolicyRequest): Promise<void> => {
-    if (busy !== null) return;
-    setBusy('policy');
-    try {
-      await updateLibraryPolicy(request);
-      notify('Scan policy saved.', { type: 'success' });
-      setSelected(null);
-      await reload();
-    } catch (error: unknown) {
-      if (errorCategory(error) === 'conflict') {
-        notify('The library changed on the server. Latest settings were reloaded.', { type: 'warning' });
-        setSelected(null);
-        await reload();
-      } else {
-        notifyError(notify, error, 'The scan policy could not be saved.');
-      }
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const remove = async (library: LibraryOption): Promise<void> => {
-    if (busy !== null) return;
-    setBusy('delete');
-    try {
-      await deleteLibrary(library.name);
-      notify('Library deleted.', { type: 'success' });
-      setSelected(null);
-      await reload();
-    } catch (error: unknown) {
-      notifyError(notify, error, 'The library could not be deleted.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
+  const controlsLocked = loading || createPending;
   return (
-    <Box sx={{
-      boxSizing: 'border-box',
-      maxWidth: { xs: 'calc(100vw - 16px)', sm: 1200 },
-      minWidth: 0,
-      width: '100%',
-      p: { xs: 2, sm: 3 },
-    }}>
-      <Title title="Libraries" />
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={1.5}
-        sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', mb: 3 }}
-      >
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
-          <FolderCopyOutlined color="primary" />
-          <Typography component="h1" variant="h1">Libraries</Typography>
-        </Stack>
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Reload libraries">
-            <span>
-              <IconButton
+    <div className="space-y-5">
+      <PageHeader
+        actions={(
+          <>
+            <Tooltip>
+              <Button
                 aria-label="Reload libraries"
-                disabled={loading || busy !== null}
-                onClick={() => void reload()}
+                isDisabled={createPending}
+                isIconOnly
+                isPending={loading}
+                onPress={() => { void reload(); }}
+                size="sm"
+                variant="ghost"
               >
-                <RefreshOutlined />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Button
-            variant="contained"
-            startIcon={<AddOutlined />}
-            disabled={busy !== null}
-            onClick={() => { setCreateOpen(true); }}
-          >
-            Add library
-          </Button>
-        </Stack>
-      </Stack>
-
-      <TableContainer
-        component={Paper}
-        variant="outlined"
-        sx={{ maxWidth: '100%', overflowX: 'auto', width: '100%' }}
-      >
-        <Table aria-label="Libraries" sx={{ minWidth: 900 }}>
-          <TableHead>
-            <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell>Type</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Scan profile</TableCell>
-              <TableCell>Effective policy</TableCell>
-              <TableCell align="right">Roots</TableCell>
-              <TableCell align="right">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {libraries.map((library) => (
-              <TableRow key={library.id} hover>
-                <TableCell component="th" scope="row">{library.name}</TableCell>
-                <TableCell>{collectionLabel(library.collectionType)}</TableCell>
-                <TableCell>{library.enabled ? 'Enabled' : 'Disabled'}</TableCell>
-                <TableCell>{library.scanProfile}</TableCell>
-                <TableCell>
-                  <Typography variant="body2">
-                    {library.objectSelectionScope} / {library.metadataPolicy} / {library.expansionPolicy} / {library.probePolicy}
-                  </Typography>
-                </TableCell>
-                <TableCell align="right">{library.locations.length}</TableCell>
-                <TableCell align="right">
-                  <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'flex-end' }}>
-                    <Tooltip title={`Manage background candidates for ${library.name}`}>
-                      <IconButton
-                        aria-label={`Manage background candidates for ${library.name}`}
-                        disabled={busy !== null}
-                        onClick={() => { setCandidateLibrary(library); }}
-                      >
-                        <PushPinOutlined />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title={`Edit ${library.name}`}>
-                      <IconButton
-                        aria-label={`Edit ${library.name}`}
-                        disabled={busy !== null}
-                        onClick={() => { setSelected(library); }}
-                      >
-                        <EditOutlined />
-                      </IconButton>
-                    </Tooltip>
-                  </Stack>
-                </TableCell>
-              </TableRow>
-            ))}
-            {!loading && libraries.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7}>
-                  <Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
-                    No libraries are configured.
-                  </Typography>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-        {loading && (
-          <Stack sx={{ alignItems: 'center', py: 4 }}>
-            <CircularProgress size={28} aria-label="Loading libraries" />
-          </Stack>
+                <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
+              </Button>
+              <Tooltip.Content>Reload libraries</Tooltip.Content>
+            </Tooltip>
+            <Button isDisabled={controlsLocked} onPress={() => { setCreateOpen(true); }} size="sm">
+              <Plus aria-hidden="true" className="size-4" />
+              Add library
+            </Button>
+          </>
         )}
-      </TableContainer>
+        description="Configure catalog sources, scanning behavior, and background expansion preferences."
+        title="Libraries"
+      />
 
-      <CreateLibraryDialog
-        open={createOpen}
-        pending={busy === 'create'}
+      {loading && hasLoaded && (
+        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing libraries...</p>
+      )}
+
+      <AsyncContent
+        empty={<LibrariesEmptyState />}
+        error={loadError}
+        hasData={hasLoaded}
+        isEmpty={hasLoaded && libraries.length === 0}
+        isPending={loading}
+        loading={<LibrariesSkeleton />}
+        onRetry={() => { void reload(); }}
+      >
+        <ResponsiveCollection
+          ariaLabel="Libraries collection"
+          desktop={<LibrariesTable libraries={libraries} />}
+          mobile={<LibrariesMobileList libraries={libraries} />}
+        />
+      </AsyncContent>
+
+      <LibraryCreateDialog
+        isOpen={createOpen}
+        isPending={createPending}
         onClose={() => { setCreateOpen(false); }}
         onCreate={create}
       />
-      {selected !== null && (
-        <EditLibraryDialog
-          key={`${selected.id}-${String(selected.profileVersion)}`}
-          library={selected}
-          busy={busy}
-          onClose={() => { setSelected(null); }}
-          onRename={rename}
-          onSavePolicy={savePolicy}
-          onDelete={remove}
-        />
-      )}
-      {candidateLibrary !== null && (
-        <HybridCandidatesDialog
-          key={candidateLibrary.id}
-          library={candidateLibrary}
-          onClose={() => { setCandidateLibrary(null); }}
-        />
-      )}
-    </Box>
+    </div>
   );
 }
 
-function CreateLibraryDialog({
-  open,
-  pending,
-  onClose,
-  onCreate,
-}: {
-  open: boolean;
-  pending: boolean;
-  onClose: () => void;
-  onCreate: (request: CreateLibraryRequest) => Promise<boolean>;
-}) {
-  const [name, setName] = useState('');
-  const [collectionType, setCollectionType] = useState<LibraryCollectionType>('mixed');
-  const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
-  const [enabled, setEnabled] = useState(true);
-
-  const close = () => {
-    if (pending) return;
-    setName('');
-    setCollectionType('mixed');
-    setScanProfile('Lazy');
-    setEnabled(true);
-    onClose();
-  };
-
+function LibrariesTable({ libraries }: { libraries: LibraryOption[] }) {
   return (
-    <Dialog open={open} onClose={close} fullWidth maxWidth="sm">
-      <DialogTitle>Add library</DialogTitle>
-      <DialogContent>
-        <Stack spacing={2} sx={{ pt: 1 }}>
-          <TextField
-            autoFocus
-            label="Library name"
-            value={name}
-            disabled={pending}
-            onChange={(event) => { setName(event.target.value); }}
-            slotProps={{ htmlInput: { maxLength: 256 } }}
-          />
-          <FormControl fullWidth disabled={pending}>
-            <InputLabel id="create-library-type-label">Content type</InputLabel>
-            <Select
-              labelId="create-library-type-label"
-              label="Content type"
-              value={collectionType}
-              onChange={(event) => { setCollectionType(event.target.value); }}
-            >
-              {COLLECTION_TYPES.map((option) => (
-                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <ProfileSelect
-            labelId="create-library-profile-label"
-            value={scanProfile}
-            disabled={pending}
-            onChange={setScanProfile}
-          />
-          <FormControlLabel
-            control={<Switch checked={enabled} onChange={(_, checked) => { setEnabled(checked); }} />}
-            label="Enabled"
-            disabled={pending}
-          />
-        </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={close} disabled={pending}>Cancel</Button>
-        <Button
-          variant="contained"
-          disabled={pending || name.trim().length === 0}
-          startIcon={pending ? <CircularProgress size={18} color="inherit" /> : <AddOutlined />}
-          onClick={() => void onCreate({ name, collectionType, enabled, scanProfile })}
-        >
-          Create library
-        </Button>
-      </DialogActions>
-    </Dialog>
+    <Table variant="secondary">
+      <Table.ScrollContainer>
+        <Table.Content aria-label="Libraries" className="min-w-[48rem] table-fixed">
+          <Table.Header>
+            <Table.Column isRowHeader>Name</Table.Column>
+            <Table.Column>Type</Table.Column>
+            <Table.Column>Status</Table.Column>
+            <Table.Column>Scan profile</Table.Column>
+            <Table.Column>Effective policy</Table.Column>
+            <Table.Column className="w-20 text-right">Roots</Table.Column>
+            <Table.Column className="w-32 text-right">Actions</Table.Column>
+          </Table.Header>
+          <Table.Body>
+            {libraries.map((library) => (
+              <Table.Row id={library.id} key={library.id}>
+                <Table.Cell><LibraryName library={library} /></Table.Cell>
+                <Table.Cell>{collectionLabel(library.collectionType)}</Table.Cell>
+                <Table.Cell><LibraryStatus enabled={library.enabled} /></Table.Cell>
+                <Table.Cell>{library.scanProfile}</Table.Cell>
+                <Table.Cell><PolicySummary library={library} /></Table.Cell>
+                <Table.Cell><span className="block text-right tabular-nums">{library.locations.length}</span></Table.Cell>
+                <Table.Cell><EditLibraryLink library={library} /></Table.Cell>
+              </Table.Row>
+            ))}
+          </Table.Body>
+        </Table.Content>
+      </Table.ScrollContainer>
+    </Table>
   );
 }
 
-function EditLibraryDialog({
-  library,
-  busy,
-  onClose,
-  onRename,
-  onSavePolicy,
-  onDelete,
-}: {
-  library: LibraryOption;
-  busy: BusyOperation;
-  onClose: () => void;
-  onRename: (library: LibraryOption, nextName: string) => Promise<void>;
-  onSavePolicy: (request: UpdateLibraryPolicyRequest) => Promise<void>;
-  onDelete: (library: LibraryOption) => Promise<void>;
-}) {
-  const [name, setName] = useState(library.name);
-  const [enabled, setEnabled] = useState(library.enabled);
-  const [scanProfile, setScanProfile] = useState<ScanProfile>(library.scanProfile);
-  const [advanced, setAdvanced] = useState(false);
-  const [policy, setPolicy] = useState<EffectiveLibraryPolicy>({
-    objectSelectionScope: library.objectSelectionScope,
-    metadataPolicy: library.metadataPolicy,
-    expansionPolicy: library.expansionPolicy,
-    probePolicy: library.probePolicy,
-  });
-  const [deleteArmed, setDeleteArmed] = useState(false);
-  const pending = busy !== null;
-
+function LibrariesMobileList({ libraries }: { libraries: LibraryOption[] }) {
   return (
-    <Dialog
-      open
-      onClose={() => {
-        if (!pending) onClose();
-      }}
-      fullWidth
-      maxWidth="md"
-    >
-      <DialogTitle>Edit {library.name}</DialogTitle>
-      <DialogContent>
-        <Stack spacing={3} sx={{ pt: 1 }}>
-          <Stack spacing={1.5}>
-            <Typography component="h2" variant="h3">Identity</Typography>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-              <TextField
-                fullWidth
-                label="Library name"
-                value={name}
-                disabled={pending}
-                onChange={(event) => { setName(event.target.value); }}
-                slotProps={{ htmlInput: { maxLength: 256 } }}
-              />
-              <Button
-                variant="outlined"
-                disabled={pending || name.trim().length === 0 || name.trim() === library.name}
-                onClick={() => void onRename(library, name)}
-              >
-                Rename
-              </Button>
-            </Stack>
-            <Typography color="text.secondary" variant="body2">
-              {collectionLabel(library.collectionType)} · {library.locations.length} storage root(s)
-            </Typography>
-          </Stack>
-
-          <Stack spacing={1.5}>
-            <Typography component="h2" variant="h3">Scan policy</Typography>
-            <FormControlLabel
-              control={<Switch checked={enabled} onChange={(_, checked) => { setEnabled(checked); }} />}
-              label="Enabled"
-              disabled={pending}
-            />
-            <ProfileSelect
-              labelId="edit-library-profile-label"
-              value={scanProfile}
-              disabled={pending}
-              onChange={setScanProfile}
-            />
-            <FormControlLabel
-              control={<Checkbox checked={advanced} onChange={(_, checked) => { setAdvanced(checked); }} />}
-              label="Override effective policy"
-              disabled={pending}
-            />
-            {advanced && (
-              <PolicyOverrides policy={policy} disabled={pending} onChange={setPolicy} />
-            )}
-            {!advanced && (
-              <Typography color="text.secondary" variant="body2">
-                Current effective policy: {library.objectSelectionScope} / {library.metadataPolicy} / {library.expansionPolicy} / {library.probePolicy}
-              </Typography>
-            )}
-            <Button
-              variant="contained"
-              disabled={pending}
-              onClick={() => void onSavePolicy({
-                id: library.id,
-                enabled,
-                scanProfile,
-                profileVersion: library.profileVersion,
-                ...(advanced ? { effectivePolicy: policy } : {}),
-              })}
-            >
-              Save scan policy
-            </Button>
-          </Stack>
-
-          <Stack spacing={1.5}>
-            <Typography component="h2" variant="h3">Delete library</Typography>
-            {deleteArmed && (
-              <Alert severity="warning">
-                This removes the library mapping. Shared catalog and storage entities are preserved.
-              </Alert>
-            )}
-            <Stack direction="row" spacing={1}>
-              {deleteArmed && (
-                <Button disabled={pending} onClick={() => { setDeleteArmed(false); }}>Cancel delete</Button>
-              )}
-              <Button
-                color="error"
-                variant={deleteArmed ? 'contained' : 'outlined'}
-                startIcon={<DeleteOutlineOutlined />}
-                disabled={pending}
-                onClick={() => {
-                  if (deleteArmed) void onDelete(library);
-                  else setDeleteArmed(true);
-                }}
-              >
-                {deleteArmed ? 'Confirm delete' : 'Delete library'}
-              </Button>
-            </Stack>
-          </Stack>
-        </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose} disabled={pending}>Close</Button>
-      </DialogActions>
-    </Dialog>
+    <ul aria-label="Libraries mobile" className="divide-y divide-border border-y border-border">
+      {libraries.map((library) => (
+        <li aria-label={library.name} className="space-y-4 py-5" key={library.id}>
+          <LibraryName library={library} />
+          <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
+            <MobileField label="Type">{collectionLabel(library.collectionType)}</MobileField>
+            <MobileField label="Status"><LibraryStatus enabled={library.enabled} /></MobileField>
+            <MobileField label="Scan profile">{library.scanProfile}</MobileField>
+            <MobileField label="Policy"><PolicySummary library={library} /></MobileField>
+            <MobileField label="Storage roots">{library.locations.length}</MobileField>
+          </dl>
+          <div className="flex justify-end"><EditLibraryLink library={library} /></div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
-function ProfileSelect({
-  labelId,
-  value,
-  disabled,
-  onChange,
-}: {
-  labelId: string;
-  value: ScanProfile;
-  disabled: boolean;
-  onChange: (value: ScanProfile) => void;
-}) {
+function LibraryName({ library }: { library: LibraryOption }) {
   return (
-    <FormControl fullWidth disabled={disabled}>
-      <InputLabel id={labelId}>Scan profile</InputLabel>
-      <Select
-        labelId={labelId}
-        label="Scan profile"
-        value={value}
-        onChange={(event) => { onChange(event.target.value); }}
+    <div className="min-w-0">
+      <p className="break-words font-semibold text-foreground">{library.name}</p>
+      <p className="mt-1 break-all font-mono text-xs text-muted">{library.id}</p>
+    </div>
+  );
+}
+
+function LibraryStatus({ enabled }: { enabled: boolean }) {
+  return <StatusChip tone={enabled ? 'success' : 'neutral'}>{enabled ? 'Enabled' : 'Disabled'}</StatusChip>;
+}
+
+function PolicySummary({ library }: { library: LibraryOption }) {
+  return (
+    <span className="break-words text-sm text-muted">
+      {optionLabel(objectScopeOptions, library.objectSelectionScope)} /{' '}
+      {optionLabel(metadataPolicyOptions, library.metadataPolicy)} /{' '}
+      {optionLabel(expansionPolicyOptions, library.expansionPolicy)} /{' '}
+      {optionLabel(probePolicyOptions, library.probePolicy)}
+    </span>
+  );
+}
+
+function EditLibraryLink({ library }: { library: LibraryOption }) {
+  return (
+    <div className="flex justify-end">
+      <Link
+        aria-label={`Edit ${library.name}`}
+        className={editLinkClassName}
+        to={`/admin/libraries/${encodeURIComponent(library.id)}`}
       >
-        {PROFILES.map((profile) => <MenuItem key={profile} value={profile}>{profile}</MenuItem>)}
-      </Select>
-    </FormControl>
+        <Pencil aria-hidden="true" className="size-4" />
+        Edit
+      </Link>
+    </div>
   );
 }
 
-function PolicyOverrides({
-  policy,
-  disabled,
-  onChange,
-}: {
-  policy: EffectiveLibraryPolicy;
-  disabled: boolean;
-  onChange: (policy: EffectiveLibraryPolicy) => void;
-}) {
+function MobileField({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' } }}>
-      <PolicySelect
-        label="Object selection"
-        value={policy.objectSelectionScope}
-        options={['all_synced_objects', 'title_layer', 'library_roots']}
-        disabled={disabled}
-        onChange={(value) => { onChange({ ...policy, objectSelectionScope: value as ObjectSelectionScope }); }}
-      />
-      <PolicySelect
-        label="Metadata"
-        value={policy.metadataPolicy}
-        options={['full', 'basic', 'none']}
-        disabled={disabled}
-        onChange={(value) => { onChange({ ...policy, metadataPolicy: value as MetadataPolicy }); }}
-      />
-      <PolicySelect
-        label="Expansion"
-        value={policy.expansionPolicy}
-        options={['eager', 'on_browse', 'background', 'manual']}
-        disabled={disabled}
-        onChange={(value) => { onChange({ ...policy, expansionPolicy: value as ExpansionPolicy }); }}
-      />
-      <PolicySelect
-        label="Probe"
-        value={policy.probePolicy}
-        options={['eager', 'on_playback', 'manual']}
-        disabled={disabled}
-        onChange={(value) => { onChange({ ...policy, probePolicy: value as ProbePolicy }); }}
-      />
-    </Box>
+    <>
+      <dt className="font-medium text-muted">{label}</dt>
+      <dd className="min-w-0 text-foreground">{children}</dd>
+    </>
   );
 }
 
-function PolicySelect({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  disabled: boolean;
-  onChange: (value: string) => void;
-}) {
-  const labelId = `${label.toLowerCase().replaceAll(' ', '-')}-label`;
+function LibrariesSkeleton() {
   return (
-    <FormControl fullWidth disabled={disabled}>
-      <InputLabel id={labelId}>{label}</InputLabel>
-      <Select
-        labelId={labelId}
-        label={label}
-        value={value}
-        onChange={(event) => { onChange(event.target.value); }}
-      >
-        {options.map((option) => <MenuItem key={option} value={option}>{option}</MenuItem>)}
-      </Select>
-    </FormControl>
+    <div aria-label="Loading libraries" className="space-y-3" role="status">
+      <Skeleton className="h-11 w-full" />
+      <Skeleton className="h-20 w-full" />
+      <Skeleton className="h-20 w-full" />
+    </div>
   );
 }
 
-function collectionLabel(value: string): string {
-  return COLLECTION_TYPES.find((option) => option.value === value)?.label ?? value;
+function LibrariesEmptyState() {
+  return (
+    <div className="flex min-h-52 flex-col items-center justify-center gap-3 border-y border-border py-8 text-center">
+      <FolderKanban aria-hidden="true" className="size-6 text-muted" />
+      <div>
+        <h2 className="text-base font-semibold text-foreground">No libraries are configured.</h2>
+        <p className="mt-1 text-sm text-muted">Add a library to begin organizing catalog content.</p>
+      </div>
+    </div>
+  );
 }
 
-async function fetchLibraryResult(signal?: AbortSignal): Promise<LibraryLoadResult> {
+async function fetchLibraries(signal: AbortSignal): Promise<LibraryLoadResult> {
   try {
     return { records: await listLibraries(signal) };
   } catch (error: unknown) {
     return { error };
   }
-}
-
-function errorCategory(error: unknown): string | undefined {
-  return typeof error === 'object' && error !== null && 'category' in error
-    ? String(error.category)
-    : undefined;
-}
-
-function notifyError(
-  notify: ReturnType<typeof useNotify>,
-  error: unknown,
-  fallback: string,
-): void {
-  const message = error instanceof Error && error.message.length > 0 ? error.message : fallback;
-  notify(message, { type: 'error' });
 }

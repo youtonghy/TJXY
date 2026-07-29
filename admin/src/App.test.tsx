@@ -73,6 +73,10 @@ vi.mock('./libraries/LibrariesPage', async () => {
   const React = await import('react');
   return { LibrariesPage: () => React.createElement('h1', null, 'Libraries page') };
 });
+vi.mock('./libraries/LibraryEditPage', async () => {
+  const React = await import('react');
+  return { LibraryEditPage: () => React.createElement('h1', null, 'Library edit page') };
+});
 vi.mock('./storage/GoogleDrivePage', async () => {
   const React = await import('react');
   return { GoogleDrivePage: () => React.createElement('h1', null, 'Google Drive page') };
@@ -144,6 +148,7 @@ it.each([
   ['/admin/users/create', 'Create user page'],
   ['/admin/users/ada/show', 'User details page'],
   ['/admin/users/ada', 'Edit user page'],
+  ['/admin/libraries/library-id', 'Library edit page'],
 ])('retains resource deep link %s', async (path, heading) => {
   renderRoute(path);
   expect(await screen.findByRole('heading', { name: heading })).toBeVisible();
