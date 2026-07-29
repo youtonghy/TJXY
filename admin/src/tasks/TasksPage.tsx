@@ -1,40 +1,46 @@
 import {
-  AccountTreeOutlined,
-  CancelOutlined,
-  PlayArrowOutlined,
-  PlaylistAddCheckOutlined,
-  RefreshOutlined,
-  StorageOutlined,
-  TaskAltOutlined,
-  TravelExploreOutlined,
-} from '@mui/icons-material';
-import {
   Alert,
-  Box,
   Button,
-  Chip,
-  CircularProgress,
-  FormControl,
-  IconButton,
-  InputLabel,
-  MenuItem,
-  Paper,
+  FieldError,
+  Input,
+  Label,
+  ListBox,
   Select,
-  Stack,
+  Skeleton,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   TextField,
   Tooltip,
-  Typography,
-} from '@mui/material';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Title, useNotify } from 'react-admin';
+} from '@heroui/react';
+import {
+  Activity,
+  CirclePlay,
+  GitBranch,
+  ListPlus,
+  LoaderCircle,
+  RefreshCw,
+  ScanSearch,
+  Search,
+  ShieldCheck,
+  Tags,
+  TriangleAlert,
+  X,
+} from 'lucide-react';
+import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
-import type { ScheduledTask, TaskJob, TaskSnapshot } from './taskApi';
+import { AsyncContent } from '../ui/AsyncContent';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { PageHeader } from '../ui/PageHeader';
+import { StatusChip, type StatusTone } from '../ui/StatusChip';
+import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
+import type {
+  ScheduledTask,
+  ScheduledTaskState,
+  StorageRootOption,
+  TaskJob,
+  TaskJobStatus,
+  TaskSnapshot,
+} from './taskApi';
 import {
   cancelScheduledTask,
   discoverTitles,
@@ -49,366 +55,568 @@ import {
 } from './taskApi';
 
 const POLL_INTERVAL_MS = 5_000;
-type BusyOperation = string | null;
+type LoadResult = { snapshot: TaskSnapshot } | { error: unknown };
+type CommandResult = 'succeeded' | 'handled' | 'failed';
+
+const scheduledTones: Record<ScheduledTaskState, StatusTone> = {
+  Idle: 'neutral',
+  Running: 'accent',
+};
+
+const jobTones: Record<TaskJobStatus, StatusTone> = {
+  Pending: 'neutral',
+  Retrying: 'warning',
+  Running: 'accent',
+  Completed: 'success',
+  Cancelled: 'neutral',
+  Failed: 'danger',
+};
 
 export function TasksPage() {
   const notify = useNotify();
+  const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [snapshot, setSnapshot] = useState<TaskSnapshot>({ scheduled: [], jobs: [], roots: [] });
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<BusyOperation>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<NonNullable<unknown> | null>(null);
+  const [authRedirecting, setAuthRedirecting] = useState(false);
   const [selectedRoot, setSelectedRoot] = useState('');
   const [itemId, setItemId] = useState('');
-  const requestVersion = useRef(0);
+  const [busyOperations, setBusyOperations] = useState<ReadonlySet<string>>(() => new Set());
+  const operationRef = useRef(new Set<string>());
 
-  const applySnapshot = useCallback((next: TaskSnapshot) => {
-    setSnapshot(next);
-    setSelectedRoot((current) => {
-      if (next.roots.some((root) => root.key === current)) return current;
-      return next.roots[0]?.key ?? '';
-    });
-    setLoading(false);
-  }, []);
-
-  const load = useCallback(async (signal?: AbortSignal) => {
-    const version = requestVersion.current + 1;
-    requestVersion.current = version;
-    try {
-      const next = await getTaskSnapshot(signal);
-      if (version === requestVersion.current) applySnapshot(next);
-    } catch (error: unknown) {
-      if (signal?.aborted === true || version !== requestVersion.current) return;
-      notifyError(notify, error, 'Tasks could not be loaded.');
-      setLoading(false);
+  const applyLoadResult = useCallback(async (result: LoadResult) => {
+    if ('snapshot' in result) {
+      setSnapshot(result.snapshot);
+      setSelectedRoot((current) => (
+        result.snapshot.roots.some((root) => root.key === current)
+          ? current
+          : result.snapshot.roots[0]?.key ?? ''
+      ));
+      setHasLoaded(true);
+      setLoadError(null);
+      setAuthRedirecting(false);
+      return;
     }
-  }, [applySnapshot, notify]);
+    if (await logoutIfAccessDenied(result.error)) {
+      setAuthRedirecting(true);
+      return;
+    }
+    setLoadError(result.error ?? new Error('Task loading failed.'));
+  }, [logoutIfAccessDenied]);
 
-  const selectedRootOption = snapshot.roots.find((root) => root.key === selectedRoot);
+  const { isMounted, loading, reload } = useAuthoritativeLoad(fetchTaskSnapshot, applyLoadResult);
 
   useEffect(() => {
-    const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      await load(abort.signal);
-      if (!abort.signal.aborted) timer = setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
-    };
-    void poll();
-    return () => {
-      requestVersion.current += 1;
-      abort.abort();
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [load]);
+    const timer = window.setInterval(() => { void reload().catch(() => undefined); }, POLL_INTERVAL_MS);
+    return () => { window.clearInterval(timer); };
+  }, [reload]);
+
+  const setOperationBusy = (operation: string, isBusy: boolean) => {
+    if (isBusy) operationRef.current.add(operation);
+    else operationRef.current.delete(operation);
+    setBusyOperations(new Set(operationRef.current));
+  };
 
   const run = async (
     operation: string,
     command: () => Promise<unknown>,
     success: string,
-  ): Promise<void> => {
-    if (busy !== null) return;
-    setBusy(operation);
+  ): Promise<CommandResult> => {
+    if (operationRef.current.has(operation)) return 'failed';
+    setOperationBusy(operation, true);
     try {
       const jobIds = await command();
+      if (!isMounted()) return 'handled';
       const suffix = Array.isArray(jobIds) && jobIds.length > 0
         ? ` ${String(jobIds.length)} durable job${jobIds.length === 1 ? '' : 's'} accepted.`
         : '';
       notify(`${success}${suffix}`, { type: 'success' });
-      await load();
+      await reload();
+      return 'succeeded';
     } catch (error: unknown) {
-      notifyError(notify, error, 'The task command could not be completed.');
+      if (!isMounted()) return 'handled';
+      if (await logoutIfAccessDenied(error)) return 'handled';
+      if (!isMounted()) return 'handled';
+      notify('The task command could not be completed.', { type: 'error' });
+      return 'failed';
     } finally {
-      setBusy(null);
+      if (isMounted()) setOperationBusy(operation, false);
+      else operationRef.current.delete(operation);
     }
   };
 
-  return (
-    <Box sx={{
-      boxSizing: 'border-box',
-      maxWidth: { xs: 'calc(100vw - 16px)', sm: 1200 },
-      minWidth: 0,
-      width: '100%',
-      p: { xs: 2, sm: 3 },
-    }}>
-      <Title title="Tasks" />
-      <Stack
-        direction="row"
-        spacing={1.5}
-        sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 3 }}
-      >
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
-          <TaskAltOutlined color="primary" />
-          <Typography component="h1" variant="h1">Tasks</Typography>
-        </Stack>
-        <Tooltip title="Reload tasks">
-          <span>
-            <IconButton
-              aria-label="Reload tasks"
-              disabled={loading || busy !== null}
-              onClick={() => { setLoading(true); void load(); }}
-            >
-              <RefreshOutlined />
-            </IconButton>
-          </span>
-        </Tooltip>
-      </Stack>
+  if (authRedirecting) return null;
 
-      <SectionHeading title="Scheduled tasks" />
-      <ScheduledTasksTable
-        tasks={snapshot.scheduled}
-        loading={loading}
-        busy={busy}
-        onRun={(task) => void run(
-          `scheduled-${task.id}`,
-          task.state === 'Idle'
-            ? () => startScheduledTask(task.id)
-            : () => cancelScheduledTask(task.id),
-          task.state === 'Idle' ? 'Scheduled task started.' : 'Scheduled task cancelled.',
+  const selectedRootOption = snapshot.roots.find((root) => root.key === selectedRoot);
+  return (
+    <div className="space-y-7">
+      <PageHeader
+        actions={(
+          <Tooltip>
+            <Button
+              aria-label="Reload tasks"
+              isDisabled={loading}
+              isIconOnly
+              onPress={() => { void reload(); }}
+              size="sm"
+              variant="ghost"
+            >
+              <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
+            </Button>
+            <Tooltip.Content>Reload tasks</Tooltip.Content>
+          </Tooltip>
         )}
+        description="Run scheduled maintenance, submit targeted work, and inspect durable job history."
+        title="Tasks"
       />
 
-      <SectionHeading title="Manual commands" />
-      <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, mb: 4 }}>
-        <Paper variant="outlined" sx={{ p: 2 }}>
-          <Stack spacing={2}>
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-              <StorageOutlined color="action" />
-              <Typography component="h2" variant="h6">Library root</Typography>
-            </Stack>
-            {snapshot.roots.length === 0 ? (
-              <Alert severity="info">No storage roots are attached to a library.</Alert>
-            ) : (
-              <FormControl fullWidth disabled={busy !== null}>
-                <InputLabel id="task-root-label">Library root</InputLabel>
-                <Select
-                  labelId="task-root-label"
-                  label="Library root"
-                  value={selectedRoot}
-                  onChange={(event) => { setSelectedRoot(event.target.value); }}
-                >
-                  {snapshot.roots.map((root) => (
-                    <MenuItem key={root.key} value={root.key}>{root.label}</MenuItem>
+      {loading && hasLoaded && (
+        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing tasks...</p>
+      )}
+
+      <AsyncContent
+        empty={null}
+        error={loadError}
+        hasData={hasLoaded}
+        isEmpty={false}
+        isPending={loading}
+        loading={<TasksSkeleton />}
+        onRetry={() => { void reload(); }}
+      >
+        <div className="space-y-10">
+          <ScheduledTasks
+            busyOperations={busyOperations}
+            onRun={run}
+            tasks={snapshot.scheduled}
+          />
+          <ManualCommands
+            busyOperations={busyOperations}
+            itemId={itemId}
+            onItemIdChange={setItemId}
+            onRootChange={setSelectedRoot}
+            onRun={run}
+            roots={snapshot.roots}
+            selectedRoot={selectedRoot}
+            selectedRootOption={selectedRootOption}
+          />
+          <RecentJobs jobs={snapshot.jobs} />
+        </div>
+      </AsyncContent>
+    </div>
+  );
+}
+
+function ScheduledTasks({
+  busyOperations,
+  onRun,
+  tasks,
+}: {
+  busyOperations: ReadonlySet<string>;
+  onRun: (operation: string, command: () => Promise<unknown>, success: string) => Promise<CommandResult>;
+  tasks: ScheduledTask[];
+}) {
+  return (
+    <section aria-labelledby="scheduled-tasks-heading" className="space-y-4">
+      <SectionHeading
+        description="Server maintenance routines reported by the scheduler."
+        id="scheduled-tasks-heading"
+        title="Scheduled tasks"
+      />
+      {tasks.length === 0 ? (
+        <EmptyState message="No scheduled tasks are available." />
+      ) : (
+        <ul aria-label="Scheduled tasks" className="divide-y divide-border border-y border-border">
+          {tasks.map((task) => {
+            const operation = `scheduled-${task.id}`;
+            const isPending = busyOperations.has(operation);
+            return (
+              <li className="grid min-w-0 gap-4 py-4 md:grid-cols-[minmax(0,1fr)_10rem_7rem_auto] md:items-center" key={task.id}>
+                <div className="min-w-0">
+                  <p className="break-words font-semibold text-foreground">{task.name}</p>
+                  <p className="mt-1 break-words text-sm text-muted">{task.description}</p>
+                  <p className="mt-1 break-all font-mono text-xs text-muted">{task.key}</p>
+                </div>
+                <LabeledValue label="Category">{task.category}</LabeledValue>
+                <LabeledValue label="Status"><TaskStatus state={task.state} /></LabeledValue>
+                <div className="flex justify-end">
+                  {task.state === 'Running' ? (
+                    <ConfirmDialog
+                      confirmLabel="Cancel task"
+                      description={<>Stop the active <strong>{task.name}</strong> task?</>}
+                      isPending={isPending}
+                      onConfirm={async () => {
+                        const result = await onRun(
+                          operation,
+                          () => cancelScheduledTask(task.id),
+                          'Scheduled task cancelled.',
+                        );
+                        if (result === 'failed') throw new Error('Task cancellation failed.');
+                        if (result === 'succeeded') focusScheduledHeading();
+                      }}
+                      title="Cancel scheduled task"
+                      trigger={(
+                        <Button
+                          aria-label={`Cancel ${task.name}`}
+                          className="min-w-24"
+                          isDisabled={isPending}
+                          size="sm"
+                          variant="danger-soft"
+                        >
+                          {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <X aria-hidden="true" className="size-4" />}
+                          <span className="inline-flex min-h-5 items-center">Cancel</span>
+                        </Button>
+                      )}
+                    />
+                  ) : (
+                    <Button
+                      aria-label={`Start ${task.name}`}
+                      className="min-w-24"
+                      isDisabled={isPending}
+                      onPress={() => {
+                        void onRun(
+                          operation,
+                          () => startScheduledTask(task.id),
+                          'Scheduled task started.',
+                        ).then((result) => {
+                          if (result === 'succeeded') focusScheduledHeading();
+                        });
+                      }}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <CirclePlay aria-hidden="true" className="size-4" />}
+                      <span className="inline-flex min-h-5 items-center">Start</span>
+                    </Button>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function ManualCommands({
+  busyOperations,
+  itemId,
+  onItemIdChange,
+  onRootChange,
+  onRun,
+  roots,
+  selectedRoot,
+  selectedRootOption,
+}: {
+  busyOperations: ReadonlySet<string>;
+  itemId: string;
+  onItemIdChange: (value: string) => void;
+  onRootChange: (value: string) => void;
+  onRun: (operation: string, command: () => Promise<unknown>, success: string) => Promise<CommandResult>;
+  roots: StorageRootOption[];
+  selectedRoot: string;
+  selectedRootOption: StorageRootOption | undefined;
+}) {
+  const run = (operation: string, command: () => Promise<unknown>, success: string) => {
+    void onRun(operation, command, success);
+  };
+  const validItem = isUuid(itemId);
+  return (
+    <section aria-labelledby="manual-commands-heading" className="space-y-4">
+      <SectionHeading
+        description="Submit focused jobs without waiting for a scheduled maintenance cycle."
+        id="manual-commands-heading"
+        title="Manual commands"
+      />
+      <div className="grid gap-8 lg:grid-cols-2">
+        <section aria-labelledby="root-commands-heading" className="space-y-4 border-t border-border pt-5">
+          <h3 className="font-semibold text-foreground" id="root-commands-heading">Library root</h3>
+          {roots.length === 0 ? (
+            <Alert status="accent">
+              <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+              <Alert.Content>
+                <Alert.Title>No library roots</Alert.Title>
+                <Alert.Description>No storage roots are attached to a library.</Alert.Description>
+              </Alert.Content>
+            </Alert>
+          ) : (
+            <Select fullWidth onChange={(key) => { if (typeof key === 'string') onRootChange(key); }} value={selectedRoot}>
+              <Label>Library root</Label>
+              <Select.Trigger>
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover>
+                <ListBox>
+                  {roots.map((root) => (
+                    <ListBox.Item id={root.key} key={root.key} textValue={root.label}>
+                      {root.label}
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
                   ))}
-                </Select>
-              </FormControl>
-            )}
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-              <Button
-                startIcon={<StorageOutlined />}
-                disabled={selectedRoot.length === 0 || busy !== null}
-                onClick={() => void run(
+                </ListBox>
+              </Select.Popover>
+            </Select>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <CommandButton
+              icon={<ShieldCheck aria-hidden="true" className="size-4" />}
+              isDisabled={selectedRootOption === undefined}
+              isPending={busyOperations.has('validate-storage')}
+              label="Validate storage"
+              onPress={() => {
+                run(
                   'validate-storage',
                   () => validateStorage(selectedRootOption?.storageRootId ?? ''),
                   'Storage validation submitted.',
-                )}
-              >
-                Validate storage
-              </Button>
-              <Button
-                startIcon={<TravelExploreOutlined />}
-                disabled={selectedRoot.length === 0 || busy !== null}
-                onClick={() => void run(
+                );
+              }}
+            />
+            <CommandButton
+              icon={<Search aria-hidden="true" className="size-4" />}
+              isDisabled={selectedRootOption === undefined}
+              isPending={busyOperations.has('discover-titles')}
+              label="Discover titles"
+              onPress={() => {
+                run(
                   'discover-titles',
                   () => discoverTitles(selectedRootOption?.storageRootId ?? ''),
                   'Title discovery submitted.',
-                )}
-              >
-                Discover titles
-              </Button>
-              <Button
-                startIcon={<PlayArrowOutlined />}
-                disabled={selectedRootOption === undefined || busy !== null}
-                onClick={() => void run(
+                );
+              }}
+            />
+            <CommandButton
+              icon={<ScanSearch aria-hidden="true" className="size-4" />}
+              isDisabled={selectedRootOption === undefined}
+              isPending={busyOperations.has('full-scan-root')}
+              label="Full scan"
+              onPress={() => {
+                run(
                   'full-scan-root',
                   () => fullScanRoot(
                     selectedRootOption?.libraryId ?? '',
                     selectedRootOption?.storageRootId ?? '',
                   ),
                   'Full scan submitted.',
-                )}
-              >
-                Full scan
-              </Button>
-            </Stack>
-          </Stack>
-        </Paper>
-
-        <Paper variant="outlined" sx={{ p: 2 }}>
-          <Stack spacing={2}>
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-              <TravelExploreOutlined color="action" />
-              <Typography component="h2" variant="h6">Catalog item</Typography>
-            </Stack>
-            <TextField
-              label="Catalog item ID"
-              value={itemId}
-              disabled={busy !== null}
-              onChange={(event) => { setItemId(event.target.value); }}
-              slotProps={{ htmlInput: { maxLength: 64 } }}
+                );
+              }}
             />
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-              <Button
-                disabled={!isUuid(itemId) || busy !== null}
-                onClick={() => void run(
-                  'resolve-metadata',
-                  () => resolveMetadata(itemId),
-                  'Metadata resolution submitted.',
-                )}
-              >
-                Resolve metadata
-              </Button>
-              <Button
-                startIcon={<AccountTreeOutlined />}
-                disabled={!isUuid(itemId) || busy !== null}
-                onClick={() => void run(
-                  'expand-item',
-                  () => expandItem(itemId),
-                  'Item expansion submitted.',
-                )}
-              >
-                Expand item
-              </Button>
-              <Button
-                startIcon={<PlaylistAddCheckOutlined />}
-                disabled={!isUuid(itemId) || busy !== null}
-                onClick={() => void run(
-                  'index-media-sources',
-                  () => indexMediaSources(itemId),
-                  'Source indexing submitted.',
-                )}
-              >
-                Index sources
-              </Button>
-              <Button
-                disabled={!isUuid(itemId) || busy !== null}
-                onClick={() => void run(
-                  'probe-media',
-                  () => probeMedia(itemId),
-                  'Media probe submitted.',
-                )}
-              >
-                Probe media
-              </Button>
-            </Stack>
-          </Stack>
-        </Paper>
-      </Box>
+          </div>
+        </section>
 
-      <SectionHeading title="Recent durable jobs" />
-      <RecentJobsTable jobs={snapshot.jobs} loading={loading} />
-    </Box>
+        <section aria-labelledby="item-commands-heading" className="space-y-4 border-t border-border pt-5">
+          <h3 className="font-semibold text-foreground" id="item-commands-heading">Catalog item</h3>
+          <TextField
+            fullWidth
+            isInvalid={itemId.length > 0 && !validItem}
+            name="catalogItemId"
+          >
+            <Label>Catalog item ID</Label>
+            <Input
+              maxLength={64}
+              onChange={(event) => { onItemIdChange(event.currentTarget.value); }}
+              value={itemId}
+            />
+            <FieldError>Enter a valid UUID.</FieldError>
+          </TextField>
+          <div className="flex flex-wrap gap-2">
+            <CommandButton
+              icon={<Tags aria-hidden="true" className="size-4" />}
+              isDisabled={!validItem}
+              isPending={busyOperations.has('resolve-metadata')}
+              label="Resolve metadata"
+              onPress={() => {
+                run('resolve-metadata', () => resolveMetadata(itemId), 'Metadata resolution submitted.');
+              }}
+            />
+            <CommandButton
+              icon={<GitBranch aria-hidden="true" className="size-4" />}
+              isDisabled={!validItem}
+              isPending={busyOperations.has('expand-item')}
+              label="Expand item"
+              onPress={() => {
+                run('expand-item', () => expandItem(itemId), 'Item expansion submitted.');
+              }}
+            />
+            <CommandButton
+              icon={<ListPlus aria-hidden="true" className="size-4" />}
+              isDisabled={!validItem}
+              isPending={busyOperations.has('index-media-sources')}
+              label="Index sources"
+              onPress={() => {
+                run('index-media-sources', () => indexMediaSources(itemId), 'Source indexing submitted.');
+              }}
+            />
+            <CommandButton
+              icon={<Activity aria-hidden="true" className="size-4" />}
+              isDisabled={!validItem}
+              isPending={busyOperations.has('probe-media')}
+              label="Probe media"
+              onPress={() => {
+                run('probe-media', () => probeMedia(itemId), 'Media probe submitted.');
+              }}
+            />
+          </div>
+        </section>
+      </div>
+    </section>
   );
 }
 
-function ScheduledTasksTable({
-  tasks,
-  loading,
-  busy,
-  onRun,
+function CommandButton({
+  icon,
+  isDisabled,
+  isPending,
+  label,
+  onPress,
 }: {
-  tasks: ScheduledTask[];
-  loading: boolean;
-  busy: BusyOperation;
-  onRun: (task: ScheduledTask) => void;
+  icon: ReactNode;
+  isDisabled: boolean;
+  isPending: boolean;
+  label: string;
+  onPress: () => void;
 }) {
   return (
-    <TableContainer component={Paper} variant="outlined" sx={{ maxWidth: '100%', mb: 4, overflowX: 'auto' }}>
-      <Table aria-label="Scheduled tasks" sx={{ minWidth: 620 }}>
-        <TableHead><TableRow>
-          <TableCell>Name</TableCell><TableCell>Category</TableCell><TableCell>Status</TableCell><TableCell align="right">Action</TableCell>
-        </TableRow></TableHead>
-        <TableBody>
-          {tasks.map((task) => (
-            <TableRow key={task.id} hover>
-              <TableCell component="th" scope="row">
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>{task.name}</Typography>
-                <Typography variant="caption" color="text.secondary">{task.description}</Typography>
-              </TableCell>
-              <TableCell>{task.category}</TableCell>
-              <TableCell><StatusChip status={task.state} /></TableCell>
-              <TableCell align="right">
-                <Button
-                  size="small"
-                  color={task.state === 'Running' ? 'error' : 'primary'}
-                  startIcon={task.state === 'Running' ? <CancelOutlined /> : <PlayArrowOutlined />}
-                  disabled={busy !== null}
-                  onClick={() => { onRun(task); }}
-                >
-                  {task.state === 'Running' ? 'Cancel' : 'Start'}
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
-          {!loading && tasks.length === 0 && <EmptyRow columns={4} message="No scheduled tasks are available." />}
-        </TableBody>
-      </Table>
-      {loading && <LoadingRows label="Loading scheduled tasks" />}
-    </TableContainer>
+    <Button
+      aria-busy={isPending}
+      className="min-w-32"
+      isDisabled={isDisabled || isPending}
+      onPress={onPress}
+      size="sm"
+      variant="secondary"
+    >
+      {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : icon}
+      <span className="inline-flex min-h-5 items-center">{label}</span>
+    </Button>
   );
 }
 
-function RecentJobsTable({ jobs, loading }: { jobs: TaskJob[]; loading: boolean }) {
+function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
   return (
-    <TableContainer component={Paper} variant="outlined" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
-      <Table aria-label="Recent durable jobs" sx={{ minWidth: 880 }}>
-        <TableHead><TableRow>
-          <TableCell>Task</TableCell><TableCell>Scope</TableCell><TableCell>Status</TableCell><TableCell align="right">Attempts</TableCell><TableCell>Created</TableCell><TableCell>Finished</TableCell>
-        </TableRow></TableHead>
-        <TableBody>
-          {jobs.map((job) => (
-            <TableRow key={job.id} hover>
-              <TableCell>{job.taskKind}</TableCell>
-              <TableCell>
-                <Typography variant="body2">{job.scopeType}</Typography>
-                <Typography variant="caption" color="text.secondary">{job.scopeId}</Typography>
-              </TableCell>
-              <TableCell><StatusChip status={job.status} /></TableCell>
-              <TableCell align="right">{job.attemptCount}</TableCell>
-              <TableCell>{formatDate(job.createdAt)}</TableCell>
-              <TableCell>{formatDate(job.completedAt)}</TableCell>
-            </TableRow>
-          ))}
-          {!loading && jobs.length === 0 && <EmptyRow columns={6} message="No durable jobs have been submitted." />}
-        </TableBody>
-      </Table>
-      {loading && <LoadingRows label="Loading recent jobs" />}
-    </TableContainer>
+    <section aria-labelledby="recent-jobs-heading" className="space-y-4">
+      <SectionHeading
+        description="The latest durable submissions and their terminal outcomes."
+        id="recent-jobs-heading"
+        title="Recent durable jobs"
+      />
+      {jobs.length === 0 ? (
+        <EmptyState message="No durable jobs have been submitted." />
+      ) : (
+        <Table variant="secondary">
+          <Table.ScrollContainer className="max-h-[32rem] overflow-auto">
+            <Table.Content aria-label="Recent durable jobs" className="min-w-[52rem] table-fixed">
+              <Table.Header>
+                <Table.Column isRowHeader>Task</Table.Column>
+                <Table.Column>Scope</Table.Column>
+                <Table.Column>Status</Table.Column>
+                <Table.Column className="w-24 text-right">Attempts</Table.Column>
+                <Table.Column>Created</Table.Column>
+                <Table.Column>Finished</Table.Column>
+              </Table.Header>
+              <Table.Body>
+                {jobs.map((job) => (
+                  <Table.Row id={job.id} key={job.id}>
+                    <Table.Cell>
+                      <p className="break-words font-medium">{readableIdentifier(job.taskKind)}</p>
+                      <p className="break-all font-mono text-xs text-muted">{job.taskKind}</p>
+                    </Table.Cell>
+                    <Table.Cell>
+                      <p>{readableIdentifier(job.scopeType)}</p>
+                      <p className="break-all text-xs text-muted">{job.scopeId}</p>
+                    </Table.Cell>
+                    <Table.Cell><JobStatus status={job.status} /></Table.Cell>
+                    <Table.Cell><span className="block text-right tabular-nums">{job.attemptCount}</span></Table.Cell>
+                    <Table.Cell>{formatDate(job.createdAt)}</Table.Cell>
+                    <Table.Cell>{formatDate(job.completedAt)}</Table.Cell>
+                  </Table.Row>
+                ))}
+              </Table.Body>
+            </Table.Content>
+          </Table.ScrollContainer>
+        </Table>
+      )}
+    </section>
   );
 }
 
-function SectionHeading({ title }: { title: string }) {
-  return <Typography component="h2" variant="h6" sx={{ mb: 1.5 }}>{title}</Typography>;
+function SectionHeading({ id, title, description }: { id: string; title: string; description: string }) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-foreground" id={id} tabIndex={-1}>{title}</h2>
+      <p className="mt-1 text-sm text-muted">{description}</p>
+    </div>
+  );
 }
 
-function StatusChip({ status }: { status: ScheduledTask['state'] | TaskJob['status'] }) {
-  const color = status === 'Completed' ? 'success'
-    : status === 'Running' || status === 'Retrying' ? 'info'
-      : status === 'Failed' || status === 'Cancelled' ? 'error'
-        : 'default';
-  return <Chip label={status} color={color} size="small" variant="outlined" />;
+function LabeledValue({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid grid-cols-[6rem_minmax(0,1fr)] items-center gap-3 text-sm md:block">
+      <span className="font-medium text-muted md:sr-only">{label}</span>
+      <span className="min-w-0 text-foreground">{children}</span>
+    </div>
+  );
 }
 
-function EmptyRow({ columns, message }: { columns: number; message: string }) {
-  return <TableRow><TableCell colSpan={columns}><Typography color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>{message}</Typography></TableCell></TableRow>;
+function TaskStatus({ state }: { state: ScheduledTaskState }) {
+  const tone = scheduledTones[state];
+  return <span data-tone={tone}><StatusChip tone={tone}>{state}</StatusChip></span>;
 }
 
-function LoadingRows({ label }: { label: string }) {
-  return <Stack sx={{ alignItems: 'center', py: 3 }}><CircularProgress size={28} aria-label={label} /></Stack>;
+function JobStatus({ status }: { status: TaskJobStatus }) {
+  const tone = jobTones[status];
+  return <span data-tone={tone}><StatusChip tone={tone}>{status}</StatusChip></span>;
+}
+
+function EmptyState({ message }: { message: string }) {
+  return <p className="border-y border-border py-8 text-center text-sm text-muted">{message}</p>;
+}
+
+function TasksSkeleton() {
+  return (
+    <div aria-label="Loading tasks" className="space-y-8" role="status">
+      <div className="space-y-3">
+        <Skeleton className="h-6 w-48" />
+        <Skeleton className="h-20 w-full" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Skeleton className="h-48 w-full" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+      <Skeleton className="h-56 w-full" />
+    </div>
+  );
 }
 
 function formatDate(value: string | null): string {
   return value === null ? 'Not finished' : new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium', timeStyle: 'short',
+    dateStyle: 'medium',
+    timeStyle: 'short',
   }).format(new Date(value));
+}
+
+function readableIdentifier(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
+    .replace(/[_-]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.trim());
 }
 
-function notifyError(
-  notify: ReturnType<typeof useNotify>,
-  error: unknown,
-  fallback: string,
-): void {
-  const message = error instanceof Error && error.message.length > 0 ? error.message : fallback;
-  notify(message, { type: 'error' });
+function focusScheduledHeading() {
+  window.setTimeout(() => {
+    document.getElementById('scheduled-tasks-heading')?.focus();
+  }, 0);
+}
+
+async function fetchTaskSnapshot(signal: AbortSignal): Promise<LoadResult> {
+  try {
+    return { snapshot: await getTaskSnapshot(signal) };
+  } catch (error: unknown) {
+    return { error };
+  }
 }

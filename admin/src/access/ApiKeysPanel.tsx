@@ -24,10 +24,10 @@ import { useCallback, useRef, useState, type ReactNode, type SyntheticEvent } fr
 import { AsyncContent } from '../ui/AsyncContent';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { ResponsiveCollection } from '../ui/ResponsiveCollection';
+import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import type { ApiKeyInfo } from './apiKeyApi';
 import { createApiKey, deleteApiKey, listApiKeys } from './apiKeyApi';
 import { formatAccessDate } from './formatAccessDate';
-import { useAuthoritativeLoad } from './useAuthoritativeLoad';
 
 const KEY_MASK = '****************';
 type LoadResult = { records: ApiKeyInfo[] } | { error: unknown };

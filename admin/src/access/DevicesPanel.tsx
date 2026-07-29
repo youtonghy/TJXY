@@ -15,10 +15,10 @@ import { useCallback, useRef, useState, type ReactNode, type SyntheticEvent } fr
 import { AsyncContent } from '../ui/AsyncContent';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { ResponsiveCollection } from '../ui/ResponsiveCollection';
+import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import type { DeviceInfo } from './deviceApi';
 import { deleteDevice, listDevices, updateDeviceName } from './deviceApi';
 import { formatAccessDate } from './formatAccessDate';
-import { useAuthoritativeLoad } from './useAuthoritativeLoad';
 
 type LoadResult = { records: DeviceInfo[] } | { error: unknown };
 type BusyOperation = 'rename' | 'revoke' | null;
