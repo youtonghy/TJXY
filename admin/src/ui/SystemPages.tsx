@@ -154,7 +154,7 @@ export function NotFoundPage() {
 export interface ApplicationErrorProps {
   error: Error;
   errorInfo?: ErrorInfo;
-  resetErrorBoundary: () => void;
+  resetErrorBoundary: (...args: unknown[]) => void;
 }
 
 export function ApplicationError({ resetErrorBoundary }: ApplicationErrorProps) {
@@ -164,7 +164,7 @@ export function ApplicationError({ resetErrorBoundary }: ApplicationErrorProps) 
       role="alert"
       title="The admin interface could not continue"
     >
-      <Button onPress={resetErrorBoundary} variant="secondary">
+      <Button onPress={() => { resetErrorBoundary(); }} variant="secondary">
         <RefreshCw aria-hidden="true" className="size-4" />
         Try again
       </Button>

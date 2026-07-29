@@ -1,17 +1,22 @@
-import { PeopleOutlined as PeopleOutlineIcon } from '@mui/icons-material';
-import { Admin, Authenticated, CustomRoutes, Resource } from 'react-admin';
+import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 
-import { dataProvider } from './api/dataProvider';
 import { AccessPage } from './access/AccessPage';
+import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
 import { LoginPage } from './auth/LoginPage';
 import { AdminLayout } from './layout/AdminLayout';
 import { LibrariesPage } from './libraries/LibrariesPage';
-import { theme } from './theme';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
 import { TasksPage } from './tasks/TasksPage';
+import {
+  AccessDeniedPage,
+  ApplicationError,
+  AuthenticationErrorPage,
+  LoadingPage,
+  NotFoundPage,
+} from './ui/SystemPages';
 import { UserCreate } from './users/UserCreate';
 import { UserEdit } from './users/UserEdit';
 import { UserList } from './users/UserList';
@@ -24,48 +29,35 @@ export function App() {
         <Route
           path="/admin/*"
           element={(
-            <Admin
-              basename="/admin"
+            <CoreAdmin
+              accessDenied={AccessDeniedPage}
+              authenticationError={AuthenticationErrorPage}
               authProvider={authProvider}
+              basename="/admin"
+              catchAll={NotFoundPage}
               dataProvider={dataProvider}
+              disableTelemetry
+              error={ApplicationError}
               layout={AdminLayout}
+              loading={LoadingPage}
               loginPage={LoginPage}
-              theme={theme}
-              requireAuth
               title="TJXY Admin"
             >
               <Resource
-                name="users"
-                list={UserList}
                 create={UserCreate}
                 edit={UserEdit}
+                list={UserList}
+                name="users"
                 show={UserShow}
-                icon={PeopleOutlineIcon}
-                options={{ label: 'Users' }}
               />
               <CustomRoutes>
-                <Route
-                  path="/access"
-                  element={<Authenticated><AccessPage /></Authenticated>}
-                />
-                <Route
-                  path="/tasks"
-                  element={<Authenticated><TasksPage /></Authenticated>}
-                />
-                <Route
-                  path="/libraries"
-                  element={<Authenticated><LibrariesPage /></Authenticated>}
-                />
-                <Route
-                  path="/storage/google-drive"
-                  element={<Authenticated><GoogleDrivePage /></Authenticated>}
-                />
-                <Route
-                  path="/storage/onedrive"
-                  element={<Authenticated><OneDrivePage /></Authenticated>}
-                />
+                <Route element={<AccessPage />} path="/access" />
+                <Route element={<TasksPage />} path="/tasks" />
+                <Route element={<LibrariesPage />} path="/libraries" />
+                <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
+                <Route element={<OneDrivePage />} path="/storage/onedrive" />
               </CustomRoutes>
-            </Admin>
+            </CoreAdmin>
           )}
         />
       </Routes>
