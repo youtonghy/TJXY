@@ -1,4 +1,4 @@
-import type { GetListParams } from 'react-admin';
+import type { GetListParams } from 'ra-core';
 
 import { apiRequest } from './httpClient';
 import type { TjxyUser, UserRecord } from './types';
@@ -11,7 +11,11 @@ vi.mock('./httpClient', async (importOriginal) => {
 
 const requestMock = vi.mocked(apiRequest);
 
-function user(id: string, name: string): TjxyUser {
+function user(
+  id: string,
+  name: string,
+  policy: Partial<TjxyUser['Policy']> = {},
+): TjxyUser {
   return {
     Id: id,
     Name: name,
@@ -28,6 +32,7 @@ function user(id: string, name: string): TjxyUser {
       EnablePlaybackRemuxing: false,
       AuthenticationProviderId: 'TJXY.LocalAuthentication',
       PasswordResetProviderId: 'TJXY.LocalPasswordReset',
+      ...policy,
     },
   };
 }
@@ -42,15 +47,22 @@ it('maps Id to id, sorts stably, and pages the bounded Users collection', async 
     user('u2', 'alice'),
     user('u1', 'Alice'),
   ]);
+  const firstPage = await dataProvider.getList<UserRecord>('users', {
+    pagination: { page: 1, perPage: 2 },
+    sort: { field: 'Name', order: 'ASC' },
+    filter: {},
+  });
   const params: GetListParams = {
     pagination: { page: 2, perPage: 2 },
     sort: { field: 'Name', order: 'ASC' },
     filter: {},
   };
 
+  expect(firstPage.data.map(({ Id }) => Id)).toEqual(['u1', 'u2']);
   await expect(dataProvider.getList<UserRecord>('users', params)).resolves.toEqual({
     data: [expect.objectContaining({ Id: 'u3', id: 'u3', Name: 'Charlie' })],
     total: 3,
+    meta: { totalUsers: 3, administrators: 0, disabled: 0 },
   });
   expect(requestMock).toHaveBeenCalledWith('/Users', {});
 });
@@ -62,7 +74,92 @@ it('returns an empty page beyond the collection', async () => {
     pagination: { page: 3, perPage: 25 },
     sort: { field: 'Name', order: 'ASC' },
     filter: {},
-  })).resolves.toEqual({ data: [], total: 1 });
+  })).resolves.toEqual({
+    data: [],
+    total: 1,
+    meta: { totalUsers: 1, administrators: 0, disabled: 0 },
+  });
+});
+
+it('searches names and ids case-insensitively after trimming the query', async () => {
+  requestMock.mockResolvedValue([
+    user('USER-ADA-01', 'Ada Lovelace'),
+    user('user-grace-02', 'Grace Hopper'),
+    user('user-alan-03', 'Alan Turing'),
+  ]);
+
+  const byName = await dataProvider.getList<UserRecord>('users', {
+    filter: { q: '  lOvElAcE ' },
+    pagination: { page: 1, perPage: 25 },
+  });
+  const byId = await dataProvider.getList<UserRecord>('users', {
+    filter: { q: 'GRACE-02' },
+    pagination: { page: 1, perPage: 25 },
+  });
+
+  expect(byName.data.map(({ Id }) => Id)).toEqual(['USER-ADA-01']);
+  expect(byId.data.map(({ Id }) => Id)).toEqual(['user-grace-02']);
+});
+
+it.each([
+  ['administrator', ['enabled-admin']],
+  ['standard', ['enabled-standard']],
+  ['disabled', ['disabled-admin', 'disabled-standard']],
+  ['all', ['disabled-admin', 'disabled-standard', 'enabled-admin', 'enabled-standard']],
+] as const)('applies the exclusive %s access filter', async (access, expectedIds) => {
+  requestMock.mockResolvedValue([
+    user('enabled-admin', 'Enabled Admin', { IsAdministrator: true }),
+    user('enabled-standard', 'Enabled Standard'),
+    user('disabled-admin', 'Disabled Admin', { IsAdministrator: true, IsDisabled: true }),
+    user('disabled-standard', 'Disabled Standard', { IsDisabled: true }),
+  ]);
+
+  const result = await dataProvider.getList<UserRecord>('users', {
+    filter: { access },
+    pagination: { page: 1, perPage: 25 },
+  });
+
+  expect(result.data.map(({ Id }) => Id).sort()).toEqual([...expectedIds].sort());
+  expect(result.meta).toEqual({ totalUsers: 4, administrators: 1, disabled: 2 });
+});
+
+it('composes search and access filters before pagination', async () => {
+  requestMock.mockResolvedValue([
+    user('admin-ada', 'Ada', { IsAdministrator: true }),
+    user('admin-grace', 'Grace', { IsAdministrator: true }),
+    user('user-ada', 'Ada Standard'),
+  ]);
+
+  const result = await dataProvider.getList<UserRecord>('users', {
+    filter: { q: 'ada', access: 'administrator' },
+    pagination: { page: 1, perPage: 25 },
+  });
+
+  expect(result.data.map(({ Id }) => Id)).toEqual(['admin-ada']);
+  expect(result.total).toBe(1);
+  expect(result.meta).toEqual({ totalUsers: 3, administrators: 2, disabled: 0 });
+});
+
+it('computes metadata before filtering and slices the filtered result to 25 rows', async () => {
+  requestMock.mockResolvedValue(Array.from({ length: 40 }, (_, index) => user(
+    `u-${String(index).padStart(2, '0')}`,
+    `User ${String(index).padStart(2, '0')}`,
+    index < 3
+      ? { IsAdministrator: true }
+      : index < 8
+        ? { IsDisabled: true }
+        : {},
+  )));
+
+  const result = await dataProvider.getList<UserRecord>('users', {
+    filter: { access: 'standard' },
+    pagination: { page: 1, perPage: 25 },
+    sort: { field: 'Name', order: 'ASC' },
+  });
+
+  expect(result.data).toHaveLength(25);
+  expect(result.total).toBe(32);
+  expect(result.meta).toEqual({ totalUsers: 40, administrators: 3, disabled: 5 });
 });
 
 it('gets one user with an encoded identifier', async () => {
@@ -118,12 +215,26 @@ it('deletes pessimistically and returns the prior record', async () => {
   expect(requestMock).toHaveBeenCalledWith('/Users/u2', { method: 'DELETE' });
 });
 
-it('rejects unsupported resources, filters, sorts, and bulk operations explicitly', async () => {
+it('rejects unsupported resources, filter shapes, sorts, and bulk operations explicitly', async () => {
   await expect(dataProvider.getList('devices', { filter: {} })).rejects.toMatchObject({ status: 405 });
-  await expect(dataProvider.getList('users', { filter: { IsDisabled: true } }))
-    .rejects.toMatchObject({ status: 400 });
+  for (const filter of [
+    { IsDisabled: true },
+    { q: 42 },
+    { q: null },
+    { access: true },
+    { access: null },
+    { access: 'owner' },
+    [],
+    null,
+  ]) {
+    await expect(dataProvider.getList('users', { filter }))
+      .rejects.toMatchObject({ status: 400, category: 'validation' });
+  }
   await expect(dataProvider.getList('users', {
     filter: {}, sort: { field: 'Policy.IsDisabled', order: 'ASC' },
+  })).rejects.toMatchObject({ status: 400 });
+  await expect(dataProvider.getList('users', {
+    filter: {}, sort: { field: 'Name', order: 'SIDEWAYS' } as never,
   })).rejects.toMatchObject({ status: 400 });
   await expect(dataProvider.deleteMany('users', { ids: ['u1'] })).rejects.toMatchObject({
     status: 405,

@@ -14,20 +14,36 @@ import type { TjxyUser, UserRecord } from './types';
 
 const RESOURCE = 'users';
 
+export type UserAccessFilter = 'all' | 'administrator' | 'standard' | 'disabled';
+
+export interface UserListFilter {
+  q?: string;
+  access?: UserAccessFilter;
+}
+
+export interface UserListMeta {
+  totalUsers: number;
+  administrators: number;
+  disabled: number;
+}
+
 /* React Admin's DataProvider contract requires generic methods so callers select record types. */
 /* eslint-disable @typescript-eslint/no-unnecessary-type-parameters */
 export const dataProvider: DataProvider = {
   async getList<RecordType extends RaRecord = UserRecord>(resource: string, params: GetListParams) {
     requireResource(resource);
-    requireEmptyFilter(params.filter);
+    const filter = parseUserListFilter(params.filter);
     const sort = validatedSort(params);
     const { page, perPage } = pagination(params);
     const users = await fetchUsers(params.signal);
-    const sorted = sortUsers(users, sort);
+    const meta = summarizeUsers(users);
+    const filtered = filterUsers(users, filter);
+    const sorted = sortUsers(filtered, sort);
     const start = (page - 1) * perPage;
     return {
       data: sorted.slice(start, start + perPage) as unknown as RecordType[],
       total: sorted.length,
+      meta,
     };
   },
 
@@ -102,10 +118,15 @@ async function fetchUser(id: unknown, signal?: AbortSignal): Promise<UserRecord>
 
 function validatedSort(params: GetListParams): { field: 'Name'; order: 'ASC' | 'DESC' } {
   const sort = params.sort ?? { field: 'Name', order: 'ASC' as const };
-  if (sort.field !== 'Name') {
+  const order: unknown = sort.order;
+  if (sort.field !== 'Name' || !isSortOrder(order)) {
     throw new ApiError(400, 'validation', 'Users can only be sorted by name.');
   }
-  return { field: 'Name', order: sort.order };
+  return { field: 'Name', order };
+}
+
+function isSortOrder(value: unknown): value is 'ASC' | 'DESC' {
+  return value === 'ASC' || value === 'DESC';
 }
 
 function sortUsers(
@@ -134,13 +155,59 @@ function requireResource(resource: string): void {
   }
 }
 
-function requireEmptyFilter(filter: unknown): void {
+function parseUserListFilter(filter: unknown): Required<UserListFilter> {
   if (filter === undefined) {
-    return;
+    return { q: '', access: 'all' };
   }
-  if (!isRecord(filter) || Object.keys(filter).length > 0) {
-    throw new ApiError(400, 'validation', 'User filters are not supported.');
+  if (!isRecord(filter) || Object.keys(filter).some((key) => key !== 'q' && key !== 'access')) {
+    throw invalidFilterError();
   }
+
+  const q = filter.q === undefined ? '' : filter.q;
+  const access = filter.access === undefined ? 'all' : filter.access;
+  if (typeof q !== 'string' || !isUserAccessFilter(access)) throw invalidFilterError();
+  return { q: q.trim().toLocaleLowerCase(), access };
+}
+
+function isUserAccessFilter(value: unknown): value is UserAccessFilter {
+  return value === 'all'
+    || value === 'administrator'
+    || value === 'standard'
+    || value === 'disabled';
+}
+
+function invalidFilterError(): ApiError {
+  return new ApiError(400, 'validation', 'User filters are invalid.');
+}
+
+function filterUsers(users: UserRecord[], filter: Required<UserListFilter>): UserRecord[] {
+  return users.filter((user) => {
+    const matchesQuery = filter.q.length === 0
+      || user.Name.toLocaleLowerCase().includes(filter.q)
+      || user.Id.toLocaleLowerCase().includes(filter.q);
+    if (!matchesQuery) return false;
+
+    switch (filter.access) {
+      case 'administrator':
+        return !user.Policy.IsDisabled && user.Policy.IsAdministrator;
+      case 'standard':
+        return !user.Policy.IsDisabled && !user.Policy.IsAdministrator;
+      case 'disabled':
+        return user.Policy.IsDisabled;
+      case 'all':
+        return true;
+    }
+  });
+}
+
+function summarizeUsers(users: UserRecord[]): UserListMeta {
+  return {
+    totalUsers: users.length,
+    administrators: users.filter((user) => (
+      !user.Policy.IsDisabled && user.Policy.IsAdministrator
+    )).length,
+    disabled: users.filter((user) => user.Policy.IsDisabled).length,
+  };
 }
 
 function requireCreateData(value: unknown): { Name: string; Password: string } {
