@@ -106,6 +106,18 @@ it('preserves Shared Drive pagination without exposing credentials', async () =>
   );
 });
 
+it('forwards cancellation signals to provider requests', async () => {
+  requestMock.mockResolvedValue({ Items: [], NextPageToken: null });
+  const controller = new AbortController();
+
+  await listSharedDrives('oauth-state', undefined, controller.signal);
+
+  expect(requestMock).toHaveBeenCalledWith(
+    '/Admin/Storage/OAuth/GoogleDrive/oauth-state/SharedDrives',
+    { signal: controller.signal },
+  );
+});
+
 it('builds scoped directory queries and filters server records', async () => {
   const next = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
   requestMock.mockResolvedValue({

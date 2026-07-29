@@ -1,36 +1,30 @@
 import {
-  CheckCircleOutlineOutlined,
-  ChevronRight,
-  CloudOutlined,
-  FolderOutlined,
-  LaunchOutlined,
-  RefreshOutlined,
-} from '@mui/icons-material';
-import {
   Alert,
-  Box,
-  Breadcrumbs,
   Button,
-  CircularProgress,
-  Divider,
-  FormControl,
-  InputLabel,
-  List,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  MenuItem,
+  Input,
+  Label,
+  ListBox,
   Select,
-  Stack,
+  Skeleton,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
-  Typography,
-} from '@mui/material';
-import { useEffect, useState } from 'react';
-import { Title, useNotify } from 'react-admin';
+} from '@heroui/react';
+import {
+  CheckCircle2,
+  ExternalLink,
+  FolderOpen,
+  RefreshCw,
+  RotateCcw,
+  TriangleAlert,
+} from 'lucide-react';
+import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { FolderBrowser, type FolderChoice } from './FolderBrowser';
 import { uniqueChoices } from './directoryChoices';
+import { closeOAuthPopup, navigateOAuthPopup, reserveOAuthPopup } from './oauthPopup';
+import { StorageWorkflow, type StoragePhase } from './StorageWorkflow';
 import type {
   GoogleDriveChoice,
   GoogleDriveScope,
@@ -46,21 +40,14 @@ import {
   startGoogleDriveOAuth,
 } from './googleDriveApi';
 
-type BusyOperation =
-  | 'start'
-  | 'verify'
-  | 'browse'
-  | 'shared-more'
-  | 'directory-more'
-  | 'bind'
-  | null;
-
-type FolderLocation = GoogleDriveChoice;
+type BusyOperation = 'libraries' | 'start' | 'verify' | 'browse' | 'shared-more' | 'directory-more' | 'bind' | null;
 
 export function GoogleDrivePage() {
   const notify = useNotify();
+  const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [libraries, setLibraries] = useState<LibraryOption[]>([]);
   const [librariesPending, setLibrariesPending] = useState(true);
+  const [librariesError, setLibrariesError] = useState(false);
   const [targetLibraryId, setTargetLibraryId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [oauth, setOAuth] = useState<GoogleOAuthStart | null>(null);
@@ -68,66 +55,152 @@ export function GoogleDrivePage() {
   const [scope, setScope] = useState<GoogleDriveScope>('MyDrive');
   const [sharedDrives, setSharedDrives] = useState<GoogleDriveChoice[]>([]);
   const [nextSharedPage, setNextSharedPage] = useState<string | null>(null);
+  const [sharedError, setSharedError] = useState(false);
+  const [noSharedDrives, setNoSharedDrives] = useState(false);
   const [sharedDriveId, setSharedDriveId] = useState('');
-  const [path, setPath] = useState<FolderLocation[]>([]);
-  const [directories, setDirectories] = useState<GoogleDriveChoice[]>([]);
+  const [path, setPath] = useState<FolderChoice[]>([]);
+  const [directories, setDirectories] = useState<FolderChoice[]>([]);
   const [nextDirectoryPage, setNextDirectoryPage] = useState<string | null>(null);
-  const [busy, setBusy] = useState<BusyOperation>(null);
+  const [directoryError, setDirectoryError] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const [authorizationError, setAuthorizationError] = useState<string | null>(null);
+  const [popupBlocked, setPopupBlocked] = useState(false);
+  const [bindingError, setBindingError] = useState(false);
   const [binding, setBinding] = useState<StorageBindingResult | null>(null);
+  const [busy, setBusy] = useState<BusyOperation>(null);
+  const busyRef = useRef<BusyOperation>(null);
+  const [authRedirecting, setAuthRedirecting] = useState(false);
+  const sequence = useRef(0);
+  const effectSequence = useRef(0);
+  const mounted = useRef(false);
+  const libraryAbort = useRef<AbortController | null>(null);
+  const operationAbort = useRef<AbortController | null>(null);
+  const oauthPopup = useRef<Window | null>(null);
+  const directoryRetry = useRef<(() => void) | null>(null);
 
-  const currentFolder = path.at(-1);
+  const isCurrent = useCallback((request: number) => mounted.current && request === sequence.current, []);
+  const invalidate = useCallback(() => { sequence.current += 1; }, []);
+
+  const loadLibraries = useCallback(async () => {
+    libraryAbort.current?.abort();
+    const controller = new AbortController();
+    libraryAbort.current = controller;
+    setLibrariesPending(true);
+    setLibrariesError(false);
+    try {
+      const records = await listLibraries(controller.signal);
+      if (libraryAbort.current !== controller) return;
+      setLibraries(records);
+      const initial = records.find((library) => library.enabled) ?? records[0];
+      if (initial !== undefined) {
+        setTargetLibraryId(initial.id);
+        setDisplayName(initial.name);
+      }
+    } catch (error: unknown) {
+      if (libraryAbort.current !== controller) return;
+      const handled = await logoutIfAccessDenied(error);
+      if (libraryAbort.current !== controller) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else {
+        setLibrariesError(true);
+      }
+    } finally {
+      if (!controller.signal.aborted && mounted.current) setLibrariesPending(false);
+    }
+  }, [logoutIfAccessDenied]);
+
   useEffect(() => {
-    const abort = new AbortController();
-    let active = true;
-    void listLibraries(abort.signal)
-      .then((records) => {
-        if (!active) return;
-        setLibraries(records);
-        const initial = records.find((library) => library.enabled) ?? records[0];
-        if (initial !== undefined) {
-          setTargetLibraryId(initial.id);
-          setDisplayName(initial.name);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        notifyError(notify, error, 'Libraries could not be loaded.');
-      })
-      .finally(() => {
-        if (!active) return;
-        setLibrariesPending(false);
-      });
+    mounted.current = true;
+    const effect = ++effectSequence.current;
+    void Promise.resolve().then(() => {
+      if (mounted.current && effect === effectSequence.current) void loadLibraries();
+    });
     return () => {
-      active = false;
-      abort.abort();
+      mounted.current = false;
+      effectSequence.current += 1;
+      invalidate();
+      libraryAbort.current?.abort();
+      libraryAbort.current = null;
+      operationAbort.current?.abort();
+      operationAbort.current = null;
+      closeOAuthPopup(oauthPopup.current);
+      oauthPopup.current = null;
     };
-  }, [notify]);
+  }, [invalidate, loadLibraries]);
 
   const startAuthorization = async () => {
-    if (busy !== null) return;
+    if (busyRef.current !== null || targetLibraryId.length === 0) return;
+    const popup = reserveOAuthPopup('tjxy-google-oauth');
+    oauthPopup.current = popup;
+    const request = ++sequence.current;
+    const controller = new AbortController();
+    operationAbort.current = controller;
+    busyRef.current = 'start';
     setBusy('start');
-    setAuthorized(false);
+    setAuthorizationError(null);
+    setPopupBlocked(false);
     setBinding(null);
     try {
-      const result = await startGoogleDriveOAuth(targetLibraryId);
+      const result = await startGoogleDriveOAuth(targetLibraryId, controller.signal);
+      if (!isCurrent(request)) return;
       setOAuth(result);
-      const popup = window.open(result.authorizationUrl, 'tjxy-google-oauth', 'noopener,noreferrer');
-      if (popup === null) notify('The authorization window was blocked.', { type: 'warning' });
+      if (popup !== null && navigateOAuthPopup(popup, result.authorizationUrl)) {
+        setPopupBlocked(false);
+      } else {
+        oauthPopup.current = null;
+        setPopupBlocked(true);
+      }
     } catch (error: unknown) {
-      notifyError(notify, error, 'Google authorization could not start.');
+      closeOAuthPopup(popup);
+      if (oauthPopup.current === popup) oauthPopup.current = null;
+      if (!isCurrent(request)) return;
+      setPopupBlocked(false);
+      const handled = await logoutIfAccessDenied(error);
+      if (!isCurrent(request)) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else {
+        setAuthorizationError('Google authorization could not start.');
+      }
     } finally {
-      setBusy(null);
+      if (isCurrent(request)) {
+        if (operationAbort.current === controller) operationAbort.current = null;
+        busyRef.current = null;
+        setBusy(null);
+      }
+    }
+  };
+
+  const retryPopup = () => {
+    if (oauth === null || busyRef.current !== null) return;
+    const popup = reserveOAuthPopup('tjxy-google-oauth');
+    oauthPopup.current = popup;
+    if (popup !== null && navigateOAuthPopup(popup, oauth.authorizationUrl)) {
+      setPopupBlocked(false);
+    } else {
+      oauthPopup.current = null;
+      setPopupBlocked(true);
     }
   };
 
   const verifyAuthorization = async () => {
-    if (oauth === null || busy !== null) return;
+    if (oauth === null || busyRef.current !== null) return;
+    const request = ++sequence.current;
+    const controller = new AbortController();
+    operationAbort.current = controller;
+    busyRef.current = 'verify';
     setBusy('verify');
+    setAuthorizationError(null);
+    setSharedError(false);
+    setNoSharedDrives(false);
+    setDirectoryError(false);
     try {
       const [drives, folders] = await Promise.all([
-        listSharedDrives(oauth.state),
-        listGoogleDirectories(oauth.state, { scope: 'MyDrive' }),
+        listSharedDrives(oauth.state, undefined, controller.signal),
+        listGoogleDirectories(oauth.state, { scope: 'MyDrive' }, controller.signal),
       ]);
+      if (!isCurrent(request)) return;
       setAuthorized(true);
       setScope('MyDrive');
       setSharedDrives(drives.items);
@@ -136,330 +209,654 @@ export function GoogleDrivePage() {
       setPath([{ id: 'root', name: 'My Drive' }]);
       setDirectories(folders.items);
       setNextDirectoryPage(folders.nextPageToken);
+      setReviewing(false);
+      closeOAuthPopup(oauthPopup.current);
+      oauthPopup.current = null;
     } catch (error: unknown) {
-      if (errorCategory(error) === 'conflict') {
-        notify('Google authorization has not completed yet.', { type: 'warning' });
+      controller.abort();
+      if (!isCurrent(request)) return;
+      const handled = await logoutIfAccessDenied(error);
+      if (!isCurrent(request)) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else if (isConflict(error)) {
+        setAuthorizationError('Google authorization has not completed yet.');
       } else {
-        notifyError(notify, error, 'Google authorization could not be verified.');
+        setAuthorizationError('Google authorization could not be verified.');
       }
     } finally {
-      setBusy(null);
+      if (isCurrent(request)) {
+        if (operationAbort.current === controller) operationAbort.current = null;
+        busyRef.current = null;
+        setBusy(null);
+      }
     }
   };
 
-  const loadFolder = async (
-    targetScope: GoogleDriveScope,
-    targetSharedDriveId: string | undefined,
-    folder: FolderLocation,
-    nextPath: FolderLocation[],
+  const loadDirectoryPage = async (
+    request: { scope: GoogleDriveScope; sharedDriveId?: string; parentId?: string; pageToken?: string },
+    nextPath: FolderChoice[],
+    mode: 'replace' | 'append',
   ) => {
-    if (oauth === null || busy !== null) return;
-    setBusy('browse');
+    if (oauth === null || busyRef.current !== null) return;
+    const operation = mode === 'append' ? 'directory-more' : 'browse';
+    const requestId = ++sequence.current;
+    const controller = new AbortController();
+    operationAbort.current = controller;
+    busyRef.current = operation;
+    directoryRetry.current = () => { void loadDirectoryPage(request, nextPath, mode); };
+    setBusy(operation);
+    setDirectoryError(false);
     try {
-      const page = await listGoogleDirectories(oauth.state, {
-        scope: targetScope,
-        ...(targetSharedDriveId === undefined ? {} : { sharedDriveId: targetSharedDriveId }),
-        ...(folder.id === 'root' ? {} : { parentId: folder.id }),
-      });
-      setScope(targetScope);
-      if (targetSharedDriveId !== undefined) setSharedDriveId(targetSharedDriveId);
-      setPath(nextPath);
-      setDirectories(page.items);
+      const page = await listGoogleDirectories(oauth.state, request, controller.signal);
+      if (!isCurrent(requestId)) return;
+      if (mode === 'append') {
+        setDirectories((current) => uniqueChoices([...current, ...page.items]));
+      } else {
+        setScope(request.scope);
+        if (request.scope === 'SharedDrive') setSharedDriveId(request.sharedDriveId ?? '');
+        else {
+          setSharedError(false);
+          setNoSharedDrives(false);
+        }
+        setPath(nextPath);
+        setDirectories(page.items);
+        setReviewing(false);
+      }
       setNextDirectoryPage(page.nextPageToken);
     } catch (error: unknown) {
-      notifyError(notify, error, 'The folder could not be opened.');
+      if (!isCurrent(requestId)) return;
+      const handled = await logoutIfAccessDenied(error);
+      if (!isCurrent(requestId)) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else {
+        setDirectoryError(true);
+      }
     } finally {
-      setBusy(null);
+      if (isCurrent(requestId)) {
+        if (operationAbort.current === controller) operationAbort.current = null;
+        busyRef.current = null;
+        setBusy(null);
+      }
     }
   };
 
-  const changeScope = (nextScope: GoogleDriveScope | null) => {
-    if (nextScope === null || nextScope === scope || busy !== null) return;
+  const navigateFolder = (pathIndex: number) => {
+    const folder = path[pathIndex];
+    if (folder === undefined) return;
+    void loadDirectoryPage(
+      {
+        scope,
+        ...(scope === 'SharedDrive' ? { sharedDriveId } : {}),
+        ...(folder.id === 'root' ? {} : { parentId: folder.id }),
+      },
+      path.slice(0, pathIndex + 1),
+      'replace',
+    );
+  };
+
+  const openFolder = (folder: FolderChoice) => {
+    void loadDirectoryPage(
+      {
+        scope,
+        ...(scope === 'SharedDrive' ? { sharedDriveId } : {}),
+        parentId: folder.id,
+      },
+      [...path, folder],
+      'replace',
+    );
+  };
+
+  const changeScope = (keys: Set<React.Key>) => {
+    const nextScope = String(keys.values().next().value ?? '');
+    if (nextScope !== 'MyDrive' && nextScope !== 'SharedDrive') return;
     if (nextScope === 'MyDrive') {
-      void loadFolder('MyDrive', undefined, { id: 'root', name: 'My Drive' }, [
-        { id: 'root', name: 'My Drive' },
-      ]);
+      void loadDirectoryPage({ scope: 'MyDrive' }, [{ id: 'root', name: 'My Drive' }], 'replace');
       return;
     }
     const drive = sharedDrives.find((item) => item.id === sharedDriveId) ?? sharedDrives[0];
     if (drive === undefined) {
-      notify('No Shared Drives are available.', { type: 'info' });
+      setSharedError(false);
+      setNoSharedDrives(true);
       return;
     }
-    void loadFolder('SharedDrive', drive.id, drive, [drive]);
+    setNoSharedDrives(false);
+    void loadDirectoryPage(
+      { scope: 'SharedDrive', sharedDriveId: drive.id, parentId: drive.id },
+      [drive],
+      'replace',
+    );
   };
 
-  const changeSharedDrive = (driveId: string) => {
-    const drive = sharedDrives.find((item) => item.id === driveId);
-    if (drive === undefined || busy !== null) return;
-    void loadFolder('SharedDrive', drive.id, drive, [drive]);
+  const changeSharedDrive = (key: React.Key | null) => {
+    if (typeof key !== 'string') return;
+    const drive = sharedDrives.find((item) => item.id === key);
+    if (drive === undefined) return;
+    setNoSharedDrives(false);
+    void loadDirectoryPage(
+      { scope: 'SharedDrive', sharedDriveId: drive.id, parentId: drive.id },
+      [drive],
+      'replace',
+    );
   };
 
   const loadMoreSharedDrives = async () => {
-    if (oauth === null || nextSharedPage === null || busy !== null) return;
+    if (oauth === null || nextSharedPage === null || busyRef.current !== null) return;
+    const request = ++sequence.current;
+    const controller = new AbortController();
+    operationAbort.current = controller;
+    busyRef.current = 'shared-more';
     setBusy('shared-more');
+    setSharedError(false);
     try {
-      const page = await listSharedDrives(oauth.state, nextSharedPage);
-      setSharedDrives((current) => uniqueChoices([...current, ...page.items]));
+      const page = await listSharedDrives(oauth.state, nextSharedPage, controller.signal);
+      if (!isCurrent(request)) return;
+      const mergedDrives = uniqueChoices([...sharedDrives, ...page.items]);
+      setSharedDrives(mergedDrives);
       setNextSharedPage(page.nextPageToken);
+      setNoSharedDrives(mergedDrives.length === 0);
     } catch (error: unknown) {
-      notifyError(notify, error, 'More Shared Drives could not be loaded.');
+      if (!isCurrent(request)) return;
+      const handled = await logoutIfAccessDenied(error);
+      if (!isCurrent(request)) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else {
+        setSharedError(true);
+      }
     } finally {
-      setBusy(null);
+      if (isCurrent(request)) {
+        if (operationAbort.current === controller) operationAbort.current = null;
+        busyRef.current = null;
+        setBusy(null);
+      }
     }
   };
 
-  const loadMoreDirectories = async () => {
-    if (
-      oauth === null
-      || currentFolder === undefined
-      || nextDirectoryPage === null
-      || busy !== null
-    ) return;
-    setBusy('directory-more');
-    try {
-      const page = await listGoogleDirectories(oauth.state, {
+  const loadMoreDirectories = () => {
+    const currentFolder = path.at(-1);
+    if (currentFolder === undefined || nextDirectoryPage === null) return;
+    void loadDirectoryPage(
+      {
         scope,
         ...(scope === 'SharedDrive' ? { sharedDriveId } : {}),
         ...(currentFolder.id === 'root' ? {} : { parentId: currentFolder.id }),
         pageToken: nextDirectoryPage,
-      });
-      setDirectories((current) => uniqueChoices([...current, ...page.items]));
-      setNextDirectoryPage(page.nextPageToken);
-    } catch (error: unknown) {
-      notifyError(notify, error, 'More folders could not be loaded.');
-    } finally {
-      setBusy(null);
-    }
+      },
+      path,
+      'append',
+    );
   };
 
   const bindCurrentFolder = async () => {
-    if (oauth === null || currentFolder === undefined || busy !== null) return;
+    const currentFolder = path.at(-1);
+    if (
+      oauth === null
+      || currentFolder === undefined
+      || busyRef.current !== null
+      || displayName.trim().length === 0
+      || bindingError
+    ) return;
+    const request = ++sequence.current;
+    const controller = new AbortController();
+    operationAbort.current = controller;
+    busyRef.current = 'bind';
     setBusy('bind');
+    setBindingError(false);
     try {
       const result = await bindGoogleDrive(oauth.state, {
         scope,
-        displayName,
+        displayName: displayName.trim(),
         rootObjectId: currentFolder.id,
         ...(scope === 'SharedDrive' ? { sharedDriveId } : {}),
-      });
+      }, controller.signal);
+      if (!isCurrent(request)) return;
       setBinding(result);
       notify('Google Drive was added.', { type: 'success' });
     } catch (error: unknown) {
-      notifyError(notify, error, 'Google Drive could not be added.');
+      if (!isCurrent(request)) return;
+      const handled = await logoutIfAccessDenied(error);
+      if (!isCurrent(request)) return;
+      if (handled) {
+        setAuthRedirecting(true);
+      } else {
+        setBindingError(true);
+      }
     } finally {
-      setBusy(null);
+      if (isCurrent(request)) {
+        if (operationAbort.current === controller) operationAbort.current = null;
+        busyRef.current = null;
+        setBusy(null);
+      }
     }
   };
 
+  const restart = () => {
+    invalidate();
+    operationAbort.current?.abort();
+    operationAbort.current = null;
+    closeOAuthPopup(oauthPopup.current);
+    oauthPopup.current = null;
+    setOAuth(null);
+    setAuthorized(false);
+    setPopupBlocked(false);
+    setAuthorizationError(null);
+    setSharedError(false);
+    setNoSharedDrives(false);
+    setDirectoryError(false);
+    setBindingError(false);
+    setBinding(null);
+    setScope('MyDrive');
+    setSharedDrives([]);
+    setNextSharedPage(null);
+    setSharedDriveId('');
+    setPath([]);
+    setDirectories([]);
+    setNextDirectoryPage(null);
+    setReviewing(false);
+    busyRef.current = null;
+    setBusy(null);
+    directoryRetry.current = null;
+    const library = libraries.find((item) => item.id === targetLibraryId);
+    if (library !== undefined) setDisplayName(library.name);
+  };
+
+  if (authRedirecting) return null;
+
+  const phase: StoragePhase = binding !== null
+    ? 'complete'
+    : !authorized
+      ? 'authorize'
+      : reviewing
+        ? 'review'
+        : 'choose-folder';
+  const currentFolder = path.at(-1);
+  const selectedLibrary = libraries.find((library) => library.id === targetLibraryId);
+  const isBusy = busy !== null;
+
   return (
-    <Box sx={{ maxWidth: 960, p: { xs: 2, sm: 3 } }}>
-      <Title title="Storage accounts" />
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 3 }}>
-        <CloudOutlined color="primary" />
-        <Typography component="h1" variant="h1">Google Drive</Typography>
-      </Stack>
+    <StorageWorkflow
+      canRestart={oauth !== null || authorized || binding !== null}
+      isBusy={isBusy}
+      onRestart={restart}
+      phase={phase}
+      providerName="Google Drive"
+      title="Google Drive"
+    >
+      {phase === 'authorize' && (
+        <AuthorizeStep
+          authorizationError={authorizationError}
+          libraries={libraries}
+          librariesError={librariesError}
+          librariesPending={librariesPending}
+          onRetryLibraries={() => { void loadLibraries(); }}
+          onRetryPopup={retryPopup}
+          onStart={() => { void startAuthorization(); }}
+          onVerify={() => { void verifyAuthorization(); }}
+          popupBlocked={popupBlocked}
+          selectedLibrary={selectedLibrary}
+          setTargetLibraryId={(id) => {
+            setTargetLibraryId(id);
+            const library = libraries.find((item) => item.id === id);
+            if (library !== undefined) setDisplayName(library.name);
+          }}
+          targetLibraryId={targetLibraryId}
+          hasOAuth={oauth !== null}
+          isBusy={isBusy}
+        />
+      )}
 
-      <Stack spacing={2.5} divider={<Divider flexItem />}>
-        <Stack spacing={2}>
-          <Typography component="h2" variant="h2">Authorization</Typography>
-          <FormControl fullWidth disabled={librariesPending || busy !== null || oauth !== null}>
-            <InputLabel id="target-library-label">Target library</InputLabel>
-            <Select
-              labelId="target-library-label"
-              label="Target library"
-              value={targetLibraryId}
-              onChange={(event) => {
-                const id = event.target.value;
-                setTargetLibraryId(id);
-                const library = libraries.find((item) => item.id === id);
-                if (library !== undefined) setDisplayName(library.name);
-              }}
-            >
-              {libraries.map((library) => (
-                <MenuItem key={library.id} value={library.id} disabled={!library.enabled}>
-                  {library.name}{library.enabled ? '' : ' (disabled)'}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          {librariesPending && <CircularProgress size={24} aria-label="Loading libraries" />}
-          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-            <Button
-              variant="contained"
-              startIcon={busy === 'start' ? <CircularProgress size={18} color="inherit" /> : <LaunchOutlined />}
-              disabled={targetLibraryId.length === 0 || busy !== null || oauth !== null}
-              onClick={() => void startAuthorization()}
-            >
-              Authorize Google Drive
-            </Button>
-            {oauth !== null && !authorized && (
-              <Button
-                variant="outlined"
-                startIcon={busy === 'verify' ? <CircularProgress size={18} /> : <RefreshOutlined />}
-                disabled={busy !== null}
-                onClick={() => void verifyAuthorization()}
-              >
-                Check authorization
-              </Button>
-            )}
-          </Stack>
-        </Stack>
+      {phase === 'choose-folder' && (
+        <ChooseFolderStep
+          directories={directories}
+          directoryError={directoryError}
+          hasMore={nextDirectoryPage !== null}
+          isBusy={isBusy}
+          isLoading={busy === 'browse'}
+          isLoadingMore={busy === 'directory-more'}
+          loadMoreDirectories={loadMoreDirectories}
+          navigateFolder={navigateFolder}
+          onOpenFolder={openFolder}
+          path={path}
+          scope={scope}
+          sharedDriveId={sharedDriveId}
+          sharedDrives={sharedDrives}
+          sharedError={sharedError}
+          noSharedDrives={noSharedDrives}
+          hasMoreSharedDrives={nextSharedPage !== null}
+          isLoadingSharedDrives={busy === 'shared-more'}
+          loadMoreSharedDrives={() => { void loadMoreSharedDrives(); }}
+          onChangeScope={changeScope}
+          onChangeSharedDrive={changeSharedDrive}
+          onRetryDirectory={() => { directoryRetry.current?.(); }}
+          onUseFolder={() => { setReviewing(true); }}
+          currentFolder={currentFolder}
+        />
+      )}
 
-        {authorized && binding === null && (
-          <Stack spacing={2}>
-            <Typography component="h2" variant="h2">Drive and folder</Typography>
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={scope}
-              disabled={busy !== null}
-              onChange={(_, value: GoogleDriveScope | null) => {
-                changeScope(value);
-              }}
-              aria-label="Drive scope"
-            >
-              <ToggleButton value="MyDrive">My Drive</ToggleButton>
-              <ToggleButton value="SharedDrive">Shared Drive</ToggleButton>
-            </ToggleButtonGroup>
-            {scope === 'SharedDrive' && (
-              <Stack
-                direction={{ xs: 'column', sm: 'row' }}
-                spacing={1}
-                sx={{ alignItems: { sm: 'center' } }}
-              >
-                <FormControl fullWidth>
-                  <InputLabel id="shared-drive-label">Shared Drive</InputLabel>
-                  <Select
-                    labelId="shared-drive-label"
-                    label="Shared Drive"
-                    value={sharedDriveId}
-                    disabled={busy !== null}
-                    onChange={(event) => {
-                      changeSharedDrive(event.target.value);
-                    }}
-                  >
-                    {sharedDrives.map((drive) => (
-                      <MenuItem key={drive.id} value={drive.id}>{drive.name}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                {nextSharedPage !== null && (
-                  <Button
-                    variant="outlined"
-                    startIcon={busy === 'shared-more' ? <CircularProgress size={18} /> : <RefreshOutlined />}
-                    disabled={busy !== null}
-                    onClick={() => void loadMoreSharedDrives()}
-                  >
-                    Load more
-                  </Button>
-                )}
-              </Stack>
-            )}
-            <Breadcrumbs aria-label="Current folder">
-              {path.map((folder, index) => (
-                <Button
-                  key={`${folder.id}-${String(index)}`}
-                  size="small"
-                  disabled={busy !== null || index === path.length - 1}
-                  onClick={() => void loadFolder(
-                    scope,
-                    scope === 'SharedDrive' ? sharedDriveId : undefined,
-                    folder,
-                    path.slice(0, index + 1),
-                  )}
-                >
-                  {folder.name}
-                </Button>
-              ))}
-            </Breadcrumbs>
-            <Box sx={{ border: '1px solid #dce2e5', borderRadius: 1, minHeight: 120, overflow: 'hidden' }}>
-              {busy === 'browse' ? (
-                <Stack sx={{ alignItems: 'center', py: 4 }}><CircularProgress size={24} /></Stack>
-              ) : directories.length === 0 ? (
-                <Typography color="text.secondary" sx={{ p: 2 }}>
-                  {nextDirectoryPage === null ? 'No child folders.' : 'No folders on this page.'}
-                </Typography>
-              ) : (
-                <List disablePadding aria-label="Folders">
-                  {directories.map((folder, index) => (
-                    <ListItemButton
-                      key={folder.id}
-                      divider={index < directories.length - 1}
-                      aria-label={`Open ${folder.name}`}
-                      disabled={busy !== null}
-                      onClick={() => void loadFolder(
-                        scope,
-                        scope === 'SharedDrive' ? sharedDriveId : undefined,
-                        folder,
-                        [...path, folder],
-                      )}
-                    >
-                      <ListItemIcon><FolderOutlined /></ListItemIcon>
-                      <ListItemText primary={folder.name} />
-                      <ChevronRight />
-                    </ListItemButton>
-                  ))}
-                </List>
-              )}
-            </Box>
-            {nextDirectoryPage !== null && (
-              <Button
-                variant="outlined"
-                aria-label="Load more folders"
-                startIcon={busy === 'directory-more'
-                  ? <CircularProgress size={18} />
-                  : <RefreshOutlined />}
-                disabled={busy !== null}
-                onClick={() => void loadMoreDirectories()}
-              >
-                Load more
-              </Button>
-            )}
-            <TextField
-              label="Display name"
-              value={displayName}
-              disabled={busy !== null}
-              onChange={(event) => {
-                setDisplayName(event.target.value);
-              }}
-              fullWidth
-              slotProps={{ htmlInput: { maxLength: 2048 } }}
-            />
-            <Button
-              variant="contained"
-              startIcon={busy === 'bind' ? <CircularProgress size={18} color="inherit" /> : <CheckCircleOutlineOutlined />}
-              disabled={busy !== null || currentFolder === undefined || displayName.trim().length === 0}
-              onClick={() => void bindCurrentFolder()}
-            >
-              Bind this folder
-            </Button>
-          </Stack>
-        )}
+      {phase === 'review' && currentFolder !== undefined && (
+        <ReviewStep
+          currentFolder={currentFolder}
+          displayName={displayName}
+          isBusy={isBusy}
+          onBack={() => { setReviewing(false); }}
+          onBind={() => { void bindCurrentFolder(); }}
+          onDisplayNameChange={setDisplayName}
+          scope={scope}
+          selectedLibrary={selectedLibrary}
+          sharedDriveId={sharedDriveId}
+          sharedDrives={sharedDrives}
+          bindingError={bindingError}
+        />
+      )}
 
-        {binding !== null && (
-          <Alert severity="success" icon={<CheckCircleOutlineOutlined />}>
-            <Typography sx={{ fontWeight: 700 }}>
-              {binding.restartRequired ? 'Restart required' : 'Ready'}
-            </Typography>
-            <Typography variant="body2">Initial sync job: {binding.initialSyncJobId}</Typography>
-          </Alert>
-        )}
-      </Stack>
-    </Box>
+      {phase === 'complete' && binding !== null && (
+        <CompleteStep binding={binding} />
+      )}
+    </StorageWorkflow>
   );
 }
 
-function errorCategory(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null || !('category' in error)) return undefined;
-  return typeof error.category === 'string' ? error.category : undefined;
+function AuthorizeStep({
+  authorizationError,
+  libraries,
+  librariesError,
+  librariesPending,
+  onRetryLibraries,
+  onRetryPopup,
+  onStart,
+  onVerify,
+  popupBlocked,
+  selectedLibrary,
+  setTargetLibraryId,
+  targetLibraryId,
+  hasOAuth,
+  isBusy,
+}: {
+  authorizationError: string | null;
+  libraries: LibraryOption[];
+  librariesError: boolean;
+  librariesPending: boolean;
+  onRetryLibraries: () => void;
+  onRetryPopup: () => void;
+  onStart: () => void;
+  onVerify: () => void;
+  popupBlocked: boolean;
+  selectedLibrary: LibraryOption | undefined;
+  setTargetLibraryId: (id: string) => void;
+  targetLibraryId: string;
+  hasOAuth: boolean;
+  isBusy: boolean;
+}) {
+  return (
+    <section aria-labelledby="google-authorize-heading" className="max-w-2xl space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold text-foreground" id="google-authorize-heading">Authorize Google Drive</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">Choose an enabled library, then complete authorization in the provider window.</p>
+      </div>
+      {librariesPending ? (
+        <div aria-label="Loading target libraries" className="space-y-2" role="status"><Skeleton className="h-12 w-full" /></div>
+      ) : librariesError ? (
+        <Alert role="alert" status="danger">
+          <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+          <Alert.Content><Alert.Title>Target libraries could not be loaded</Alert.Title><Alert.Description>Retry before starting authorization.</Alert.Description></Alert.Content>
+          <Button onPress={onRetryLibraries} size="sm" variant="tertiary"><RefreshCw aria-hidden="true" className="size-4" />Retry</Button>
+        </Alert>
+      ) : libraries.length === 0 ? (
+        <p className="border-y border-border py-8 text-sm text-muted">Create an enabled library before connecting Google Drive.</p>
+      ) : (
+        <>
+          <Select
+            fullWidth
+            isDisabled={isBusy || hasOAuth}
+            onChange={(key) => { if (typeof key === 'string') setTargetLibraryId(key); }}
+            value={targetLibraryId}
+          >
+            <Label>Target library</Label>
+            <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                {libraries.map((library) => (
+                  <ListBox.Item id={library.id} isDisabled={!library.enabled} key={library.id} textValue={library.enabled ? library.name : `${library.name} disabled`}>
+                    <span className="min-w-0 flex-1 break-words">{library.name}</span>
+                    {!library.enabled && <span className="text-xs text-muted">Disabled</span>}
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+          </Select>
+          {selectedLibrary !== undefined && !selectedLibrary.enabled && (
+            <p className="text-sm text-danger">Select an enabled library to continue.</p>
+          )}
+          {authorizationError !== null && (
+            <Alert role="alert" status="warning">
+              <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+              <Alert.Content><Alert.Title>Authorization needs attention</Alert.Title><Alert.Description>{authorizationError}</Alert.Description></Alert.Content>
+            </Alert>
+          )}
+          {popupBlocked && (
+            <Alert role="alert" status="warning">
+              <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+              <Alert.Content><Alert.Title>The authorization window was blocked</Alert.Title><Alert.Description>Allow popups for this admin page, then retry. Your authorization state is still available.</Alert.Description></Alert.Content>
+              <Button isDisabled={isBusy} onPress={onRetryPopup} size="sm" variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />Retry</Button>
+            </Alert>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {!hasOAuth && (
+              <Button isDisabled={targetLibraryId.length === 0 || selectedLibrary?.enabled !== true} isPending={isBusy} onPress={onStart}>
+                <ExternalLink aria-hidden="true" className="size-4" />Authorize Google Drive
+              </Button>
+            )}
+            {hasOAuth && (
+              <Button isPending={isBusy} onPress={onVerify} variant="secondary">
+                <RefreshCw aria-hidden="true" className="size-4" />Check authorization
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
 }
 
-function notifyError(
-  notify: ReturnType<typeof useNotify>,
-  error: unknown,
-  fallback: string,
-): void {
-  const message = error instanceof Error && error.message.length > 0 ? error.message : fallback;
-  notify(message, { type: 'error' });
+function ChooseFolderStep({
+  directories,
+  directoryError,
+  hasMore,
+  isBusy,
+  isLoading,
+  isLoadingMore,
+  loadMoreDirectories,
+  navigateFolder,
+  onOpenFolder,
+  path,
+  scope,
+  sharedDriveId,
+  sharedDrives,
+  sharedError,
+  noSharedDrives,
+  hasMoreSharedDrives,
+  isLoadingSharedDrives,
+  loadMoreSharedDrives,
+  onChangeScope,
+  onChangeSharedDrive,
+  onRetryDirectory,
+  onUseFolder,
+  currentFolder,
+}: {
+  directories: FolderChoice[];
+  directoryError: boolean;
+  hasMore: boolean;
+  isBusy: boolean;
+  isLoading: boolean;
+  isLoadingMore: boolean;
+  loadMoreDirectories: () => void;
+  navigateFolder: (index: number) => void;
+  onOpenFolder: (folder: FolderChoice) => void;
+  path: FolderChoice[];
+  scope: GoogleDriveScope;
+  sharedDriveId: string;
+  sharedDrives: GoogleDriveChoice[];
+  sharedError: boolean;
+  noSharedDrives: boolean;
+  hasMoreSharedDrives: boolean;
+  isLoadingSharedDrives: boolean;
+  loadMoreSharedDrives: () => void;
+  onChangeScope: (keys: Set<React.Key>) => void;
+  onChangeSharedDrive: (key: React.Key | null) => void;
+  onRetryDirectory: () => void;
+  onUseFolder: () => void;
+  currentFolder: FolderChoice | undefined;
+}) {
+  return (
+    <section aria-labelledby="google-folder-heading" className="space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold text-foreground" id="google-folder-heading">Choose a folder</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">Browse folders on the authorized account. Only the selected folder is bound.</p>
+      </div>
+      <ToggleButtonGroup
+        aria-label="Drive scope"
+        disallowEmptySelection
+        isDisabled={isBusy}
+        onSelectionChange={onChangeScope}
+        selectedKeys={[scope]}
+        selectionMode="single"
+      >
+        <ToggleButton id="MyDrive">My Drive</ToggleButton>
+        <ToggleButton id="SharedDrive">Shared Drive</ToggleButton>
+      </ToggleButtonGroup>
+      {scope === 'SharedDrive' && (
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <Select fullWidth isDisabled={isBusy} onChange={onChangeSharedDrive} value={sharedDriveId}>
+            <Label>Shared Drive</Label>
+            <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+            <Select.Popover><ListBox>{sharedDrives.map((drive) => <ListBox.Item id={drive.id} key={drive.id} textValue={drive.name}>{drive.name}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+          </Select>
+          {hasMoreSharedDrives && nextPageButton(sharedError, loadMoreSharedDrives, isBusy, isLoadingSharedDrives)}
+        </div>
+      )}
+      {noSharedDrives && (
+        <Alert status="accent">
+          <Alert.Content>
+            <Alert.Title>No Shared Drives are available</Alert.Title>
+            <Alert.Description>{hasMoreSharedDrives ? 'Load the next provider page, then try Shared Drive again.' : 'This account has no Shared Drives to browse.'}</Alert.Description>
+          </Alert.Content>
+          {hasMoreSharedDrives && nextPageButton(sharedError, loadMoreSharedDrives, isBusy, isLoadingSharedDrives)}
+        </Alert>
+      )}
+      {sharedError && (scope === 'SharedDrive' || noSharedDrives) && (
+        <Alert role="alert" status="danger">
+          <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+          <Alert.Content><Alert.Title>Shared Drives could not be loaded</Alert.Title><Alert.Description>The current Drive context is unchanged.</Alert.Description></Alert.Content>
+        </Alert>
+      )}
+      <FolderBrowser
+        ariaLabel="Google Drive folders"
+        directories={directories}
+        error={directoryError ? new Error('provider') : null}
+        hasMore={hasMore}
+        isDisabled={isBusy}
+        isLoading={isLoading}
+        isLoadingMore={isLoadingMore}
+        onLoadMore={loadMoreDirectories}
+        onNavigate={navigateFolder}
+        onOpen={onOpenFolder}
+        onRetry={onRetryDirectory}
+        path={path}
+      />
+      <div className="flex justify-end">
+        <Button isDisabled={isBusy || currentFolder === undefined} onPress={onUseFolder}>
+          <FolderOpen aria-hidden="true" className="size-4" />Use this folder
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function nextPageButton(error: boolean, onPress: () => void, isBusy: boolean, isLoading: boolean) {
+  return (
+    <Button isDisabled={isBusy && !isLoading} isPending={isLoading} onPress={onPress} size="sm" variant="secondary">
+      <RefreshCw aria-hidden="true" className={`size-4${isLoading ? ' animate-spin' : ''}`} />
+      {error ? 'Retry Shared Drives' : 'Load more Shared Drives'}
+    </Button>
+  );
+}
+
+function ReviewStep({
+  currentFolder,
+  displayName,
+  isBusy,
+  onBack,
+  onBind,
+  onDisplayNameChange,
+  scope,
+  selectedLibrary,
+  sharedDriveId,
+  sharedDrives,
+  bindingError,
+}: {
+  currentFolder: FolderChoice;
+  displayName: string;
+  isBusy: boolean;
+  onBack: () => void;
+  onBind: () => void;
+  onDisplayNameChange: (value: string) => void;
+  scope: GoogleDriveScope;
+  selectedLibrary: LibraryOption | undefined;
+  sharedDriveId: string;
+  sharedDrives: GoogleDriveChoice[];
+  bindingError: boolean;
+}) {
+  const sharedDrive = sharedDrives.find((drive) => drive.id === sharedDriveId);
+  return (
+    <section aria-labelledby="google-review-heading" className="max-w-2xl space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold text-foreground" id="google-review-heading">Review binding</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">Confirm the target library and provider folder before creating the binding.</p>
+      </div>
+      <dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-3">
+        <ReviewField label="Target library">{selectedLibrary?.name ?? 'Unknown library'}</ReviewField>
+        <ReviewField label="Drive scope">{scope === 'MyDrive' ? 'My Drive' : sharedDrive?.name ?? 'Shared Drive'}</ReviewField>
+        <ReviewField label="Folder">{currentFolder.name}</ReviewField>
+      </dl>
+      <TextField fullWidth isRequired name="displayName">
+        <Label>Display name</Label>
+        <Input disabled={isBusy || bindingError} maxLength={2048} onChange={(event) => { onDisplayNameChange(event.currentTarget.value); }} value={displayName} />
+      </TextField>
+      {bindingError && <Alert role="alert" status="danger"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>The binding result could not be confirmed</Alert.Title><Alert.Description>This authorization cannot be reused. Restart authorization before trying again.</Alert.Description></Alert.Content></Alert>}
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button isDisabled={isBusy || bindingError} onPress={onBack} variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />Back to folder</Button>
+        <Button isDisabled={bindingError || displayName.trim().length === 0} isPending={isBusy} onPress={onBind}><CheckCircle2 aria-hidden="true" className="size-4" />Add Google Drive</Button>
+      </div>
+    </section>
+  );
+}
+
+function ReviewField({ label, children }: { label: string; children: string }) {
+  return <div><dt className="font-medium text-muted">{label}</dt><dd className="mt-1 break-words text-foreground">{children}</dd></div>;
+}
+
+function CompleteStep({ binding }: { binding: StorageBindingResult }) {
+  return (
+    <section aria-labelledby="google-complete-heading" className="max-w-2xl space-y-5">
+      <Alert status="success">
+        <Alert.Indicator><CheckCircle2 aria-hidden="true" className="size-5" /></Alert.Indicator>
+        <Alert.Content>
+          <Alert.Title id="google-complete-heading">Google Drive is connected</Alert.Title>
+          <Alert.Description>{binding.restartRequired ? 'Restart the server before the new storage root becomes active.' : 'The storage root is active and ready for its initial sync.'}</Alert.Description>
+        </Alert.Content>
+      </Alert>
+      <dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-2">
+        <ReviewField label="Initial sync job">{binding.initialSyncJobId}</ReviewField>
+        <ReviewField label="Storage root">{binding.rootId}</ReviewField>
+      </dl>
+    </section>
+  );
+}
+
+function isConflict(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (('category' in error && error.category === 'conflict') || ('status' in error && error.status === 409));
 }

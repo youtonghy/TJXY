@@ -925,7 +925,7 @@ export interface FolderBrowserProps {
 
 - [ ] Add shared workflow tests first for phase labels, current-step semantics, Restart authorization visibility after OAuth begins, pending restart prevention, responsive step layout, and child preservation.
 
-- [ ] Rewrite Google tests first while preserving OAuth popup name and `noopener,noreferrer`, an inline popup-blocked error with Retry/Restart, retry-before-callback, My Drive/Shared Drive switch, paginated Shared Drive list, paginated folder append/dedupe, breadcrumb resets, disabled target libraries, bind result, initial job, restart-required status, and stale request rejection.
+- [ ] Rewrite Google tests first while preserving the OAuth popup name and opener/referrer isolation, an inline popup-blocked error with Retry/Restart, retry-before-callback, My Drive/Shared Drive switch, paginated Shared Drive list, paginated folder append/dedupe, breadcrumb resets, disabled target libraries, bind result, initial job, restart-required status, and stale request rejection. Reserve a same-origin blank popup during the user gesture, detach `opener`, and navigate it under a `no-referrer` policy; a direct `noopener` feature returns `null` on success and cannot distinguish a blocked popup.
 
 - [ ] Rewrite OneDrive tests first with the parallel contract: popup-blocked error, OAuth retry, paginated folder browse, breadcrumb resets, bind result, explicit loading indicator, restart, and stale request rejection.
 

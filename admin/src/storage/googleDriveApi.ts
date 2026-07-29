@@ -52,11 +52,15 @@ export interface StorageBindingResult {
   restartRequired: boolean;
 }
 
-export async function startGoogleDriveOAuth(libraryId: string): Promise<GoogleOAuthStart> {
+export async function startGoogleDriveOAuth(
+  libraryId: string,
+  signal?: AbortSignal,
+): Promise<GoogleOAuthStart> {
   const targetLibraryId = requireText(libraryId, 'A target library is required.');
   const value = await apiRequest<unknown>('/Admin/Storage/OAuth/GoogleDrive/Start', {
     method: 'POST',
     body: JSON.stringify({ TargetLibraryId: targetLibraryId }),
+    ...signalOption(signal),
   });
   if (!isRecord(value) || !validText(value.State) || !validAuthorizationUrl(value.AuthorizationUrl)) {
     throw invalidResponse('Google authorization');
@@ -67,11 +71,12 @@ export async function startGoogleDriveOAuth(libraryId: string): Promise<GoogleOA
 export async function listSharedDrives(
   state: string,
   pageToken?: string,
+  signal?: AbortSignal,
 ): Promise<StorageChoicePage> {
   const path = oauthPath(state, 'SharedDrives');
   const query = new URLSearchParams();
   if (pageToken !== undefined) query.set('PageToken', requireText(pageToken, 'A page token is required.'));
-  const value = await apiRequest<unknown>(withQuery(path, query));
+  const value = await apiGet<unknown>(withQuery(path, query), signal);
   if (!isRecord(value) || !Array.isArray(value.Items)) throw invalidResponse('Shared Drive list');
   if (value.NextPageToken !== null && value.NextPageToken !== undefined && !validText(value.NextPageToken)) {
     throw invalidResponse('Shared Drive pagination');
@@ -85,6 +90,7 @@ export async function listSharedDrives(
 export async function listGoogleDirectories(
   state: string,
   request: GoogleDirectoryRequest,
+  signal?: AbortSignal,
 ): Promise<StorageChoicePage> {
   validateScope(request.scope, request.sharedDriveId);
   const query = new URLSearchParams({ Scope: request.scope });
@@ -97,13 +103,14 @@ export async function listGoogleDirectories(
   if (request.pageToken !== undefined) {
     query.set('PageToken', requireUuid(request.pageToken, 'A valid page token is required.'));
   }
-  const value = await apiRequest<unknown>(withQuery(oauthPath(state, 'Directories'), query));
+  const value = await apiGet<unknown>(withQuery(oauthPath(state, 'Directories'), query), signal);
   return toDirectoryPage(value, 'directory list');
 }
 
 export async function bindGoogleDrive(
   state: string,
   request: GoogleDriveBindingRequest,
+  signal?: AbortSignal,
 ): Promise<StorageBindingResult> {
   validateScope(request.scope, request.sharedDriveId);
   const body: Record<string, string> = {
@@ -117,6 +124,7 @@ export async function bindGoogleDrive(
   const value = await apiRequest<unknown>(oauthPath(state, 'Bind'), {
     method: 'POST',
     body: JSON.stringify(body),
+    ...signalOption(signal),
   });
   if (
     !isRecord(value)
@@ -135,11 +143,15 @@ export async function bindGoogleDrive(
   };
 }
 
-export async function startOneDriveOAuth(libraryId: string): Promise<GoogleOAuthStart> {
+export async function startOneDriveOAuth(
+  libraryId: string,
+  signal?: AbortSignal,
+): Promise<GoogleOAuthStart> {
   const targetLibraryId = requireText(libraryId, 'A target library is required.');
   const value = await apiRequest<unknown>('/Admin/Storage/OAuth/OneDrive/Start', {
     method: 'POST',
     body: JSON.stringify({ TargetLibraryId: targetLibraryId }),
+    ...signalOption(signal),
   });
   if (!isRecord(value) || !validText(value.State) || !validAuthorizationUrl(value.AuthorizationUrl)) {
     throw invalidResponse('Microsoft authorization');
@@ -150,6 +162,7 @@ export async function startOneDriveOAuth(libraryId: string): Promise<GoogleOAuth
 export async function listOneDriveDirectories(
   state: string,
   request: OneDriveDirectoryRequest = {},
+  signal?: AbortSignal,
 ): Promise<StorageChoicePage> {
   const query = new URLSearchParams();
   if (request.parentId !== undefined) {
@@ -158,13 +171,14 @@ export async function listOneDriveDirectories(
   if (request.pageToken !== undefined) {
     query.set('PageToken', requireUuid(request.pageToken, 'A valid page token is required.'));
   }
-  const value = await apiRequest<unknown>(withQuery(oneDriveOAuthPath(state, 'Directories'), query));
+  const value = await apiGet<unknown>(withQuery(oneDriveOAuthPath(state, 'Directories'), query), signal);
   return toDirectoryPage(value, 'OneDrive directory list');
 }
 
 export async function bindOneDrive(
   state: string,
   request: OneDriveBindingRequest,
+  signal?: AbortSignal,
 ): Promise<StorageBindingResult> {
   const value = await apiRequest<unknown>(oneDriveOAuthPath(state, 'Bind'), {
     method: 'POST',
@@ -172,6 +186,7 @@ export async function bindOneDrive(
       DisplayName: requireText(request.displayName, 'A display name is required.'),
       RootObjectId: requireText(request.rootObjectId, 'A root folder is required.'),
     }),
+    ...signalOption(signal),
   });
   if (
     !isRecord(value)
@@ -188,6 +203,14 @@ export async function bindOneDrive(
     initialSyncJobId: value.InitialSyncJobId,
     restartRequired: value.RestartRequired,
   };
+}
+
+function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return signal === undefined ? apiRequest<T>(path) : apiRequest<T>(path, { signal });
+}
+
+function signalOption(signal?: AbortSignal): Partial<Pick<RequestInit, 'signal'>> {
+  return signal === undefined ? {} : { signal };
 }
 
 function validateScope(scope: GoogleDriveScope, sharedDriveId?: string): void {
