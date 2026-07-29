@@ -1,4 +1,4 @@
-import type { AuthProvider, UserIdentity } from 'react-admin';
+import type { AuthProvider, UserIdentity } from 'ra-core';
 
 import { ApiError, apiRequest } from '../api/httpClient';
 import type { AuthenticationResult, TjxyUser } from '../api/types';
@@ -17,6 +17,9 @@ export const authProvider: AuthProvider = {
   },
 
   checkError(error: unknown) {
+    if (statusOf(error) === 403) {
+      return Promise.reject(new AccessDeniedAuthError());
+    }
     if (statusOf(error) === 401) {
       clearSession();
       return Promise.reject(
@@ -38,6 +41,19 @@ export const authProvider: AuthProvider = {
     return 'administrator';
   },
 };
+
+class AccessDeniedAuthError extends Error {
+  readonly status = 403;
+  readonly category = 'authorization';
+  readonly logoutUser = false;
+  readonly redirectTo = '/admin/access-denied';
+
+  constructor() {
+    super('Administrator access is required.');
+    this.name = 'AccessDeniedAuthError';
+    Object.defineProperty(this, 'message', { configurable: true, value: false });
+  }
+}
 
 async function login(parameters: unknown): Promise<void> {
   if (!isRecord(parameters)

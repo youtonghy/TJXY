@@ -112,12 +112,20 @@ it('rejects checkAuth without a token before making a request', async () => {
   expect(requestMock).not.toHaveBeenCalled();
 });
 
-it('clears authentication on 401 but preserves it on 403', async () => {
+it('preserves authentication and requests access-denied routing on 403', async () => {
   sessionStorage.setItem('tjxy.admin.token', 'token');
   await expect(authProvider.checkError(new ApiError(403, 'authorization', 'Forbidden.')))
-    .resolves.toBeUndefined();
+    .rejects.toMatchObject({
+      status: 403,
+      logoutUser: false,
+      redirectTo: '/admin/access-denied',
+      message: false,
+    });
   expect(sessionStorage.getItem('tjxy.admin.token')).toBe('token');
+});
 
+it('clears authentication on 401', async () => {
+  sessionStorage.setItem('tjxy.admin.token', 'token');
   await expect(authProvider.checkError(new ApiError(401, 'authentication', 'Invalid.')))
     .rejects.toMatchObject({ status: 401 });
   expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();

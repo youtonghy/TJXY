@@ -7,7 +7,7 @@ import type {
   Identifier,
   RaRecord,
   UpdateParams,
-} from 'react-admin';
+} from 'ra-core';
 
 import { ApiError, apiRequest } from './httpClient';
 import type { TjxyUser, UserRecord } from './types';
