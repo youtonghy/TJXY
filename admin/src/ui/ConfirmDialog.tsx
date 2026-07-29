@@ -6,6 +6,8 @@ export interface ConfirmDialogProps {
   trigger: ReactNode;
   title: string;
   description: ReactNode;
+  /** Caller-vetted copy for known failures; never pass a raw server message. */
+  errorDescription?: ReactNode;
   confirmLabel: string;
   isPending: boolean;
   onConfirm: () => void | Promise<void>;
@@ -15,6 +17,7 @@ export function ConfirmDialog({
   trigger,
   title,
   description,
+  errorDescription,
   confirmLabel,
   isPending,
   onConfirm,
@@ -77,7 +80,9 @@ export function ConfirmDialog({
                   </Alert.Indicator>
                   <Alert.Content>
                     <Alert.Title>The action could not be completed</Alert.Title>
-                    <Alert.Description>Review the current state and try again.</Alert.Description>
+                    <Alert.Description>
+                      {errorDescription ?? 'Review the current state and try again.'}
+                    </Alert.Description>
                   </Alert.Content>
                 </Alert>
               )}

@@ -82,6 +82,29 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('dialog', { name: 'Delete Ada?' })).toBeVisible();
   });
 
+  it('renders a caller-provided safe error description after confirmation rejects', async () => {
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialog
+        errorDescription="The last enabled administrator cannot be deleted."
+        trigger={<Button>Delete Bob</Button>}
+        title="Delete Bob?"
+        description="Bob will permanently lose access."
+        confirmLabel="Delete user"
+        isPending={false}
+        onConfirm={vi.fn().mockRejectedValue(new Error('private detail'))}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Delete Bob' }));
+    await user.click(screen.getByRole('button', { name: 'Delete user' }));
+
+    expect(await screen.findByText(
+      'The last enabled administrator cannot be deleted.',
+    )).toBeVisible();
+    expect(screen.queryByText('private detail')).not.toBeInTheDocument();
+  });
+
   it('closes after success and restores focus to the trigger', async () => {
     const user = userEvent.setup();
     renderDialog(vi.fn().mockResolvedValue(undefined));
