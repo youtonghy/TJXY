@@ -10,8 +10,8 @@ use tjxy_cache::{
 };
 use tjxy_common::{CatalogItemId, UserId, WorkJobId};
 use tjxy_db::{
-    BrowseParent, CatalogItemRecord, CatalogItemType, CatalogPage, CatalogPageRequest,
-    CatalogPublicationError, CatalogPublicationRepository, CatalogQueryError,
+    BrowseParent, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogPage,
+    CatalogPageRequest, CatalogPublicationError, CatalogPublicationRepository, CatalogQueryError,
     CatalogQueryRepository, LazyCatalogWorkTarget, LibraryViewRecord, PlaystateRepository,
     PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError, WorkJobRepository,
     WorkJobRepositoryError, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
@@ -659,6 +659,55 @@ impl CatalogQueryService {
         }
     }
 
+    /// Returns one visible item with normalized detail metadata for the principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for user impersonation or
+    /// propagates catalog, lazy-work, and cache failures.
+    pub async fn item_detail(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        item_id: CatalogItemId,
+    ) -> Result<Option<CatalogItemDetailRecord>, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
+        let repository = CatalogQueryRepository::new(&self.database);
+        let Some(cache) = &self.cache else {
+            return self
+                .read_item_detail_with_lazy(&repository, principal, item_id)
+                .await;
+        };
+        let revisions = repository.cache_revisions(principal).await?;
+        let descriptor = format!("rich-detail/{item_id}");
+        let key = cache.keys.user_scoped(
+            revisions.catalog_generation(),
+            &principal.to_string(),
+            revisions.user_revision(),
+            CacheProjection::Items,
+            &CacheQueryDigest::from_bytes(descriptor.as_bytes()),
+        );
+        match cache_lookup(cache, &key).await {
+            CacheLookup::Hit(item) => Ok(item),
+            CacheLookup::Fallback => {
+                self.read_item_detail_with_lazy(&repository, principal, item_id)
+                    .await
+            }
+            CacheLookup::Leader(_leader) => {
+                let item = self
+                    .read_item_detail_with_lazy(&repository, principal, item_id)
+                    .await?;
+                let ttl = if item.is_some() {
+                    cache.item_ttl
+                } else {
+                    cache.empty_ttl
+                };
+                cache_put(cache, &key, &item, ttl).await;
+                Ok(item)
+            }
+        }
+    }
+
     async fn read_item_with_lazy(
         &self,
         repository: &CatalogQueryRepository<'_>,
@@ -675,6 +724,25 @@ impl CatalogQueryService {
                 .await?;
         }
         Ok(item)
+    }
+
+    async fn read_item_detail_with_lazy(
+        &self,
+        repository: &CatalogQueryRepository<'_>,
+        principal: UserId,
+        item_id: CatalogItemId,
+    ) -> Result<Option<CatalogItemDetailRecord>, CatalogServiceError> {
+        if self
+            .read_item_with_lazy(repository, principal, item_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        repository
+            .item_detail(principal, item_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Returns only probed, currently available sources suitable for direct playback.

@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+
+use chrono::{TimeZone, Utc};
 use serde_json::json;
 use tjxy_api::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, ClientCapabilitiesDto, CollectionType,
-    UserItemDataDto,
+    ItemNamedCodeDto, ItemPersonDto, UserItemDataDto,
 };
 use uuid::Uuid;
 
@@ -20,6 +23,91 @@ fn client_capabilities_accept_the_pinned_optional_shape() {
     assert_eq!(capabilities.supported_commands, ["DisplayContent"]);
     assert!(capabilities.supports_media_control);
     assert!(capabilities.supports_persistent_identifier);
+}
+
+#[test]
+fn rich_item_details_are_pascal_case_and_list_only_fields_remain_compact() {
+    let server_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+    let item_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
+    let person_id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
+    let premiere = Utc.with_ymd_and_hms(2019, 5, 6, 0, 0, 0).unwrap();
+    let end = Utc.with_ymd_and_hms(2019, 6, 3, 0, 0, 0).unwrap();
+    let provider_ids = BTreeMap::from([
+        ("imdb".to_owned(), "tt7366338".to_owned()),
+        ("tmdb".to_owned(), "87108".to_owned()),
+    ]);
+    let detail = BaseItemDto::catalog_item(
+        item_id,
+        "Chernobyl",
+        server_id,
+        BaseItemKind::Series,
+        None,
+        Some(2019),
+        Some("A disaster and its aftermath.".to_owned()),
+        None,
+    )
+    .with_list_metadata(Some("Chernobyl".to_owned()), Some(8.7), None)
+    .with_rich_details(
+        Some("Every lie we tell incurs a debt.".to_owned()),
+        Some(7_000),
+        Some(36_000_000_000),
+        Some(premiere),
+        Some(end),
+        Some("Ended".to_owned()),
+        Some("TV-MA".to_owned()),
+        Some("en".to_owned()),
+        vec!["Drama".to_owned()],
+        vec!["HBO".to_owned()],
+        vec![ItemNamedCodeDto::new("US", "United States")],
+        vec![ItemNamedCodeDto::new("en", "English")],
+        vec![ItemPersonDto::new(
+            person_id,
+            "Johan Renck",
+            "Director",
+            Some("Crew".to_owned()),
+        )],
+        provider_ids,
+        false,
+    );
+
+    assert_eq!(
+        serde_json::to_value(detail).unwrap(),
+        json!({
+            "Name": "Chernobyl",
+            "ServerId": server_id,
+            "Id": item_id,
+            "Type": "Series",
+            "OriginalTitle": "Chernobyl",
+            "ProductionYear": 2019,
+            "Overview": "A disaster and its aftermath.",
+            "CommunityRating": 8.7,
+            "IsFolder": true,
+            "ImageTags": {},
+            "Tagline": "Every lie we tell incurs a debt.",
+            "VoteCount": 7000,
+            "RunTimeTicks": 36_000_000_000_i64,
+            "PremiereDate": "2019-05-06T00:00:00Z",
+            "EndDate": "2019-06-03T00:00:00Z",
+            "Status": "Ended",
+            "OfficialRating": "TV-MA",
+            "OriginalLanguage": "en",
+            "Genres": ["Drama"],
+            "Studios": ["HBO"],
+            "Countries": [{"Code": "US", "Name": "United States"}],
+            "Languages": [{"Code": "en", "Name": "English"}],
+            "People": [{
+                "Id": person_id,
+                "Name": "Johan Renck",
+                "Role": "Director",
+                "Type": "Crew"
+            }],
+            "ProviderIds": {
+                "imdb": "tt7366338",
+                "tmdb": "87108"
+            },
+            "HasMediaSources": false
+        })
+    );
 }
 
 #[test]

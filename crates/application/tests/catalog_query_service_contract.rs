@@ -513,11 +513,15 @@ async fn requested_user_must_match_the_authenticated_principal() {
             CatalogPageRequest::new(0, 20).unwrap(),
         )
         .await;
+    let detail = service
+        .item_detail(principal, Some(other), CatalogItemId::new())
+        .await;
 
     assert!(matches!(views, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(items, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(latest, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(next_up, Err(CatalogServiceError::ForbiddenUser)));
+    assert!(matches!(detail, Err(CatalogServiceError::ForbiddenUser)));
 }
 
 #[tokio::test]

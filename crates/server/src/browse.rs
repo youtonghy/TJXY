@@ -10,15 +10,15 @@ use axum::{
 use serde_json::json;
 use tjxy_api::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, CollectionType, DeliveryMethod,
-    MediaSourceInfo, MediaStream, MediaStreamType, PlaybackInfoResponse, SearchHint,
-    SearchHintResult, UserItemDataDto,
+    ItemNamedCodeDto, ItemPersonDto, MediaSourceInfo, MediaStream, MediaStreamType,
+    PlaybackInfoResponse, SearchHint, SearchHintResult, UserItemDataDto,
 };
 use tjxy_application::{
     AuthError, CatalogItemType, CatalogPageRequest, CatalogServiceError, DeviceProfile,
     PlaybackSource, SessionCapabilities,
 };
 use tjxy_common::{CatalogItemId, PresentationKey, UserId};
-use tjxy_db::{CatalogItemRecord, CatalogPage, LibraryViewRecord};
+use tjxy_db::{CatalogItemDetailRecord, CatalogItemRecord, CatalogPage, LibraryViewRecord};
 use uuid::Uuid;
 
 use crate::{AppState, auth};
@@ -410,18 +410,14 @@ pub(crate) async fn item_detail(
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
     match catalog
-        .item(
+        .item_detail(
             principal.user().id(),
             requested_user,
             CatalogItemId::from_uuid(item_id),
         )
         .await
     {
-        Ok(Some(item)) => match item_dto(
-            state.identity.id,
-            item.parent_id().map(CatalogItemId::as_uuid),
-            &item,
-        ) {
+        Ok(Some(item)) => match item_detail_dto(state.identity.id, &item) {
             Ok(item) => Json(item).into_response(),
             Err(error) => error.into_response(),
         },
@@ -1196,11 +1192,13 @@ fn search_hint_result(page: &CatalogPage) -> Result<SearchHintResult, HttpBrowse
         .items()
         .iter()
         .map(|item| {
-            Ok(SearchHint::new(
-                item.id().as_uuid(),
-                item.name(),
-                item_kind(item)?,
-            ))
+            Ok(
+                SearchHint::new(item.id().as_uuid(), item.name(), item_kind(item)?).with_metadata(
+                    item.production_year(),
+                    item.image_tags().get("Primary").cloned(),
+                    item.community_rating(),
+                ),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SearchHintResult::new(
@@ -1270,7 +1268,63 @@ fn item_dto(
             item.playback_position_ticks(),
         )),
     )
+    .with_list_metadata(
+        item.original_title().map(str::to_owned),
+        item.community_rating(),
+        item.index_number(),
+    )
     .with_image_tags(item.image_tags().clone()))
+}
+
+fn item_detail_dto(
+    server_id: Uuid,
+    detail: &CatalogItemDetailRecord,
+) -> Result<BaseItemDto, HttpBrowseError> {
+    let item = detail.item();
+    let countries = detail
+        .countries()
+        .iter()
+        .map(|country| ItemNamedCodeDto::new(country.code(), country.name()))
+        .collect();
+    let languages = detail
+        .languages()
+        .iter()
+        .map(|language| ItemNamedCodeDto::new(language.code(), language.name()))
+        .collect();
+    let people = detail
+        .credits()
+        .iter()
+        .map(|credit| {
+            ItemPersonDto::new(
+                credit.person_id(),
+                credit.person_name(),
+                credit.role(),
+                credit.credit_type().map(str::to_owned),
+            )
+        })
+        .collect();
+    Ok(item_dto(
+        server_id,
+        item.parent_id().map(CatalogItemId::as_uuid),
+        item,
+    )?
+    .with_rich_details(
+        detail.tagline().map(str::to_owned),
+        detail.vote_count(),
+        detail.runtime_ticks(),
+        detail.premiere_date(),
+        detail.end_date(),
+        detail.release_status().map(str::to_owned),
+        detail.official_rating().map(str::to_owned),
+        detail.original_language().map(str::to_owned),
+        detail.genres().to_vec(),
+        detail.studios().to_vec(),
+        countries,
+        languages,
+        people,
+        detail.provider_ids().clone(),
+        detail.has_media_sources(),
+    ))
 }
 
 fn item_kind(item: &CatalogItemRecord) -> Result<BaseItemKind, HttpBrowseError> {

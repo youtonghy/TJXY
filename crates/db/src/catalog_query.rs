@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult,
     sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement},
@@ -161,14 +162,17 @@ impl LibraryViewRecord {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CatalogItemRecord {
     id: CatalogItemId,
     parent_id: Option<CatalogItemId>,
     item_type: String,
     name: String,
+    original_title: Option<String>,
     production_year: Option<i32>,
     overview: Option<String>,
+    community_rating: Option<f64>,
+    index_number: Option<i32>,
     is_favorite: bool,
     is_played: bool,
     play_count: i32,
@@ -198,6 +202,11 @@ impl CatalogItemRecord {
     }
 
     #[must_use]
+    pub fn original_title(&self) -> Option<&str> {
+        self.original_title.as_deref()
+    }
+
+    #[must_use]
     pub const fn production_year(&self) -> Option<i32> {
         self.production_year
     }
@@ -205,6 +214,16 @@ impl CatalogItemRecord {
     #[must_use]
     pub fn overview(&self) -> Option<&str> {
         self.overview.as_deref()
+    }
+
+    #[must_use]
+    pub const fn community_rating(&self) -> Option<f64> {
+        self.community_rating
+    }
+
+    #[must_use]
+    pub const fn index_number(&self) -> Option<i32> {
+        self.index_number
     }
 
     #[must_use]
@@ -230,6 +249,167 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn image_tags(&self) -> &BTreeMap<String, String> {
         &self.image_tags
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CatalogNamedCodeRecord {
+    code: String,
+    name: String,
+}
+
+impl CatalogNamedCodeRecord {
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CatalogCreditRecord {
+    person_id: Uuid,
+    person_name: String,
+    role: String,
+    credit_type: Option<String>,
+    sort_order: i32,
+}
+
+impl CatalogCreditRecord {
+    #[must_use]
+    pub const fn person_id(&self) -> Uuid {
+        self.person_id
+    }
+
+    #[must_use]
+    pub fn person_name(&self) -> &str {
+        &self.person_name
+    }
+
+    #[must_use]
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    #[must_use]
+    pub fn credit_type(&self) -> Option<&str> {
+        self.credit_type.as_deref()
+    }
+
+    #[must_use]
+    pub const fn sort_order(&self) -> i32 {
+        self.sort_order
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CatalogItemDetailRecord {
+    item: CatalogItemRecord,
+    tagline: Option<String>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
+    genres: Vec<String>,
+    studios: Vec<String>,
+    countries: Vec<CatalogNamedCodeRecord>,
+    languages: Vec<CatalogNamedCodeRecord>,
+    credits: Vec<CatalogCreditRecord>,
+    provider_ids: BTreeMap<String, String>,
+    has_media_sources: bool,
+}
+
+impl CatalogItemDetailRecord {
+    #[must_use]
+    pub const fn item(&self) -> &CatalogItemRecord {
+        &self.item
+    }
+
+    #[must_use]
+    pub fn tagline(&self) -> Option<&str> {
+        self.tagline.as_deref()
+    }
+
+    #[must_use]
+    pub const fn community_rating(&self) -> Option<f64> {
+        self.item.community_rating
+    }
+
+    #[must_use]
+    pub const fn vote_count(&self) -> Option<i64> {
+        self.vote_count
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
+    }
+
+    #[must_use]
+    pub const fn premiere_date(&self) -> Option<DateTime<Utc>> {
+        self.premiere_date
+    }
+
+    #[must_use]
+    pub const fn end_date(&self) -> Option<DateTime<Utc>> {
+        self.end_date
+    }
+
+    #[must_use]
+    pub fn release_status(&self) -> Option<&str> {
+        self.release_status.as_deref()
+    }
+
+    #[must_use]
+    pub fn official_rating(&self) -> Option<&str> {
+        self.official_rating.as_deref()
+    }
+
+    #[must_use]
+    pub fn original_language(&self) -> Option<&str> {
+        self.original_language.as_deref()
+    }
+
+    #[must_use]
+    pub fn genres(&self) -> &[String] {
+        &self.genres
+    }
+
+    #[must_use]
+    pub fn studios(&self) -> &[String] {
+        &self.studios
+    }
+
+    #[must_use]
+    pub fn countries(&self) -> &[CatalogNamedCodeRecord] {
+        &self.countries
+    }
+
+    #[must_use]
+    pub fn languages(&self) -> &[CatalogNamedCodeRecord] {
+        &self.languages
+    }
+
+    #[must_use]
+    pub fn credits(&self) -> &[CatalogCreditRecord] {
+        &self.credits
+    }
+
+    #[must_use]
+    pub const fn provider_ids(&self) -> &BTreeMap<String, String> {
+        &self.provider_ids
+    }
+
+    #[must_use]
+    pub const fn has_media_sources(&self) -> bool {
+        self.has_media_sources
     }
 }
 
@@ -275,7 +455,7 @@ impl AssetRecord {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CatalogPage {
     items: Vec<CatalogItemRecord>,
     total_record_count: u64,
@@ -585,6 +765,14 @@ impl<'connection> CatalogQueryRepository<'connection> {
 
         let mut query = item_query(user_id, parent, &page.item_types, source);
         select_item_columns(&mut query, source);
+        if matches!(source, ItemQuerySource::Catalog) && matches!(parent, BrowseParent::Item(_)) {
+            query
+                .order_by_expr(
+                    Expr::cust("CASE WHEN ci.index_number IS NULL THEN 1 ELSE 0 END"),
+                    Order::Asc,
+                )
+                .order_by((Alias::new("ci"), Alias::new("index_number")), Order::Asc);
+        }
         query
             .order_by_expr(source.sort_expr().into(), Order::Asc)
             .order_by_expr(source.id_expr().into(), Order::Asc)
@@ -901,6 +1089,72 @@ impl<'connection> CatalogQueryRepository<'connection> {
         self.canonical_item(user_id, item_id).await
     }
 
+    /// Returns one visible item with normalized rich metadata and bounded credits.
+    ///
+    /// Provider snapshots are deliberately excluded from this read model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or stored-value decoding fails.
+    pub async fn item_detail(
+        &self,
+        user_id: UserId,
+        item_id: CatalogItemId,
+    ) -> Result<Option<CatalogItemDetailRecord>, CatalogQueryError> {
+        let Some(item) = self.item(user_id, item_id).await? else {
+            return Ok(None);
+        };
+        let Some(facts) = rich_item_facts(self.database, item_id).await? else {
+            return Ok(None);
+        };
+        let genres =
+            named_associations(self.database, item_id, "item_genres", "genre_id", "genres").await?;
+        let studios = named_associations(
+            self.database,
+            item_id,
+            "item_studios",
+            "studio_id",
+            "studios",
+        )
+        .await?;
+        let countries = coded_associations(
+            self.database,
+            item_id,
+            "item_countries",
+            "country_id",
+            "countries",
+        )
+        .await?;
+        let languages = coded_associations(
+            self.database,
+            item_id,
+            "item_languages",
+            "language_id",
+            "languages",
+        )
+        .await?;
+        let credits = item_credits(self.database, item_id).await?;
+        let provider_ids = item_provider_ids(self.database, item_id).await?;
+        Ok(Some(CatalogItemDetailRecord {
+            item,
+            tagline: facts.tagline,
+            vote_count: facts.vote_count,
+            runtime_ticks: facts.runtime_ticks,
+            premiere_date: facts.premiere_date,
+            end_date: facts.end_date,
+            release_status: facts.release_status,
+            official_rating: facts.official_rating,
+            original_language: facts.original_language,
+            genres,
+            studios,
+            countries,
+            languages,
+            credits,
+            provider_ids,
+            has_media_sources: facts.has_media_sources,
+        }))
+    }
+
     /// Returns the visible item's durable revisions used to join lazy work.
     ///
     /// # Errors
@@ -1190,6 +1444,223 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .map(asset_from_row)
             .transpose()
     }
+}
+
+struct RichItemFacts {
+    tagline: Option<String>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
+    has_media_sources: bool,
+}
+
+async fn rich_item_facts(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+) -> Result<Option<RichItemFacts>, CatalogQueryError> {
+    let item = Alias::new("detail_item");
+    let mut query = Query::select();
+    query
+        .from_as(Alias::new("catalog_items"), item.clone())
+        .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+        .expr_as(
+            Expr::exists(current_effective_source_publication(&item)),
+            Alias::new("has_media_sources"),
+        )
+        .limit(1);
+    for column in [
+        "tagline",
+        "vote_count",
+        "runtime_ticks",
+        "premiere_date",
+        "end_date",
+        "release_status",
+        "official_rating",
+        "original_language",
+    ] {
+        query.expr_as(
+            Expr::col((item.clone(), Alias::new(column))),
+            Alias::new(column),
+        );
+    }
+    database
+        .query_one(database.get_database_backend().build(&query))
+        .await?
+        .map(|row| {
+            Ok(RichItemFacts {
+                tagline: row.try_get("", "tagline")?,
+                vote_count: row.try_get("", "vote_count")?,
+                runtime_ticks: row.try_get("", "runtime_ticks")?,
+                premiere_date: row.try_get("", "premiere_date")?,
+                end_date: row.try_get("", "end_date")?,
+                release_status: row.try_get("", "release_status")?,
+                official_rating: row.try_get("", "official_rating")?,
+                original_language: row.try_get("", "original_language")?,
+                has_media_sources: row.try_get("", "has_media_sources")?,
+            })
+        })
+        .transpose()
+}
+
+async fn named_associations(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    link_table: &str,
+    foreign_key: &str,
+    entity_table: &str,
+) -> Result<Vec<String>, CatalogQueryError> {
+    let link = Alias::new("detail_named_link");
+    let entity = Alias::new("detail_named_entity");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((entity.clone(), Alias::new("name"))),
+            Alias::new("name"),
+        )
+        .from_as(Alias::new(link_table), link.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new(entity_table),
+            entity.clone(),
+            Expr::col((entity.clone(), Alias::new("id")))
+                .equals((link.clone(), Alias::new(foreign_key))),
+        )
+        .and_where(Expr::col((link, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .order_by((entity, Alias::new("name")), Order::Asc)
+        .limit(256)
+        .to_owned();
+    database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| row.try_get("", "name").map_err(Into::into))
+        .collect()
+}
+
+async fn coded_associations(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    link_table: &str,
+    foreign_key: &str,
+    entity_table: &str,
+) -> Result<Vec<CatalogNamedCodeRecord>, CatalogQueryError> {
+    let link = Alias::new("detail_coded_link");
+    let entity = Alias::new("detail_coded_entity");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((entity.clone(), Alias::new("code"))),
+            Alias::new("code"),
+        )
+        .expr_as(
+            Expr::col((entity.clone(), Alias::new("name"))),
+            Alias::new("name"),
+        )
+        .from_as(Alias::new(link_table), link.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new(entity_table),
+            entity,
+            Expr::col((Alias::new("detail_coded_entity"), Alias::new("id")))
+                .equals((link.clone(), Alias::new(foreign_key))),
+        )
+        .and_where(Expr::col((link.clone(), Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .order_by((link, Alias::new("sort_order")), Order::Asc)
+        .limit(64)
+        .to_owned();
+    database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(CatalogNamedCodeRecord {
+                code: row.try_get("", "code")?,
+                name: row.try_get("", "name")?,
+            })
+        })
+        .collect()
+}
+
+async fn item_credits(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+) -> Result<Vec<CatalogCreditRecord>, CatalogQueryError> {
+    let credit = Alias::new("detail_credit");
+    let person = Alias::new("detail_person");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((person.clone(), Alias::new("id"))),
+            Alias::new("person_id"),
+        )
+        .expr_as(
+            Expr::col((person.clone(), Alias::new("name"))),
+            Alias::new("person_name"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("role"))),
+            Alias::new("role"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("credit_type"))),
+            Alias::new("credit_type"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("sort_order"))),
+            Alias::new("sort_order"),
+        )
+        .from_as(Alias::new("item_people"), credit.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("people"),
+            person,
+            Expr::col((Alias::new("detail_person"), Alias::new("id")))
+                .equals((credit.clone(), Alias::new("person_id"))),
+        )
+        .and_where(Expr::col((credit.clone(), Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .order_by((credit.clone(), Alias::new("sort_order")), Order::Asc)
+        .order_by((credit, Alias::new("id")), Order::Asc)
+        .limit(64)
+        .to_owned();
+    database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(CatalogCreditRecord {
+                person_id: row.try_get("", "person_id")?,
+                person_name: row.try_get("", "person_name")?,
+                role: row.try_get("", "role")?,
+                credit_type: row.try_get("", "credit_type")?,
+                sort_order: row.try_get("", "sort_order")?,
+            })
+        })
+        .collect()
+}
+
+async fn item_provider_ids(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+) -> Result<BTreeMap<String, String>, CatalogQueryError> {
+    let query = Query::select()
+        .columns([Alias::new("provider"), Alias::new("provider_item_id")])
+        .from(Alias::new("provider_ids"))
+        .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()))
+        .order_by(Alias::new("provider"), Order::Asc)
+        .limit(64)
+        .to_owned();
+    database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get("", "provider")?,
+                row.try_get("", "provider_item_id")?,
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -1952,8 +2423,11 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 "parent_id",
                 "item_type",
                 "name",
+                "original_title",
                 "production_year",
                 "overview",
+                "community_rating",
+                "index_number",
             ] {
                 query.expr_as(
                     Expr::col((ci.clone(), Alias::new(column))),
@@ -1975,6 +2449,9 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                     Expr::col((pci.clone(), Alias::new(column))),
                     Alias::new(alias),
                 );
+            }
+            for column in ["original_title", "community_rating", "index_number"] {
+                query.expr_as(Expr::val(Option::<String>::None), Alias::new(column));
             }
         }
     }
@@ -2007,8 +2484,11 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
             .map(CatalogItemId::from_uuid),
         item_type: row.try_get("", "item_type")?,
         name: row.try_get("", "name")?,
+        original_title: row.try_get("", "original_title")?,
         production_year: row.try_get("", "production_year")?,
         overview: row.try_get("", "overview")?,
+        community_rating: row.try_get("", "community_rating")?,
+        index_number: row.try_get("", "index_number")?,
         is_favorite: row
             .try_get::<Option<bool>>("", "is_favorite")?
             .unwrap_or(false),

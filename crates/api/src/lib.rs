@@ -19,7 +19,8 @@ pub use auth::{
 };
 pub use browse::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, ClientCapabilitiesDto, CollectionType,
-    MediaType, SearchHint, SearchHintResult, UpdateUserItemDataDto, UserItemDataDto,
+    ItemNamedCodeDto, ItemPersonDto, MediaType, SearchHint, SearchHintResult,
+    UpdateUserItemDataDto, UserItemDataDto,
 };
 pub use device::{DeviceInfoDto, DeviceInfoDtoQueryResult, DeviceOptionsDto};
 pub use display_preferences::{DisplayPreferencesDto, ScrollDirection, SortOrder};

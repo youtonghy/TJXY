@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection,
-    sea_query::{Alias, Query},
+    sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, ImageType, UserId, Username};
@@ -155,6 +155,162 @@ async fn add_to_library(database: &DatabaseConnection, library_id: Uuid, item_id
         )
         .await
         .unwrap();
+}
+
+async fn set_rich_item_fields(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    index_number: Option<i32>,
+) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                &Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .values([
+                        (Alias::new("tagline"), "Every second counts".into()),
+                        (Alias::new("community_rating"), 8.7_f64.into()),
+                        (Alias::new("vote_count"), 7_000_i64.into()),
+                        (Alias::new("runtime_ticks"), 36_000_000_000_i64.into()),
+                        (Alias::new("release_status"), "Ended".into()),
+                        (Alias::new("official_rating"), "TV-MA".into()),
+                        (Alias::new("original_language"), "en".into()),
+                        (Alias::new("index_number"), index_number.into()),
+                    ])
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_rich_detail_associations(database: &DatabaseConnection, item_id: CatalogItemId) {
+    let backend = database.get_database_backend();
+    let genre = Uuid::new_v4();
+    let country = Uuid::new_v4();
+    let language = Uuid::new_v4();
+    let director = Uuid::new_v4();
+    let actor = Uuid::new_v4();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("genres"))
+            .columns([Alias::new("id"), Alias::new("name")])
+            .values_panic([genre.into(), "Drama".into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("item_genres"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("genre_id"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                item_id.as_uuid().into(),
+                genre.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("countries"))
+            .columns([Alias::new("id"), Alias::new("code"), Alias::new("name")])
+            .values_panic([country.into(), "US".into(), "United States".into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("item_countries"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("country_id"),
+                Alias::new("sort_order"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                item_id.as_uuid().into(),
+                country.into(),
+                0_i32.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("languages"))
+            .columns([Alias::new("id"), Alias::new("code"), Alias::new("name")])
+            .values_panic([language.into(), "en".into(), "English".into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("item_languages"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("language_id"),
+                Alias::new("sort_order"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                item_id.as_uuid().into(),
+                language.into(),
+                0_i32.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("people"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("name"),
+                Alias::new("sort_name"),
+            ])
+            .values_panic([director.into(), "Director First".into(), "director".into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("people"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("name"),
+                Alias::new("sort_name"),
+            ])
+            .values_panic([actor.into(), "Actor Second".into(), "actor".into()])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("item_people"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("person_id"),
+                Alias::new("role"),
+                Alias::new("sort_order"),
+                Alias::new("credit_type"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                item_id.as_uuid().into(),
+                actor.into(),
+                "Valery Legasov".into(),
+                1_i32.into(),
+                "Actor".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("item_people"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("person_id"),
+                Alias::new("role"),
+                Alias::new("sort_order"),
+                Alias::new("credit_type"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                item_id.as_uuid().into(),
+                director.into(),
+                "Director".into(),
+                0_i32.into(),
+                "Crew".into(),
+            ])
+            .to_owned(),
+    ] {
+        database.execute(backend.build(&statement)).await.unwrap();
+    }
 }
 
 async fn seed_asset(
@@ -356,6 +512,87 @@ async fn child_page_requires_shared_library_membership_with_parent() {
 
     assert_eq!(page.total_record_count(), 1);
     assert_eq!(page.items()[0].name(), "Season 1");
+}
+
+#[tokio::test]
+async fn rich_detail_loads_normalized_facts_and_children_use_numeric_index_order() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Television", "tvshows", true).await;
+    let series = seed_item(&database, "Chernobyl", "Series", None, true, "Matched").await;
+    let season_two = seed_item(
+        &database,
+        "Alpha",
+        "Season",
+        Some(series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let season_zero = seed_item(
+        &database,
+        "Zulu",
+        "Season",
+        Some(series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let season_one = seed_item(
+        &database,
+        "Middle",
+        "Season",
+        Some(series.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    for item in [series, season_two, season_zero, season_one] {
+        add_to_library(&database, library, item).await;
+    }
+    set_rich_item_fields(&database, series, None).await;
+    set_rich_item_fields(&database, season_two, Some(2)).await;
+    set_rich_item_fields(&database, season_zero, Some(0)).await;
+    set_rich_item_fields(&database, season_one, Some(1)).await;
+    seed_rich_detail_associations(&database, series).await;
+
+    let repository = CatalogQueryRepository::new(&database);
+    let children = repository
+        .items(
+            user_id,
+            BrowseParent::Item(series),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+    let detail = repository
+        .item_detail(user_id, series)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        children
+            .items()
+            .iter()
+            .map(tjxy_db::CatalogItemRecord::id)
+            .collect::<Vec<_>>(),
+        [season_zero, season_one, season_two]
+    );
+    assert_eq!(detail.item().name(), "Chernobyl");
+    assert_eq!(detail.tagline(), Some("Every second counts"));
+    assert_eq!(detail.community_rating(), Some(8.7));
+    assert_eq!(detail.vote_count(), Some(7_000));
+    assert_eq!(detail.runtime_ticks(), Some(36_000_000_000));
+    assert_eq!(detail.release_status(), Some("Ended"));
+    assert_eq!(detail.official_rating(), Some("TV-MA"));
+    assert_eq!(detail.original_language(), Some("en"));
+    assert_eq!(detail.genres(), ["Drama"]);
+    assert_eq!(detail.countries()[0].code(), "US");
+    assert_eq!(detail.languages()[0].name(), "English");
+    assert_eq!(detail.credits()[0].person_name(), "Director First");
+    assert_eq!(detail.credits()[1].person_name(), "Actor Second");
+    assert!(!detail.has_media_sources());
 }
 
 #[tokio::test]
