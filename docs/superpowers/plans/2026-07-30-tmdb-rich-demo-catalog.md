@@ -93,20 +93,20 @@ git commit -m "feat(db): add rich catalog metadata schema"
   `RichEpisode`, `RichCredit`, and `RemoteImage` values.
 - Consumes one bearer token and language as zeroized constructor inputs.
 
-- [ ] **Step 1: Write complete wire fixtures and a failing parsing test**
+- [x] **Step 1: Write complete wire fixtures and a failing parsing test**
 
 Use local JSON fixtures that include the complete documented response shape for details,
 credits, images, classifications, external IDs, Seasons, and Episodes. Assert hand-derived
 values such as `community_rating == 8.1`, `runtime_ticks == 6_960_000_000`,
 Season index `1`, Episode index `2`, and provider-ordered credits.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p tjxy-metadata --test tmdb_catalog_contract --locked`
 
 Expected: FAIL because `TmdbCatalogClient` and rich records do not exist.
 
-- [ ] **Step 3: Implement private wire DTOs and validation**
+- [x] **Step 3: Implement private wire DTOs and validation**
 
 Build request paths for:
 
@@ -121,13 +121,13 @@ within `0..=10`, image paths beginning with `/`, and Season/Episode indices. Pre
 configured language and perform one `en-US` fallback only when localized title or overview
 is empty.
 
-- [ ] **Step 4: Add retry and redaction contracts**
+- [x] **Step 4: Add retry and redaction contracts**
 
 Add tests proving 429 honors a bounded retry delay, transient 5xx retries stop at the
 configured bound, permanent 4xx does not retry, and formatted errors contain neither the
 token nor upstream response body.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -136,7 +136,7 @@ cargo test -p tjxy-metadata --test tmdb_catalog_contract --locked
 cargo test -p tjxy-metadata --locked
 ```
 
-- [ ] **Step 6: Commit the transport slice**
+- [x] **Step 6: Commit the transport slice**
 
 ```text
 git add crates/metadata/src crates/metadata/tests

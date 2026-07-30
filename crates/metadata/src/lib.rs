@@ -1,5 +1,12 @@
 //! Metadata provider contracts and bounded offline metadata parsers.
 
+mod tmdb_catalog;
+
+pub use tmdb_catalog::{
+    RichCatalogItem, RichCountry, RichCredit, RichEpisode, RichLanguage, RichRemoteImage,
+    RichRemoteImageKind, RichSeason, RichSeries, TmdbCatalogClient, TmdbCatalogTransport,
+};
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
