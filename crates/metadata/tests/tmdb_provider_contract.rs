@@ -10,10 +10,15 @@ type SearchCall = (MetadataItemKind, String, Option<i32>, String);
 
 struct FakeTransport {
     calls: Mutex<Vec<SearchCall>>,
+    validation_result: Result<(), MetadataProviderError>,
 }
 
 #[async_trait]
 impl TmdbTransport for FakeTransport {
+    async fn validate(&self) -> Result<(), MetadataProviderError> {
+        self.validation_result
+    }
+
     async fn search(
         &self,
         kind: MetadataItemKind,
@@ -42,6 +47,7 @@ impl TmdbTransport for FakeTransport {
 async fn tmdb_provider_selects_the_requested_year_and_maps_basic_metadata() {
     let transport = Arc::new(FakeTransport {
         calls: Mutex::new(Vec::new()),
+        validation_result: Ok(()),
     });
     let provider = TmdbProvider::with_transport("zh-CN", transport.clone()).unwrap();
     let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", Some(2016)).unwrap();
@@ -76,10 +82,36 @@ async fn tmdb_provider_selects_the_requested_year_and_maps_basic_metadata() {
 async fn title_search_is_not_used_for_season_or_episode_lookups() {
     let transport = Arc::new(FakeTransport {
         calls: Mutex::new(Vec::new()),
+        validation_result: Ok(()),
     });
     let provider = TmdbProvider::with_transport("en-AU", transport.clone()).unwrap();
     let lookup = MetadataLookup::new(MetadataItemKind::Episode, "Pilot", None).unwrap();
 
     assert!(provider.resolve(&lookup).await.unwrap().is_none());
     assert!(transport.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn connection_validation_forwards_the_transport_result_without_searching() {
+    let accepted_transport = Arc::new(FakeTransport {
+        calls: Mutex::new(Vec::new()),
+        validation_result: Ok(()),
+    });
+    let accepted = TmdbProvider::with_transport("en-AU", accepted_transport.clone()).unwrap();
+
+    accepted.validate_connection().await.unwrap();
+
+    assert!(accepted_transport.calls.lock().unwrap().is_empty());
+
+    let rejected_transport = Arc::new(FakeTransport {
+        calls: Mutex::new(Vec::new()),
+        validation_result: Err(MetadataProviderError::Rejected),
+    });
+    let rejected = TmdbProvider::with_transport("en-AU", rejected_transport.clone()).unwrap();
+
+    assert_eq!(
+        rejected.validate_connection().await,
+        Err(MetadataProviderError::Rejected)
+    );
+    assert!(rejected_transport.calls.lock().unwrap().is_empty());
 }

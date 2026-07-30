@@ -1,6 +1,10 @@
 //! Metadata provider contracts and bounded offline metadata parsers.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use quick_xml::{Reader, events::Event};
@@ -637,6 +641,53 @@ pub trait MetadataProvider: Send + Sync {
     ) -> Result<Option<MetadataCandidate>, MetadataProviderError>;
 }
 
+/// A metadata provider whose active delegate can be replaced at runtime.
+pub struct ReloadableMetadataProvider {
+    name: &'static str,
+    provider: RwLock<Option<Arc<dyn MetadataProvider>>>,
+}
+
+impl ReloadableMetadataProvider {
+    /// Creates an empty wrapper with a stable provider name.
+    #[must_use]
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            provider: RwLock::new(None),
+        }
+    }
+
+    /// Replaces the active provider, or disables resolution when passed `None`.
+    pub fn replace(&self, provider: Option<Arc<dyn MetadataProvider>>) {
+        *self
+            .provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = provider;
+    }
+}
+
+#[async_trait]
+impl MetadataProvider for ReloadableMetadataProvider {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    async fn resolve(
+        &self,
+        lookup: &MetadataLookup,
+    ) -> Result<Option<MetadataCandidate>, MetadataProviderError> {
+        let provider = self
+            .provider
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        provider.resolve(lookup).await
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TmdbSearchItem {
     id: u64,
@@ -682,6 +733,18 @@ impl TmdbSearchItem {
 
 #[async_trait]
 pub trait TmdbTransport: Send + Sync {
+    /// Validates TMDB access without performing a title search.
+    ///
+    /// The default preserves compatibility for alternate transports that do not support
+    /// validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataProviderError::TemporarilyUnavailable`] by default.
+    async fn validate(&self) -> Result<(), MetadataProviderError> {
+        Err(MetadataProviderError::TemporarilyUnavailable)
+    }
+
     async fn search(
         &self,
         kind: MetadataItemKind,
@@ -734,6 +797,15 @@ impl TmdbProvider {
             transport,
             language,
         })
+    }
+
+    /// Validates the configured transport without performing a title search.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the transport's validation failure.
+    pub async fn validate_connection(&self) -> Result<(), MetadataProviderError> {
+        self.transport.validate().await
     }
 }
 
@@ -829,6 +901,47 @@ impl ReqwestTmdbTransport {
     }
 }
 
+async fn read_tmdb_response(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, MetadataProviderError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_TMDB_RESPONSE_BYTES as u64)
+    {
+        return Err(MetadataProviderError::InvalidResponse);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| MetadataProviderError::TemporarilyUnavailable)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_TMDB_RESPONSE_BYTES {
+            return Err(MetadataProviderError::InvalidResponse);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn validate_tmdb_configuration_response(bytes: &[u8]) -> Result<(), MetadataProviderError> {
+    let response: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| MetadataProviderError::InvalidResponse)?;
+    let Some(response) = response.as_object() else {
+        return Err(MetadataProviderError::InvalidResponse);
+    };
+    if !response
+        .get("images")
+        .is_some_and(serde_json::Value::is_object)
+        || !response
+            .get("change_keys")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(MetadataProviderError::InvalidResponse);
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct TmdbSearchResponse {
     results: Vec<TmdbWireItem>,
@@ -849,6 +962,34 @@ struct TmdbWireItem {
 
 #[async_trait]
 impl TmdbTransport for ReqwestTmdbTransport {
+    async fn validate(&self) -> Result<(), MetadataProviderError> {
+        let response = self
+            .client
+            .get("https://api.themoviedb.org/3/configuration")
+            .bearer_auth(self.access_token.as_str())
+            .send()
+            .await
+            .map_err(|_| MetadataProviderError::TemporarilyUnavailable)?;
+        if !response.status().is_success() {
+            return Err(
+                if matches!(
+                    response.status(),
+                    reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+                ) {
+                    MetadataProviderError::Rejected
+                } else if response.status().is_server_error()
+                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || response.status() == reqwest::StatusCode::REQUEST_TIMEOUT
+                {
+                    MetadataProviderError::TemporarilyUnavailable
+                } else {
+                    MetadataProviderError::InvalidResponse
+                },
+            );
+        }
+        validate_tmdb_configuration_response(&read_tmdb_response(response).await?)
+    }
+
     async fn search(
         &self,
         kind: MetadataItemKind,
@@ -877,7 +1018,7 @@ impl TmdbTransport for ReqwestTmdbTransport {
                 year.to_string(),
             ));
         }
-        let mut response = self
+        let response = self
             .client
             .get(endpoint)
             .bearer_auth(self.access_token.as_str())
@@ -896,23 +1037,7 @@ impl TmdbTransport for ReqwestTmdbTransport {
                 },
             );
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_TMDB_RESPONSE_BYTES as u64)
-        {
-            return Err(MetadataProviderError::InvalidResponse);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| MetadataProviderError::TemporarilyUnavailable)?
-        {
-            if bytes.len().saturating_add(chunk.len()) > MAX_TMDB_RESPONSE_BYTES {
-                return Err(MetadataProviderError::InvalidResponse);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = read_tmdb_response(response).await?;
         let wire: TmdbSearchResponse =
             serde_json::from_slice(&bytes).map_err(|_| MetadataProviderError::InvalidResponse)?;
         if wire.results.len() > 100 {
