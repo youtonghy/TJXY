@@ -1,6 +1,24 @@
-use serde::Serialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tjxy_common::PresentationKey;
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct PlaybackTicketRequest {
+    pub media_source_id: PresentationKey,
+    pub play_session_id: Uuid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackTicketResponse {
+    pub id: Uuid,
+    pub ticket: String,
+    pub expires_at: DateTime<Utc>,
+    pub stream_url: String,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum MediaProtocol {

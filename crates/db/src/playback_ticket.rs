@@ -77,7 +77,7 @@ impl<'connection> PlaybackTicketRepository<'connection> {
     pub async fn issue(
         &self,
         draft: PlaybackTicketDraft,
-    ) -> Result<(), PlaybackTicketRepositoryError> {
+    ) -> Result<DateTime<Utc>, PlaybackTicketRepositoryError> {
         if draft.expires_at <= draft.created_at {
             return Err(PlaybackTicketRepositoryError::InvalidDraft);
         }
@@ -195,7 +195,7 @@ impl<'connection> PlaybackTicketRepository<'connection> {
 async fn issue_on(
     transaction: &DatabaseTransaction,
     draft: &PlaybackTicketDraft,
-) -> Result<(), PlaybackTicketRepositoryError> {
+) -> Result<DateTime<Utc>, PlaybackTicketRepositoryError> {
     let lock = Query::update()
         .table(Alias::new("auth_sessions"))
         .value(
@@ -208,7 +208,7 @@ async fn issue_on(
         .cond_where(
             Cond::any()
                 .add(Expr::col(Alias::new("expires_at")).is_null())
-                .add(Expr::col(Alias::new("expires_at")).gte(draft.expires_at)),
+                .add(Expr::col(Alias::new("expires_at")).gt(draft.created_at)),
         )
         .to_owned();
     if transaction
@@ -219,6 +219,25 @@ async fn issue_on(
     {
         return Err(PlaybackTicketRepositoryError::SessionRejected);
     }
+
+    let session_expiry_query = Query::select()
+        .column(Alias::new("expires_at"))
+        .from(Alias::new("auth_sessions"))
+        .and_where(Expr::col(Alias::new("id")).eq(draft.auth_session_id))
+        .limit(1)
+        .to_owned();
+    let session_expiry = transaction
+        .query_one(
+            transaction
+                .get_database_backend()
+                .build(&session_expiry_query),
+        )
+        .await?
+        .ok_or(PlaybackTicketRepositoryError::SessionRejected)?
+        .try_get::<Option<DateTime<Utc>>>("", "expires_at")?;
+    let actual_expiry = session_expiry.map_or(draft.expires_at, |expires_at| {
+        expires_at.min(draft.expires_at)
+    });
 
     let count = Query::select()
         .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("count"))
@@ -258,7 +277,7 @@ async fn issue_on(
             draft.media_source_id.as_uuid().into(),
             draft.play_session_id.into(),
             draft.token_digest.to_vec().into(),
-            draft.expires_at.into(),
+            actual_expiry.into(),
             Option::<DateTime<Utc>>::None.into(),
             draft.created_at.into(),
         ])
@@ -266,7 +285,7 @@ async fn issue_on(
     transaction
         .execute(transaction.get_database_backend().build(&insert))
         .await?;
-    Ok(())
+    Ok(actual_expiry)
 }
 
 fn grant_from_row(row: QueryResult) -> Result<PlaybackTicketGrant, PlaybackTicketRepositoryError> {

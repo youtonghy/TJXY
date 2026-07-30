@@ -8,8 +8,8 @@ use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
     CatalogQueryService, DisplayPreferencesService, LibraryService, MediaCollectionService,
     MediaReadService, MetadataImageFetchError, MetadataImportService, MetadataResolveService,
-    PlaystateService, ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry,
-    SystemClock, TaskService, UserDataService,
+    PlaybackTicketService, PlaystateService, ProbeService, ReqwestMetadataImageFetcher,
+    StorageBackendRegistry, SystemClock, TaskService, UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
@@ -390,6 +390,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
         database.clone(),
     ));
     let media_collections = Arc::new(MediaCollectionService::new(database.clone()));
+    let playback_tickets = Arc::new(PlaybackTicketService::new(database.clone(), SystemClock));
     let display_preferences = Arc::new(DisplayPreferencesService::new(database.clone()));
     let user_data = Arc::new(UserDataService::new(database));
     let warm_home_cache = cache.is_enabled();
@@ -403,6 +404,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_libraries(libraries)
     .with_assets(assets)
     .with_media(media)
+    .with_playback_tickets(playback_tickets)
     .with_media_collections(media_collections)
     .with_display_preferences(display_preferences)
     .with_playstate(playstate)

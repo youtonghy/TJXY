@@ -12,6 +12,7 @@ mod import_admin;
 mod library;
 mod media_collection;
 mod metadata_admin;
+mod playback_ticket;
 mod playstate;
 mod relink_admin;
 mod runtime_storage;
@@ -45,8 +46,8 @@ use axum::{
 use tjxy_api::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
 use tjxy_application::{
     AssetReadService, AuthService, CatalogQueryService, DisplayPreferencesService, LibraryService,
-    MediaCollectionService, MediaReadService, MetadataImportService, PlaystateService, SystemClock,
-    TaskService, UserDataService,
+    MediaCollectionService, MediaReadService, MetadataImportService, PlaybackTicketService,
+    PlaystateService, SystemClock, TaskService, UserDataService,
 };
 use uuid::Uuid;
 
@@ -117,6 +118,7 @@ pub struct AppState {
     libraries: Option<Arc<LibraryService>>,
     assets: Option<Arc<AssetReadService>>,
     media: Option<Arc<MediaReadService>>,
+    playback_tickets: Option<Arc<PlaybackTicketService<SystemClock>>>,
     media_collections: Option<Arc<MediaCollectionService>>,
     playstate: Option<Arc<PlaystateService>>,
     tasks: Option<Arc<TaskService>>,
@@ -142,6 +144,7 @@ impl AppState {
             libraries: None,
             assets: None,
             media: None,
+            playback_tickets: None,
             media_collections: None,
             playstate: None,
             tasks: None,
@@ -198,6 +201,15 @@ impl AppState {
     #[must_use]
     pub fn with_media(mut self, media: Arc<MediaReadService>) -> Self {
         self.media = Some(media);
+        self
+    }
+
+    #[must_use]
+    pub fn with_playback_tickets(
+        mut self,
+        playback_tickets: Arc<PlaybackTicketService<SystemClock>>,
+    ) -> Self {
+        self.playback_tickets = Some(playback_tickets);
         self
     }
 
@@ -333,6 +345,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/Items/{item_id}/PlaybackInfo",
             get(browse::playback_info_get).post(browse::playback_info_post),
+        )
+        .route(
+            "/Items/{item_id}/PlaybackTicket",
+            post(playback_ticket::issue),
+        )
+        .route(
+            "/PlaybackTickets/{ticket_id}",
+            delete(playback_ticket::revoke),
         )
         .route(
             "/UserItems/{item_id}/UserData",

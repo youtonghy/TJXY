@@ -569,6 +569,8 @@ pub struct PlaybackLocation {
     provider_object_id: String,
     size: u64,
     remote_revision: Option<String>,
+    container: Option<String>,
+    is_audio: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -618,6 +620,16 @@ impl PlaybackLocation {
     #[must_use]
     pub fn remote_revision(&self) -> Option<&str> {
         self.remote_revision.as_deref()
+    }
+
+    #[must_use]
+    pub fn container(&self) -> Option<&str> {
+        self.container.as_deref()
+    }
+
+    #[must_use]
+    pub const fn is_audio(&self) -> bool {
+        self.is_audio
     }
 }
 
@@ -2763,6 +2775,14 @@ async fn playback_location(
             Expr::col((object.clone(), Alias::new("remote_revision"))),
             Alias::new("remote_revision"),
         )
+        .expr_as(
+            Expr::col((canonical_source.clone(), Alias::new("container"))),
+            Alias::new("container"),
+        )
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("item_type"))),
+            Alias::new("item_type"),
+        )
         .expr_as(availability_rank.clone(), Alias::new("availability_rank"))
         .expr_as(
             Expr::col((location.clone(), Alias::new("priority"))),
@@ -2945,6 +2965,8 @@ fn playback_location_from_row(
         provider_object_id: row.try_get("", "provider_object_id")?,
         size: u64::try_from(size).map_err(|_| CatalogPublicationError::InvalidSourceGraph)?,
         remote_revision: row.try_get("", "remote_revision")?,
+        container: row.try_get("", "container")?,
+        is_audio: row.try_get::<String>("", "item_type")? == "Audio",
     })
 }
 
@@ -3000,6 +3022,14 @@ async fn subtitle_location(
         .expr_as(
             Expr::col((object.clone(), Alias::new("remote_revision"))),
             Alias::new("remote_revision"),
+        )
+        .expr_as(
+            Expr::col((canonical_source.clone(), Alias::new("container"))),
+            Alias::new("container"),
+        )
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("item_type"))),
+            Alias::new("item_type"),
         )
         .expr_as(
             Expr::col((canonical_subtitle.clone(), Alias::new("format"))),

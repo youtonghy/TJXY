@@ -1,5 +1,8 @@
 use chrono::{Duration, TimeZone, Utc};
-use sea_orm::DatabaseConnection;
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection,
+    sea_query::{Alias, Query},
+};
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, PresentationKey, Username};
 use tjxy_db::{
@@ -286,4 +289,27 @@ async fn issue_caps_each_login_session_at_thirty_two_active_tickets() {
         error,
         PlaybackTicketRepositoryError::CapacityReached
     ));
+}
+
+#[tokio::test]
+async fn issue_caps_ticket_expiry_at_the_login_session_expiry() {
+    let fixture = fixture().await;
+    let session_expiry = fixture.now + Duration::hours(1);
+    let update = Query::update()
+        .table(Alias::new("auth_sessions"))
+        .value(Alias::new("expires_at"), session_expiry)
+        .and_where(sea_orm::sea_query::Expr::col(Alias::new("id")).eq(fixture.session_id))
+        .to_owned();
+    fixture
+        .database
+        .execute(fixture.database.get_database_backend().build(&update))
+        .await
+        .unwrap();
+
+    let actual_expiry = PlaybackTicketRepository::new(&fixture.database)
+        .issue(draft(&fixture, [53_u8; 32]))
+        .await
+        .unwrap();
+
+    assert_eq!(actual_expiry, session_expiry);
 }

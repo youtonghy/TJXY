@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tjxy_application::{
     AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
-    MediaInspector, MediaReadService, PlaystateService, ProbeInput, ProbeService,
-    ProbeServiceError, SourceIndexService, SystemClock, TaskService, UserDataService,
+    MediaInspector, MediaReadService, PlaybackTicketService, PlaystateService, ProbeInput,
+    ProbeService, ProbeServiceError, SourceIndexService, SystemClock, TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
 use tjxy_server::{AppState, ServerIdentity, build_router};
@@ -351,6 +351,7 @@ async fn test_app() -> TestApp {
             .with_backend(cloud_account, Arc::clone(&cloud_backend)),
     );
     let media_collections = Arc::new(MediaCollectionService::new(database.clone()));
+    let playback_tickets = Arc::new(PlaybackTicketService::new(database.clone(), SystemClock));
     let user_data = Arc::new(UserDataService::new(database.clone()));
     let playstate = Arc::new(PlaystateService::new(database.clone()));
     let tasks = Arc::new(TaskService::new(database.clone()));
@@ -362,6 +363,7 @@ async fn test_app() -> TestApp {
                 .with_libraries(libraries)
                 .with_assets(asset_reader)
                 .with_media(media_reader)
+                .with_playback_tickets(playback_tickets)
                 .with_media_collections(media_collections)
                 .with_playstate(playstate)
                 .with_tasks(tasks)
@@ -2027,7 +2029,7 @@ fn assert_cloud_representation_headers(
     content_length: &str,
     content_range: Option<&str>,
 ) {
-    assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
+    assert_eq!(headers[header::CONTENT_TYPE], "video/x-matroska");
     assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
     assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
     assert_eq!(headers[header::CONTENT_LENGTH], content_length);
@@ -3612,6 +3614,7 @@ async fn media_stream_supports_get_head_range_if_range_and_416() {
 
     let full = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
     assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::CONTENT_TYPE], "video/x-matroska");
     assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
     assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
     let etag = full.headers()[header::ETAG].to_str().unwrap().to_owned();
@@ -3736,6 +3739,7 @@ async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
 
     let full = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
     assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::CONTENT_TYPE], "audio/x-matroska");
     assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
     assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
     let body = full.into_body().collect().await.unwrap().to_bytes();
@@ -3774,6 +3778,101 @@ async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
             .unwrap()
             .to_bytes()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn playback_ticket_is_scoped_revocable_and_authorizes_range_streaming() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let other_item = seed_item(&app.database, library, "Dune", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, login_token) = login(&app.router).await;
+    let playback = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &login_token,
+        "{}".to_owned(),
+    )
+    .await;
+    assert_eq!(playback.status(), StatusCode::OK);
+    let playback = playback.into_body().collect().await.unwrap().to_bytes();
+    let playback: Value = serde_json::from_slice(&playback).unwrap();
+    let play_session_id = playback["PlaySessionId"].as_str().unwrap();
+
+    let issued = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackTicket"),
+        &login_token,
+        json!({
+            "MediaSourceId": presentation,
+            "PlaySessionId": play_session_id,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(issued.status(), StatusCode::OK);
+    assert_eq!(issued.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(issued.headers()[header::REFERRER_POLICY], "no-referrer");
+    let issued = issued.into_body().collect().await.unwrap().to_bytes();
+    let issued: Value = serde_json::from_slice(&issued).unwrap();
+    let ticket_id = issued["Id"].as_str().unwrap();
+    let ticket = issued["Ticket"].as_str().unwrap();
+    let stream_url = issued["StreamUrl"].as_str().unwrap();
+    assert_eq!(ticket.len(), 64);
+    assert_ne!(ticket, login_token);
+    assert!(issued["ExpiresAt"].as_str().is_some());
+
+    let partial = stream_request(
+        &app.router,
+        "GET",
+        stream_url,
+        None,
+        Some("bytes=2-5"),
+        None,
+    )
+    .await;
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(partial.headers()[header::CONTENT_TYPE], "video/x-matroska");
+    let body = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"2345");
+
+    let tampered_url = stream_url.replacen(&item.to_string(), &other_item.to_string(), 1);
+    assert_eq!(
+        stream_request(&app.router, "GET", &tampered_url, None, None, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let revoked = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/PlaybackTickets/{ticket_id}"))
+                .header(header::AUTHORIZATION, token_header(&login_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        stream_request(&app.router, "GET", stream_url, None, None, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
 }
 

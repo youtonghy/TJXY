@@ -13,6 +13,7 @@ mod library;
 mod media;
 mod media_collection;
 mod metadata;
+mod playback_ticket;
 mod playstate;
 mod probe;
 mod series_expand;
@@ -54,6 +55,9 @@ pub use metadata::{
     MetadataImageBytes, MetadataImageFetchError, MetadataImageFetcher, MetadataImportError,
     MetadataImportReport, MetadataImportService, MetadataResolveError, MetadataResolveReport,
     MetadataResolveService, ReqwestMetadataImageFetcher,
+};
+pub use playback_ticket::{
+    IssuedPlaybackTicket, PlaybackTicketService, PlaybackTicketServiceError, SecretPlaybackTicket,
 };
 pub use playstate::{PlaybackEvent, PlaystateService, PlaystateServiceError};
 pub use probe::{

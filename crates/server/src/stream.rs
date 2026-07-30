@@ -36,14 +36,41 @@ async fn serve(
     raw_query: Option<String>,
     head_only: bool,
 ) -> Response {
-    let principal =
-        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
-            Ok(principal) => principal,
-            Err(response) => return response,
-        };
-    let presentation = match stream_presentation(raw_query.as_deref()) {
-        Ok(presentation) => presentation,
+    let query = match stream_query(raw_query.as_deref()) {
+        Ok(query) => query,
         Err((status, message)) => return response(status, message),
+    };
+    let user_id = if headers.contains_key(header::AUTHORIZATION)
+        || query.api_key_present
+        || headers.contains_key("X-Emby-Token")
+        || headers.contains_key("X-MediaBrowser-Token")
+    {
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal.user().id(),
+            Err(response) => return response,
+        }
+    } else if let Some(ticket) = query.playback_ticket.as_deref() {
+        let Some(service) = state.playback_tickets.as_ref() else {
+            return response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "playback tickets are unavailable",
+            );
+        };
+        match service
+            .authorize(
+                ticket,
+                CatalogItemId::from_uuid(item_id),
+                query.presentation,
+            )
+            .await
+        {
+            Ok(Some(grant)) => grant.user_id(),
+            Ok(None) | Err(_) => {
+                return response(StatusCode::UNAUTHORIZED, "authentication required");
+            }
+        }
+    } else {
+        return response(StatusCode::UNAUTHORIZED, "authentication required");
     };
     let Some(media) = state.media.as_ref() else {
         return response(
@@ -53,9 +80,9 @@ async fn serve(
     };
     let resolved = match media
         .resolve(
-            principal.user().id(),
+            user_id,
             CatalogItemId::from_uuid(item_id),
-            presentation,
+            query.presentation,
         )
         .await
     {
@@ -77,7 +104,14 @@ async fn serve(
         if use_range && headers.contains_key(header::RANGE) {
             return unsatisfied(0);
         }
-        return build_response(StatusCode::OK, 0, resolved.etag(), None, Body::empty());
+        return build_response(
+            StatusCode::OK,
+            0,
+            resolved.etag(),
+            resolved.content_type(),
+            None,
+            Body::empty(),
+        );
     }
     let selected = if use_range {
         match requested_range(&headers, size) {
@@ -99,6 +133,7 @@ async fn serve(
             status,
             length,
             resolved.etag(),
+            resolved.content_type(),
             content_range.as_deref(),
             Body::empty(),
         );
@@ -113,6 +148,7 @@ async fn serve(
                 status,
                 length,
                 &etag,
+                resolved.content_type(),
                 content_range.as_deref(),
                 Body::from_stream(opened.into_stream()),
             )
@@ -122,13 +158,17 @@ async fn serve(
     }
 }
 
-fn stream_presentation(
-    raw_query: Option<&str>,
-) -> Result<PresentationKey, (StatusCode, &'static str)> {
+struct StreamQuery {
+    presentation: PresentationKey,
+    playback_ticket: Option<String>,
+    api_key_present: bool,
+}
+
+fn stream_query(raw_query: Option<&str>) -> Result<StreamQuery, (StatusCode, &'static str)> {
     let mut query = auth::request_query(raw_query)
         .map_err(|()| (StatusCode::BAD_REQUEST, "invalid stream query"))?;
-    query.remove("ApiKey");
-    query.remove("api_key");
+    let api_key_present = query.remove("ApiKey").is_some() || query.remove("api_key").is_some();
+    let playback_ticket = query.remove("PlaybackTicket");
     if query.remove("static").as_deref() != Some("true") {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
@@ -138,9 +178,14 @@ fn stream_presentation(
     if !query.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
-    Uuid::parse_str(&presentation)
+    let presentation = Uuid::parse_str(&presentation)
         .map(PresentationKey::from_uuid)
-        .map_err(|_| (StatusCode::NOT_FOUND, "media source was not found"))
+        .map_err(|_| (StatusCode::NOT_FOUND, "media source was not found"))?;
+    Ok(StreamQuery {
+        presentation,
+        playback_ticket,
+        api_key_present,
+    })
 }
 
 fn requested_range(headers: &HeaderMap, size: u64) -> Result<Option<(u64, u64)>, ()> {
@@ -183,6 +228,7 @@ fn build_response(
     status: StatusCode,
     content_length: u64,
     etag: &str,
+    content_type: &str,
     content_range: Option<&str>,
     body: Body,
 ) -> Response {
@@ -192,7 +238,7 @@ fn build_response(
         .header(header::CONTENT_LENGTH, content_length)
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, "private, no-cache")
-        .header(header::CONTENT_TYPE, "application/octet-stream");
+        .header(header::CONTENT_TYPE, content_type);
     if let Some(content_range) = content_range {
         builder = builder.header(header::CONTENT_RANGE, content_range);
     }

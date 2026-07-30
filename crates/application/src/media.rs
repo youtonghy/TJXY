@@ -134,6 +134,7 @@ impl MediaReadService {
             storage_object_id: location.storage_object_id(),
             object_id,
             size: location.size(),
+            content_type: media_content_type(location.container(), location.is_audio()),
             etag: media_etag(
                 location.storage_account_id(),
                 location.provider_object_id(),
@@ -172,6 +173,7 @@ pub struct ResolvedMedia {
     storage_object_id: StorageObjectRecordId,
     object_id: StorageObjectId,
     size: u64,
+    content_type: &'static str,
     etag: String,
 }
 
@@ -184,6 +186,11 @@ impl ResolvedMedia {
     #[must_use]
     pub fn etag(&self) -> &str {
         &self.etag
+    }
+
+    #[must_use]
+    pub const fn content_type(&self) -> &'static str {
+        self.content_type
     }
 
     /// Opens a validated half-open byte range.
@@ -217,6 +224,24 @@ impl ResolvedMedia {
             total_size: self.size,
             etag: self.etag.clone(),
         })
+    }
+}
+
+fn media_content_type(container: Option<&str>, is_audio: bool) -> &'static str {
+    match (is_audio, container.map(str::to_ascii_lowercase).as_deref()) {
+        (false, Some("mp4" | "m4v")) => "video/mp4",
+        (false, Some("webm")) => "video/webm",
+        (false, Some("mkv" | "matroska")) => "video/x-matroska",
+        (false, Some("ogg" | "ogv")) => "video/ogg",
+        (true, Some("mp3")) => "audio/mpeg",
+        (true, Some("m4a" | "mp4")) => "audio/mp4",
+        (true, Some("aac")) => "audio/aac",
+        (true, Some("ogg" | "oga")) => "audio/ogg",
+        (true, Some("webm")) => "audio/webm",
+        (true, Some("flac")) => "audio/flac",
+        (true, Some("wav" | "wave")) => "audio/wav",
+        (true, Some("mkv" | "matroska")) => "audio/x-matroska",
+        _ => "application/octet-stream",
     }
 }
 
