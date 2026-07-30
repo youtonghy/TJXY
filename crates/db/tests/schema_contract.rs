@@ -40,6 +40,7 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "auth_state",
         "auth_sessions",
         "api_keys",
+        "metadata_provider_settings",
         "playback_tickets",
         "playback_sessions",
         "storage_accounts",
@@ -1064,6 +1065,47 @@ async fn all_migrations_can_be_rolled_back() {
             "table {table} remains"
         );
     }
+}
+
+#[tokio::test]
+async fn metadata_provider_settings_migration_is_reversible() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+    assert!(
+        schema
+            .has_table("metadata_provider_settings")
+            .await
+            .unwrap()
+    );
+    for column in [
+        "provider",
+        "enabled",
+        "language",
+        "credential_id",
+        "encrypted_payload",
+        "key_version",
+        "revision",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            schema
+                .has_column("metadata_provider_settings", column)
+                .await
+                .unwrap(),
+            "metadata_provider_settings missing {column}"
+        );
+    }
+
+    Migrator::down(&database, Some(1)).await.unwrap();
+
+    assert!(
+        !schema
+            .has_table("metadata_provider_settings")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

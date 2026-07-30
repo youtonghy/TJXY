@@ -19,6 +19,7 @@ mod library;
 mod manual_probe;
 mod media_collection;
 mod metadata;
+mod metadata_provider_settings;
 mod metadata_work;
 mod migration;
 mod natural_key;
@@ -96,6 +97,10 @@ pub use media_collection::{
 };
 pub use metadata::{
     MetadataPublicationError, MetadataPublicationReport, MetadataPublicationRepository,
+};
+pub use metadata_provider_settings::{
+    MetadataProviderSettingRecord, MetadataProviderSettingsRepository,
+    MetadataProviderSettingsRepositoryError,
 };
 pub use metadata_work::{
     MetadataSidecarCandidate, MetadataWorkError, MetadataWorkRepository, MetadataWorkSnapshot,
