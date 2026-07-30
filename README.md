@@ -113,12 +113,20 @@ worker reads at most 1 MiB from each end of an object and currently supports Mat
 unsupported or incomplete containers are recorded as terminal Probe failures.
 Remote metadata is disabled by default. Set
 `TJXY_ENABLE_REMOTE_PROVIDERS=true` and provide the secret
-`TJXY_TMDB_ACCESS_TOKEN` to enable `TMDb`; `TJXY_TMDB_LANGUAGE` defaults to
-`zh-CN`. A missing token keeps the provider disabled and performs no remote
-metadata requests. Selected Movie/Series posters are downloaded only from the
-fixed TMDb image host with redirects disabled and bounded time/bytes, validated
-by the asset store, and published as local Primary images. Image failures are
-recorded as work warnings without discarding usable text metadata.
+`TJXY_TMDB_ACCESS_TOKEN` to enable `TMDb`; this credential must be the TMDB API
+Read Access Token used as an HTTPS Bearer token, not a legacy v3 API key.
+`TJXY_TMDB_LANGUAGE` defaults to `zh-CN`. Authenticated administrators can manage
+the same setting through `/Admin/Metadata/Providers/Tmdb`; persistent saves
+require `TJXY_CREDENTIAL_KEYRING`, are encrypted before entering SQL, and apply
+to subsequent metadata jobs without a restart. A database setting takes
+precedence over the environment fallback, including when it disables TMDB;
+deleting it restores the fallback. A missing database row preserves the
+environment behavior, while a missing token keeps the provider disabled and
+performs no remote metadata requests. Selected Movie/Series posters are
+downloaded only from the fixed TMDb image host with redirects disabled and
+bounded time/bytes, validated by the asset store, and published as local Primary
+images. Image failures are recorded as work warnings without discarding usable
+text metadata.
 Native Google accounts reference an encrypted `storage_credentials` row and are
 loaded automatically. Supply only the deployment keyring through the secret
 environment variable `TJXY_CREDENTIAL_KEYRING`, for example

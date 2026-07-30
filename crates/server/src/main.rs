@@ -5,7 +5,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tjxy_cache::{CacheConfigurationError, RedisCacheConfig, RedisMode};
 use tjxy_credentials::{CredentialCipher, CredentialKey};
-use tjxy_metadata::TmdbProvider;
+use tjxy_metadata::{ReloadableMetadataProvider, TmdbProvider};
 use tjxy_server::{
     AdminAssetsError, BootstrapAdmin, GoogleDriveOAuthConfiguration, InitializationError,
     MicrosoftOneDriveOAuthConfiguration, ServerIdentity, StartupOptions,
@@ -83,7 +83,9 @@ async fn main() -> Result<(), StartupError> {
     }
     let database_url =
         env::var("TJXY_DATABASE_URL").unwrap_or_else(|_| "sqlite://tjxy.db?mode=rwc".to_owned());
-    let mut startup = StartupOptions::new(database_url, identity);
+    let tmdb = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let mut startup =
+        StartupOptions::new(database_url, identity).with_tmdb_provider(Arc::clone(&tmdb));
     if let Ok(encoded) = env::var("TJXY_CREDENTIAL_KEYRING") {
         let encoded = Zeroizing::new(encoded);
         startup = startup.with_credential_cipher(Arc::new(parse_credential_keyring(&encoded)?));
@@ -123,9 +125,12 @@ async fn main() -> Result<(), StartupError> {
         .map_err(|_| StartupError::InvalidRemoteProviders)?;
     if remote_providers && let Ok(token) = env::var("TJXY_TMDB_ACCESS_TOKEN") {
         let language = env::var("TJXY_TMDB_LANGUAGE").unwrap_or_else(|_| "zh-CN".to_owned());
-        let provider = TmdbProvider::new(token, language)
-            .map_err(|_| StartupError::InvalidTmdbConfiguration)?;
-        startup = startup.with_metadata_provider(Arc::new(provider));
+        let provider = Arc::new(
+            TmdbProvider::new(token, language.clone())
+                .map_err(|_| StartupError::InvalidTmdbConfiguration)?,
+        );
+        tmdb.replace(Some(provider.clone()));
+        startup = startup.with_tmdb_environment_fallback(provider, language);
     }
     if let Ok(value) = env::var("TJXY_LAZY_WAIT_MS") {
         let milliseconds = value

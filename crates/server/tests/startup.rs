@@ -22,7 +22,12 @@ use tjxy_common::{CatalogItemId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     CatalogPublicationRepository, FilesystemRootDraft, LibraryPolicyUpdate, LibraryRepository,
-    WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
+    MetadataProviderSettingsRepository, WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope,
+    WorkTaskKind,
+};
+use tjxy_metadata::{
+    MetadataItemKind, MetadataLookup, MetadataProvider, MetadataProviderError,
+    ReloadableMetadataProvider, TmdbProvider, TmdbSearchItem, TmdbTransport,
 };
 use tjxy_server::{
     ApiKeyValidationError, BootstrapAdmin, InitializationError, ServerIdentity, StartupOptions,
@@ -40,6 +45,27 @@ use uuid::Uuid;
 struct ChangeAwareFilesystem {
     filesystem: FilesystemBackend,
     change_calls: AtomicUsize,
+}
+
+struct StartupTmdbTransport {
+    label: String,
+    language: String,
+}
+
+#[async_trait::async_trait]
+impl TmdbTransport for StartupTmdbTransport {
+    async fn search(
+        &self,
+        _kind: MetadataItemKind,
+        _query: &str,
+        _year: Option<i32>,
+        _language: &str,
+    ) -> Result<Vec<TmdbSearchItem>, MetadataProviderError> {
+        Ok(vec![TmdbSearchItem::new(
+            1,
+            format!("{}:{}", self.label, self.language),
+        )])
+    }
 }
 
 #[async_trait::async_trait]
@@ -88,6 +114,57 @@ fn api_key_cipher(
         .map(|(version, byte)| CredentialKey::new(*version, [*byte; 32]).unwrap())
         .collect();
     Arc::new(CredentialCipher::new(active, historical).unwrap())
+}
+
+fn startup_tmdb_provider(
+    access_token: &str,
+    language: &str,
+) -> Result<TmdbProvider, tjxy_metadata::MetadataError> {
+    TmdbProvider::with_transport(
+        language,
+        Arc::new(StartupTmdbTransport {
+            label: access_token.to_owned(),
+            language: language.to_owned(),
+        }),
+    )
+}
+
+async fn active_tmdb_title(provider: &ReloadableMetadataProvider) -> Option<String> {
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Fixture", None).unwrap();
+    let candidate = provider.resolve(&lookup).await.unwrap()?;
+    let resolution = tjxy_metadata::MetadataResolution::from_candidate(&lookup, candidate).unwrap();
+    Some(resolution.title().to_owned())
+}
+
+async fn seed_tmdb_settings(
+    database: &DatabaseConnection,
+    cipher: &CredentialCipher,
+    enabled: bool,
+    language: &str,
+    token: &[u8],
+) {
+    let sealed = cipher.seal_bound(Uuid::new_v4(), "tmdb", token).unwrap();
+    MetadataProviderSettingsRepository::new(database)
+        .put(&sealed, enabled, language, None)
+        .await
+        .unwrap();
+}
+
+fn tmdb_startup_options(
+    fixture: &ReconnectableTestDatabase,
+    assets: &TempDir,
+    runtime: Arc<ReloadableMetadataProvider>,
+    fallback: Arc<TmdbProvider>,
+) -> StartupOptions {
+    StartupOptions::new(
+        fixture.database_url(),
+        ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"),
+    )
+    .with_assets_dir(assets.path())
+    .with_bootstrap_admin(BootstrapAdmin::new("Admin", "password"))
+    .with_tmdb_provider(runtime)
+    .with_tmdb_environment_fallback(fallback, "zh-CN")
+    .with_tmdb_provider_factory(startup_tmdb_provider)
 }
 
 async fn seed_api_keys(
@@ -176,6 +253,166 @@ async fn api_key_startup_without_persisted_keys_does_not_require_a_keyring() {
     initialize(api_key_startup_options(&fixture, &assets))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn persisted_enabled_tmdb_settings_replace_the_environment_fallback() {
+    let fixture = reconnectable_test_database().await.unwrap();
+    tjxy_db::Migrator::up(fixture.connection(), None)
+        .await
+        .unwrap();
+    let cipher = api_key_cipher(1, 81, &[]);
+    seed_tmdb_settings(
+        fixture.connection(),
+        &cipher,
+        true,
+        "en-AU",
+        b"database-token",
+    )
+    .await;
+    let runtime = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let fallback = Arc::new(startup_tmdb_provider("environment-token", "zh-CN").unwrap());
+    runtime.replace(Some(fallback.clone()));
+    let assets = TempDir::new().unwrap();
+
+    initialize(
+        tmdb_startup_options(&fixture, &assets, Arc::clone(&runtime), fallback)
+            .with_credential_cipher(cipher),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        active_tmdb_title(&runtime).await.as_deref(),
+        Some("database-token:en-AU")
+    );
+}
+
+#[tokio::test]
+async fn persisted_disabled_tmdb_settings_suppress_the_environment_fallback() {
+    let fixture = reconnectable_test_database().await.unwrap();
+    tjxy_db::Migrator::up(fixture.connection(), None)
+        .await
+        .unwrap();
+    let cipher = api_key_cipher(1, 82, &[]);
+    seed_tmdb_settings(
+        fixture.connection(),
+        &cipher,
+        false,
+        "en-US",
+        b"disabled-database-token",
+    )
+    .await;
+    let runtime = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let fallback = Arc::new(startup_tmdb_provider("environment-token", "zh-CN").unwrap());
+    runtime.replace(Some(fallback.clone()));
+    let assets = TempDir::new().unwrap();
+
+    initialize(
+        tmdb_startup_options(&fixture, &assets, Arc::clone(&runtime), fallback)
+            .with_credential_cipher(cipher),
+    )
+    .await
+    .unwrap();
+
+    assert!(active_tmdb_title(&runtime).await.is_none());
+}
+
+#[tokio::test]
+async fn missing_database_tmdb_settings_preserve_the_environment_fallback() {
+    let fixture = reconnectable_test_database().await.unwrap();
+    let runtime = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let fallback = Arc::new(startup_tmdb_provider("environment-token", "zh-CN").unwrap());
+    runtime.replace(Some(fallback.clone()));
+    let assets = TempDir::new().unwrap();
+
+    initialize(tmdb_startup_options(
+        &fixture,
+        &assets,
+        Arc::clone(&runtime),
+        fallback,
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        active_tmdb_title(&runtime).await.as_deref(),
+        Some("environment-token:zh-CN")
+    );
+}
+
+#[tokio::test]
+async fn unreadable_persisted_tmdb_settings_prevent_readiness_without_exposing_plaintext() {
+    let fixture = reconnectable_test_database().await.unwrap();
+    tjxy_db::Migrator::up(fixture.connection(), None)
+        .await
+        .unwrap();
+    let cipher = api_key_cipher(1, 83, &[]);
+    let token = b"startup-token-must-not-leak";
+    seed_tmdb_settings(fixture.connection(), &cipher, true, "en-GB", token).await;
+    let row = fixture
+        .connection()
+        .query_one(
+            fixture.connection().get_database_backend().build(
+                &Query::select()
+                    .column(Alias::new("encrypted_payload"))
+                    .from(Alias::new("metadata_provider_settings"))
+                    .and_where(Expr::col(Alias::new("provider")).eq("tmdb"))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut payload = row.try_get::<Vec<u8>>("", "encrypted_payload").unwrap();
+    payload[12] ^= 1;
+    fixture
+        .connection()
+        .execute(
+            fixture.connection().get_database_backend().build(
+                &Query::update()
+                    .table(Alias::new("metadata_provider_settings"))
+                    .value(Alias::new("encrypted_payload"), payload)
+                    .and_where(Expr::col(Alias::new("provider")).eq("tmdb"))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    let runtime = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let fallback = Arc::new(startup_tmdb_provider("environment-token", "zh-CN").unwrap());
+    runtime.replace(Some(fallback.clone()));
+    let assets = TempDir::new().unwrap();
+
+    let Err(error) = initialize(
+        tmdb_startup_options(&fixture, &assets, runtime, fallback).with_credential_cipher(cipher),
+    )
+    .await
+    else {
+        panic!("unreadable persisted TMDB settings unexpectedly reached readiness");
+    };
+
+    assert!(matches!(
+        error,
+        InitializationError::MetadataSettingsValidation(_)
+    ));
+    assert_eq!(
+        error.to_string(),
+        "metadata provider settings validation failed"
+    );
+    assert!(
+        !error
+            .to_string()
+            .as_bytes()
+            .windows(token.len())
+            .any(|window| window == token)
+    );
+    assert!(
+        !format!("{error:?}")
+            .as_bytes()
+            .windows(token.len())
+            .any(|window| window == token)
+    );
 }
 
 #[tokio::test]

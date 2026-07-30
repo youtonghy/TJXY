@@ -15,10 +15,11 @@ use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
 use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
+    MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
     StorageAccountRepository, StorageAccountRepositoryError, StorageCredentialRepository,
     StorageCredentialRepositoryError,
 };
-use tjxy_metadata::MetadataProvider;
+use tjxy_metadata::{MetadataError, MetadataProvider, ReloadableMetadataProvider, TmdbProvider};
 use tjxy_storage::StorageBackend;
 use tjxy_storage_filesystem::FilesystemBackend;
 use tjxy_storage_google_drive::{
@@ -75,6 +76,9 @@ pub struct StartupOptions {
     onedrive_oauth: Option<crate::storage_admin::MicrosoftOneDriveOAuthConfiguration>,
     redis_cache: RedisCacheConfig,
     metadata_providers: Vec<Arc<dyn MetadataProvider>>,
+    tmdb_provider: Arc<ReloadableMetadataProvider>,
+    tmdb_environment_fallback: Option<crate::metadata_settings_admin::TmdbEnvironmentFallback>,
+    tmdb_provider_factory: Arc<crate::metadata_settings_admin::TmdbProviderFactory>,
     media_refresh_interval: Option<StdDuration>,
 }
 
@@ -119,6 +123,12 @@ impl fmt::Debug for StartupOptions {
             .field("onedrive_oauth_configured", &self.onedrive_oauth.is_some())
             .field("redis_cache", &self.redis_cache)
             .field("metadata_provider_count", &self.metadata_providers.len())
+            .field("tmdb_provider", &"[RELOADABLE]")
+            .field(
+                "tmdb_environment_fallback_configured",
+                &self.tmdb_environment_fallback.is_some(),
+            )
+            .field("tmdb_provider_factory", &"[CONFIGURED]")
             .field("media_refresh_interval", &self.media_refresh_interval)
             .finish()
     }
@@ -144,6 +154,11 @@ impl StartupOptions {
             onedrive_oauth: None,
             redis_cache: RedisCacheConfig::default(),
             metadata_providers: Vec::new(),
+            tmdb_provider: Arc::new(ReloadableMetadataProvider::new("Tmdb")),
+            tmdb_environment_fallback: None,
+            tmdb_provider_factory: Arc::new(|access_token, language| {
+                TmdbProvider::new(access_token.to_owned(), language.to_owned())
+            }),
             media_refresh_interval: None,
         }
     }
@@ -242,6 +257,36 @@ impl StartupOptions {
         self
     }
 
+    /// Uses one shared reloadable TMDB provider for startup, metadata work, and admin updates.
+    #[must_use]
+    pub fn with_tmdb_provider(mut self, provider: Arc<ReloadableMetadataProvider>) -> Self {
+        self.tmdb_provider = provider;
+        self
+    }
+
+    /// Records the already-loaded environment fallback restored when database settings are absent.
+    #[must_use]
+    pub fn with_tmdb_environment_fallback(
+        mut self,
+        provider: Arc<TmdbProvider>,
+        language: impl Into<String>,
+    ) -> Self {
+        self.tmdb_environment_fallback = Some(
+            crate::metadata_settings_admin::TmdbEnvironmentFallback::new(provider, language.into()),
+        );
+        self
+    }
+
+    /// Overrides TMDB construction for alternate transports and deterministic integration tests.
+    #[must_use]
+    pub fn with_tmdb_provider_factory<Factory>(mut self, factory: Factory) -> Self
+    where
+        Factory: Fn(&str, &str) -> Result<TmdbProvider, MetadataError> + Send + Sync + 'static,
+    {
+        self.tmdb_provider_factory = Arc::new(factory);
+        self
+    }
+
     /// Enables periodic durable media refresh submission. A zero duration disables it.
     #[must_use]
     pub fn with_media_refresh_interval(mut self, interval: StdDuration) -> Self {
@@ -260,6 +305,10 @@ impl StartupOptions {
 #[allow(clippy::too_many_lines)] // Startup deliberately composes every long-lived service once.
 pub async fn initialize(options: StartupOptions) -> Result<AppState, InitializationError> {
     let storage_admin_cipher = options.credential_cipher.clone();
+    let metadata_settings_cipher = options.credential_cipher.clone();
+    let tmdb_provider = Arc::clone(&options.tmdb_provider);
+    let tmdb_environment_fallback = options.tmdb_environment_fallback.clone();
+    let tmdb_provider_factory = Arc::clone(&options.tmdb_provider_factory);
     validate_storage_backends(&options.storage_backends)?;
     let database = Database::connect(&options.database_url).await?;
     if database.get_database_backend() == DbBackend::Sqlite {
@@ -271,6 +320,14 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .await?;
     }
     tjxy_db::Migrator::up(&database, None).await?;
+    load_persisted_tmdb_settings(
+        &database,
+        metadata_settings_cipher.as_deref(),
+        &tmdb_provider,
+        tmdb_provider_factory.as_ref(),
+    )
+    .await
+    .map_err(InitializationError::MetadataSettingsValidation)?;
     let mut filesystem_backends = options.filesystem_backends;
     for configured in LibraryRepository::new(&database)
         .active_filesystem_roots()
@@ -352,11 +409,13 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     let filesystem_backends =
         prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled)
             .await?;
+    let mut metadata_providers = options.metadata_providers;
+    metadata_providers.insert(0, Arc::clone(&tmdb_provider) as Arc<dyn MetadataProvider>);
     let (media, storage_runtime) = configure_storage(
         &database,
         filesystem_backends,
         storage_backends,
-        options.metadata_providers,
+        metadata_providers,
         asset_writer,
         image_fetcher,
         options.filesystem_realtime_enabled,
@@ -386,6 +445,15 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
         Arc::clone(&storage_runtime),
     );
     let metadata_import = Arc::new(MetadataImportService::new(database.clone()));
+    let metadata_settings_admin = Arc::new(
+        crate::metadata_settings_admin::MetadataSettingsAdminService::new(
+            database.clone(),
+            metadata_settings_cipher,
+            tmdb_provider,
+            tmdb_environment_fallback,
+            tmdb_provider_factory,
+        ),
+    );
     let relink_admin = Arc::new(crate::relink_admin::RelinkAdminService::new(
         database.clone(),
     ));
@@ -413,6 +481,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_storage_admin(storage_admin)
     .with_import_admin(import_admin)
     .with_metadata_import(metadata_import)
+    .with_metadata_settings_admin(metadata_settings_admin)
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)
     .with_realtime_events(realtime_events)
@@ -451,6 +520,72 @@ fn configure_admin_services(
             cipher,
         ))),
     )
+}
+
+async fn load_persisted_tmdb_settings(
+    database: &sea_orm::DatabaseConnection,
+    cipher: Option<&CredentialCipher>,
+    runtime: &ReloadableMetadataProvider,
+    provider_factory: &crate::metadata_settings_admin::TmdbProviderFactory,
+) -> Result<(), MetadataSettingsValidationError> {
+    let stored = MetadataProviderSettingsRepository::new(database)
+        .get(crate::metadata_settings_admin::TMDB_PROVIDER_KEY)
+        .await
+        .map_err(|error| metadata_settings_repository_error(&error))?;
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let cipher = cipher.ok_or(MetadataSettingsValidationError::KeyringUnavailable)?;
+    let plaintext = cipher
+        .open(stored.credential_id(), stored.provider(), stored.envelope())
+        .map_err(|error| metadata_settings_cipher_error(&error))?;
+    let access_token = std::str::from_utf8(&plaintext)
+        .map_err(|_| MetadataSettingsValidationError::StoredStateInvalid)?;
+    let provider = provider_factory(access_token, stored.language())
+        .map(Arc::new)
+        .map_err(|_| MetadataSettingsValidationError::StoredStateInvalid)?;
+    runtime.replace(stored.enabled().then_some(provider as Arc<_>));
+    Ok(())
+}
+
+fn metadata_settings_repository_error(
+    error: &MetadataProviderSettingsRepositoryError,
+) -> MetadataSettingsValidationError {
+    match error {
+        MetadataProviderSettingsRepositoryError::InvalidStoredEnvelope => {
+            MetadataSettingsValidationError::EnvelopeUnreadable
+        }
+        MetadataProviderSettingsRepositoryError::Database(_)
+        | MetadataProviderSettingsRepositoryError::RollbackFailed { .. } => {
+            MetadataSettingsValidationError::PersistenceUnavailable
+        }
+        MetadataProviderSettingsRepositoryError::InvalidProvider
+        | MetadataProviderSettingsRepositoryError::InvalidLanguage
+        | MetadataProviderSettingsRepositoryError::InvalidRevision
+        | MetadataProviderSettingsRepositoryError::RevisionConflict
+        | MetadataProviderSettingsRepositoryError::CredentialIdentityConflict => {
+            MetadataSettingsValidationError::StoredStateInvalid
+        }
+    }
+}
+
+fn metadata_settings_cipher_error(
+    error: &CredentialCipherError,
+) -> MetadataSettingsValidationError {
+    match error {
+        CredentialCipherError::UnknownKeyVersion => {
+            MetadataSettingsValidationError::KeyringUnavailable
+        }
+        CredentialCipherError::InvalidKeyVersion
+        | CredentialCipherError::DuplicateKeyVersion
+        | CredentialCipherError::InvalidEnvelope
+        | CredentialCipherError::InvalidInput => {
+            MetadataSettingsValidationError::StoredStateInvalid
+        }
+        CredentialCipherError::EncryptionFailed | CredentialCipherError::AuthenticationFailed => {
+            MetadataSettingsValidationError::EnvelopeUnreadable
+        }
+    }
 }
 
 async fn load_onedrive_backends(
@@ -686,6 +821,8 @@ pub enum InitializationError {
     Authentication(#[from] AuthError),
     #[error("API key validation failed")]
     ApiKeyValidation(#[source] ApiKeyValidationError),
+    #[error("metadata provider settings validation failed")]
+    MetadataSettingsValidation(#[source] MetadataSettingsValidationError),
     #[error("asset service initialization failed: {0}")]
     Asset(#[from] AssetReadError),
     #[error("asset writer initialization failed: {0}")]
@@ -702,6 +839,18 @@ pub enum InitializationError {
     OneDriveStorage(#[from] OneDriveBackendLoadError),
     #[error("runtime storage activation failed: {0}")]
     RuntimeStorage(#[from] crate::runtime_storage::RuntimeStorageError),
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum MetadataSettingsValidationError {
+    #[error("metadata provider credential keyring is unavailable")]
+    KeyringUnavailable,
+    #[error("persisted metadata provider credential envelope is unreadable")]
+    EnvelopeUnreadable,
+    #[error("persisted metadata provider settings are invalid")]
+    StoredStateInvalid,
+    #[error("persisted metadata provider settings storage is unavailable")]
+    PersistenceUnavailable,
 }
 
 #[derive(Debug, Error)]

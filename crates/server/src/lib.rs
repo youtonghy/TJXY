@@ -12,6 +12,7 @@ mod import_admin;
 mod library;
 mod media_collection;
 mod metadata_admin;
+mod metadata_settings_admin;
 mod playback_ticket;
 mod playstate;
 mod relink_admin;
@@ -54,7 +55,8 @@ use uuid::Uuid;
 pub use admin_assets::AdminAssetsError;
 pub use runtime_storage::RuntimeStorageError;
 pub use startup::{
-    ApiKeyValidationError, BootstrapAdmin, InitializationError, StartupOptions, initialize,
+    ApiKeyValidationError, BootstrapAdmin, InitializationError, MetadataSettingsValidationError,
+    StartupOptions, initialize,
 };
 pub use storage_admin::{GoogleDriveOAuthConfiguration, MicrosoftOneDriveOAuthConfiguration};
 
@@ -126,6 +128,7 @@ pub struct AppState {
     storage_admin: Option<Arc<storage_admin::StorageAdminService>>,
     import_admin: Option<Arc<import_admin::ImportAdminService>>,
     metadata_import: Option<Arc<MetadataImportService>>,
+    metadata_settings_admin: Option<Arc<metadata_settings_admin::MetadataSettingsAdminService>>,
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
     storage_runtime: Option<Arc<runtime_storage::RuntimeStorageManager>>,
     realtime_events: Arc<socket::RealtimeEvents>,
@@ -152,6 +155,7 @@ impl AppState {
             storage_admin: None,
             import_admin: None,
             metadata_import: None,
+            metadata_settings_admin: None,
             relink_admin: None,
             storage_runtime: None,
             realtime_events: Arc::new(socket::RealtimeEvents::new()),
@@ -272,6 +276,15 @@ impl AppState {
     #[must_use]
     fn with_metadata_import(mut self, metadata_import: Arc<MetadataImportService>) -> Self {
         self.metadata_import = Some(metadata_import);
+        self
+    }
+
+    #[must_use]
+    fn with_metadata_settings_admin(
+        mut self,
+        service: Arc<metadata_settings_admin::MetadataSettingsAdminService>,
+    ) -> Self {
+        self.metadata_settings_admin = Some(service);
         self
     }
 
@@ -414,6 +427,16 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/Admin/Items/{item_id}/Metadata/Nfo",
             post(metadata_admin::import_nfo),
+        )
+        .route(
+            "/Admin/Metadata/Providers/Tmdb",
+            get(metadata_settings_admin::get)
+                .put(metadata_settings_admin::put)
+                .delete(metadata_settings_admin::delete),
+        )
+        .route(
+            "/Admin/Metadata/Providers/Tmdb/Test",
+            post(metadata_settings_admin::test),
         )
         .route(
             "/Admin/Imports/{job_id}/Publish",
