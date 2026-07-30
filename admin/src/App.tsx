@@ -8,6 +8,7 @@ import { LoginPage } from './auth/LoginPage';
 import { AdminLayout } from './layout/AdminLayout';
 import { LibraryEditPage } from './libraries/LibraryEditPage';
 import { LibrariesPage } from './libraries/LibrariesPage';
+import { MetadataSettingsPage } from './settings/MetadataSettingsPage';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
 import { TasksPage } from './tasks/TasksPage';
@@ -58,6 +59,7 @@ export function App() {
                 <Route element={<TasksPage />} path="/tasks" />
                 <Route element={<LibrariesPage />} path="/libraries" />
                 <Route element={<LibraryEditPage />} path="/libraries/:id" />
+                <Route element={<MetadataSettingsPage />} path="/settings/metadata" />
                 <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
                 <Route element={<OneDrivePage />} path="/storage/onedrive" />
               </CustomRoutes>

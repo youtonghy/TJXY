@@ -24,7 +24,7 @@ describe('AdminShell', () => {
     });
 
     const navigation = screen.getByRole('navigation', { name: 'Primary' });
-    expect(within(navigation).getAllByText(/Manage|Operations|Storage/u)).toHaveLength(3);
+    expect(within(navigation).getAllByText(/Manage|Operations|Storage|System/u)).toHaveLength(4);
     expect(within(navigation).getAllByRole('link').map((link) => link.textContent.trim())).toEqual([
       'Users',
       'Access',
@@ -32,6 +32,7 @@ describe('AdminShell', () => {
       'Tasks',
       'Google Drive',
       'OneDrive',
+      'Metadata',
     ]);
     expect(within(navigation).getByRole('link', { name: 'Tasks' })).toHaveAttribute(
       'aria-current',

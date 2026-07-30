@@ -1,5 +1,6 @@
 import {
   Cloud,
+  DatabaseZap,
   FolderKanban,
   ListTodo,
   ShieldCheck,
@@ -8,7 +9,7 @@ import {
 import type { ComponentType } from 'react';
 
 export interface AdminNavigationGroup {
-  label: 'Manage' | 'Operations' | 'Storage';
+  label: 'Manage' | 'Operations' | 'Storage' | 'System';
   items: readonly {
     label: string;
     to: string;
@@ -36,6 +37,12 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
     items: [
       { label: 'Google Drive', to: '/admin/storage/google-drive', icon: Cloud },
       { label: 'OneDrive', to: '/admin/storage/onedrive', icon: Cloud },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { label: 'Metadata', to: '/admin/settings/metadata', icon: DatabaseZap },
     ],
   },
 ];

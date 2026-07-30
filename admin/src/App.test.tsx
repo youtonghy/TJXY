@@ -85,6 +85,10 @@ vi.mock('./storage/OneDrivePage', async () => {
   const React = await import('react');
   return { OneDrivePage: () => React.createElement('h1', null, 'OneDrive page') };
 });
+vi.mock('./settings/MetadataSettingsPage', async () => {
+  const React = await import('react');
+  return { MetadataSettingsPage: () => React.createElement('h1', null, 'Metadata page') };
+});
 
 const readinessMock = vi.mocked(checkServerReadiness);
 
@@ -146,6 +150,7 @@ it.each([
   ['/admin/libraries', 'Libraries page'],
   ['/admin/storage/google-drive', 'Google Drive page'],
   ['/admin/storage/onedrive', 'OneDrive page'],
+  ['/admin/settings/metadata', 'Metadata page'],
 ])('renders %s inside the guarded shell', async (path, heading) => {
   renderRoute(path);
 
