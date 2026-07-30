@@ -78,6 +78,22 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "text/javascript");
     assert!(body_text(response).await.contains("console.log"));
+
+    let root = request(&app, Method::GET, "/").await;
+    assert_eq!(root.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(root.headers()[header::LOCATION], "/app/");
+    for path in ["/app/", "/app/items/item-1"] {
+        let response = request(&app, Method::GET, path).await;
+        assert_eq!(response.status(), StatusCode::OK, "path {path}");
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+    }
+    let response = request(&app, Method::GET, "/assets/app.js").await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

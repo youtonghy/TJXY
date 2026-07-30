@@ -33,11 +33,22 @@ pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
         fs::read(&index_path).map_err(|_| AdminAssetsError::UnreadableIndex)?,
     ));
     let fallback_index = Arc::clone(&index);
+    let app_fallback_index = Arc::clone(&index);
 
     Ok(Router::new()
+        .route("/", get(|| async { Redirect::permanent("/app/") }))
         .route("/admin", get(|| async { Redirect::permanent("/admin/") }))
+        .route_service("/app/", get_service(ServeFile::new(index_path.clone())))
         .route_service("/admin/", get_service(ServeFile::new(index_path)))
+        .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
         .nest_service("/admin/assets", ServeDir::new(dist_dir.join("assets")))
+        .route(
+            "/app/{*path}",
+            get(move |headers: HeaderMap| {
+                let index = Arc::clone(&app_fallback_index);
+                async move { spa_fallback(&headers, &index) }
+            }),
+        )
         .route(
             "/admin/{*path}",
             get(move |headers: HeaderMap| {

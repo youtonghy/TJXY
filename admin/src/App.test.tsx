@@ -130,6 +130,16 @@ it('uses Users as the direct-login fallback', async () => {
   expect(window.location.pathname).toBe('/admin/users');
 });
 
+it('renders the ordinary HeroUI client without mounting the administrator shell', async () => {
+  sessionStorage.clear();
+  renderRoute('/app/login');
+
+  expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  expect(screen.getByText('Your media library')).toBeVisible();
+  expect(screen.queryByText('TJXY Admin')).not.toBeInTheDocument();
+  expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+});
+
 it.each([
   ['/admin/access', 'Access page'],
   ['/admin/tasks', 'Tasks page'],

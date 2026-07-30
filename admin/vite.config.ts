@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
   const target = environment.TJXY_DEV_SERVER ?? 'http://127.0.0.1:8096';
 
   return {
-    base: '/admin/',
+    base: '/',
     plugins: [react()],
     build: {
       outDir: 'dist',
@@ -23,7 +23,7 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    server: {
+      server: {
       proxy: {
         '/Admin': target,
         '/Auth': target,
@@ -33,6 +33,14 @@ export default defineConfig(({ mode }) => {
         '/Users': target,
         '/System': target,
         '/health': target,
+        '/Items': target,
+        '/UserItems': target,
+        '/Shows': target,
+        '/Search': target,
+        '/UserViews': target,
+        '/Sessions': target,
+        '/Videos': target,
+        '/Audio': target,
       },
     },
   };

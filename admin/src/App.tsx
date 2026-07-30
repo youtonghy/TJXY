@@ -22,11 +22,13 @@ import { UserCreate } from './users/UserCreate';
 import { UserEdit } from './users/UserEdit';
 import { UserList } from './users/UserList';
 import { UserShow } from './users/UserShow';
+import { ClientApp } from './client/ClientApp';
 
 export function App() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route element={<ClientApp />} path="/app/*" />
         <Route
           path="/admin/*"
           element={(
