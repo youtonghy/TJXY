@@ -315,14 +315,14 @@ function TmdbSettingsForm({
       )}
 
       <Card className="gap-0 p-0">
-        <Card.Header className="flex-row items-start justify-between gap-4 border-b border-border p-5 sm:p-6">
+        <Card.Header className="flex-col items-start justify-between gap-4 border-b border-border p-5 sm:flex-row sm:p-6">
           <div className="min-w-0">
             <Card.Title>TMDB</Card.Title>
             <Card.Description className="mt-1">
               The Movie Database metadata provider.
             </Card.Description>
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <div className="flex w-full shrink-0 flex-wrap justify-start gap-2 sm:w-auto sm:justify-end">
             <StatusChip tone={sourceTone(settings.source)}>
               {sourceLabel(settings.source)}
             </StatusChip>
