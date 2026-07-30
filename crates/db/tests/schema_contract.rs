@@ -1150,6 +1150,16 @@ async fn metadata_provider_settings_migration_is_reversible() {
 
     Migrator::down(&database, Some(1)).await.unwrap();
 
+    assert!(!schema.has_table("metadata_snapshots").await.unwrap());
+    assert!(
+        schema
+            .has_table("metadata_provider_settings")
+            .await
+            .unwrap()
+    );
+
+    Migrator::down(&database, Some(1)).await.unwrap();
+
     assert!(
         !schema
             .has_table("metadata_provider_settings")

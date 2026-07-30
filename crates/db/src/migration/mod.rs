@@ -37,6 +37,7 @@ mod m20260726_000036_device_options;
 mod m20260726_000037_api_keys;
 mod m20260730_000038_playback_tickets;
 mod m20260730_000039_metadata_provider_settings;
+mod m20260730_000040_rich_catalog_metadata;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -96,6 +97,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260726_000037_api_keys::Migration),
             Box::new(m20260730_000038_playback_tickets::Migration),
             Box::new(m20260730_000039_metadata_provider_settings::Migration),
+            Box::new(m20260730_000040_rich_catalog_metadata::Migration),
         ]
     }
 }

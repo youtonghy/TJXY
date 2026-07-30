@@ -5,7 +5,7 @@ TJXY models logical media independently from storage and exposes the resulting c
 ## Language
 
 **CatalogItem**:
-A logical work or hierarchy node such as a Movie, Series, Season, or Episode. Its identity and UserData do not depend on a file path.
+A logical work or hierarchy node such as a Movie, Series, Season, or Episode. Its identity and UserData do not depend on a file path, and it may be fully browsable without a MediaSource.
 _Avoid_: BaseItem, media file, path item
 
 **MediaSource**:
@@ -99,6 +99,14 @@ _Avoid_: Item metadata, session state
 **MetadataProvider**:
 A process-local Rust provider that resolves basic title metadata and images into SQL with provenance. v1 remote support is TMDb only; NFO/local images are importers, not runtime sources of truth. There is no Jellyfin/Emby plugin host.
 _Avoid_: Plugin runtime, TVDB remote in v1, media-folder as SoT
+
+**Credit**:
+The ordered relationship between a Person and a CatalogItem, including the person's contribution type and optional character or job.
+_Avoid_: Person record, untyped cast name
+
+**MetadataSnapshot**:
+A provider response captured at fetch time for traceability of metadata not yet represented by the CatalogItem model. It is evidence, not the catalog's query-facing source of truth.
+_Avoid_: CatalogItem metadata blob, frontend DTO
 
 **EffectiveScanPolicy**:
 The SQL-persisted object selection, metadata, expansion, and probe policies used by Admin, VirtualFolders, and schedulers. A profile name is a preset label, not a hidden runtime default.
