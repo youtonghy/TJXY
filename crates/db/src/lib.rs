@@ -23,6 +23,7 @@ mod metadata_work;
 mod migration;
 mod natural_key;
 mod outbox;
+mod playback_ticket;
 mod playstate;
 mod probe;
 mod series_expand;
@@ -103,6 +104,10 @@ pub use migration::Migrator;
 pub use outbox::{
     BackloggedStorageRoot, ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason,
     OutboxRepository, OutboxRepositoryError, SystemClock,
+};
+pub use playback_ticket::{
+    PlaybackTicketDraft, PlaybackTicketGrant, PlaybackTicketRepository,
+    PlaybackTicketRepositoryError,
 };
 pub use playstate::{PlaybackSessionCommit, PlaystateRepository, PlaystateRepositoryError};
 pub use probe::{ProbeCandidate, ProbeRepository, ProbeRepositoryError, ProbeResult, ProbedStream};

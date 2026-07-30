@@ -40,6 +40,7 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
         "auth_state",
         "auth_sessions",
         "api_keys",
+        "playback_tickets",
         "playback_sessions",
         "storage_accounts",
         "storage_credentials",
@@ -217,6 +218,21 @@ async fn schema_keeps_effective_policy_and_revisions_in_sql() {
                 "expires_at",
                 "last_seen_at",
                 "revoked_at",
+            ],
+        ),
+        (
+            "playback_tickets",
+            vec![
+                "id",
+                "auth_session_id",
+                "user_id",
+                "item_id",
+                "media_source_id",
+                "play_session_id",
+                "token_digest",
+                "expires_at",
+                "revoked_at",
+                "created_at",
             ],
         ),
         (
@@ -1077,6 +1093,8 @@ async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight(
         ("api_keys", "uq_api_keys_envelope_id"),
         ("api_keys", "uq_api_keys_token_digest"),
         ("api_keys", "ix_api_keys_creator"),
+        ("playback_tickets", "uq_playback_tickets_token_digest"),
+        ("playback_tickets", "ix_playback_tickets_session_state"),
         ("user_data", "ix_user_data_hybrid_signals"),
         (
             "library_catalog_items",
