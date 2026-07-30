@@ -175,7 +175,7 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
                     "backdrop_path": "/chernobyl-bg.jpg",
                     "original_language": "en",
                     "genres": [{"id": 18, "name": "剧情"}],
-                    "production_companies": [],
+                    "production_companies": null,
                     "production_countries": [{"iso_3166_1": "US", "name": "United States of America"}],
                     "spoken_languages": [{"english_name": "English", "iso_639_1": "en", "name": "English"}],
                     "seasons": [
@@ -198,7 +198,7 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
                         }]
                     },
                     "content_ratings": {"results": [{"iso_3166_1": "US", "rating": "TV-MA"}]},
-                    "external_ids": {"imdb_id": "tt7366338", "tvdb_id": 360_893},
+                    "external_ids": null,
                     "images": {"posters": [], "backdrops": []}
                 })),
             ),
@@ -223,13 +223,13 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
                             "vote_average": 8.5,
                             "vote_count": 500,
                             "still_path": "/e2.jpg",
-                            "guest_stars": [],
-                            "crew": []
+                            "guest_stars": null,
+                            "crew": null
                         },
                         {
                             "id": 170_001,
                             "name": "1:23:45",
-                            "overview": "第一集",
+                            "overview": "第一集\n灾难开始\t调查展开",
                             "air_date": "2019-05-06",
                             "episode_number": 1,
                             "season_number": 1,
@@ -253,7 +253,7 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
                             }]
                         }
                     ],
-                    "credits": {"cast": [], "crew": []},
+                    "credits": null,
                     "images": {"posters": []}
                 })),
             ),
@@ -281,6 +281,10 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
     assert_eq!(
         series.seasons()[0].episodes()[0].item().runtime_ticks(),
         Some(35_400_000_000)
+    );
+    assert_eq!(
+        series.seasons()[0].episodes()[0].item().overview(),
+        Some("第一集 灾难开始 调查展开")
     );
     assert_eq!(
         series.seasons()[0].episodes()[0].item().credits()[0].credit_type(),

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -1075,7 +1075,18 @@ fn validated_optional(
     value: Option<String>,
     limit: usize,
 ) -> Result<Option<String>, MetadataProviderError> {
-    let value = nonempty(value);
+    let value = nonempty(value).map(|value| {
+        value
+            .chars()
+            .map(|character| {
+                if matches!(character, '\r' | '\n' | '\t') {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+    });
     if value
         .as_deref()
         .is_some_and(|value| !valid_text(value, limit))
@@ -1158,19 +1169,19 @@ struct MovieWire {
     poster_path: Option<String>,
     backdrop_path: Option<String>,
     original_language: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     genres: Vec<NamedWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     production_companies: Vec<NamedWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     production_countries: Vec<CountryWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     spoken_languages: Vec<LanguageWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     credits: CreditsWire,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     release_dates: ReleaseDatesWire,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     external_ids: ExternalIdsWire,
 }
 
@@ -1186,26 +1197,26 @@ struct SeriesWire {
     status: Option<String>,
     vote_average: Option<f64>,
     vote_count: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     episode_run_time: Vec<i64>,
     poster_path: Option<String>,
     backdrop_path: Option<String>,
     original_language: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     genres: Vec<NamedWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     production_companies: Vec<NamedWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     production_countries: Vec<CountryWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     spoken_languages: Vec<LanguageWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     seasons: Vec<SeasonSummaryWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     aggregate_credits: AggregateCreditsWire,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     content_ratings: ContentRatingsWire,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     external_ids: ExternalIdsWire,
 }
 
@@ -1222,9 +1233,9 @@ struct SeasonWire {
     air_date: Option<String>,
     season_number: i32,
     poster_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     episodes: Vec<EpisodeWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_or_null")]
     credits: CreditsWire,
 }
 
@@ -1241,9 +1252,9 @@ struct EpisodeWire {
     vote_average: Option<f64>,
     vote_count: Option<u64>,
     still_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     guest_stars: Vec<CastWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     crew: Vec<CrewWire>,
 }
 
@@ -1269,9 +1280,9 @@ struct LanguageWire {
 
 #[derive(Default, Deserialize)]
 struct CreditsWire {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     cast: Vec<CastWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     crew: Vec<CrewWire>,
 }
 
@@ -1297,9 +1308,9 @@ struct CrewWire {
 
 #[derive(Default, Deserialize)]
 struct AggregateCreditsWire {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     cast: Vec<AggregateCastWire>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     crew: Vec<AggregateCrewWire>,
 }
 
@@ -1309,7 +1320,7 @@ struct AggregateCastWire {
     name: String,
     #[serde(default)]
     order: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     roles: Vec<AggregateRoleWire>,
     profile_path: Option<String>,
 }
@@ -1325,7 +1336,7 @@ struct AggregateCrewWire {
     name: String,
     #[serde(default)]
     department: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     jobs: Vec<AggregateJobWire>,
     profile_path: Option<String>,
 }
@@ -1337,14 +1348,14 @@ struct AggregateJobWire {
 
 #[derive(Default, Deserialize)]
 struct ReleaseDatesWire {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     results: Vec<ReleaseRegionWire>,
 }
 
 #[derive(Deserialize)]
 struct ReleaseRegionWire {
     iso_3166_1: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     release_dates: Vec<ReleaseWire>,
 }
 
@@ -1357,7 +1368,7 @@ struct ReleaseWire {
 
 #[derive(Default, Deserialize)]
 struct ContentRatingsWire {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     results: Vec<ContentRatingWire>,
 }
 
@@ -1373,4 +1384,20 @@ struct ExternalIdsWire {
     imdb_id: Option<String>,
     tvdb_id: Option<u64>,
     wikidata_id: Option<String>,
+}
+
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn deserialize_default_or_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }

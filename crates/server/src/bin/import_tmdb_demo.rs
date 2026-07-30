@@ -63,6 +63,13 @@ enum ImportDemoError {
     MetadataConfiguration(#[from] MetadataError),
     #[error("TMDB catalog request failed: {0}")]
     MetadataProvider(#[from] MetadataProviderError),
+    #[error("TMDB {kind} {id} request failed: {source}")]
+    MetadataRecord {
+        kind: &'static str,
+        id: u64,
+        #[source]
+        source: MetadataProviderError,
+    },
     #[error("image client configuration failed: {0}")]
     ImageFetch(#[from] MetadataImageFetchError),
     #[error("asset storage failed: {0}")]
@@ -91,11 +98,26 @@ async fn main() -> Result<(), ImportDemoError> {
     let manifest = demo_manifest();
     let mut movies = Vec::with_capacity(manifest.movie_ids.len());
     for id in manifest.movie_ids {
-        movies.push(client.movie(*id).await?);
+        movies.push(
+            client
+                .movie(*id)
+                .await
+                .map_err(|source| ImportDemoError::MetadataRecord {
+                    kind: "movie",
+                    id: *id,
+                    source,
+                })?,
+        );
     }
     let mut series = Vec::with_capacity(manifest.series_ids.len());
     for id in manifest.series_ids {
-        series.push(client.series(*id).await?);
+        series.push(client.series(*id).await.map_err(|source| {
+            ImportDemoError::MetadataRecord {
+                kind: "series",
+                id: *id,
+                source,
+            }
+        })?);
     }
 
     let image_fetcher = ReqwestMetadataImageFetcher::new()?;
