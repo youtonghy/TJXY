@@ -345,5 +345,5 @@ fn unique(name: &str, columns: &[&str]) -> IndexCreateStatement {
     for column in columns {
         index.col(Alias::new(*column));
     }
-    index.to_owned()
+    index.clone()
 }

@@ -1,15 +1,12 @@
-use std::{collections::BTreeMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
 use thiserror::Error;
 use tjxy_cache::{CacheConfigurationError, RedisCacheConfig, RedisMode};
-use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_metadata::{ReloadableMetadataProvider, TmdbProvider};
 use tjxy_server::{
     AdminAssetsError, BootstrapAdmin, GoogleDriveOAuthConfiguration, InitializationError,
     MicrosoftOneDriveOAuthConfiguration, ServerIdentity, StartupOptions,
-    build_router_with_admin_dist, initialize,
+    build_router_with_admin_dist, initialize, parse_credential_keyring,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -88,7 +85,10 @@ async fn main() -> Result<(), StartupError> {
         StartupOptions::new(database_url, identity).with_tmdb_provider(Arc::clone(&tmdb));
     if let Ok(encoded) = env::var("TJXY_CREDENTIAL_KEYRING") {
         let encoded = Zeroizing::new(encoded);
-        startup = startup.with_credential_cipher(Arc::new(parse_credential_keyring(&encoded)?));
+        startup = startup.with_credential_cipher(Arc::new(
+            parse_credential_keyring(&encoded)
+                .map_err(|_| StartupError::InvalidCredentialKeyring)?,
+        ));
     }
     if let Some(oauth) = google_oauth_configuration()? {
         startup = startup.with_google_oauth(oauth);
@@ -253,43 +253,6 @@ fn redis_number(name: &'static str, default: u64) -> Result<u64, StartupError> {
             .ok_or(StartupError::InvalidRedisNumber(name)),
         Err(_) => Ok(default),
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SerializedCredentialKeyring {
-    active_version: i32,
-    keys: BTreeMap<i32, Zeroizing<String>>,
-}
-
-fn parse_credential_keyring(value: &str) -> Result<CredentialCipher, StartupError> {
-    let serialized: SerializedCredentialKeyring =
-        serde_json::from_str(value).map_err(|_| StartupError::InvalidCredentialKeyring)?;
-    let mut active = None;
-    let mut historical = Vec::with_capacity(serialized.keys.len().saturating_sub(1));
-    for (version, encoded) in serialized.keys {
-        let decoded = Zeroizing::new(
-            STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|_| StartupError::InvalidCredentialKeyring)?,
-        );
-        let bytes: [u8; 32] = decoded
-            .as_slice()
-            .try_into()
-            .map_err(|_| StartupError::InvalidCredentialKeyring)?;
-        let key = CredentialKey::new(version, bytes)
-            .map_err(|_| StartupError::InvalidCredentialKeyring)?;
-        if version == serialized.active_version {
-            active = Some(key);
-        } else {
-            historical.push(key);
-        }
-    }
-    CredentialCipher::new(
-        active.ok_or(StartupError::InvalidCredentialKeyring)?,
-        historical,
-    )
-    .map_err(|_| StartupError::InvalidCredentialKeyring)
 }
 
 #[cfg(test)]

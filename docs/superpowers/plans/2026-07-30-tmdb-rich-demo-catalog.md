@@ -161,44 +161,44 @@ git commit -m "feat(metadata): fetch rich tmdb catalog records"
 - Consumes `MetadataProviderSettingsRepository`, the configured credential keyring,
   `TmdbCatalogClient`, and `AssetWriteService`.
 
-- [ ] **Step 1: Write a failing repository contract**
+- [x] **Step 1: Write a failing repository contract**
 
 Publish a two-item fixture twice into real SQLite. Assert literal counts remain one
 Movie library, one Television library, one Series, one Season, one Episode, and one shared
 Person; assert all descendants have Television membership; assert `catalog_state.generation`
 increases once per successful publication and no media source rows exist.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p tjxy-db --test demo_catalog_repository_contract --locked`
 
 Expected: FAIL because the repository and publication types do not exist.
 
-- [ ] **Step 3: Implement deterministic transactional publication**
+- [x] **Step 3: Implement deterministic transactional publication**
 
 Derive UUIDs from the namespace plus provider kind and ID. Upsert the two libraries and
 items, replace only associations owned by the deterministic demo item set, publish
 provider IDs/provenance/snapshots/assets, then increment generation once in the same
 transaction. A forced association error must roll back all catalog changes.
 
-- [ ] **Step 4: Add and verify rollback behavior**
+- [x] **Step 4: Add and verify rollback behavior**
 
 Inject one invalid parent in the fixture and assert item, membership, association, and
 generation counts remain unchanged.
 
-- [ ] **Step 5: Write a failing command-manifest test**
+- [x] **Step 5: Write a failing command-manifest test**
 
 Test a pure `demo_manifest()` consumer result: 12 unique Movie IDs, 6 unique Series IDs,
 and exact inclusion of the approved IDs. Test missing/disabled/undecryptable TMDB settings
 fail before a fake transport records any request.
 
-- [ ] **Step 6: Implement the command**
+- [x] **Step 6: Implement the command**
 
 Read `TJXY_DATABASE_URL`, the existing asset root configuration, and the existing
 `TJXY_CREDENTIAL_KEYRING` parser. Fetch and validate every manifest record, stage assets,
 build one publication, publish it, and print only counts and sanitized warnings.
 
-- [ ] **Step 7: Verify GREEN**
+- [x] **Step 7: Verify GREEN**
 
 Run:
 

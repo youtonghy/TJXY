@@ -20,6 +20,7 @@ tjxy-storage = { path = "../storage" }
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tjxy-test-support = { path = "../test-support" }
 tokio.workspace = true
 

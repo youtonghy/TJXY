@@ -7,6 +7,7 @@ mod cache_invalidation;
 mod catalog_publication;
 mod catalog_query;
 mod catalog_storage_scope;
+mod demo_catalog;
 mod device;
 mod discover;
 mod display_preferences;
@@ -60,6 +61,10 @@ pub use catalog_query::{
     AssetRecord, BrowseParent, CacheRevisions, CatalogItemRecord, CatalogItemType, CatalogPage,
     CatalogPageRequest, CatalogQueryError, CatalogQueryRepository, LazyCatalogWorkTarget,
     LazyStorageScope, LibraryViewRecord,
+};
+pub use demo_catalog::{
+    DemoCatalogPublication, DemoCatalogPublicationError, DemoCatalogPublicationReport,
+    DemoCatalogRepository, demo_catalog_item_id,
 };
 pub use device::{DeviceOptionsRecord, DeviceRecord, DeviceRepository, DeviceRepositoryError};
 #[doc(hidden)]

@@ -487,7 +487,9 @@ pub struct MetadataImageReference {
 }
 
 impl MetadataImageReference {
-    fn tmdb(path: &str) -> Option<Self> {
+    /// Builds the pinned HTTPS TMDB image reference for a validated provider path.
+    #[must_use]
+    pub fn tmdb(path: &str) -> Option<Self> {
         let path = path.strip_prefix('/')?;
         if path.is_empty()
             || path.len() > 512

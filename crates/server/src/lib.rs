@@ -4,6 +4,7 @@ mod admin_assets;
 mod api_key;
 mod auth;
 mod browse;
+mod configuration;
 mod device;
 mod display_preferences;
 mod hybrid_admin;
@@ -53,6 +54,7 @@ use tjxy_application::{
 use uuid::Uuid;
 
 pub use admin_assets::AdminAssetsError;
+pub use configuration::{CredentialKeyringError, parse_credential_keyring};
 pub use runtime_storage::RuntimeStorageError;
 pub use startup::{
     ApiKeyValidationError, BootstrapAdmin, InitializationError, MetadataSettingsValidationError,

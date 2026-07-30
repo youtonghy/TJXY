@@ -3154,6 +3154,7 @@ dependencies = [
 name = "tjxy-db"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "sea-orm",
  "sea-orm-migration",
