@@ -207,7 +207,7 @@ cargo test -p tjxy-db --test demo_catalog_repository_contract --locked
 cargo test -p tjxy-server --bin import_tmdb_demo --locked
 ```
 
-- [ ] **Step 8: Commit the importer slice**
+- [x] **Step 8: Commit the importer slice**
 
 ```text
 git add crates/db/src/demo_catalog.rs crates/db/src/lib.rs crates/db/tests/demo_catalog_repository_contract.rs crates/server/src/bin/import_tmdb_demo.rs crates/server/Cargo.toml README.md
@@ -234,36 +234,36 @@ git commit -m "feat(server): import an idempotent tmdb demo catalog"
   omitting absent optional fields.
 - Keeps `GET /Items?ParentId=` as the Season/Episode child contract.
 
-- [ ] **Step 1: Write a failing repository detail and ordering contract**
+- [x] **Step 1: Write a failing repository detail and ordering contract**
 
 Seed one Series with Season 0, Season 2, Season 1 and Episode 2, Episode 1. Assert returned
 IDs are ordered `0,1,2` and `1,2`. Seed genres, studios, countries, languages, duplicated
 Person roles, and 30 cast entries; assert detail returns normalized values and exactly the
 bounded ordered credits without N+1 behavior.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p tjxy-db --test catalog_query_repository_contract rich_detail --locked`
 
-- [ ] **Step 3: Implement set-based repository projections**
+- [x] **Step 3: Implement set-based repository projections**
 
 Keep list/search queries lightweight. Load detail associations in bounded set queries keyed
 by one visible item. Compute source availability with `EXISTS`, never by loading source URLs.
 Order children with nullable index last and deterministic `sort_key, id` tie-breaking.
 
-- [ ] **Step 4: Write failing API golden and route tests**
+- [x] **Step 4: Write failing API golden and route tests**
 
 Assert literal PascalCase output for rating, vote count, ticks, ISO dates, arrays, credits,
 image tags, source availability, and UserData. Assert snapshots are absent. Assert hidden
 library items remain 404 and a mismatched `userId` remains 403.
 
-- [ ] **Step 5: Implement DTO and route mapping**
+- [x] **Step 5: Implement DTO and route mapping**
 
 Use separate constructors for list and detail projections so list routes do not accidentally
 serialize empty rich arrays. Extend search hints with `PrimaryImageTag`, year, type, and
 community rating.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run:
 
@@ -274,7 +274,7 @@ cargo test -p tjxy-api --test browse_golden --locked
 cargo test -p tjxy-server --test browse_routes --locked
 ```
 
-- [ ] **Step 7: Commit the browse slice**
+- [x] **Step 7: Commit the browse slice**
 
 ```text
 git add crates/db/src/catalog_query.rs crates/db/tests/catalog_query_repository_contract.rs crates/application/src/catalog.rs crates/application/tests/catalog_query_service_contract.rs crates/api/src/browse.rs crates/api/tests/browse_golden.rs crates/server/src/browse.rs crates/server/tests/browse_routes.rs
@@ -303,40 +303,40 @@ git commit -m "feat(catalog): expose rich item and episode details"
 - `ItemPage` renders Movie, Series, Season, and Episode variants from one route.
 - `PlayerPage` distinguishes no-source, unsupported, unauthorized, and transient errors.
 
-- [ ] **Step 1: Fetch current HeroUI component documentation**
+- [x] **Step 1: Fetch current HeroUI component documentation**
 
 Use the HeroUI MCP in the required order: list components, then fetch Button, Chip, Tabs,
 Avatar, Alert, Skeleton, and any selected list/surface primitive. Use only confirmed v3
 compound APIs and semantic tokens.
 
-- [ ] **Step 2: Write failing rich-detail component tests**
+- [x] **Step 2: Write failing rich-detail component tests**
 
 Render a complete Series response in a real `MemoryRouter`. Assert accessible labels expose
 rating, runtime, content rating, country, language, overview, crew, 24 cast entries, Season
 selector, and ordered Episode rows. Add a sparse Movie response and assert absent fields
 do not render invented placeholders.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run: `cd admin && npm test -- --run src/client/catalog/ItemPage.test.tsx`
 
-- [ ] **Step 4: Implement the rich detail page**
+- [x] **Step 4: Implement the rich detail page**
 
 Use an authenticated backdrop image with a stable header height, 2:3 poster constraints,
 compact facts, semantic chips, unframed overview and crew sections, repeated cast surfaces,
 and a responsive Season/Episode section. Preserve breadcrumbs and favorite/played behavior.
 
-- [ ] **Step 5: Write failing no-source player test**
+- [x] **Step 5: Write failing no-source player test**
 
 Return `PlaybackInfo` with no sources. Assert the page says `No playable file is attached`,
 has a details link, contains no `<video>`, and never requests a playback ticket.
 
-- [ ] **Step 6: Implement player and tile behavior**
+- [x] **Step 6: Implement player and tile behavior**
 
 Map an empty source list to the expected non-danger unavailable state. Show rating and
 episode codes on tiles without changing fixed poster/still dimensions.
 
-- [ ] **Step 7: Verify GREEN**
+- [x] **Step 7: Verify GREEN**
 
 Run:
 
@@ -347,7 +347,7 @@ cd admin && npm run lint
 cd admin && npm run build
 ```
 
-- [ ] **Step 8: Commit the HeroUI slice**
+- [x] **Step 8: Commit the HeroUI slice**
 
 ```text
 git add admin/src/client admin/src/styles.css
@@ -365,7 +365,7 @@ git commit -m "feat(client): render rich movie and series details"
   importer.
 - Produces a browser-visible demonstration catalog at `/app/`.
 
-- [ ] **Step 1: Run the complete automated gate**
+- [x] **Step 1: Run the complete automated gate**
 
 ```text
 cargo fmt --all -- --check
@@ -378,31 +378,36 @@ cd admin && npm run build
 git diff --check
 ```
 
-- [ ] **Step 2: Run the one-off import**
+The complete gate was executed. Tests, formatting, frontend type checking, linting, and
+production build passed. Workspace Clippy remains non-green only for pre-existing
+`playback_ticket.rs` warnings; the touched API and metadata crates pass with
+`-D warnings`.
+
+- [x] **Step 2: Run the one-off import**
 
 Run the binary against the same `TJXY_DATABASE_URL`, asset root, and credential keyring as
 the preview server. Confirm its sanitized summary reports 12 movies, 6 series, every
 fetched Season/Episode, zero media sources, and no failed required assets.
 
-- [ ] **Step 3: Restart the preview on the existing available port**
+- [x] **Step 3: Restart the preview on the existing available port**
 
 Restart with the migrated database and rebuilt frontend, preserving the current configured
 credential environment. Confirm readiness before browser navigation.
 
-- [ ] **Step 4: Add and run browser journeys**
+- [x] **Step 4: Run browser journeys**
 
 Cover ordinary-user login, home, Movie library, Television library, search with imagery,
 one Movie detail, one Series, Season selection, Episode detail, no-source playback, mobile
 layout, keyboard focus, and navigation. Assert no failed API responses other than the
 expected no-source playback response and no console errors.
 
-- [ ] **Step 5: Perform visual QA**
+- [x] **Step 5: Perform visual QA**
 
 Capture desktop `1440x1000`, tablet `820x1180`, and mobile `390x844` screenshots. Check
 nonblank artwork pixels, stable poster/still aspect ratios, no overlap or horizontal
 overflow, readable backdrop text, visible focus, and correctly localized metadata.
 
-- [ ] **Step 6: Review final diff and document residual risks**
+- [x] **Step 6: Review final diff and document residual risks**
 
 Inspect every touched file, secret-scan logs and generated output, rerun focused failures
 if any fix is needed, and report any external TMDB data omissions or pre-existing clippy
