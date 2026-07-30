@@ -1097,6 +1097,56 @@ async fn metadata_provider_settings_migration_is_reversible() {
             "metadata_provider_settings missing {column}"
         );
     }
+    let provider_type = column_type_name(&database, "metadata_provider_settings", "provider").await;
+    let language_type = column_type_name(&database, "metadata_provider_settings", "language").await;
+    assert!(
+        provider_type.to_ascii_lowercase().contains("varchar(64)")
+            || provider_type
+                .to_ascii_lowercase()
+                .contains("character varying(64)"),
+        "metadata provider key is not bounded to 64 characters: {provider_type}"
+    );
+    assert!(
+        language_type.to_ascii_lowercase().contains("varchar(32)")
+            || language_type
+                .to_ascii_lowercase()
+                .contains("character varying(32)"),
+        "metadata provider language is not bounded to 32 characters: {language_type}"
+    );
+
+    let now = chrono::Utc::now();
+    let invalid_revision = Query::insert()
+        .into_table(Alias::new("metadata_provider_settings"))
+        .columns([
+            Alias::new("provider"),
+            Alias::new("enabled"),
+            Alias::new("language"),
+            Alias::new("credential_id"),
+            Alias::new("encrypted_payload"),
+            Alias::new("key_version"),
+            Alias::new("revision"),
+            Alias::new("created_at"),
+            Alias::new("updated_at"),
+        ])
+        .values_panic([
+            "tmdb".into(),
+            true.into(),
+            "en-US".into(),
+            uuid::Uuid::new_v4().into(),
+            vec![7_u8; 28].into(),
+            1_i32.into(),
+            0_i64.into(),
+            now.into(),
+            now.into(),
+        ])
+        .to_owned();
+    assert!(
+        database
+            .execute(database.get_database_backend().build(&invalid_revision))
+            .await
+            .is_err(),
+        "metadata provider revision check accepted zero"
+    );
 
     Migrator::down(&database, Some(1)).await.unwrap();
 
@@ -1305,15 +1355,21 @@ async fn column_type_name(
         DbBackend::Postgres => database
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT data_type FROM information_schema.columns \
+                "SELECT data_type, \
+                        CAST(character_maximum_length AS BIGINT) AS character_maximum_length \
+                 FROM information_schema.columns \
                  WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2"
                     .to_owned(),
                 [table.into(), column.into()],
             ))
             .await
             .unwrap()
-            .unwrap()
-            .try_get("", "data_type")
+            .map(|row| {
+                let data_type = row.try_get::<String>("", "data_type").unwrap();
+                row.try_get::<Option<i64>>("", "character_maximum_length")
+                    .unwrap()
+                    .map_or(data_type.clone(), |length| format!("{data_type}({length})"))
+            })
             .unwrap(),
         DbBackend::MySql => {
             let row = database

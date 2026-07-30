@@ -30,6 +30,25 @@ fn envelope_round_trips_and_is_bound_to_credential_and_provider() {
 }
 
 #[test]
+fn sealed_credential_carries_the_identity_used_for_authenticated_encryption() {
+    let cipher =
+        CredentialCipher::new(CredentialKey::new(3, [8_u8; 32]).unwrap(), Vec::new()).unwrap();
+    let credential_id = Uuid::new_v4();
+
+    let sealed = cipher
+        .seal_bound(credential_id, "tmdb", b"read-access-token")
+        .unwrap();
+
+    assert_eq!(sealed.credential_id(), credential_id);
+    assert_eq!(sealed.provider(), "tmdb");
+    assert_eq!(
+        cipher.open_bound(&sealed).unwrap().as_slice(),
+        b"read-access-token"
+    );
+    assert!(!format!("{sealed:?}").contains("read-access-token"));
+}
+
+#[test]
 fn tampering_is_rejected_and_each_envelope_uses_a_fresh_nonce() {
     let cipher =
         CredentialCipher::new(CredentialKey::new(1, [9_u8; 32]).unwrap(), Vec::new()).unwrap();

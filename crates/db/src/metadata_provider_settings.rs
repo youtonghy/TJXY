@@ -5,7 +5,7 @@ use sea_orm::{
     sea_query::{Alias, Expr, Query},
 };
 use thiserror::Error;
-use tjxy_credentials::CredentialEnvelope;
+use tjxy_credentials::{CredentialEnvelope, SealedCredential};
 use uuid::Uuid;
 
 const PROVIDER_MAX_CHARS: usize = 64;
@@ -85,39 +85,30 @@ impl<'connection> MetadataProviderSettingsRepository<'connection> {
 
     /// Creates or rotates one encrypted provider setting using an optimistic revision fence.
     ///
+    /// Provider and credential identity are taken from the cipher-produced sealed value so an
+    /// opaque envelope cannot be paired with unrelated associated-data fields.
+    ///
     /// Passing `None` creates revision 1 and conflicts with an existing setting. Passing
     /// `Some(revision)` updates only that revision. This boundary never accepts plaintext.
     ///
     /// # Errors
     ///
     /// Returns input validation, revision conflict, commit, rollback, or database errors.
-    #[allow(clippy::too_many_arguments)]
     pub async fn put(
         &self,
-        provider: &str,
+        sealed: &SealedCredential,
         enabled: bool,
         language: &str,
-        credential_id: Uuid,
-        envelope: &CredentialEnvelope,
         expected_revision: Option<i64>,
     ) -> Result<MetadataProviderSettingRecord, MetadataProviderSettingsRepositoryError> {
-        validate_provider(provider)?;
+        validate_provider(sealed.provider())?;
         validate_language(language)?;
         if expected_revision.is_some_and(|revision| revision <= 0) {
             return Err(MetadataProviderSettingsRepositoryError::InvalidRevision);
         }
 
         let transaction = self.database.begin().await?;
-        let result = put_on(
-            &transaction,
-            provider,
-            enabled,
-            language,
-            credential_id,
-            envelope,
-            expected_revision,
-        )
-        .await;
+        let result = put_on(&transaction, sealed, enabled, language, expected_revision).await;
         finish(transaction, result).await
     }
 
@@ -154,6 +145,8 @@ pub enum MetadataProviderSettingsRepositoryError {
     InvalidRevision,
     #[error("metadata provider settings changed since they were read")]
     RevisionConflict,
+    #[error("metadata provider credential identity changed during rotation")]
+    CredentialIdentityConflict,
     #[error("stored metadata provider credential envelope is malformed")]
     InvalidStoredEnvelope,
     #[error("metadata provider settings database operation failed: {0}")]
@@ -164,13 +157,12 @@ pub enum MetadataProviderSettingsRepositoryError {
 
 async fn put_on(
     transaction: &DatabaseTransaction,
-    provider: &str,
+    sealed: &SealedCredential,
     enabled: bool,
     language: &str,
-    credential_id: Uuid,
-    envelope: &CredentialEnvelope,
     expected_revision: Option<i64>,
 ) -> Result<MetadataProviderSettingRecord, MetadataProviderSettingsRepositoryError> {
+    let provider = sealed.provider();
     let backend = transaction.get_database_backend();
     let now = Utc::now();
     match expected_revision {
@@ -192,9 +184,9 @@ async fn put_on(
                     provider.into(),
                     enabled.into(),
                     language.into(),
-                    credential_id.into(),
-                    envelope.payload().to_vec().into(),
-                    envelope.key_version().into(),
+                    sealed.credential_id().into(),
+                    sealed.envelope().payload().to_vec().into(),
+                    sealed.envelope().key_version().into(),
                     1_i64.into(),
                     now.into(),
                     now.into(),
@@ -212,6 +204,15 @@ async fn put_on(
             result?;
         }
         Some(expected_revision) => {
+            let current = get_on(transaction, provider)
+                .await?
+                .ok_or(MetadataProviderSettingsRepositoryError::RevisionConflict)?;
+            if current.revision() != expected_revision {
+                return Err(MetadataProviderSettingsRepositoryError::RevisionConflict);
+            }
+            if current.credential_id() != sealed.credential_id() {
+                return Err(MetadataProviderSettingsRepositoryError::CredentialIdentityConflict);
+            }
             let next_revision = expected_revision
                 .checked_add(1)
                 .ok_or(MetadataProviderSettingsRepositoryError::InvalidRevision)?;
@@ -219,13 +220,16 @@ async fn put_on(
                 .table(Alias::new("metadata_provider_settings"))
                 .value(Alias::new("enabled"), enabled)
                 .value(Alias::new("language"), language)
-                .value(Alias::new("credential_id"), credential_id)
-                .value(Alias::new("encrypted_payload"), envelope.payload().to_vec())
-                .value(Alias::new("key_version"), envelope.key_version())
+                .value(
+                    Alias::new("encrypted_payload"),
+                    sealed.envelope().payload().to_vec(),
+                )
+                .value(Alias::new("key_version"), sealed.envelope().key_version())
                 .value(Alias::new("revision"), next_revision)
                 .value(Alias::new("updated_at"), now)
                 .and_where(Expr::col(Alias::new("provider")).eq(provider))
                 .and_where(Expr::col(Alias::new("revision")).eq(expected_revision))
+                .and_where(Expr::col(Alias::new("credential_id")).eq(sealed.credential_id()))
                 .to_owned();
             if transaction
                 .execute(backend.build(&update))

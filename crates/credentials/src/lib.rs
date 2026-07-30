@@ -1,4 +1,4 @@
-//! Versioned authenticated encryption for storage-provider credentials.
+//! Versioned authenticated encryption for provider credentials.
 
 use std::{collections::HashMap, fmt};
 
@@ -96,6 +96,42 @@ impl fmt::Debug for CredentialEnvelope {
     }
 }
 
+/// An encrypted credential bundled with the identity used as authenticated associated data.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SealedCredential {
+    credential_id: Uuid,
+    provider: String,
+    envelope: CredentialEnvelope,
+}
+
+impl SealedCredential {
+    #[must_use]
+    pub const fn credential_id(&self) -> Uuid {
+        self.credential_id
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    #[must_use]
+    pub const fn envelope(&self) -> &CredentialEnvelope {
+        &self.envelope
+    }
+}
+
+impl fmt::Debug for SealedCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedCredential")
+            .field("credential_id", &self.credential_id)
+            .field("provider", &self.provider)
+            .field("envelope", &self.envelope)
+            .finish()
+    }
+}
+
 pub struct CredentialCipher {
     active_version: i32,
     keys: HashMap<i32, CredentialKey>,
@@ -136,6 +172,34 @@ impl CredentialCipher {
         provider: &str,
         plaintext: &[u8],
     ) -> Result<CredentialEnvelope, CredentialCipherError> {
+        self.seal_envelope(credential_id, provider, plaintext)
+    }
+
+    /// Encrypts one credential and retains the identity used as associated data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid provider/plaintext bounds or encryption failure.
+    pub fn seal_bound(
+        &self,
+        credential_id: Uuid,
+        provider: &str,
+        plaintext: &[u8],
+    ) -> Result<SealedCredential, CredentialCipherError> {
+        let envelope = self.seal_envelope(credential_id, provider, plaintext)?;
+        Ok(SealedCredential {
+            credential_id,
+            provider: provider.to_owned(),
+            envelope,
+        })
+    }
+
+    fn seal_envelope(
+        &self,
+        credential_id: Uuid,
+        provider: &str,
+        plaintext: &[u8],
+    ) -> Result<CredentialEnvelope, CredentialCipherError> {
         validate_input(provider, plaintext)?;
         let key = self
             .keys
@@ -158,6 +222,18 @@ impl CredentialCipher {
         payload.extend_from_slice(&nonce);
         payload.extend_from_slice(&ciphertext);
         CredentialEnvelope::from_parts(self.active_version, payload)
+    }
+
+    /// Authenticates and decrypts an identity-bound encrypted credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns a single authentication error for altered ciphertext or identity.
+    pub fn open_bound(
+        &self,
+        sealed: &SealedCredential,
+    ) -> Result<Zeroizing<Vec<u8>>, CredentialCipherError> {
+        self.open(sealed.credential_id, &sealed.provider, &sealed.envelope)
     }
 
     /// Authenticates and decrypts one identity-bound credential envelope.
