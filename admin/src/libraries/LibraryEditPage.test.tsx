@@ -143,6 +143,27 @@ it('loads a direct deep link with ordered sections and a Back breadcrumb', async
   expect(screen.getByText('3', { selector: 'dd' })).toBeVisible();
 });
 
+it('presents scanning policy as one ordered form with a structured effective-policy summary', async () => {
+  renderEdit();
+  const user = userEvent.setup();
+  await loadedNameInput();
+
+  const policySection = screen.getByRole('region', { name: 'Scanning policy' });
+  const automatic = within(policySection).getByRole('radio', { name: /Automatic scrape/iu });
+  const localOnly = within(policySection).getByRole('radio', { name: /Local metadata only/iu });
+  expect(automatic).toBeChecked();
+  await user.click(localOnly);
+  expect(localOnly).toBeChecked();
+  expect(automatic).not.toBeChecked();
+  expect(within(policySection).getByRole('switch', { name: 'Enabled' })).toBeVisible();
+  expect(within(policySection).getByRole('switch', { name: 'Override effective policy' })).toBeVisible();
+  const summary = within(policySection).getByLabelText('Effective policy summary');
+  expect(within(summary).getByText('Object selection').nextElementSibling).toHaveTextContent('Title layer');
+  expect(within(summary).getByText('Metadata').nextElementSibling).toHaveTextContent('Basic metadata');
+  expect(within(summary).getByText('Expansion').nextElementSibling).toHaveTextContent('On browse');
+  expect(within(summary).getByText('Media probe').nextElementSibling).toHaveTextContent('On playback');
+});
+
 it('shows a safe initial error with Retry and an explicit not-found state', async () => {
   listMock
     .mockRejectedValueOnce(new Error('private-library-detail'))
