@@ -6,18 +6,19 @@ use sea_orm::{
 };
 use serde_json::json;
 use thiserror::Error;
-use tjxy_common::{CatalogItemId, StorageObjectRecordId, StorageRootId};
+use tjxy_common::{CatalogItemId, ImageType, StorageObjectRecordId, StorageRootId};
 use tjxy_metadata::{MetadataItemKind, MetadataLookup, MetadataResolution};
 use uuid::Uuid;
 
 use crate::{
-    AssetPublication, AssetPublicationReport, AssetRepositoryError, ClaimedWorkJob,
-    MetadataPublicationError, MetadataRequirement, WorkJobRepository, WorkJobRepositoryError,
-    WorkJobResult, WorkJobSpec, WorkJobSubmission, WorkScope, WorkTaskKind,
+    AssetPublication, AssetRepositoryError, ClaimedWorkJob, MetadataPublicationError,
+    MetadataRequirement, WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec,
+    WorkJobSubmission, WorkScope, WorkTaskKind,
 };
 
 const MAX_NFO_CANDIDATES: u64 = 512;
 const MAX_NFO_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_IMAGE_CANDIDATES: u64 = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataSidecarCandidate {
@@ -75,10 +76,29 @@ impl MetadataSidecarCandidate {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataImageCandidate {
+    file: MetadataSidecarCandidate,
+    image_type: ImageType,
+}
+
+impl MetadataImageCandidate {
+    #[must_use]
+    pub const fn file(&self) -> &MetadataSidecarCandidate {
+        &self.file
+    }
+
+    #[must_use]
+    pub const fn image_type(&self) -> ImageType {
+        self.image_type
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MetadataWorkSnapshot {
     lookup: MetadataLookup,
     sidecar: Option<MetadataSidecarCandidate>,
+    images: Vec<MetadataImageCandidate>,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
 }
 
@@ -91,6 +111,11 @@ impl MetadataWorkSnapshot {
     #[must_use]
     pub const fn sidecar(&self) -> Option<&MetadataSidecarCandidate> {
         self.sidecar.as_ref()
+    }
+
+    #[must_use]
+    pub fn images(&self) -> &[MetadataImageCandidate] {
+        &self.images
     }
 }
 
@@ -193,11 +218,16 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .map_err(|_| MetadataWorkError::InvalidStoredMetadata)?;
         let rows = self
             .database
-            .query_all(self.database.get_database_backend().build(&sidecar_query(
-                item_id,
-                scope,
-                input_revision,
-            )))
+            .query_all(
+                self.database
+                    .get_database_backend()
+                    .build(&sibling_file_query(
+                        item_id,
+                        scope,
+                        input_revision,
+                        SiblingFileKind::Nfo,
+                    )),
+            )
             .await?;
         if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
             return Err(MetadataWorkError::TooManySidecars);
@@ -218,9 +248,32 @@ impl<'connection> MetadataWorkRepository<'connection> {
             Vec::new()
         };
         let sidecar = select_sidecar(kind, &mut candidates, &video_names)?;
+        let image_rows = self
+            .database
+            .query_all(
+                self.database
+                    .get_database_backend()
+                    .build(&sibling_file_query(
+                        item_id,
+                        scope,
+                        input_revision,
+                        SiblingFileKind::Image,
+                    )),
+            )
+            .await?;
+        if u64::try_from(image_rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
+            return Err(MetadataWorkError::TooManyImages);
+        }
+        let images = select_images(
+            image_rows
+                .iter()
+                .map(sidecar_from_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         Ok(MetadataWorkSnapshot {
             lookup,
             sidecar,
+            images,
             scope,
         })
     }
@@ -235,7 +288,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
         claimed: &ClaimedWorkJob,
         snapshot: &MetadataWorkSnapshot,
         resolution: &MetadataResolution,
-        asset_publication: Option<&AssetPublication>,
+        asset_publications: &[&AssetPublication],
         used_nfo: bool,
         warnings: Vec<String>,
     ) -> Result<MetadataWorkCommitReport, MetadataWorkError> {
@@ -284,20 +337,16 @@ impl<'connection> MetadataWorkRepository<'connection> {
                 requirement,
             )
             .await?;
-            let asset_publication = if let Some(asset) = asset_publication {
-                Some(
-                    crate::asset::publish_in_transaction(
-                        &transaction,
-                        asset,
-                        !publication.changed(),
-                    )
-                    .await?,
+            let mut asset_changed = false;
+            for asset in asset_publications {
+                let report = crate::asset::publish_in_transaction(
+                    &transaction,
+                    asset,
+                    !publication.changed() && !asset_changed,
                 )
-            } else {
-                None
-            };
-            let asset_changed =
-                asset_publication.is_some_and(AssetPublicationReport::reference_changed);
+                .await?;
+                asset_changed |= report.reference_changed();
+            }
             WorkJobRepository::new(self.database)
                 .complete_in_transaction(
                     &transaction,
@@ -340,11 +389,16 @@ async fn revalidate_metadata_snapshot(
     snapshot: &MetadataWorkSnapshot,
 ) -> Result<(), MetadataWorkError> {
     let rows = transaction
-        .query_all(transaction.get_database_backend().build(&sidecar_query(
-            item_id,
-            scope,
-            input_revision,
-        )))
+        .query_all(
+            transaction
+                .get_database_backend()
+                .build(&sibling_file_query(
+                    item_id,
+                    scope,
+                    input_revision,
+                    SiblingFileKind::Nfo,
+                )),
+        )
         .await?;
     if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
         return Err(MetadataWorkError::TooManySidecars);
@@ -365,6 +419,30 @@ async fn revalidate_metadata_snapshot(
         Vec::new()
     };
     if select_sidecar(snapshot.lookup.kind(), &mut candidates, &video_names)? != snapshot.sidecar {
+        return Err(MetadataWorkError::StaleOrUnavailable);
+    }
+    let image_rows = transaction
+        .query_all(
+            transaction
+                .get_database_backend()
+                .build(&sibling_file_query(
+                    item_id,
+                    scope,
+                    input_revision,
+                    SiblingFileKind::Image,
+                )),
+        )
+        .await?;
+    if u64::try_from(image_rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
+        return Err(MetadataWorkError::TooManyImages);
+    }
+    let images = select_images(
+        image_rows
+            .iter()
+            .map(sidecar_from_row)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if images != snapshot.images {
         return Err(MetadataWorkError::StaleOrUnavailable);
     }
     Ok(())
@@ -480,6 +558,8 @@ pub enum MetadataWorkError {
     StaleOrUnavailable,
     #[error("metadata inventory has too many NFO candidates")]
     TooManySidecars,
+    #[error("metadata inventory has too many local image candidates")]
+    TooManyImages,
     #[error("metadata inventory has ambiguous NFO candidates")]
     AmbiguousSidecars,
     #[error("metadata work resolves to more than one authorized storage scope")]
@@ -563,10 +643,11 @@ fn target_query(
 }
 
 #[allow(clippy::too_many_lines)] // The aliases keep one authorization snapshot legible and auditable.
-fn sidecar_query(
+fn sibling_file_query(
     item_id: CatalogItemId,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
     input_revision: i64,
+    file_kind: SiblingFileKind,
 ) -> sea_orm::sea_query::SelectStatement {
     let item = Alias::new("nfo_item");
     let parent = Alias::new("nfo_parent");
@@ -715,12 +796,33 @@ fn sidecar_query(
         )
         .and_where(Expr::col((object.clone(), Alias::new("object_type"))).eq("File"))
         .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
-        .and_where(Expr::col((object, Alias::new("normalized_name"))).like("%.nfo"))
+        .and_where(match file_kind {
+            SiblingFileKind::Nfo => {
+                Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.nfo")
+            }
+            SiblingFileKind::Image => Cond::any()
+                .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.jpg"))
+                .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.jpeg"))
+                .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.png"))
+                .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.webp"))
+                .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.bmp"))
+                .add(Expr::col((object, Alias::new("normalized_name"))).like("%.gif"))
+                .into(),
+        })
         .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
         .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(input_revision))
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
-        .limit(MAX_NFO_CANDIDATES + 1)
+        .limit(match file_kind {
+            SiblingFileKind::Nfo => MAX_NFO_CANDIDATES + 1,
+            SiblingFileKind::Image => MAX_IMAGE_CANDIDATES + 1,
+        })
         .to_owned()
+}
+
+#[derive(Clone, Copy)]
+enum SiblingFileKind {
+    Nfo,
+    Image,
 }
 
 fn sidecar_from_row(
@@ -742,6 +844,43 @@ fn sidecar_from_row(
             .try_get::<Option<Uuid>>("", "facts_observed_storage_root_id")?
             .map(StorageRootId::from_uuid),
     })
+}
+
+fn select_images(candidates: Vec<MetadataSidecarCandidate>) -> Vec<MetadataImageCandidate> {
+    let mut selected = Vec::new();
+    for image_type in [ImageType::Primary, ImageType::Backdrop] {
+        let mut matches = candidates
+            .iter()
+            .filter_map(|candidate| {
+                image_rank(&candidate.name, image_type)
+                    .map(|rank| (rank, candidate.name.to_ascii_lowercase(), candidate.clone()))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        if let Some((_, _, file)) = matches.into_iter().next() {
+            selected.push(MetadataImageCandidate { file, image_type });
+        }
+    }
+    selected
+}
+
+fn image_rank(name: &str, image_type: ImageType) -> Option<u8> {
+    let stem = Path::new(name).file_stem()?.to_str()?.to_ascii_lowercase();
+    match image_type {
+        ImageType::Primary => match stem.as_str() {
+            "poster" => Some(0),
+            "folder" => Some(1),
+            "cover" => Some(2),
+            _ if stem.ends_with("-poster") => Some(3),
+            _ => None,
+        },
+        ImageType::Backdrop => match stem.as_str() {
+            "fanart" => Some(0),
+            "backdrop" => Some(1),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn select_sidecar(

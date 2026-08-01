@@ -3,6 +3,8 @@ import {
   Button,
   Label,
   ListBox,
+  Radio,
+  RadioGroup,
   Select,
   Switch,
 } from '@heroui/react';
@@ -13,6 +15,7 @@ import type {
   ExpansionPolicy,
   LibraryOption,
   MetadataPolicy,
+  MetadataSourceMode,
   ObjectSelectionScope,
   ProbePolicy,
   ScanProfile,
@@ -34,12 +37,14 @@ export interface LibraryPolicyFormProps {
   library: LibraryOption;
   onAdvancedChange: (advanced: boolean) => void;
   onEnabledChange: (enabled: boolean) => void;
+  onMetadataSourceModeChange: (mode: MetadataSourceMode) => void;
   onPolicyChange: (policy: EffectiveLibraryPolicy) => void;
   onProfileChange: (profile: ScanProfile) => void;
   onReloadLatest: () => void;
   onSave: () => void;
   policy: EffectiveLibraryPolicy;
   scanProfile: ScanProfile;
+  metadataSourceMode: MetadataSourceMode;
 }
 
 export function LibraryPolicyForm({
@@ -50,12 +55,14 @@ export function LibraryPolicyForm({
   library,
   onAdvancedChange,
   onEnabledChange,
+  onMetadataSourceModeChange,
   onPolicyChange,
   onProfileChange,
   onReloadLatest,
   onSave,
   policy,
   scanProfile,
+  metadataSourceMode,
 }: LibraryPolicyFormProps) {
   return (
     <section aria-labelledby="scanning-policy-heading" className="space-y-5 border-t border-border py-7">
@@ -63,6 +70,30 @@ export function LibraryPolicyForm({
         <h2 className="text-base font-semibold text-foreground" id="scanning-policy-heading">Scanning policy</h2>
         <p className="mt-1 text-sm text-muted">Choose how this library discovers and expands catalog content.</p>
       </div>
+
+      <RadioGroup
+        isDisabled={isPending}
+        onChange={(value) => { onMetadataSourceModeChange(value as MetadataSourceMode); }}
+        value={metadataSourceMode}
+      >
+        <Label>Metadata source</Label>
+        <div className="grid gap-3 md:grid-cols-2">
+          <Radio value="automatic_scrape">
+            <Radio.Control><Radio.Indicator /></Radio.Control>
+            <Radio.Content>
+              <span className="font-medium">Automatic scrape</span>
+              <span className="text-sm text-muted">Prefer local NFO and artwork, then use TMDB for missing fields.</span>
+            </Radio.Content>
+          </Radio>
+          <Radio value="local_only">
+            <Radio.Control><Radio.Indicator /></Radio.Control>
+            <Radio.Content>
+              <span className="font-medium">Local metadata only</span>
+              <span className="text-sm text-muted">Index local NFO and artwork without remote provider requests.</span>
+            </Radio.Content>
+          </Radio>
+        </div>
+      </RadioGroup>
 
       {hasConflict && (
         <Alert role="alert" status="warning">

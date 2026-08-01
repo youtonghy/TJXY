@@ -14,6 +14,7 @@ use tjxy_db::{
     DiscoverTitlesError, DiscoverTitlesRepository, MetadataRequirement, WorkJobRepository,
     WorkJobState, WorkScope, WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{
     MetadataCandidate, MetadataLookup, MetadataProvider, MetadataProviderError, MetadataSource,
 };
@@ -315,6 +316,41 @@ async fn full_metadata_policy_is_preserved_by_title_discovery() {
     assert_eq!(
         metadata.job().metadata_requirement(),
         Some(MetadataRequirement::Full)
+    );
+}
+
+#[tokio::test]
+async fn title_discovery_captures_local_only_metadata_source_mode() {
+    let fixture = discovery_fixture("basic").await;
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+    let metadata = WorkJobRepository::new(&fixture.database)
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "local-only-discovery-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        metadata.job().metadata_source_mode(),
+        Some(MetadataSourceMode::LocalOnly)
     );
 }
 

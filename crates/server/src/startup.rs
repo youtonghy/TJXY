@@ -6,10 +6,11 @@ use sea_orm_migration::MigratorTrait;
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
-    CatalogQueryService, DisplayPreferencesService, LibraryService, MediaCollectionService,
-    MediaReadService, MetadataImageFetchError, MetadataImportService, MetadataResolveService,
-    PlaybackTicketService, PlaystateService, ProbeService, ReqwestMetadataImageFetcher,
-    StorageBackendRegistry, SystemClock, TaskService, UserDataService,
+    CatalogQueryService, DisplayPreferencesService, FilesystemBrowser, FilesystemBrowserError,
+    LibraryService, MediaCollectionService, MediaReadService, MetadataImageFetchError,
+    MetadataImportService, MetadataResolveService, PlaybackTicketService, PlaystateService,
+    ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry, SystemClock, TaskService,
+    UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
@@ -69,6 +70,7 @@ pub struct StartupOptions {
     assets_dir: PathBuf,
     lazy_wait_timeout: StdDuration,
     filesystem_backends: Vec<(Uuid, PathBuf)>,
+    filesystem_browser_roots: Vec<PathBuf>,
     filesystem_realtime_enabled: bool,
     storage_backends: Vec<ConfiguredStorageBackend>,
     credential_cipher: Option<Arc<CredentialCipher>>,
@@ -111,6 +113,10 @@ impl fmt::Debug for StartupOptions {
             .field("lazy_wait_timeout", &self.lazy_wait_timeout)
             .field("filesystem_backend_count", &self.filesystem_backends.len())
             .field(
+                "filesystem_browser_root_count",
+                &self.filesystem_browser_roots.len(),
+            )
+            .field(
                 "filesystem_realtime_enabled",
                 &self.filesystem_realtime_enabled,
             )
@@ -147,6 +153,7 @@ impl StartupOptions {
             assets_dir: PathBuf::from("./data/assets"),
             lazy_wait_timeout: StdDuration::from_millis(2_500),
             filesystem_backends: Vec::new(),
+            filesystem_browser_roots: Vec::new(),
             filesystem_realtime_enabled: true,
             storage_backends: Vec::new(),
             credential_cipher: None,
@@ -190,6 +197,16 @@ impl StartupOptions {
     #[must_use]
     pub fn with_filesystem_backend(mut self, account_id: Uuid, root: impl Into<PathBuf>) -> Self {
         self.filesystem_backends.push((account_id, root.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn with_filesystem_browser_roots<I, P>(mut self, roots: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.filesystem_browser_roots = roots.into_iter().map(Into::into).collect();
         self
     }
 
@@ -304,6 +321,13 @@ impl StartupOptions {
 /// connection, migration, or authentication setup fails.
 #[allow(clippy::too_many_lines)] // Startup deliberately composes every long-lived service once.
 pub async fn initialize(options: StartupOptions) -> Result<AppState, InitializationError> {
+    let filesystem_browser = if options.filesystem_browser_roots.is_empty() {
+        None
+    } else {
+        Some(Arc::new(
+            FilesystemBrowser::from_roots(options.filesystem_browser_roots.clone()).await?,
+        ))
+    };
     let storage_admin_cipher = options.credential_cipher.clone();
     let metadata_settings_cipher = options.credential_cipher.clone();
     let tmdb_provider = Arc::clone(&options.tmdb_provider);
@@ -462,7 +486,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     let display_preferences = Arc::new(DisplayPreferencesService::new(database.clone()));
     let user_data = Arc::new(UserDataService::new(database.clone()));
     let warm_home_cache = cache.is_enabled();
-    let state = AppState::new(
+    let mut state = AppState::new(
         options
             .identity
             .with_startup_wizard_completed(has_enabled_admin),
@@ -489,6 +513,9 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_realtime_events(realtime_events)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_ready(true);
+    if let Some(browser) = filesystem_browser {
+        state = state.with_filesystem_browser(browser);
+    }
     if warm_home_cache {
         worker::spawn_home_cache_warm_worker(auth, catalog);
     }
@@ -833,6 +860,8 @@ pub enum InitializationError {
     MetadataImage(#[from] MetadataImageFetchError),
     #[error("filesystem storage backend initialization failed: {0}")]
     StorageBackend(#[from] tjxy_storage::BackendError),
+    #[error("filesystem browser configuration is invalid: {0}")]
+    FilesystemBrowser(#[from] FilesystemBrowserError),
     #[error("cache initialization failed: {0}")]
     Cache(#[from] CacheStartupError),
     #[error("Google storage backend loading failed: {0}")]

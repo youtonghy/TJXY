@@ -25,6 +25,11 @@ pub struct AssetPublication {
 }
 
 impl AssetPublication {
+    #[must_use]
+    pub const fn image_type(&self) -> ImageType {
+        self.image_type
+    }
+
     /// Defines one validated content-addressed image reference.
     ///
     /// # Errors

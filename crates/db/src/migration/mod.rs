@@ -41,6 +41,7 @@ mod m20260730_000040_rich_catalog_metadata;
 mod m20260731_000041_provider_id_scope;
 mod m20260731_000042_dashboard_indexes;
 mod m20260731_000043_user_profile_and_watch_time;
+mod m20260801_000044_metadata_source_mode;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -104,6 +105,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260731_000041_provider_id_scope::Migration),
             Box::new(m20260731_000042_dashboard_indexes::Migration),
             Box::new(m20260731_000043_user_profile_and_watch_time::Migration),
+            Box::new(m20260801_000044_metadata_source_mode::Migration),
         ]
     }
 }

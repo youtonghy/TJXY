@@ -121,7 +121,22 @@ and reloads every active Filesystem root after restart. The legacy
 `TJXY_FILESYSTEM_ACCOUNT_ID` plus `TJXY_FILESYSTEM_ROOT` pair remains an explicit
 runtime override; both variables are required together. Each configured root
 starts an account-scoped inventory worker and shares the serial Probe worker. A
-native recursive filesystem event monitor is
+server-side folder picker is enabled by setting `TJXY_MEDIA_BROWSER_ROOTS` to a
+platform path-list of allowed parent directories (colon-separated on Unix and
+semicolon-separated on Windows). The Admin API exposes opaque root IDs and
+relative paths only; every selection is canonicalized again before it can be
+attached to a Library, and symlinks cannot escape an allowed root.
+
+A Library's metadata source is independent of its scan profile. The default
+`automatic_scrape` mode reads local NFO and artwork first and uses configured
+remote providers only to fill missing metadata. The `local_only` mode reads NFO
+and naming metadata without invoking remote providers. Supported local artwork
+names include `poster`, `folder`, `cover`, and `*-poster` for Primary images,
+plus `fanart` and `backdrop` for Backdrop images, using JPEG, PNG, GIF, WebP, or
+BMP extensions. Malformed NFO and artwork produce work warnings and fall back to
+the remaining permitted metadata sources.
+
+A native recursive filesystem event monitor is
 enabled by default; it coalesces event bursts for 500 ms and schedules durable
 inventory only for already-materialized parent directories. Set
 `TJXY_FILESYSTEM_REALTIME=false` to disable this hint path; explicit Validate

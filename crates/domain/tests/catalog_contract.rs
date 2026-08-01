@@ -1,7 +1,8 @@
 use tjxy_common::{CatalogItemId, MediaSourceId, PresentationKey};
 use tjxy_domain::{
     CatalogItem, CatalogItemKind, EffectiveScanPolicy, MediaLocation, MediaSource, MetadataPolicy,
-    ObjectSelectionScope, PresenceState, ProbePolicy, ScanProfile, StructureExpansionPolicy,
+    MetadataSourceMode, ObjectSelectionScope, PresenceState, ProbePolicy, ScanProfile,
+    StructureExpansionPolicy,
 };
 
 #[test]
@@ -58,6 +59,28 @@ fn scan_profiles_expand_to_persistable_effective_policies() {
     assert_eq!(manual.metadata, MetadataPolicy::ExplicitOnly);
     assert_eq!(manual.expansion, StructureExpansionPolicy::ExplicitOnly);
     assert_eq!(manual.probe, ProbePolicy::OnPlaybackInfo);
+}
+
+#[test]
+fn metadata_source_mode_has_stable_persistence_values_and_safe_default() {
+    assert_eq!(
+        MetadataSourceMode::default(),
+        MetadataSourceMode::AutomaticScrape
+    );
+    assert_eq!(
+        MetadataSourceMode::AutomaticScrape.as_str(),
+        "automatic_scrape"
+    );
+    assert_eq!(MetadataSourceMode::LocalOnly.as_str(), "local_only");
+    assert_eq!(
+        "automatic_scrape".parse::<MetadataSourceMode>().unwrap(),
+        MetadataSourceMode::AutomaticScrape
+    );
+    assert_eq!(
+        "local_only".parse::<MetadataSourceMode>().unwrap(),
+        MetadataSourceMode::LocalOnly
+    );
+    assert!("remote_only".parse::<MetadataSourceMode>().is_err());
 }
 
 #[test]

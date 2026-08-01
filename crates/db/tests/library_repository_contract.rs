@@ -31,6 +31,7 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
                         Alias::new("scan_profile"),
                         Alias::new("object_selection_scope"),
                         Alias::new("metadata_policy"),
+                        Alias::new("metadata_source_mode"),
                         Alias::new("expansion_policy"),
                         Alias::new("probe_policy"),
                         Alias::new("profile_version"),
@@ -44,6 +45,7 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
                         "Lazy".into(),
                         "title_layer".into(),
                         "basic".into(),
+                        "local_only".into(),
                         "on_browse".into(),
                         "on_playback".into(),
                         3.into(),
@@ -136,6 +138,7 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
     let folder = &folders[0];
     assert_eq!(folder.id(), library_id);
     assert_eq!(folder.scan_profile(), "Lazy");
+    assert_eq!(folder.metadata_source_mode(), "local_only");
     assert_eq!(folder.profile_version(), 3);
     assert_eq!(folder.roots().len(), 2);
     assert!(

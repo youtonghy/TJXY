@@ -115,7 +115,8 @@ pub use metadata_provider_settings::{
     MetadataProviderSettingsRepositoryError,
 };
 pub use metadata_work::{
-    MetadataSidecarCandidate, MetadataWorkError, MetadataWorkRepository, MetadataWorkSnapshot,
+    MetadataImageCandidate, MetadataSidecarCandidate, MetadataWorkError, MetadataWorkRepository,
+    MetadataWorkSnapshot,
 };
 pub use migration::Migrator;
 pub use outbox::{

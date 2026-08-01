@@ -372,6 +372,7 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
             | MetadataWorkError::InvalidClaim
             | MetadataWorkError::MissingSyncRevision
             | MetadataWorkError::TooManySidecars
+            | MetadataWorkError::TooManyImages
             | MetadataWorkError::AmbiguousSidecars
             | MetadataWorkError::InvalidSidecarSize
             | MetadataWorkError::InvalidStoredMetadata,
@@ -406,6 +407,7 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
             | DiscoverTitlesError::Publication(_)
             | DiscoverTitlesError::Work(_)
             | DiscoverTitlesError::InvalidMetadataPolicy
+            | DiscoverTitlesError::InvalidMetadataSourceMode
             | DiscoverTitlesError::MissingLibraryScope
             | DiscoverTitlesError::InvalidLibraryScope
             | DiscoverTitlesError::StaleLibraryPolicy

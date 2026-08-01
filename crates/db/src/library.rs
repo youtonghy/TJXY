@@ -124,6 +124,7 @@ pub struct VirtualFolderRecord {
     profile_version: i32,
     object_selection_scope: String,
     metadata_policy: String,
+    metadata_source_mode: String,
     expansion_policy: String,
     probe_policy: String,
     roots: Vec<VirtualFolderRoot>,
@@ -171,6 +172,11 @@ impl VirtualFolderRecord {
     }
 
     #[must_use]
+    pub fn metadata_source_mode(&self) -> &str {
+        &self.metadata_source_mode
+    }
+
+    #[must_use]
     pub fn expansion_policy(&self) -> &str {
         &self.expansion_policy
     }
@@ -203,6 +209,7 @@ pub struct LibraryPolicyUpdate {
     scan_profile: String,
     object_selection_scope: String,
     metadata_policy: String,
+    metadata_source_mode: Option<String>,
     expansion_policy: String,
     probe_policy: String,
     is_enabled: bool,
@@ -227,6 +234,7 @@ impl LibraryPolicyUpdate {
             scan_profile: scan_profile.into(),
             object_selection_scope: object_selection_scope.into(),
             metadata_policy: metadata_policy.into(),
+            metadata_source_mode: None,
             expansion_policy: expansion_policy.into(),
             probe_policy: probe_policy.into(),
             is_enabled,
@@ -239,6 +247,26 @@ impl LibraryPolicyUpdate {
             &update.probe_policy,
         )?;
         Ok(update)
+    }
+
+    /// Sets the metadata provider policy without changing scan completeness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryRepositoryError::InvalidStoredPolicy`] for an unknown mode.
+    pub fn with_metadata_source_mode(
+        mut self,
+        metadata_source_mode: impl Into<String>,
+    ) -> Result<Self, LibraryRepositoryError> {
+        let metadata_source_mode = metadata_source_mode.into();
+        if !matches!(
+            metadata_source_mode.as_str(),
+            "automatic_scrape" | "local_only"
+        ) {
+            return Err(LibraryRepositoryError::InvalidStoredPolicy);
+        }
+        self.metadata_source_mode = Some(metadata_source_mode);
+        Ok(self)
     }
 }
 
@@ -292,6 +320,42 @@ impl<'connection> LibraryRepository<'connection> {
         ensure_name_available(&transaction, name).await?;
         let library_id = LibraryId::new();
         insert_library(&transaction, library_id, name, collection_type, policy).await?;
+        let created = bind_filesystem_root(&transaction, library_id, root).await?;
+        crate::advance_catalog_generation(&transaction).await?;
+        transaction.commit().await?;
+        Ok(CreatedFilesystemLibrary {
+            library: library_id,
+            account: created.account,
+            root: created.root,
+            initial_sync_job: created.initial_sync_job,
+        })
+    }
+
+    /// Attaches one validated filesystem root to an existing library atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryRepositoryError`] when the library is missing or the root cannot bind.
+    pub async fn attach_filesystem_root(
+        &self,
+        library_id: LibraryId,
+        root: &FilesystemRootDraft,
+    ) -> Result<CreatedFilesystemLibrary, LibraryRepositoryError> {
+        let transaction = self.database.begin().await?;
+        lock_library_mutations(&transaction).await?;
+        let exists = Query::select()
+            .expr(Expr::val(1_i32))
+            .from(Alias::new("libraries"))
+            .and_where(Expr::col(Alias::new("id")).eq(library_id.as_uuid()))
+            .limit(1)
+            .to_owned();
+        if transaction
+            .query_one(transaction.get_database_backend().build(&exists))
+            .await?
+            .is_none()
+        {
+            return Err(LibraryRepositoryError::NotFound);
+        }
         let created = bind_filesystem_root(&transaction, library_id, root).await?;
         crate::advance_catalog_generation(&transaction).await?;
         transaction.commit().await?;
@@ -531,6 +595,7 @@ impl<'connection> LibraryRepository<'connection> {
                 (library.clone(), Alias::new("profile_version")),
                 (library.clone(), Alias::new("object_selection_scope")),
                 (library.clone(), Alias::new("metadata_policy")),
+                (library.clone(), Alias::new("metadata_source_mode")),
                 (library.clone(), Alias::new("expansion_policy")),
                 (library.clone(), Alias::new("probe_policy")),
             ])
@@ -579,7 +644,8 @@ impl<'connection> LibraryRepository<'connection> {
         let next_version = expected_version
             .checked_add(1)
             .ok_or(LibraryRepositoryError::InvalidProfileVersion)?;
-        let statement = Query::update()
+        let mut statement = Query::update();
+        statement
             .table(Alias::new("libraries"))
             .value(Alias::new("scan_profile"), update.scan_profile.as_str())
             .value(
@@ -598,8 +664,11 @@ impl<'connection> LibraryRepository<'connection> {
             .value(Alias::new("is_enabled"), update.is_enabled)
             .value(Alias::new("profile_version"), next_version)
             .and_where(Expr::col(Alias::new("id")).eq(library_id.as_uuid()))
-            .and_where(Expr::col(Alias::new("profile_version")).eq(expected_version))
-            .to_owned();
+            .and_where(Expr::col(Alias::new("profile_version")).eq(expected_version));
+        if let Some(mode) = update.metadata_source_mode.as_deref() {
+            statement.value(Alias::new("metadata_source_mode"), mode);
+        }
+        let statement = statement.to_owned();
         let backend = self.database.get_database_backend();
         if self
             .database
@@ -694,6 +763,7 @@ async fn insert_library(
             Alias::new("scan_profile"),
             Alias::new("object_selection_scope"),
             Alias::new("metadata_policy"),
+            Alias::new("metadata_source_mode"),
             Alias::new("expansion_policy"),
             Alias::new("probe_policy"),
             Alias::new("profile_version"),
@@ -707,6 +777,11 @@ async fn insert_library(
             policy.scan_profile.as_str().into(),
             policy.object_selection_scope.as_str().into(),
             policy.metadata_policy.as_str().into(),
+            policy
+                .metadata_source_mode
+                .as_deref()
+                .unwrap_or("automatic_scrape")
+                .into(),
             policy.expansion_policy.as_str().into(),
             policy.probe_policy.as_str().into(),
             1_i32.into(),
@@ -1165,6 +1240,7 @@ fn folder_from_row(
         profile_version: row.try_get("", "profile_version")?,
         object_selection_scope: row.try_get("", "object_selection_scope")?,
         metadata_policy: row.try_get("", "metadata_policy")?,
+        metadata_source_mode: row.try_get("", "metadata_source_mode")?,
         expansion_policy: row.try_get("", "expansion_policy")?,
         probe_policy: row.try_get("", "probe_policy")?,
         roots: Vec::new(),
@@ -1181,6 +1257,12 @@ fn validate_policy(record: &VirtualFolderRecord) -> Result<(), LibraryRepository
         &record.expansion_policy,
         &record.probe_policy,
     )?;
+    if !matches!(
+        record.metadata_source_mode.as_str(),
+        "automatic_scrape" | "local_only"
+    ) {
+        return Err(LibraryRepositoryError::InvalidStoredPolicy);
+    }
     if record.profile_version < 0 {
         return Err(LibraryRepositoryError::InvalidStoredPolicy);
     }

@@ -36,6 +36,7 @@ beforeEach(() => {
     profileVersion: 1,
     objectSelectionScope: 'title_layer',
     metadataPolicy: 'basic',
+    metadataSourceMode: 'automatic_scrape',
     expansionPolicy: 'on_browse',
     probePolicy: 'on_playback',
   }]);

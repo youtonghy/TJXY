@@ -8,9 +8,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use tjxy_api::{
-    AddVirtualFolderDto, LibraryOptionsDto, UpdateLibraryOptionsDto, VirtualFolderInfo,
+    AddVirtualFolderDto, AttachVirtualFolderPathDto, FilesystemSelectionDto, LibraryOptionsDto,
+    UpdateLibraryOptionsDto, VirtualFolderInfo,
 };
-use tjxy_application::{LibraryPolicyOverrides, LibraryServiceError};
+use tjxy_application::{LibraryPolicyOverrides, LibraryService, LibraryServiceError};
 use tjxy_common::{LibraryId, StorageRootId};
 use tjxy_db::{FilesystemRootDraft, LibraryRepositoryError};
 use tjxy_storage_filesystem::FilesystemBackend;
@@ -66,6 +67,7 @@ pub(crate) async fn virtual_folders(
                             folder.profile_version(),
                             folder.object_selection_scope(),
                             folder.metadata_policy(),
+                            folder.metadata_source_mode(),
                             folder.expansion_policy(),
                             folder.probe_policy(),
                         ),
@@ -103,10 +105,33 @@ pub(crate) async fn add_virtual_folder(
     let Some(libraries) = state.libraries.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let (profile, enabled) = request.library_options().map_or(("Lazy", true), |options| {
-        (options.scan_profile(), options.enabled())
-    });
-    let result = if let Some(path) = query.paths.filter(|path| !path.is_empty()) {
+    let (profile, enabled, metadata_source_mode) =
+        request
+            .library_options()
+            .map_or(("Lazy", true, "automatic_scrape"), |options| {
+                (
+                    options.scan_profile(),
+                    options.enabled(),
+                    options.metadata_source_mode(),
+                )
+            });
+    let selection = request.filesystem_selection();
+    let result = if let Some(selection) = selection {
+        let Ok((backend, draft)) = browser_filesystem_root(&state, selection).await else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let result = libraries
+            .create_virtual_folder_with_filesystem_root(
+                &query.name,
+                &query.collection_type,
+                profile,
+                enabled,
+                metadata_source_mode,
+                &draft,
+            )
+            .await;
+        activate_created_filesystem_root(&state, libraries, backend, result).await
+    } else if let Some(path) = query.paths.filter(|path| !path.is_empty()) {
         let Ok(backend) = FilesystemBackend::new(&path).await.map(Arc::new) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
@@ -131,6 +156,7 @@ pub(crate) async fn add_virtual_folder(
                 &query.collection_type,
                 profile,
                 enabled,
+                metadata_source_mode,
                 &draft,
             )
             .await;
@@ -156,7 +182,13 @@ pub(crate) async fn add_virtual_folder(
         }
     } else {
         libraries
-            .create_virtual_folder(&query.name, &query.collection_type, profile, enabled)
+            .create_virtual_folder(
+                &query.name,
+                &query.collection_type,
+                profile,
+                enabled,
+                metadata_source_mode,
+            )
             .await
             .map(|_| ())
     };
@@ -164,6 +196,93 @@ pub(crate) async fn add_virtual_folder(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => library_error_response(&error),
     }
+}
+
+pub(crate) async fn attach_virtual_folder_path(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_administrator(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    if !auth::is_json_content_type(&headers) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let request: AttachVirtualFolderPathDto = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Some(libraries) = state.libraries.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok((backend, draft)) =
+        browser_filesystem_root(&state, request.filesystem_selection()).await
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let result = libraries
+        .attach_filesystem_root(LibraryId::from_uuid(request.library_id()), &draft)
+        .await;
+    match activate_created_filesystem_root(&state, libraries, backend, result).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => library_error_response(&error),
+    }
+}
+
+async fn browser_filesystem_root(
+    state: &AppState,
+    selection: &FilesystemSelectionDto,
+) -> Result<(Arc<FilesystemBackend>, FilesystemRootDraft), ()> {
+    let browser = state.filesystem_browser.as_ref().ok_or(())?;
+    let resolved = browser
+        .resolve(
+            selection.root_id(),
+            std::path::Path::new(selection.relative_path()),
+        )
+        .await
+        .map_err(|_| ())?;
+    let backend = Arc::new(
+        FilesystemBackend::new(resolved.path())
+            .await
+            .map_err(|_| ())?,
+    );
+    let root_path = backend.root_path().to_str().ok_or(())?;
+    let display_name = backend
+        .root_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Media");
+    let draft = FilesystemRootDraft::new(
+        root_path,
+        backend.root_id().provider_object_id(),
+        display_name,
+    )
+    .map_err(|_| ())?;
+    Ok((backend, draft))
+}
+
+async fn activate_created_filesystem_root(
+    state: &AppState,
+    libraries: &LibraryService,
+    backend: Arc<FilesystemBackend>,
+    result: Result<tjxy_db::CreatedFilesystemLibrary, LibraryServiceError>,
+) -> Result<(), LibraryServiceError> {
+    let created = result?;
+    if let Some(runtime) = state.storage_runtime.as_ref()
+        && runtime
+            .activate_filesystem(created.account_id(), backend)
+            .is_err()
+    {
+        libraries
+            .disable_storage_account_after_activation_failure(created.account_id())
+            .await?;
+        return Err(LibraryServiceError::RuntimeStorageActivation);
+    }
+    Ok(())
 }
 
 pub(crate) async fn rename_virtual_folder(
@@ -401,6 +520,7 @@ pub(crate) async fn update_library_options(
             options.scan_profile(),
             options.profile_version(),
             options.enabled(),
+            options.metadata_source_mode(),
             overrides,
         )
         .await

@@ -7,9 +7,11 @@ use sea_orm::DatabaseConnection;
 use thiserror::Error;
 use tjxy_common::{CatalogItemId, ImageType};
 use tjxy_db::{
-    ClaimedWorkJob, MetadataPublicationError, MetadataPublicationRepository, MetadataWorkError,
-    MetadataWorkRepository, StorageSyncRepositoryError, WorkScope,
+    ClaimedWorkJob, MetadataImageCandidate, MetadataPublicationError,
+    MetadataPublicationRepository, MetadataWorkError, MetadataWorkRepository,
+    StorageSyncRepositoryError, WorkScope,
 };
+use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{
     MetadataError, MetadataImageReference, MetadataProvider, MetadataResolution, MetadataResolver,
     MetadataState, NfoDocument,
@@ -315,7 +317,14 @@ impl MetadataResolveService {
     ) -> Result<MetadataResolveReport, MetadataResolveError> {
         let repository = MetadataWorkRepository::new(&self.database);
         let snapshot = repository.snapshot(claimed).await?;
-        let resolver = MetadataResolver::new(self.providers.clone())?;
+        let providers = match claimed.job().metadata_source_mode() {
+            Some(MetadataSourceMode::AutomaticScrape) => self.providers.clone(),
+            Some(MetadataSourceMode::LocalOnly) => Vec::new(),
+            None => {
+                return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
+            }
+        };
+        let resolver = MetadataResolver::new(providers)?;
         let mut execution_warnings = Vec::new();
         let (resolution, used_nfo) = if let Some(sidecar) = snapshot.sidecar() {
             let backend = self
@@ -386,17 +395,28 @@ impl MetadataResolveService {
         let WorkScope::CatalogItem(item_id) = claimed.job().scope() else {
             return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
         };
-        let prepared_asset = self
-            .prepare_primary_image(item_id, &resolution, &mut execution_warnings)
+        let mut prepared_assets = self
+            .prepare_local_images(item_id, snapshot.images(), &mut execution_warnings)
             .await?;
+        if !prepared_assets
+            .iter()
+            .any(|asset| asset.publication().image_type() == ImageType::Primary)
+            && let Some(remote) = self
+                .prepare_primary_image(item_id, &resolution, &mut execution_warnings)
+                .await?
+        {
+            prepared_assets.push(remote);
+        }
+        let asset_publications = prepared_assets
+            .iter()
+            .map(PreparedAssetPublication::publication)
+            .collect::<Vec<_>>();
         let publication = repository
             .commit(
                 claimed,
                 &snapshot,
                 &resolution,
-                prepared_asset
-                    .as_ref()
-                    .map(PreparedAssetPublication::publication),
+                &asset_publications,
                 used_nfo,
                 execution_warnings,
             )
@@ -406,6 +426,86 @@ impl MetadataResolveService {
             state: resolution.state(),
             used_nfo,
         })
+    }
+
+    async fn prepare_local_images(
+        &self,
+        item_id: CatalogItemId,
+        candidates: &[MetadataImageCandidate],
+        warnings: &mut Vec<String>,
+    ) -> Result<Vec<PreparedAssetPublication>, MetadataResolveError> {
+        let Some(writer) = self.asset_writer.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut prepared = Vec::new();
+        for candidate in candidates {
+            let file = candidate.file();
+            if file.size() > MAX_METADATA_IMAGE_BYTES as u64 {
+                warnings.push(format!("Local image {} is too large", file.name()));
+                continue;
+            }
+            let Some(mime_type) = local_image_mime(file.name()) else {
+                continue;
+            };
+            let backend = self
+                .backends
+                .backend_for_drive(file.storage_account_id(), file.provider_drive_id())
+                .ok_or(MetadataResolveError::BackendUnavailable)?;
+            let object_id = StorageObjectId::new(
+                file.provider().to_owned(),
+                file.provider_object_id().to_owned(),
+            )?;
+            let before = storage_read::get_object(
+                &self.database,
+                backend.as_ref(),
+                file.record_id(),
+                &object_id,
+            )
+            .await
+            .map_err(metadata_storage_read_error)?;
+            validate_sidecar(file, &object_id, &before)?;
+            let bytes = read_sidecar(
+                &self.database,
+                backend.as_ref(),
+                file.record_id(),
+                &object_id,
+                file.size(),
+            )
+            .await?;
+            let after = storage_read::get_object(
+                &self.database,
+                backend.as_ref(),
+                file.record_id(),
+                &object_id,
+            )
+            .await
+            .map_err(metadata_storage_read_error)?;
+            validate_sidecar(file, &object_id, &after)?;
+            if object_revision(&before) != object_revision(&after) || before.size() != after.size()
+            {
+                return Err(MetadataResolveError::ObjectChanged);
+            }
+            let source_reference = format!("storage-object:{}", file.record_id());
+            match writer
+                .prepare_original(
+                    item_id,
+                    candidate.image_type(),
+                    0,
+                    "Local",
+                    Some(&source_reference),
+                    mime_type,
+                    &bytes,
+                )
+                .await
+            {
+                Ok(asset) => prepared.push(asset),
+                Err(error) if invalid_remote_image(&error) => {
+                    warnings.push(format!("Local image {}: {error}", file.name()));
+                }
+                Err(error) => return Err(MetadataResolveError::Asset(error)),
+            }
+        }
+        Ok(prepared)
     }
 
     async fn prepare_primary_image(
@@ -447,6 +547,22 @@ impl MetadataResolveService {
             }
             Err(error) => Err(MetadataResolveError::Asset(error)),
         }
+    }
+}
+
+fn local_image_mime(name: &str) -> Option<&'static str> {
+    match std::path::Path::new(name)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
     }
 }
 

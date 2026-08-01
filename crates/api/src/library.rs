@@ -46,6 +46,7 @@ pub struct LibraryOptionsDto {
     profile_version: i32,
     object_selection_scope: String,
     metadata_policy: String,
+    metadata_source_mode: String,
     expansion_policy: String,
     probe_policy: String,
 }
@@ -59,6 +60,7 @@ impl LibraryOptionsDto {
         profile_version: i32,
         object_selection_scope: impl Into<String>,
         metadata_policy: impl Into<String>,
+        metadata_source_mode: impl Into<String>,
         expansion_policy: impl Into<String>,
         probe_policy: impl Into<String>,
     ) -> Self {
@@ -70,6 +72,7 @@ impl LibraryOptionsDto {
             profile_version,
             object_selection_scope: object_selection_scope.into(),
             metadata_policy: metadata_policy.into(),
+            metadata_source_mode: metadata_source_mode.into(),
             expansion_policy: expansion_policy.into(),
             probe_policy: probe_policy.into(),
         }
@@ -96,12 +99,57 @@ struct MediaPathInfoDto {
 pub struct AddVirtualFolderDto {
     #[serde(default)]
     library_options: Option<CreateLibraryOptions>,
+    #[serde(default)]
+    filesystem_selection: Option<FilesystemSelectionDto>,
 }
 
 impl AddVirtualFolderDto {
     #[must_use]
     pub const fn library_options(&self) -> Option<&CreateLibraryOptions> {
         self.library_options.as_ref()
+    }
+
+    #[must_use]
+    pub const fn filesystem_selection(&self) -> Option<&FilesystemSelectionDto> {
+        self.filesystem_selection.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct FilesystemSelectionDto {
+    root_id: Uuid,
+    relative_path: String,
+}
+
+impl FilesystemSelectionDto {
+    #[must_use]
+    pub const fn root_id(&self) -> Uuid {
+        self.root_id
+    }
+
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct AttachVirtualFolderPathDto {
+    library_id: Uuid,
+    filesystem_selection: FilesystemSelectionDto,
+}
+
+impl AttachVirtualFolderPathDto {
+    #[must_use]
+    pub const fn library_id(&self) -> Uuid {
+        self.library_id
+    }
+
+    #[must_use]
+    pub const fn filesystem_selection(&self) -> &FilesystemSelectionDto {
+        &self.filesystem_selection
     }
 }
 
@@ -112,6 +160,8 @@ pub struct CreateLibraryOptions {
     enabled: bool,
     #[serde(default = "default_scan_profile")]
     scan_profile: String,
+    #[serde(default = "default_metadata_source_mode")]
+    metadata_source_mode: String,
 }
 
 impl CreateLibraryOptions {
@@ -124,6 +174,11 @@ impl CreateLibraryOptions {
     pub fn scan_profile(&self) -> &str {
         &self.scan_profile
     }
+
+    #[must_use]
+    pub fn metadata_source_mode(&self) -> &str {
+        &self.metadata_source_mode
+    }
 }
 
 const fn default_true() -> bool {
@@ -132,6 +187,10 @@ const fn default_true() -> bool {
 
 fn default_scan_profile() -> String {
     "Lazy".to_owned()
+}
+
+fn default_metadata_source_mode() -> String {
+    "automatic_scrape".to_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -161,6 +220,7 @@ pub struct UpdateLibraryOptions {
     profile_version: i32,
     object_selection_scope: Option<String>,
     metadata_policy: Option<String>,
+    metadata_source_mode: Option<String>,
     expansion_policy: Option<String>,
     probe_policy: Option<String>,
 }
@@ -189,6 +249,11 @@ impl UpdateLibraryOptions {
     #[must_use]
     pub fn metadata_policy(&self) -> Option<&str> {
         self.metadata_policy.as_deref()
+    }
+
+    #[must_use]
+    pub fn metadata_source_mode(&self) -> Option<&str> {
+        self.metadata_source_mode.as_deref()
     }
 
     #[must_use]

@@ -15,6 +15,7 @@ use tjxy_db::{
     HybridCandidateRepository, MetadataRequirement, UserDataPatch, UserDataRepository,
     WorkJobRepository, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 use tjxy_test_support::test_database;
 use uuid::Uuid;
 
@@ -2184,6 +2185,17 @@ async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
         "on_playback",
     )
     .await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
     let (item, _) = seed_indexed_movie_with_source(&database, library).await;
     let (_, storage_object) = seed_root(&database, library).await;
     let sql = database.get_database_backend();
@@ -2247,6 +2259,10 @@ async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
     assert_eq!(
         metadata.job().metadata_requirement(),
         Some(MetadataRequirement::Basic)
+    );
+    assert_eq!(
+        metadata.job().metadata_source_mode(),
+        Some(MetadataSourceMode::LocalOnly)
     );
 
     let metadata_report = MetadataResolveService::new(database.clone())

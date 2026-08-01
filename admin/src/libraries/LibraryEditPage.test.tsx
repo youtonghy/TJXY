@@ -6,6 +6,7 @@ import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmin';
 import { AdminNotifications } from '../ui/AdminNotifications';
 import { LibraryEditPage } from './LibraryEditPage';
+import { attachFilesystemFolder } from './filesystemApi';
 import type { LibraryOption } from './libraryApi';
 import {
   deleteLibrary,
@@ -27,11 +28,23 @@ vi.mock('./HybridCandidatesPanel', () => ({
     </section>
   ),
 }));
+vi.mock('./filesystemApi', () => ({ attachFilesystemFolder: vi.fn() }));
+vi.mock('./FolderPickerDialog', () => ({
+  FolderPickerDialog: ({ isOpen, onSelect }: {
+    isOpen: boolean;
+    onSelect: (selection: { rootId: string; relativePath: string }, label: string) => void;
+  }) => isOpen ? (
+    <button onClick={() => { onSelect({ rootId: 'root-2', relativePath: 'Movies' }, 'Media / Movies'); }} type="button">
+      Choose media fixture
+    </button>
+  ) : null,
+}));
 
 const listMock = vi.mocked(listLibraries);
 const renameMock = vi.mocked(renameLibrary);
 const updateMock = vi.mocked(updateLibraryPolicy);
 const deleteMock = vi.mocked(deleteLibrary);
+const attachMock = vi.mocked(attachFilesystemFolder);
 const libraryId = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
 const otherLibraryId = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f12';
 const movies = {
@@ -44,6 +57,7 @@ const movies = {
   profileVersion: 3,
   objectSelectionScope: 'title_layer',
   metadataPolicy: 'basic',
+  metadataSourceMode: 'automatic_scrape',
   expansionPolicy: 'on_browse',
   probePolicy: 'on_playback',
 } satisfies LibraryOption;
@@ -97,10 +111,12 @@ beforeEach(() => {
   renameMock.mockReset();
   updateMock.mockReset();
   deleteMock.mockReset();
+  attachMock.mockReset();
   listMock.mockResolvedValue([movies]);
   renameMock.mockResolvedValue(undefined);
   updateMock.mockResolvedValue(undefined);
   deleteMock.mockResolvedValue(undefined);
+  attachMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -120,6 +136,7 @@ it('loads a direct deep link with ordered sections and a Back breadcrumb', async
   expect(sectionHeadings).toEqual([
     'Identity',
     'Scanning policy',
+    'Media folders',
     'Background candidates',
     'Danger zone',
   ]);
@@ -189,6 +206,7 @@ it('saves a named profile with the loaded version and omits advanced overrides',
     enabled: false,
     scanProfile: 'Hybrid',
     profileVersion: 3,
+    metadataSourceMode: 'automatic_scrape',
   });
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
   expect(await screen.findByText('4', { selector: 'dd' })).toBeVisible();
@@ -210,12 +228,29 @@ it('sends all advanced policy values as one versioned update', async () => {
     enabled: true,
     scanProfile: 'Lazy',
     profileVersion: 3,
+    metadataSourceMode: 'automatic_scrape',
     effectivePolicy: {
       objectSelectionScope: 'library_roots',
       metadataPolicy: 'full',
       expansionPolicy: 'background',
       probePolicy: 'eager',
     },
+  });
+});
+
+it('attaches a folder selected through the server folder picker', async () => {
+  renderEdit();
+  const user = userEvent.setup();
+  await loadedNameInput();
+
+  await user.click(screen.getByRole('button', { name: 'Add folder' }));
+  await user.click(screen.getByRole('button', { name: 'Choose media fixture' }));
+
+  await waitFor(() => {
+    expect(attachMock).toHaveBeenCalledWith(libraryId, {
+      rootId: 'root-2',
+      relativePath: 'Movies',
+    });
   });
 });
 

@@ -9,6 +9,7 @@ mod configuration;
 mod dashboard_admin;
 mod device;
 mod display_preferences;
+mod filesystem_admin;
 mod hybrid_admin;
 mod image;
 mod import_admin;
@@ -49,9 +50,10 @@ use axum::{
 };
 use tjxy_api::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
 use tjxy_application::{
-    AssetReadService, AuthService, CatalogQueryService, DisplayPreferencesService, LibraryService,
-    MediaCollectionService, MediaReadService, MetadataImportService, PlaybackTicketService,
-    PlaystateService, SystemClock, TaskService, UserDataService,
+    AssetReadService, AuthService, CatalogQueryService, DisplayPreferencesService,
+    FilesystemBrowser, LibraryService, MediaCollectionService, MediaReadService,
+    MetadataImportService, PlaybackTicketService, PlaystateService, SystemClock, TaskService,
+    UserDataService,
 };
 use uuid::Uuid;
 
@@ -124,6 +126,7 @@ pub struct AppState {
     dashboard_admin: Option<Arc<dashboard_admin::DashboardAdminService>>,
     client_portal: Option<Arc<client_portal::ClientPortalService>>,
     libraries: Option<Arc<LibraryService>>,
+    filesystem_browser: Option<Arc<FilesystemBrowser>>,
     assets: Option<Arc<AssetReadService>>,
     media: Option<Arc<MediaReadService>>,
     playback_tickets: Option<Arc<PlaybackTicketService<SystemClock>>>,
@@ -153,6 +156,7 @@ impl AppState {
             dashboard_admin: None,
             client_portal: None,
             libraries: None,
+            filesystem_browser: None,
             assets: None,
             media: None,
             playback_tickets: None,
@@ -215,6 +219,12 @@ impl AppState {
     #[must_use]
     pub fn with_libraries(mut self, libraries: Arc<LibraryService>) -> Self {
         self.libraries = Some(libraries);
+        self
+    }
+
+    #[must_use]
+    pub fn with_filesystem_browser(mut self, browser: Arc<FilesystemBrowser>) -> Self {
+        self.filesystem_browser = Some(browser);
         self
     }
 
@@ -464,6 +474,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/Sessions/Playing/Ping", post(playstate::ping))
         .route("/Library/Refresh", post(task::refresh_library))
         .merge(admin_task_routes())
+        .merge(admin_filesystem_routes())
         .merge(admin_hybrid_routes())
         .merge(admin_storage_routes())
         .merge(admin_source_routes())
@@ -583,7 +594,7 @@ fn library_routes() -> Router<AppState> {
         )
         .route(
             "/Library/VirtualFolders/Paths",
-            delete(library::detach_virtual_folder_path),
+            post(library::attach_virtual_folder_path).delete(library::detach_virtual_folder_path),
         )
 }
 
@@ -612,6 +623,15 @@ fn admin_task_routes() -> Router<AppState> {
             post(task::index_media_sources),
         )
         .route("/Admin/Tasks/ProbeMedia/{id}", post(task::probe_media))
+}
+
+fn admin_filesystem_routes() -> Router<AppState> {
+    Router::new()
+        .route("/Admin/Filesystem/Roots", get(filesystem_admin::roots))
+        .route(
+            "/Admin/Filesystem/Directories",
+            get(filesystem_admin::directories),
+        )
 }
 
 fn admin_hybrid_routes() -> Router<AppState> {

@@ -3164,6 +3164,7 @@ dependencies = [
  "thiserror",
  "tjxy-common",
  "tjxy-credentials",
+ "tjxy-domain",
  "tjxy-metadata",
  "tjxy-storage",
  "tjxy-test-support",

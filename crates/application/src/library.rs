@@ -52,8 +52,9 @@ impl LibraryService {
         collection_type: &str,
         profile: &str,
         enabled: bool,
+        metadata_source_mode: &str,
     ) -> Result<LibraryId, LibraryServiceError> {
-        let update = policy_update(profile, enabled, None)?;
+        let update = policy_update(profile, enabled, None, Some(metadata_source_mode))?;
         LibraryRepository::new(&self.database)
             .create(name, collection_type, &update)
             .await
@@ -71,11 +72,28 @@ impl LibraryService {
         collection_type: &str,
         profile: &str,
         enabled: bool,
+        metadata_source_mode: &str,
         root: &FilesystemRootDraft,
     ) -> Result<CreatedFilesystemLibrary, LibraryServiceError> {
-        let update = policy_update(profile, enabled, None)?;
+        let update = policy_update(profile, enabled, None, Some(metadata_source_mode))?;
         LibraryRepository::new(&self.database)
             .create_with_filesystem_root(name, collection_type, &update, root)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Attaches one server-validated filesystem root to an existing library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryServiceError`] when the library is unavailable or binding fails.
+    pub async fn attach_filesystem_root(
+        &self,
+        library_id: LibraryId,
+        root: &FilesystemRootDraft,
+    ) -> Result<CreatedFilesystemLibrary, LibraryServiceError> {
+        LibraryRepository::new(&self.database)
+            .attach_filesystem_root(library_id, root)
             .await
             .map_err(Into::into)
     }
@@ -154,9 +172,10 @@ impl LibraryService {
         profile: &str,
         expected_version: i32,
         enabled: bool,
+        metadata_source_mode: Option<&str>,
         overrides: Option<LibraryPolicyOverrides<'_>>,
     ) -> Result<i32, LibraryServiceError> {
-        let update = policy_update(profile, enabled, overrides)?;
+        let update = policy_update(profile, enabled, overrides, metadata_source_mode)?;
         LibraryRepository::new(&self.database)
             .update_policy(library_id, expected_version, &update)
             .await
@@ -168,6 +187,7 @@ fn policy_update(
     profile: &str,
     enabled: bool,
     overrides: Option<LibraryPolicyOverrides<'_>>,
+    metadata_source_mode: Option<&str>,
 ) -> Result<LibraryPolicyUpdate, LibraryServiceError> {
     let profile = parse_profile(profile)?;
     let policy = EffectiveScanPolicy::for_profile(profile);
@@ -189,15 +209,18 @@ fn policy_update(
             )
         },
     );
-    LibraryPolicyUpdate::new(
+    let update = LibraryPolicyUpdate::new(
         profile_name(profile),
         object_selection,
         metadata,
         expansion,
         probe,
         enabled,
-    )
-    .map_err(Into::into)
+    )?;
+    match metadata_source_mode {
+        Some(mode) => update.with_metadata_source_mode(mode).map_err(Into::into),
+        None => Ok(update),
+    }
 }
 
 fn parse_profile(value: &str) -> Result<ScanProfile, LibraryServiceError> {

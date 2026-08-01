@@ -1,9 +1,11 @@
 import { ApiError, apiRequest } from '../api/httpClient';
+import type { FilesystemSelection } from './filesystemApi';
 
 export type ScanProfile = 'Full' | 'Lazy' | 'Hybrid' | 'Manual';
 export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | 'homevideos';
 export type ObjectSelectionScope = 'all_synced_objects' | 'title_layer' | 'library_roots';
 export type MetadataPolicy = 'full' | 'basic' | 'none';
+export type MetadataSourceMode = 'automatic_scrape' | 'local_only';
 export type ExpansionPolicy = 'eager' | 'on_browse' | 'background' | 'manual';
 export type ProbePolicy = 'eager' | 'on_playback' | 'manual';
 
@@ -12,6 +14,8 @@ export interface CreateLibraryRequest {
   collectionType: LibraryCollectionType;
   enabled: boolean;
   scanProfile: ScanProfile;
+  metadataSourceMode: MetadataSourceMode;
+  filesystemSelection?: FilesystemSelection;
 }
 
 export interface EffectiveLibraryPolicy {
@@ -26,6 +30,7 @@ export interface UpdateLibraryPolicyRequest {
   enabled: boolean;
   scanProfile: ScanProfile;
   profileVersion: number;
+  metadataSourceMode: MetadataSourceMode;
   effectivePolicy?: EffectiveLibraryPolicy;
 }
 
@@ -39,6 +44,7 @@ export interface LibraryOption {
   profileVersion: number;
   objectSelectionScope: ObjectSelectionScope;
   metadataPolicy: MetadataPolicy;
+  metadataSourceMode: MetadataSourceMode;
   expansionPolicy: ExpansionPolicy;
   probePolicy: ProbePolicy;
 }
@@ -64,7 +70,14 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
       LibraryOptions: {
         Enabled: request.enabled,
         ScanProfile: request.scanProfile,
+        MetadataSourceMode: request.metadataSourceMode,
       },
+      ...(request.filesystemSelection === undefined ? {} : {
+        FilesystemSelection: {
+          RootId: request.filesystemSelection.rootId,
+          RelativePath: request.filesystemSelection.relativePath,
+        },
+      }),
     }),
   });
 }
@@ -86,6 +99,7 @@ export async function updateLibraryPolicy(request: UpdateLibraryPolicyRequest): 
     Enabled: request.enabled,
     ScanProfile: request.scanProfile,
     ProfileVersion: request.profileVersion,
+    MetadataSourceMode: request.metadataSourceMode,
   };
   if (request.effectivePolicy !== undefined) {
     options.ObjectSelectionScope = request.effectivePolicy.objectSelectionScope;
@@ -111,6 +125,15 @@ export async function deleteLibrary(name: string): Promise<void> {
 }
 
 function toLibrary(value: unknown): LibraryOption {
+  const metadataSourceMode = isRecord(value)
+    && isRecord(value.LibraryOptions)
+    && value.LibraryOptions.MetadataSourceMode === undefined
+    ? 'automatic_scrape'
+    : isRecord(value)
+      && isRecord(value.LibraryOptions)
+      && isMetadataSourceMode(value.LibraryOptions.MetadataSourceMode)
+      ? value.LibraryOptions.MetadataSourceMode
+      : null;
   if (
     !isRecord(value)
     || !validText(value.ItemId)
@@ -123,6 +146,7 @@ function toLibrary(value: unknown): LibraryOption {
     || !isPositiveVersion(value.LibraryOptions.ProfileVersion)
     || !isObjectSelectionScope(value.LibraryOptions.ObjectSelectionScope)
     || !isMetadataPolicy(value.LibraryOptions.MetadataPolicy)
+    || metadataSourceMode === null
     || !isExpansionPolicy(value.LibraryOptions.ExpansionPolicy)
     || !isProbePolicy(value.LibraryOptions.ProbePolicy)
   ) {
@@ -138,6 +162,7 @@ function toLibrary(value: unknown): LibraryOption {
     profileVersion: value.LibraryOptions.ProfileVersion,
     objectSelectionScope: value.LibraryOptions.ObjectSelectionScope,
     metadataPolicy: value.LibraryOptions.MetadataPolicy,
+    metadataSourceMode,
     expansionPolicy: value.LibraryOptions.ExpansionPolicy,
     probePolicy: value.LibraryOptions.ProbePolicy,
   };
@@ -157,6 +182,10 @@ function isObjectSelectionScope(value: unknown): value is ObjectSelectionScope {
 
 function isMetadataPolicy(value: unknown): value is MetadataPolicy {
   return value === 'full' || value === 'basic' || value === 'none';
+}
+
+function isMetadataSourceMode(value: unknown): value is MetadataSourceMode {
+  return value === 'automatic_scrape' || value === 'local_only';
 }
 
 function isExpansionPolicy(value: unknown): value is ExpansionPolicy {

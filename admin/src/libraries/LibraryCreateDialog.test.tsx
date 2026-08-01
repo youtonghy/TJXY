@@ -1,7 +1,22 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useEffect, useRef } from 'react';
 
 import { LibraryCreateDialog } from './LibraryCreateDialog';
+
+vi.mock('./FolderPickerDialog', () => ({
+  FolderPickerDialog: ({ isOpen, onSelect }: {
+    isOpen: boolean;
+    onSelect: (selection: { rootId: string; relativePath: string }, label: string) => void;
+  }) => {
+    const selectRef = useRef(onSelect);
+    selectRef.current = onSelect;
+    useEffect(() => {
+      if (isOpen) selectRef.current({ rootId: 'root-1', relativePath: 'Shows' }, 'Media / Shows');
+    }, [isOpen]);
+    return null;
+  },
+}));
 
 it('submits the approved defaults and resets the draft after success', async () => {
   const onCreate = vi.fn().mockResolvedValue(true);
@@ -12,13 +27,17 @@ it('submits the approved defaults and resets the draft after success', async () 
   const user = userEvent.setup();
 
   await user.type(screen.getByRole('textbox', { name: 'Library name' }), '  Shows  ');
+  await user.click(screen.getByRole('button', { name: 'Browse' }));
+  expect(await screen.findByText('Media / Shows')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Create library' }));
 
   expect(onCreate).toHaveBeenCalledWith({
     name: 'Shows',
-    collectionType: 'mixed',
+    collectionType: 'movies',
     enabled: true,
     scanProfile: 'Lazy',
+    metadataSourceMode: 'automatic_scrape',
+    filesystemSelection: { rootId: 'root-1', relativePath: 'Shows' },
   });
 
   view.rerender(
@@ -40,6 +59,8 @@ it('preserves all input after failure and exposes HeroUI pending semantics', asy
 
   const name = screen.getByRole('textbox', { name: 'Library name' });
   await user.type(name, 'Shows');
+  await user.click(screen.getByRole('button', { name: 'Browse' }));
+  expect(await screen.findByText('Media / Shows')).toBeVisible();
   await user.click(screen.getByRole('switch', { name: 'Enabled' }));
   await user.click(screen.getByRole('button', { name: 'Create library' }));
 

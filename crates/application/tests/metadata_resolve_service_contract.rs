@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io::Cursor,
     sync::{Arc, Mutex},
 };
@@ -22,6 +22,7 @@ use tjxy_db::{
     MetadataPublicationRepository, MetadataRequirement, MetadataWorkError, MetadataWorkRepository,
     WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{MetadataCandidate, MetadataResolution, MetadataSource};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
@@ -31,6 +32,22 @@ use tjxy_test_support::test_database;
 use uuid::Uuid;
 
 struct PosterProvider;
+
+struct ForbiddenRemoteProvider;
+
+#[async_trait]
+impl tjxy_metadata::MetadataProvider for ForbiddenRemoteProvider {
+    fn name(&self) -> &'static str {
+        "ForbiddenRemote"
+    }
+
+    async fn resolve(
+        &self,
+        _lookup: &tjxy_metadata::MetadataLookup,
+    ) -> Result<Option<MetadataCandidate>, tjxy_metadata::MetadataProviderError> {
+        panic!("LocalOnly metadata resolution must not invoke remote providers")
+    }
+}
 
 #[async_trait]
 impl tjxy_metadata::MetadataProvider for PosterProvider {
@@ -72,17 +89,24 @@ struct NfoBackend {
     bytes: Vec<u8>,
     get_errors: Mutex<VecDeque<BackendError>>,
     ranges: Mutex<Vec<ByteRange>>,
+    extra_objects: Mutex<HashMap<String, (String, Vec<u8>, String)>>,
 }
 
 #[async_trait::async_trait]
 impl StorageBackend for NfoBackend {
     async fn get_object(&self, id: &StorageObjectId) -> Result<StorageObject, BackendError> {
-        assert_eq!(id, &self.object_id);
-        if let Some(error) = self.get_errors.lock().unwrap().pop_front() {
-            return Err(error);
+        if id == &self.object_id {
+            if let Some(error) = self.get_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
+            return StorageObject::file(id.clone(), "movie.nfo", self.bytes.len() as u64)
+                .with_remote_revision("nfo-r1");
         }
-        StorageObject::file(id.clone(), "movie.nfo", self.bytes.len() as u64)
-            .with_remote_revision("nfo-r1")
+        let objects = self.extra_objects.lock().unwrap();
+        let (name, bytes, revision) = objects
+            .get(id.provider_object_id())
+            .ok_or(BackendError::NotFound)?;
+        StorageObject::file(id.clone(), name, bytes.len() as u64).with_remote_revision(revision)
     }
 
     async fn list_children(
@@ -102,11 +126,20 @@ impl StorageBackend for NfoBackend {
         id: &StorageObjectId,
         range: ByteRange,
     ) -> Result<ByteStream, BackendError> {
-        assert_eq!(id, &self.object_id);
         self.ranges.lock().unwrap().push(range);
+        let extra = self.extra_objects.lock().unwrap();
+        let source = if id == &self.object_id {
+            self.bytes.as_slice()
+        } else {
+            extra
+                .get(id.provider_object_id())
+                .ok_or(BackendError::NotFound)?
+                .1
+                .as_slice()
+        };
         let start = usize::try_from(range.start()).unwrap();
         let end = usize::try_from(range.end_exclusive()).unwrap();
-        let bytes = self.bytes[start..end].to_vec();
+        let bytes = source[start..end].to_vec();
         Ok(Box::pin(stream::once(async move { Ok(bytes.into()) })))
     }
 
@@ -121,6 +154,7 @@ struct Fixture {
     account: Uuid,
     root: StorageRootId,
     nfo_record: StorageObjectRecordId,
+    parent: StorageObjectRecordId,
     backend: Arc<NfoBackend>,
 }
 
@@ -465,6 +499,44 @@ async fn resolve_metadata_reads_only_the_sql_selected_nfo_and_completes_durably(
 }
 
 #[tokio::test]
+async fn local_only_metadata_uses_nfo_without_invoking_configured_remote_providers() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "local-only-metadata-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let service = MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(ForbiddenRemoteProvider));
+
+    let report = service.execute(&claimed).await.unwrap();
+
+    assert!(report.used_nfo());
+    assert_eq!(report.state().as_str(), "Ready");
+}
+
+#[tokio::test]
 async fn newer_scope_observation_does_not_stale_an_unchanged_children_snapshot() {
     let fixture = fixture().await;
     let backend = fixture.database.get_database_backend();
@@ -616,7 +688,7 @@ async fn pending_sidecar_fact_rejects_metadata_commit_after_snapshot() {
     mark_object_fact_pending(&fixture.database, fixture.root, fixture.nfo_record).await;
 
     let error = repository
-        .commit(&claimed, &snapshot, &resolution, None, false, Vec::new())
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
         .await
         .unwrap_err();
 
@@ -679,7 +751,7 @@ async fn direct_metadata_publication_stales_an_older_running_resolver() {
             &claimed,
             &snapshot,
             &worker_resolution,
-            None,
+            &[],
             false,
             Vec::new(),
         )
@@ -800,7 +872,7 @@ async fn reconciled_sidecar_fact_change_rejects_metadata_commit_after_snapshot()
         .unwrap();
 
     let error = repository
-        .commit(&claimed, &snapshot, &resolution, None, false, Vec::new())
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
         .await
         .unwrap_err();
 
@@ -1180,6 +1252,107 @@ async fn invalid_remote_image_records_a_warning_without_losing_text_metadata() {
     assert!(warnings[0].as_str().unwrap().starts_with("Tmdb image: "));
 }
 
+#[tokio::test]
+async fn local_only_metadata_publishes_a_sibling_poster_without_remote_fetching() {
+    let fixture = fixture().await;
+    let poster_record = StorageObjectRecordId::new();
+    let poster_bytes = png_bytes();
+    fixture.backend.extra_objects.lock().unwrap().insert(
+        "poster-object".to_owned(),
+        (
+            "poster.png".to_owned(),
+            poster_bytes.clone(),
+            "poster-r1".to_owned(),
+        ),
+    );
+    insert_storage_object(
+        &fixture.database,
+        fixture.account,
+        poster_record,
+        "poster-object",
+        "poster.png",
+        "File",
+        Some(i64::try_from(poster_bytes.len()).unwrap()),
+        Some("poster-r1"),
+    )
+    .await;
+    insert_root_object(
+        &fixture.database,
+        fixture.root,
+        poster_record,
+        Some(fixture.parent),
+        false,
+    )
+    .await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "local-image-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let assets = TempDir::new().unwrap();
+    let writer = Arc::new(
+        AssetWriteService::new(fixture.database.clone(), assets.path())
+            .await
+            .unwrap(),
+    );
+    let service = MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(ForbiddenRemoteProvider))
+        .with_asset_writer(writer);
+
+    let report = service.execute(&claimed).await.unwrap();
+
+    assert!(report.used_nfo());
+    let asset = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .columns([
+                        Alias::new("image_type"),
+                        Alias::new("source_provider"),
+                        Alias::new("source_reference"),
+                    ])
+                    .from(Alias::new("item_assets")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        asset.try_get::<String>("", "image_type").unwrap(),
+        "Primary"
+    );
+    assert_eq!(
+        asset.try_get::<String>("", "source_provider").unwrap(),
+        "Local"
+    );
+    assert_eq!(
+        asset.try_get::<String>("", "source_reference").unwrap(),
+        format!("storage-object:{poster_record}")
+    );
+}
+
 fn png_bytes() -> Vec<u8> {
     let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255])));
     let mut bytes = Cursor::new(Vec::new());
@@ -1205,6 +1378,7 @@ async fn fixture() -> Fixture {
         bytes: nfo_bytes.clone(),
         get_errors: Mutex::new(VecDeque::new()),
         ranges: Mutex::new(Vec::new()),
+        extra_objects: Mutex::new(HashMap::new()),
     });
     insert_library(&database, library).await;
     database
@@ -1369,6 +1543,7 @@ async fn fixture() -> Fixture {
         account,
         root,
         nfo_record,
+        parent,
         backend,
     }
 }

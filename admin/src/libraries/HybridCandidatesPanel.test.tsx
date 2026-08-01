@@ -38,6 +38,7 @@ const library = {
   profileVersion: 1,
   objectSelectionScope: 'title_layer',
   metadataPolicy: 'basic',
+  metadataSourceMode: 'automatic_scrape',
   expansionPolicy: 'background',
   probePolicy: 'on_playback',
 } satisfies LibraryOption;

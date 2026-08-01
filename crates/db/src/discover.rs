@@ -10,6 +10,7 @@ use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, LibraryRootBindingId, SortKey, StorageObjectRecordId, StorageRootId,
 };
+use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
 
 use crate::{
@@ -79,6 +80,7 @@ pub struct DiscoveredTitle {
     name: String,
     production_year: Option<i32>,
     metadata_requirement: Option<MetadataRequirement>,
+    metadata_source_mode: MetadataSourceMode,
     children_indexed: bool,
     children_revision: i64,
 }
@@ -252,6 +254,10 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 "none" => None,
                 _ => return Err(DiscoverTitlesError::InvalidMetadataPolicy),
             };
+            let metadata_source_mode =
+                row.try_get::<String>("", "metadata_source_mode")?
+                    .parse()
+                    .map_err(|_| DiscoverTitlesError::InvalidMetadataSourceMode)?;
             titles.push(DiscoveredTitle {
                 item_id: derived_item(object),
                 library_id: row.try_get("", "library_id")?,
@@ -260,6 +266,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 name,
                 production_year,
                 metadata_requirement,
+                metadata_source_mode,
                 children_indexed: row.try_get("", "children_indexed")?,
                 children_revision: row.try_get("", "children_index_revision")?,
             });
@@ -307,6 +314,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                         claimed.job().priority(),
                     )?
                     .with_metadata_requirement(requirement)?
+                    .with_metadata_source_mode(title.metadata_source_mode)?
                     .with_input_sync_revision(if title.children_indexed {
                         title.children_revision
                     } else {
@@ -993,6 +1001,10 @@ fn candidate_query(
             Alias::new("metadata_policy"),
         )
         .expr_as(
+            Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
+            Alias::new("metadata_source_mode"),
+        )
+        .expr_as(
             Expr::col((object.clone(), Alias::new("id"))),
             Alias::new("storage_object_id"),
         )
@@ -1125,6 +1137,8 @@ pub enum DiscoverTitlesError {
     UnsupportedCollection,
     #[error("library metadata policy is invalid")]
     InvalidMetadataPolicy,
+    #[error("library metadata source mode is invalid")]
+    InvalidMetadataSourceMode,
     #[error("title-layer object has an invalid name")]
     InvalidTitle,
     #[error("title identity conflicts with an existing catalog item")]

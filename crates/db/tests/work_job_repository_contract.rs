@@ -13,6 +13,7 @@ use tjxy_db::{
     WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope,
     WorkStagingRow, WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 use tjxy_test_support::test_database;
 use uuid::Uuid;
 
@@ -228,6 +229,8 @@ async fn metadata_join_upgrades_the_active_requirement_without_allowing_a_downgr
     )
     .unwrap()
     .with_metadata_requirement(MetadataRequirement::Basic)
+    .unwrap()
+    .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
     .unwrap();
     let full = WorkJobSpec::new(
         WorkTaskKind::ResolveMetadata,
@@ -237,6 +240,8 @@ async fn metadata_join_upgrades_the_active_requirement_without_allowing_a_downgr
     )
     .unwrap()
     .with_metadata_requirement(MetadataRequirement::Full)
+    .unwrap()
+    .with_metadata_source_mode(MetadataSourceMode::AutomaticScrape)
     .unwrap();
 
     let created = repository.enqueue_or_join(&basic).await.unwrap();
@@ -247,6 +252,10 @@ async fn metadata_join_upgrades_the_active_requirement_without_allowing_a_downgr
     assert!(!upgraded.created());
     assert!(!joined.created());
     assert_eq!(created.job().id(), upgraded.job().id());
+    assert_eq!(
+        upgraded.job().metadata_source_mode(),
+        Some(MetadataSourceMode::AutomaticScrape)
+    );
     assert_eq!(
         upgraded.job().metadata_requirement(),
         Some(MetadataRequirement::Full)
@@ -267,6 +276,10 @@ async fn metadata_join_upgrades_the_active_requirement_without_allowing_a_downgr
     assert_eq!(
         claimed.job().metadata_requirement(),
         Some(MetadataRequirement::Full)
+    );
+    assert_eq!(
+        claimed.job().metadata_source_mode(),
+        Some(MetadataSourceMode::AutomaticScrape)
     );
 }
 

@@ -17,6 +17,7 @@ fn virtual_folder_uses_jellyfin_fields_and_tjxy_effective_policy_extensions() {
             3,
             "title_layer",
             "basic",
+            "local_only",
             "on_browse",
             "on_playback",
         ),
@@ -37,6 +38,7 @@ fn virtual_folder_uses_jellyfin_fields_and_tjxy_effective_policy_extensions() {
                 "ProfileVersion": 3,
                 "ObjectSelectionScope": "title_layer",
                 "MetadataPolicy": "basic",
+                "MetadataSourceMode": "local_only",
                 "ExpansionPolicy": "on_browse",
                 "ProbePolicy": "on_playback"
             },
@@ -56,6 +58,7 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
             "Enabled": false,
             "ScanProfile": "Hybrid",
             "ProfileVersion": 3,
+            "MetadataSourceMode": "local_only",
             "EnableRealtimeMonitor": true
         }
     }))
@@ -64,6 +67,10 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
     assert_eq!(payload.library_options().scan_profile(), "Hybrid");
     assert_eq!(payload.library_options().profile_version(), 3);
     assert!(!payload.library_options().enabled());
+    assert_eq!(
+        payload.library_options().metadata_source_mode(),
+        Some("local_only")
+    );
 }
 
 #[test]
@@ -81,4 +88,5 @@ fn virtual_folder_create_accepts_jellyfin_options_and_tjxy_profile_extensions() 
 
     assert!(!options.enabled());
     assert_eq!(options.scan_profile(), "Manual");
+    assert_eq!(options.metadata_source_mode(), "automatic_scrape");
 }

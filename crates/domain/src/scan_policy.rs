@@ -1,4 +1,45 @@
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MetadataSourceMode {
+    #[default]
+    AutomaticScrape,
+    LocalOnly,
+}
+
+impl MetadataSourceMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AutomaticScrape => "automatic_scrape",
+            Self::LocalOnly => "local_only",
+        }
+    }
+}
+
+impl FromStr for MetadataSourceMode {
+    type Err = InvalidMetadataSourceMode;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "automatic_scrape" => Ok(Self::AutomaticScrape),
+            "local_only" => Ok(Self::LocalOnly),
+            _ => Err(InvalidMetadataSourceMode),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidMetadataSourceMode;
+
+impl fmt::Display for InvalidMetadataSourceMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid metadata source mode")
+    }
+}
+
+impl std::error::Error for InvalidMetadataSourceMode {}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ScanProfile {

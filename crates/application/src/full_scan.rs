@@ -9,6 +9,7 @@ use tjxy_db::{
     WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope,
     WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 
 const HYBRID_BACKGROUND_PRIORITY: i32 = 5;
 const MAX_HYBRID_BACKGROUND_CANDIDATES: u64 = 20;
@@ -55,6 +56,7 @@ impl FullScanService {
                     *item,
                     target,
                     requirement,
+                    policy.metadata_source_mode(),
                     claimed.job().priority(),
                     storage_root_scope,
                 )?;
@@ -419,6 +421,7 @@ fn metadata_child_spec(
     item: CatalogItemId,
     target: LazyCatalogWorkTarget,
     requirement: MetadataRequirement,
+    metadata_source_mode: MetadataSourceMode,
     priority: i32,
     storage_root_scope: Option<StorageRootId>,
 ) -> Result<(String, WorkJobSpec), FullScanError> {
@@ -432,13 +435,15 @@ fn metadata_child_spec(
         priority,
     )?
     .with_metadata_requirement(requirement)?
+    .with_metadata_source_mode(metadata_source_mode)?
     .with_input_sync_revision(scope.metadata_input_revision())?;
     let spec = root_affine_spec(spec, storage_root_scope.or(Some(scope.storage_root_id())))?;
     Ok((
         format!(
-            "ResolveMetadata:{item}:{}:{}",
+            "ResolveMetadata:{item}:{}:{}:{}",
             target.metadata_revision(),
-            requirement.as_i32()
+            requirement.as_i32(),
+            metadata_source_mode.as_str()
         ),
         spec,
     ))

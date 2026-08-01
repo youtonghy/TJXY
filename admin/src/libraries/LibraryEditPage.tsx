@@ -8,7 +8,9 @@ import {
 } from '@heroui/react';
 import {
   FolderCog,
+  FolderPlus,
   LoaderCircle,
+  MapPin,
   Pencil,
   RefreshCw,
   Trash2,
@@ -22,9 +24,12 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { PageHeader } from '../ui/PageHeader';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import { HybridCandidatesPanel } from './HybridCandidatesPanel';
+import { FolderPickerDialog } from './FolderPickerDialog';
+import { attachFilesystemFolder } from './filesystemApi';
 import type {
   EffectiveLibraryPolicy,
   LibraryOption,
+  MetadataSourceMode,
   ScanProfile,
 } from './libraryApi';
 import {
@@ -55,12 +60,15 @@ function LibraryEditPageContent({ id }: { id: string }) {
   const [name, setName] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
+  const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
   const [advanced, setAdvanced] = useState(false);
   const [policy, setPolicy] = useState<EffectiveLibraryPolicy>(defaultPolicy);
   const [policyConflict, setPolicyConflict] = useState(false);
   const [renamePending, setRenamePending] = useState(false);
   const [policyPending, setPolicyPending] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
+  const [attachPending, setAttachPending] = useState(false);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const renameRef = useRef(false);
   const policyRef = useRef(false);
   const deleteRef = useRef(false);
@@ -88,6 +96,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
           if (loadMode === 'all') setName(result.record.name);
           setEnabled(result.record.enabled);
           setScanProfile(result.record.scanProfile);
+          setMetadataSourceMode(result.record.metadataSourceMode);
           setAdvanced(false);
           setPolicy(policyFromLibrary(result.record));
         }
@@ -140,6 +149,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
         enabled,
         scanProfile,
         profileVersion: library.profileVersion,
+        metadataSourceMode,
         ...(advanced ? { effectivePolicy: policy } : {}),
       });
       if (!isMounted()) return;
@@ -158,6 +168,23 @@ function LibraryEditPageContent({ id }: { id: string }) {
     } finally {
       policyRef.current = false;
       if (isMounted()) setPolicyPending(false);
+    }
+  };
+
+  const attachFolder = async (selection: { rootId: string; relativePath: string }) => {
+    if (library === null || attachPending) return;
+    setAttachPending(true);
+    try {
+      await attachFilesystemFolder(library.id, selection);
+      if (!isMounted()) return;
+      notify('Media folder attached.', { type: 'success' });
+      reloadAll();
+    } catch (error: unknown) {
+      if (!isMounted()) return;
+      if (await logoutIfAccessDenied(error)) return;
+      if (isMounted()) notify('The media folder could not be attached.', { type: 'error' });
+    } finally {
+      if (isMounted()) setAttachPending(false);
     }
   };
 
@@ -183,7 +210,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
 
   if (authRedirecting) return null;
 
-  const anyMutationPending = renamePending || policyPending || deletePending;
+  const anyMutationPending = renamePending || policyPending || deletePending || attachPending;
   const pageTitle = library?.name ?? 'Library settings';
   return (
     <div className="space-y-5">
@@ -242,12 +269,19 @@ function LibraryEditPageContent({ id }: { id: string }) {
               library={library}
               onAdvancedChange={setAdvanced}
               onEnabledChange={setEnabled}
+              onMetadataSourceModeChange={setMetadataSourceMode}
               onPolicyChange={setPolicy}
               onProfileChange={setScanProfile}
               onReloadLatest={reloadAll}
               onSave={() => { void savePolicy(); }}
               policy={policy}
               scanProfile={scanProfile}
+              metadataSourceMode={metadataSourceMode}
+            />
+            <StorageFoldersSection
+              isPending={attachPending}
+              library={library}
+              onBrowse={() => { setFolderPickerOpen(true); }}
             />
             <HybridCandidatesPanel library={library} />
             <DangerZone
@@ -259,7 +293,52 @@ function LibraryEditPageContent({ id }: { id: string }) {
           </div>
         )}
       </AsyncContent>
+      <FolderPickerDialog
+        isDisabled={attachPending}
+        isOpen={folderPickerOpen}
+        onClose={() => { setFolderPickerOpen(false); }}
+        onSelect={(selection) => { void attachFolder(selection); }}
+      />
     </div>
+  );
+}
+
+function StorageFoldersSection({
+  isPending,
+  library,
+  onBrowse,
+}: {
+  isPending: boolean;
+  library: LibraryOption;
+  onBrowse: () => void;
+}) {
+  return (
+    <section aria-labelledby="storage-folders-heading" className="space-y-5 border-t border-border py-7">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-foreground" id="storage-folders-heading">Media folders</h2>
+          <p className="mt-1 text-sm text-muted">Attach server folders that contain this library's media.</p>
+        </div>
+        <Button isPending={isPending} onPress={onBrowse} variant="secondary">
+          {isPending
+            ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+            : <FolderPlus aria-hidden="true" className="size-4" />}
+          Add folder
+        </Button>
+      </div>
+      {library.locations.length === 0 ? (
+        <p className="border-y border-border py-7 text-center text-sm text-muted">No media folders attached.</p>
+      ) : (
+        <ul aria-label="Attached media folders" className="divide-y divide-border border-y border-border">
+          {library.locations.map((location, index) => (
+            <li className="flex min-h-12 items-center gap-3 px-2" key={location}>
+              <MapPin aria-hidden="true" className="size-4 shrink-0 text-muted" />
+              <span className="text-sm font-medium text-foreground">Storage root {index + 1}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

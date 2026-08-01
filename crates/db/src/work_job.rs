@@ -11,6 +11,7 @@ use tjxy_common::{
     CatalogItemId, LibraryId, LibraryRootBindingId, MediaSourceId, StorageObjectRecordId,
     StorageRootId, WorkJobId,
 };
+use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
 
 const STATE_PENDING: &str = "Pending";
@@ -154,6 +155,7 @@ pub struct WorkJobSpec {
     required_sync_job_id: Option<WorkJobId>,
     input_sync_revision: Option<i64>,
     metadata_requirement: Option<MetadataRequirement>,
+    metadata_source_mode: Option<MetadataSourceMode>,
     storage_root_affinity: Option<StorageRootId>,
 }
 
@@ -181,6 +183,8 @@ impl WorkJobSpec {
             input_sync_revision: None,
             metadata_requirement: (task_kind == WorkTaskKind::ResolveMetadata)
                 .then_some(MetadataRequirement::Basic),
+            metadata_source_mode: (task_kind == WorkTaskKind::ResolveMetadata)
+                .then_some(MetadataSourceMode::AutomaticScrape),
             storage_root_affinity: None,
         })
     }
@@ -198,6 +202,22 @@ impl WorkJobSpec {
             return Err(WorkJobRepositoryError::InvalidMetadataWork);
         }
         self.metadata_requirement = Some(requirement);
+        Ok(self)
+    }
+
+    /// Sets whether a metadata job may use remote providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkJobRepositoryError::InvalidMetadataWork`] for non-metadata tasks.
+    pub fn with_metadata_source_mode(
+        mut self,
+        mode: MetadataSourceMode,
+    ) -> Result<Self, WorkJobRepositoryError> {
+        if self.task_kind != WorkTaskKind::ResolveMetadata {
+            return Err(WorkJobRepositoryError::InvalidMetadataWork);
+        }
+        self.metadata_source_mode = Some(mode);
         Ok(self)
     }
 
@@ -291,6 +311,11 @@ impl WorkJobSpec {
     }
 
     #[must_use]
+    pub const fn metadata_source_mode(&self) -> Option<MetadataSourceMode> {
+        self.metadata_source_mode
+    }
+
+    #[must_use]
     pub const fn storage_root_affinity(&self) -> Option<StorageRootId> {
         self.storage_root_affinity
     }
@@ -352,6 +377,7 @@ pub struct WorkJobRecord {
     priority: i32,
     attempt_count: i32,
     metadata_requirement: Option<MetadataRequirement>,
+    metadata_source_mode: Option<MetadataSourceMode>,
     storage_root_affinity: Option<StorageRootId>,
 }
 
@@ -440,6 +466,11 @@ impl WorkJobRecord {
     #[must_use]
     pub const fn metadata_requirement(&self) -> Option<MetadataRequirement> {
         self.metadata_requirement
+    }
+
+    #[must_use]
+    pub const fn metadata_source_mode(&self) -> Option<MetadataSourceMode> {
+        self.metadata_source_mode
     }
 
     #[must_use]
@@ -1303,6 +1334,8 @@ pub enum WorkJobRepositoryError {
     InvalidRevision,
     #[error("stored metadata requirement is invalid")]
     InvalidStoredMetadataRequirement,
+    #[error("stored metadata source mode is invalid")]
+    InvalidStoredMetadataSourceMode,
     #[error("lazy enqueue requires an ExpandItem or IndexMediaSources CatalogItem scope")]
     InvalidLazyWork,
     #[error("metadata enqueue requires a ResolveMetadata CatalogItem scope")]
@@ -1601,6 +1634,7 @@ async fn enqueue_or_join(
         Alias::new("available_at"),
         Alias::new("created_at"),
         Alias::new("metadata_requirement"),
+        Alias::new("metadata_source_mode"),
         Alias::new("storage_root_affinity"),
         Alias::new("natural_key_storage_root_id"),
     ];
@@ -1619,6 +1653,9 @@ async fn enqueue_or_join(
         now.into(),
         spec.metadata_requirement
             .map(MetadataRequirement::as_i32)
+            .into(),
+        spec.metadata_source_mode
+            .map(MetadataSourceMode::as_str)
             .into(),
         spec.storage_root_affinity
             .map_or_else(Uuid::nil, StorageRootId::as_uuid)
@@ -1684,6 +1721,24 @@ async fn enqueue_or_join(
                     .add(Expr::col(Alias::new("metadata_requirement")).lt(requirement.as_i32()))
                     .into(),
             )
+            .to_owned();
+        transaction.execute(backend.build(&upgrade)).await?;
+        job = transaction
+            .query_one(backend.build(&job_by_id(job.id)))
+            .await?
+            .as_ref()
+            .map(job_from_row)
+            .transpose()?
+            .ok_or(WorkJobRepositoryError::MissingEnqueuedJob)?;
+    }
+    if spec.metadata_source_mode == Some(MetadataSourceMode::AutomaticScrape)
+        && job.metadata_source_mode != Some(MetadataSourceMode::AutomaticScrape)
+    {
+        let upgrade = Query::update()
+            .table(Alias::new("work_jobs"))
+            .value(Alias::new("metadata_source_mode"), "automatic_scrape")
+            .and_where(Expr::col(Alias::new("id")).eq(job.id.as_uuid()))
+            .and_where(Expr::col(Alias::new("state")).is_in([STATE_PENDING, STATE_RUNNING]))
             .to_owned();
         transaction.execute(backend.build(&upgrade)).await?;
         job = transaction
@@ -2609,6 +2664,7 @@ fn select_job_columns(query: &mut SelectStatement, table: &Alias) {
         "priority",
         "attempt_count",
         "metadata_requirement",
+        "metadata_source_mode",
         "storage_root_affinity",
     ] {
         query.expr_as(
@@ -2635,6 +2691,14 @@ fn job_from_row(row: &QueryResult) -> Result<WorkJobRecord, WorkJobRepositoryErr
         .try_get::<Option<i32>>("", "metadata_requirement")?
         .map(MetadataRequirement::from_database)
         .transpose()?;
+    let metadata_source_mode = row
+        .try_get::<Option<String>>("", "metadata_source_mode")?
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| WorkJobRepositoryError::InvalidStoredMetadataSourceMode)
+        })
+        .transpose()?;
     let storage_root_affinity = row.try_get::<Uuid>("", "storage_root_affinity")?;
     let storage_root_affinity = if storage_root_affinity.is_nil() {
         None
@@ -2643,6 +2707,9 @@ fn job_from_row(row: &QueryResult) -> Result<WorkJobRecord, WorkJobRepositoryErr
     };
     if (task_kind == "ResolveMetadata") != metadata_requirement.is_some() {
         return Err(WorkJobRepositoryError::InvalidStoredMetadataRequirement);
+    }
+    if (task_kind == "ResolveMetadata") != metadata_source_mode.is_some() {
+        return Err(WorkJobRepositoryError::InvalidStoredMetadataSourceMode);
     }
     Ok(WorkJobRecord {
         id: WorkJobId::from_uuid(id),
@@ -2655,6 +2722,7 @@ fn job_from_row(row: &QueryResult) -> Result<WorkJobRecord, WorkJobRepositoryErr
         priority: row.try_get("", "priority")?,
         attempt_count,
         metadata_requirement,
+        metadata_source_mode,
         storage_root_affinity,
     })
 }

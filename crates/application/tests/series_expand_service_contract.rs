@@ -1228,7 +1228,7 @@ async fn metadata_commit_rejects_a_structure_scope_invalidated_after_snapshot() 
         .unwrap();
 
     let error = repository
-        .commit(&claimed, &snapshot, &resolution, None, false, Vec::new())
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
         .await
         .unwrap_err();
 

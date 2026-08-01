@@ -2,6 +2,7 @@ import { apiRequest } from '../api/httpClient';
 import {
   createLibrary,
   deleteLibrary,
+  listLibraries,
   renameLibrary,
   updateLibraryPolicy,
 } from './libraryApi';
@@ -17,7 +18,7 @@ beforeEach(() => {
   requestMock.mockReset();
 });
 
-it('creates an empty library without accepting a browser filesystem path', async () => {
+it('creates a library from an opaque filesystem selection and metadata source mode', async () => {
   requestMock.mockResolvedValue(undefined);
 
   await createLibrary({
@@ -25,16 +26,47 @@ it('creates an empty library without accepting a browser filesystem path', async
     collectionType: 'movies',
     enabled: true,
     scanProfile: 'Lazy',
+    metadataSourceMode: 'local_only',
+    filesystemSelection: { rootId: 'root-1', relativePath: 'Movies' },
   });
 
   expect(requestMock).toHaveBeenCalledWith(
     '/Library/VirtualFolders?name=Family+Movies&collectionType=movies&refreshLibrary=false',
     {
       method: 'POST',
-      body: JSON.stringify({ LibraryOptions: { Enabled: true, ScanProfile: 'Lazy' } }),
+      body: JSON.stringify({
+        LibraryOptions: {
+          Enabled: true,
+          ScanProfile: 'Lazy',
+          MetadataSourceMode: 'local_only',
+        },
+        FilesystemSelection: { RootId: 'root-1', RelativePath: 'Movies' },
+      }),
     },
   );
-  expect(JSON.stringify(requestMock.mock.calls)).not.toMatch(/paths|filesystem/i);
+  expect(JSON.stringify(requestMock.mock.calls)).not.toContain('/Movies');
+});
+
+it('defaults a missing metadata source mode from an older server to automatic scrape', async () => {
+  requestMock.mockResolvedValueOnce([{
+    ItemId: 'library-1',
+    Name: 'Movies',
+    CollectionType: 'movies',
+    Locations: [],
+    LibraryOptions: {
+      Enabled: true,
+      ScanProfile: 'Lazy',
+      ProfileVersion: 1,
+      ObjectSelectionScope: 'title_layer',
+      MetadataPolicy: 'basic',
+      ExpansionPolicy: 'on_browse',
+      ProbePolicy: 'on_playback',
+    },
+  }]);
+
+  await expect(listLibraries()).resolves.toEqual([
+    expect.objectContaining({ metadataSourceMode: 'automatic_scrape' }),
+  ]);
 });
 
 it('renames a library through the exact current-name command', async () => {
@@ -56,6 +88,7 @@ it('updates the complete effective policy with the current profile version', asy
     enabled: false,
     scanProfile: 'Hybrid',
     profileVersion: 3,
+    metadataSourceMode: 'automatic_scrape',
     effectivePolicy: {
       objectSelectionScope: 'title_layer',
       metadataPolicy: 'full',
@@ -72,6 +105,7 @@ it('updates the complete effective policy with the current profile version', asy
         Enabled: false,
         ScanProfile: 'Hybrid',
         ProfileVersion: 3,
+        MetadataSourceMode: 'automatic_scrape',
         ObjectSelectionScope: 'title_layer',
         MetadataPolicy: 'full',
         ExpansionPolicy: 'background',

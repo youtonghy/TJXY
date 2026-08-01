@@ -11,6 +11,7 @@ use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, LibraryId, LibraryRootBindingId, StorageObjectRecordId, StorageRootId, WorkJobId,
 };
+use tjxy_domain::MetadataSourceMode;
 
 use crate::{
     ClaimedWorkJob, WorkJobRepository, WorkJobSpec, WorkJobSubmission, WorkScope, WorkStagingRow,
@@ -740,11 +741,17 @@ fn background_unstarted_episode_signal(candidate: &Alias, user: &Alias) -> Selec
 pub struct FullScanPolicy {
     object_selection_scope: String,
     metadata_policy: String,
+    metadata_source_mode: MetadataSourceMode,
     expansion_policy: String,
     probe_policy: String,
 }
 
 impl FullScanPolicy {
+    #[must_use]
+    pub const fn metadata_source_mode(&self) -> MetadataSourceMode {
+        self.metadata_source_mode
+    }
+
     #[must_use]
     pub fn selects_all_synced_objects(&self) -> bool {
         self.object_selection_scope == "all_synced_objects"
@@ -896,6 +903,7 @@ struct RootBindingContext {
     library_id: LibraryId,
     root_id: StorageRootId,
     profile_version: i32,
+    metadata_source_mode: MetadataSourceMode,
 }
 
 async fn scan_context(
@@ -911,6 +919,7 @@ async fn scan_context(
                             .columns([
                                 Alias::new("object_selection_scope"),
                                 Alias::new("metadata_policy"),
+                                Alias::new("metadata_source_mode"),
                                 Alias::new("expansion_policy"),
                                 Alias::new("probe_policy"),
                             ])
@@ -930,6 +939,10 @@ async fn scan_context(
             let policy = FullScanPolicy {
                 object_selection_scope: row.try_get("", "object_selection_scope")?,
                 metadata_policy: row.try_get("", "metadata_policy")?,
+                metadata_source_mode: row
+                    .try_get::<String>("", "metadata_source_mode")?
+                    .parse()
+                    .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
                 expansion_policy: row.try_get("", "expansion_policy")?,
                 probe_policy: row.try_get("", "probe_policy")?,
             };
@@ -959,6 +972,7 @@ async fn scan_context(
                 policy: FullScanPolicy {
                     object_selection_scope: "all_synced_objects".to_owned(),
                     metadata_policy: "full".to_owned(),
+                    metadata_source_mode: binding.metadata_source_mode,
                     expansion_policy: "eager".to_owned(),
                     probe_policy: "eager".to_owned(),
                 },
@@ -987,6 +1001,10 @@ async fn root_binding_context(
                         Expr::col((library.clone(), Alias::new("profile_version"))),
                         Alias::new("profile_version"),
                     )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
+                        Alias::new("metadata_source_mode"),
+                    )
                     .from_as(Alias::new("library_storage_roots"), binding.clone())
                     .join_as(
                         JoinType::InnerJoin,
@@ -1014,6 +1032,10 @@ async fn root_binding_context(
         library_id,
         root_id,
         profile_version: row.try_get("", "profile_version")?,
+        metadata_source_mode: row
+            .try_get::<String>("", "metadata_source_mode")?
+            .parse()
+            .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
     })
 }
 
@@ -1042,6 +1064,10 @@ where
                         Expr::col((library.clone(), Alias::new("profile_version"))),
                         Alias::new("profile_version"),
                     )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
+                        Alias::new("metadata_source_mode"),
+                    )
                     .from_as(Alias::new("library_storage_roots"), binding.clone())
                     .join_as(
                         JoinType::InnerJoin,
@@ -1063,6 +1089,10 @@ where
         library_id: LibraryId::from_uuid(row.try_get("", "library_id")?),
         root_id: StorageRootId::from_uuid(row.try_get("", "storage_root_id")?),
         profile_version: row.try_get("", "profile_version")?,
+        metadata_source_mode: row
+            .try_get::<String>("", "metadata_source_mode")?
+            .parse()
+            .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
     })
 }
 
