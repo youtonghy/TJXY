@@ -6,7 +6,8 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, ImageType, UserId, Username};
 use tjxy_db::{
-    AuthRepository, BrowseParent, CatalogItemType, CatalogPageRequest, CatalogQueryRepository,
+    AuthRepository, BrowseParent, CatalogItemType, CatalogItemsQuery, CatalogItemsScope,
+    CatalogPageRequest, CatalogQueryRepository,
 };
 use tjxy_db::{UserDataPatch, UserDataRepository};
 use tjxy_test_support::test_database;
@@ -474,6 +475,144 @@ async fn search_hints_filter_visible_items_before_type_filtering_and_paging() {
 }
 
 #[tokio::test]
+async fn item_search_treats_sql_wildcards_as_literal_text() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let literal = seed_item(&database, "100%_Match", "Movie", None, true, "Matched").await;
+    let wildcard_only = seed_item(
+        &database,
+        "100 Percent Match",
+        "Movie",
+        None,
+        true,
+        "Matched",
+    )
+    .await;
+    for item in [literal, wildcard_only] {
+        add_to_library(&database, library, item).await;
+    }
+
+    let page = CatalogQueryRepository::new(&database)
+        .query_items(
+            user_id,
+            CatalogItemsQuery::new(
+                CatalogItemsScope::AllVisible,
+                CatalogPageRequest::new(0, 20).unwrap(),
+            )
+            .with_search_term(Some("%_".to_owned())),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.total_record_count(), 1);
+    assert_eq!(page.items()[0].id(), literal);
+}
+
+#[tokio::test]
+async fn recursive_items_stay_in_the_parent_library_and_exclude_a_cycle_back_to_parent() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let first = seed_library(&database, "TV", "tvshows", true).await;
+    let second = seed_library(&database, "Other", "folders", true).await;
+    let parent = seed_item(&database, "Series", "Series", None, true, "Matched").await;
+    let shared_child = seed_item(
+        &database,
+        "Shared season",
+        "Season",
+        Some(parent.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let foreign_child = seed_item(
+        &database,
+        "Foreign season",
+        "Season",
+        Some(parent.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    for item in [parent, shared_child] {
+        add_to_library(&database, first, item).await;
+    }
+    add_to_library(&database, second, foreign_child).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("parent_id"), shared_child.as_uuid())
+                    .and_where(Expr::col(Alias::new("id")).eq(parent.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let page = CatalogQueryRepository::new(&database)
+        .query_items(
+            user_id,
+            CatalogItemsQuery::new(
+                CatalogItemsScope::Parent(BrowseParent::Item(parent)),
+                CatalogPageRequest::new(0, 20).unwrap(),
+            )
+            .with_recursive(true),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.total_record_count(), 1);
+    assert_eq!(page.items()[0].id(), shared_child);
+}
+
+#[tokio::test]
+async fn parent_search_only_includes_deeper_descendants_when_recursive_is_true() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "TV", "tvshows", true).await;
+    let parent = seed_item(&database, "Series", "Series", None, true, "Matched").await;
+    let direct = seed_item(
+        &database,
+        "Pilot season",
+        "Season",
+        Some(parent.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    let grandchild = seed_item(
+        &database,
+        "Pilot episode",
+        "Episode",
+        Some(direct.as_uuid()),
+        true,
+        "Matched",
+    )
+    .await;
+    for item in [parent, direct, grandchild] {
+        add_to_library(&database, library, item).await;
+    }
+    let repository = CatalogQueryRepository::new(&database);
+    let base = CatalogItemsQuery::new(
+        CatalogItemsScope::Parent(BrowseParent::Item(parent)),
+        CatalogPageRequest::new(0, 20).unwrap(),
+    )
+    .with_search_term(Some("Pilot".to_owned()));
+
+    let direct_page = repository.query_items(user_id, base.clone()).await.unwrap();
+    let recursive_page = repository
+        .query_items(user_id, base.with_recursive(true))
+        .await
+        .unwrap();
+
+    assert_eq!(direct_page.total_record_count(), 1);
+    assert_eq!(direct_page.items()[0].id(), direct);
+    assert_eq!(recursive_page.total_record_count(), 2);
+}
+
+#[tokio::test]
 async fn child_page_requires_shared_library_membership_with_parent() {
     let database = database().await;
     let user_id = seed_user(&database).await;
@@ -929,6 +1068,26 @@ async fn item_pages_batch_primary_tags_and_resolve_authorized_images() {
         "01/23/poster.jpg",
     )
     .await;
+    let first_backdrop = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let second_backdrop = "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    seed_asset(
+        &database,
+        item,
+        ImageType::Backdrop,
+        0,
+        first_backdrop,
+        "01/23/backdrop-0.jpg",
+    )
+    .await;
+    seed_asset(
+        &database,
+        item,
+        ImageType::Backdrop,
+        1,
+        second_backdrop,
+        "01/23/backdrop-1.jpg",
+    )
+    .await;
 
     let repository = CatalogQueryRepository::new(&database);
     let page = repository
@@ -946,6 +1105,14 @@ async fn item_pages_batch_primary_tags_and_resolve_authorized_images() {
         .unwrap();
 
     assert_eq!(page.items()[0].image_tags()["Primary"], sha256);
+    assert_eq!(
+        page.items()[0].backdrop_image_tags(),
+        [first_backdrop, second_backdrop]
+    );
+    assert_eq!(
+        page.items()[0].primary_image_aspect_ratio(),
+        Some(2.0 / 3.0)
+    );
     assert_eq!(image.sha256(), sha256);
     assert_eq!(image.mime_type(), "image/jpeg");
     assert_eq!(image.byte_size(), 4);

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::{MediaSourceInfo, MediaStream};
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ClientCapabilitiesDto {
@@ -50,6 +52,14 @@ impl BaseItemKind {
 pub enum MediaType {
     Video,
     Audio,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum LocationType {
+    FileSystem,
+    Remote,
+    Virtual,
+    Offline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -99,6 +109,10 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     run_time_ticks: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    date_created: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location_type: Option<LocationType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     premiere_date: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     end_date: Option<DateTime<Utc>>,
@@ -122,6 +136,14 @@ pub struct BaseItemDto {
     provider_ids: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     has_media_sources: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    backdrop_image_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_image_aspect_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_sources: Option<Vec<MediaSourceInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_streams: Option<Vec<MediaStream>>,
 }
 
 impl BaseItemDto {
@@ -151,6 +173,8 @@ impl BaseItemDto {
             tagline: None,
             vote_count: None,
             run_time_ticks: None,
+            date_created: None,
+            location_type: None,
             premiere_date: None,
             end_date: None,
             status: None,
@@ -163,6 +187,10 @@ impl BaseItemDto {
             people: None,
             provider_ids: None,
             has_media_sources: None,
+            backdrop_image_tags: Vec::new(),
+            primary_image_aspect_ratio: None,
+            media_sources: None,
+            media_streams: None,
         }
     }
 
@@ -197,6 +225,8 @@ impl BaseItemDto {
             tagline: None,
             vote_count: None,
             run_time_ticks: None,
+            date_created: None,
+            location_type: None,
             premiere_date: None,
             end_date: None,
             status: None,
@@ -209,6 +239,10 @@ impl BaseItemDto {
             people: None,
             provider_ids: None,
             has_media_sources: None,
+            backdrop_image_tags: Vec::new(),
+            primary_image_aspect_ratio: None,
+            media_sources: None,
+            media_streams: None,
         }
     }
 
@@ -234,6 +268,32 @@ impl BaseItemDto {
     #[must_use]
     pub const fn with_runtime_ticks(mut self, runtime_ticks: Option<i64>) -> Self {
         self.run_time_ticks = runtime_ticks;
+        self
+    }
+
+    #[must_use]
+    pub fn with_catalog_metadata(
+        mut self,
+        date_created: DateTime<Utc>,
+        location_type: LocationType,
+        backdrop_image_tags: Vec<String>,
+        primary_image_aspect_ratio: Option<f64>,
+    ) -> Self {
+        self.date_created = Some(date_created);
+        self.location_type = Some(location_type);
+        self.backdrop_image_tags = backdrop_image_tags;
+        self.primary_image_aspect_ratio = primary_image_aspect_ratio;
+        self
+    }
+
+    #[must_use]
+    pub fn with_media_sources(mut self, media_sources: Vec<MediaSourceInfo>) -> Self {
+        self.media_streams = Some(
+            media_sources
+                .first()
+                .map_or_else(Vec::new, |source| source.media_streams().to_vec()),
+        );
+        self.media_sources = Some(media_sources);
         self
     }
 

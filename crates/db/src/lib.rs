@@ -60,9 +60,10 @@ pub use catalog_publication::{
 };
 pub use catalog_query::{
     AssetRecord, BrowseParent, CacheRevisions, CatalogCreditRecord, CatalogItemDetailRecord,
-    CatalogItemRecord, CatalogItemType, CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest,
-    CatalogQueryError, CatalogQueryRepository, LazyCatalogWorkTarget, LazyStorageScope,
-    LibraryViewRecord,
+    CatalogItemRecord, CatalogItemType, CatalogItemsQuery, CatalogItemsScope,
+    CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest, CatalogQueryError,
+    CatalogQueryRepository, CatalogSort, CatalogSortField, CatalogSortOrder, LazyCatalogWorkTarget,
+    LazyStorageScope, LibraryViewRecord,
 };
 pub use dashboard::{
     DashboardLoginRecord, DashboardNowPlaying, DashboardPage, DashboardPlaybackEvent,

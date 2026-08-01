@@ -1104,6 +1104,8 @@ async fn seed_asset(app: &TestApp, item_id: CatalogItemId, bytes: &[u8]) -> Stri
                         Alias::new("id"),
                         Alias::new("sha256"),
                         Alias::new("mime_type"),
+                        Alias::new("width"),
+                        Alias::new("height"),
                         Alias::new("byte_size"),
                         Alias::new("local_relative_path"),
                     ])
@@ -1111,6 +1113,8 @@ async fn seed_asset(app: &TestApp, item_id: CatalogItemId, bytes: &[u8]) -> Stri
                         blob_id.into(),
                         sha256.into(),
                         "image/jpeg".into(),
+                        2_i32.into(),
+                        1_i32.into(),
                         i64::try_from(bytes.len()).unwrap().into(),
                         relative_path.into(),
                     ]),
@@ -2426,6 +2430,215 @@ async fn items_apply_parent_paging_and_findroid_type_filter() {
 }
 
 #[tokio::test]
+async fn items_search_term_returns_visible_type_filtered_items() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    seed_item(&app.database, library, "Arrival", "Movie").await;
+    seed_item(&app.database, library, "Alpine", "Movie").await;
+    seed_item(&app.database, library, "Alpha Song", "Audio").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        "/Items?searchTerm=Alp&includeItemTypes=Movie",
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Name"], "Alpine");
+}
+
+#[tokio::test]
+async fn items_without_parent_filter_visible_items_by_type() {
+    let app = test_app().await;
+    let first = seed_library(&app.database, "Movies", true).await;
+    let second = seed_library(&app.database, "Music", true).await;
+    seed_item(&app.database, first, "Arrival", "Movie").await;
+    seed_item(&app.database, second, "Alpha Song", "Audio").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(&app.router, "/Items?includeItemTypes=Movie", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Name"], "Arrival");
+}
+
+#[tokio::test]
+async fn items_library_type_filter_defaults_to_recursive_unless_explicitly_disabled() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let folder = seed_item(&app.database, library, "Folder", "Folder").await;
+    let movie = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("parent_id"), folder.as_uuid())
+                    .and_where(Expr::col(Alias::new("id")).eq(movie.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let (_, _, token) = login(&app.router).await;
+
+    let recursive = get(
+        &app.router,
+        &format!("/Items?parentId={library}&includeItemTypes=Movie"),
+        Some(&token),
+    )
+    .await;
+    let body = recursive.into_body().collect().await.unwrap().to_bytes();
+    let recursive: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(recursive["TotalRecordCount"], 1);
+    assert_eq!(recursive["Items"][0]["Id"], movie.to_string());
+
+    let direct = get(
+        &app.router,
+        &format!("/Items?parentId={library}&includeItemTypes=Movie&recursive=false"),
+        Some(&token),
+    )
+    .await;
+    let body = direct.into_body().collect().await.unwrap().to_bytes();
+    let direct: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(direct["TotalRecordCount"], 0);
+}
+
+#[tokio::test]
+async fn items_tolerate_projection_flags_and_unknown_client_hints() {
+    let app = test_app().await;
+    seed_library(&app.database, "Library", true).await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        "/Items?fields=Genres,ProviderIds&enableImages=true&enableUserData=true&imageTypeLimit=1&enableImageTypes=Primary&enableTotalRecordCount=true&clientHint=ignored",
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn items_sort_name_descending_reverses_the_stable_name_order() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    seed_item(&app.database, library, "Arrival", "Movie").await;
+    seed_item(&app.database, library, "Blade Runner", "Movie").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        &format!("/Items?parentId={library}&sortBy=SortName&sortOrder=Descending"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["Items"][0]["Name"], "Blade Runner");
+    assert_eq!(result["Items"][1]["Name"], "Arrival");
+}
+
+#[tokio::test]
+async fn items_preserve_sort_positions_and_put_null_runtime_last() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let older = seed_item(&app.database, library, "Older", "Movie").await;
+    let newer = seed_item(&app.database, library, "Newer", "Movie").await;
+    seed_item(&app.database, library, "Unknown runtime", "Movie").await;
+    let backend = app.database.get_database_backend();
+    for (item, age, runtime) in [(older, 2_i64, 100_i64), (newer, 1_i64, 200_i64)] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .values([
+                            (
+                                Alias::new("date_created"),
+                                (Utc::now() - Duration::days(age)).into(),
+                            ),
+                            (Alias::new("runtime_ticks"), runtime.into()),
+                        ])
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        &format!(
+            "/Items?parentId={library}&sortBy=Unsupported,DateCreated&sortOrder=Descending,Ascending"
+        ),
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let by_date: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(by_date["Items"][0]["Id"], older.to_string());
+
+    let response = get(
+        &app.router,
+        &format!("/Items?parentId={library}&sortBy=Runtime&sortOrder=Descending"),
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let by_runtime: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(by_runtime["Items"][0]["Id"], newer.to_string());
+    assert_eq!(by_runtime["Items"][1]["Id"], older.to_string());
+    assert_eq!(by_runtime["Items"][2]["Name"], "Unknown runtime");
+}
+
+#[tokio::test]
+async fn items_recursive_parent_query_returns_matching_descendants() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let folder = seed_item(&app.database, library, "Shows", "Folder").await;
+    let season = seed_item(&app.database, library, "Season 1", "Season").await;
+    let episode = seed_item(&app.database, library, "Pilot", "Episode").await;
+    let backend = app.database.get_database_backend();
+    for (child, parent) in [(season, folder), (episode, season)] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("parent_id"), parent.as_uuid())
+                        .and_where(Expr::col(Alias::new("id")).eq(child.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        &format!(
+            "/Items?parentId={folder}&recursive=true&includeItemTypes=Episode&sortBy=SortName"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Id"], episode.to_string());
+}
+
+#[tokio::test]
 async fn search_hints_returns_authenticated_visible_type_filtered_pages() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Library", true).await;
@@ -2813,6 +3026,15 @@ async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
     let visible = seed_item(&app.database, enabled, "Arrival", "Movie").await;
     let hidden = seed_item(&app.database, disabled, "Secret", "Movie").await;
     let sha256 = seed_asset(&app, visible, b"jpeg").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        visible,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
     let (user_id, _, token) = login(&app.router).await;
 
     assert_eq!(
@@ -2835,6 +3057,15 @@ async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
     assert_eq!(item["Type"], "Movie");
     assert_eq!(item["MediaType"], "Video");
     assert_eq!(item["ImageTags"]["Primary"], sha256);
+    assert!(item["DateCreated"].is_string());
+    assert_eq!(item["LocationType"], "FileSystem");
+    assert_eq!(item["PrimaryImageAspectRatio"], 2.0);
+    assert_eq!(item["MediaSources"][0]["Id"], presentation.to_string());
+    assert!(!item["MediaStreams"].as_array().unwrap().is_empty());
+    assert_eq!(
+        item["MediaSources"][0]["DirectStreamUrl"],
+        format!("/Videos/{visible}/stream?static=true&mediaSourceId={presentation}")
+    );
 
     for item_id in [hidden, CatalogItemId::new()] {
         assert_eq!(
@@ -2854,6 +3085,52 @@ async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
         .status(),
         StatusCode::FORBIDDEN
     );
+}
+
+#[tokio::test]
+async fn item_detail_omits_unprobed_sources_without_scheduling_probe_work() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), "Pending")
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap();
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(&app.router, &format!("/Items/{item}"), Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let detail: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(detail["MediaSources"], json!([]));
+    assert_eq!(detail["MediaStreams"], json!([]));
+    let row = app
+        .database
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT COUNT(*) AS count FROM work_jobs WHERE task_kind = 'ProbeMedia'".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
 }
 
 #[tokio::test]
@@ -2992,7 +3269,7 @@ async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
 }
 
 #[tokio::test]
-async fn browse_queries_reject_impersonation_unknown_keys_and_invalid_pages() {
+async fn browse_queries_reject_impersonation_and_invalid_pages() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;
 
@@ -3009,10 +3286,6 @@ async fn browse_queries_reject_impersonation_unknown_keys_and_invalid_pages() {
         ("/Items?limit=0".to_owned(), StatusCode::BAD_REQUEST),
         ("/Items?limit=201".to_owned(), StatusCode::BAD_REQUEST),
         ("/Items?limit=1&limit=2".to_owned(), StatusCode::BAD_REQUEST),
-        (
-            "/Items?includeItemTypes=Movie".to_owned(),
-            StatusCode::BAD_REQUEST,
-        ),
     ] {
         let response = get(&app.router, &path, Some(&token)).await;
         assert_eq!(response.status(), expected, "{path}");

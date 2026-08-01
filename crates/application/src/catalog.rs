@@ -10,9 +10,10 @@ use tjxy_cache::{
 };
 use tjxy_common::{CatalogItemId, UserId, WorkJobId};
 use tjxy_db::{
-    BrowseParent, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogPage,
-    CatalogPageRequest, CatalogPublicationError, CatalogPublicationRepository, CatalogQueryError,
-    CatalogQueryRepository, LazyCatalogWorkTarget, LibraryViewRecord, PlaystateRepository,
+    BrowseParent, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogItemsQuery,
+    CatalogItemsScope, CatalogPage, CatalogPageRequest, CatalogPublicationError,
+    CatalogPublicationRepository, CatalogQueryError, CatalogQueryRepository, CatalogSortField,
+    CatalogSortOrder, LazyCatalogWorkTarget, LibraryViewRecord, PlaystateRepository,
     PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError, WorkJobRepository,
     WorkJobRepositoryError, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
@@ -359,16 +360,36 @@ impl CatalogQueryService {
         parent: BrowseParent,
         page: CatalogPageRequest,
     ) -> Result<CatalogPage, CatalogServiceError> {
+        self.query_items(
+            principal,
+            requested_user,
+            CatalogItemsQuery::new(CatalogItemsScope::Parent(parent), page),
+        )
+        .await
+    }
+
+    /// Returns a bounded page for one complete catalog query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for a mismatched user or
+    /// propagates a catalog query failure.
+    pub async fn query_items(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        query: CatalogItemsQuery,
+    ) -> Result<CatalogPage, CatalogServiceError> {
         authorize_user(principal, requested_user)?;
         let repository = CatalogQueryRepository::new(&self.database);
         let Some(cache) = &self.cache else {
             return repository
-                .items(principal, parent, page)
+                .query_items(principal, query)
                 .await
                 .map_err(Into::into);
         };
         let revisions = repository.cache_revisions(principal).await?;
-        let descriptor = items_cache_descriptor(parent, &page);
+        let descriptor = items_cache_descriptor(&query);
         let key = cache.keys.user_scoped(
             revisions.catalog_generation(),
             &principal.to_string(),
@@ -379,11 +400,11 @@ impl CatalogQueryService {
         match cache_lookup(cache, &key).await {
             CacheLookup::Hit(page) => Ok(page),
             CacheLookup::Fallback => repository
-                .items(principal, parent, page)
+                .query_items(principal, query)
                 .await
                 .map_err(Into::into),
             CacheLookup::Leader(_leader) => {
-                let page = repository.items(principal, parent, page).await?;
+                let page = repository.query_items(principal, query).await?;
                 let ttl = if page.items().is_empty() {
                     cache.empty_ttl
                 } else {
@@ -622,6 +643,28 @@ impl CatalogQueryService {
         parent_id: Uuid,
         page: CatalogPageRequest,
     ) -> Result<Option<CatalogPage>, CatalogServiceError> {
+        self.query_items_by_parent_id(
+            principal,
+            requested_user,
+            parent_id,
+            CatalogItemsQuery::new(CatalogItemsScope::AllVisible, page),
+        )
+        .await
+    }
+
+    /// Resolves a wire-level parent UUID and executes a complete catalog query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for a mismatched user or
+    /// propagates a catalog query failure.
+    pub async fn query_items_by_parent_id(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        parent_id: Uuid,
+        query: CatalogItemsQuery,
+    ) -> Result<Option<CatalogPage>, CatalogServiceError> {
         authorize_user(principal, requested_user)?;
         let repository = CatalogQueryRepository::new(&self.database);
         let Some(parent) = repository.resolve_parent(parent_id).await? else {
@@ -635,9 +678,13 @@ impl CatalogQueryService {
             self.enqueue_and_wait(target, parent_item, WorkTaskKind::ExpandItem)
                 .await?;
         }
-        self.items(principal, requested_user, parent, page)
-            .await
-            .map(Some)
+        self.query_items(
+            principal,
+            requested_user,
+            query.with_scope(CatalogItemsScope::Parent(parent)),
+        )
+        .await
+        .map(Some)
     }
 
     /// Returns one visible published item for the authenticated principal.
@@ -873,6 +920,36 @@ impl CatalogQueryService {
                 Ok(Some(playable))
             }
         }
+    }
+
+    /// Returns the currently available, already-probed playback sources without
+    /// scheduling indexing or probe work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError`] for authorization or query failures.
+    pub async fn available_playback_sources(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        item_id: CatalogItemId,
+    ) -> Result<Option<Vec<PlaybackSource>>, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
+        let query = CatalogQueryRepository::new(&self.database);
+        let Some(item) = query.item(principal, item_id).await? else {
+            return Ok(None);
+        };
+        let sources = CatalogPublicationRepository::new(&self.database)
+            .active_sources(item_id)
+            .await?;
+        let last_used = PlaystateRepository::new(&self.database)
+            .last_presentation_key(principal, item_id)
+            .await?;
+        Ok(Some(playable_sources(
+            sources,
+            last_used,
+            item.item_type() == "Audio",
+        )))
     }
 
     /// Updates the administrator policy for a stable media source identity.
@@ -1156,19 +1233,48 @@ fn sort_playable_sources(playable: &mut [(i32, PlaybackSource)]) {
     });
 }
 
-fn items_cache_descriptor(parent: BrowseParent, page: &CatalogPageRequest) -> String {
-    let parent = match parent {
-        BrowseParent::Library(id) => format!("library/{id}"),
-        BrowseParent::Item(id) => format!("item/{id}"),
+fn items_cache_descriptor(query: &CatalogItemsQuery) -> String {
+    let scope = match query.scope() {
+        CatalogItemsScope::AllVisible => "all-visible".to_owned(),
+        CatalogItemsScope::Parent(BrowseParent::Library(id)) => format!("library/{id}"),
+        CatalogItemsScope::Parent(BrowseParent::Item(id)) => format!("item/{id}"),
     };
+    let page = query.page();
     let mut item_types = page
         .item_types()
         .iter()
         .map(|item_type| item_type.cache_name())
         .collect::<Vec<_>>();
     item_types.sort_unstable();
+    let sorts = query
+        .sorts()
+        .iter()
+        .map(|sort| {
+            let field = match sort.field() {
+                CatalogSortField::SortName => "sort-name",
+                CatalogSortField::DateCreated => "date-created",
+                CatalogSortField::ProductionYear => "production-year",
+                CatalogSortField::Runtime => "runtime",
+            };
+            let order = match sort.order() {
+                CatalogSortOrder::Ascending => "asc",
+                CatalogSortOrder::Descending => "desc",
+            };
+            format!("{field}:{order}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let search = query.search_term().unwrap_or_default();
+    let recursive = query.recursive()
+        || (query.recursive_for_library()
+            && matches!(
+                query.scope(),
+                CatalogItemsScope::Parent(BrowseParent::Library(_))
+            ));
     format!(
-        "parent={parent};start={};limit={};types={}",
+        "query-items/v1;scope={scope};recursive={};search-length={};search={search};start={};limit={};types={};sorts={sorts}",
+        recursive,
+        search.len(),
         page.start_index(),
         page.limit(),
         item_types.join(",")
@@ -1208,8 +1314,12 @@ fn authorize_user(
 #[cfg(test)]
 mod tests {
     use tjxy_common::{MediaSourceId, PresentationKey};
+    use tjxy_db::{
+        BrowseParent, CatalogItemsQuery, CatalogItemsScope, CatalogPageRequest, CatalogSort,
+        CatalogSortField, CatalogSortOrder,
+    };
 
-    use super::{PlaybackSource, sort_playable_sources};
+    use super::{PlaybackSource, items_cache_descriptor, sort_playable_sources};
 
     #[test]
     fn last_used_source_precedes_location_priority_with_stable_key_fallback() {
@@ -1256,5 +1366,39 @@ mod tests {
             last_used.presentation_key()
         );
         assert_eq!(sources[1].1.presentation_key(), stable.presentation_key());
+    }
+
+    #[test]
+    fn item_query_cache_descriptor_covers_every_result_dimension() {
+        let parent = tjxy_common::CatalogItemId::new();
+        let base = CatalogItemsQuery::new(
+            CatalogItemsScope::Parent(BrowseParent::Item(parent)),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        );
+        let search = base.clone().with_search_term(Some("Pilot".to_owned()));
+        let recursive = search.clone().with_recursive(true);
+        let sorted = recursive.clone().with_sorts(vec![CatalogSort::new(
+            CatalogSortField::DateCreated,
+            CatalogSortOrder::Descending,
+        )]);
+        let library = CatalogItemsQuery::new(
+            CatalogItemsScope::Parent(BrowseParent::Library(uuid::Uuid::new_v4())),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        );
+        let library_default_recursive = library.clone().with_recursive_for_library(true);
+
+        let descriptors = [
+            base,
+            search,
+            recursive,
+            sorted,
+            library,
+            library_default_recursive,
+        ]
+        .iter()
+        .map(items_cache_descriptor)
+        .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(descriptors.len(), 6);
     }
 }

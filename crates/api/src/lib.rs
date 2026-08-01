@@ -19,7 +19,7 @@ pub use auth::{
 };
 pub use browse::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, ClientCapabilitiesDto, CollectionType,
-    ItemNamedCodeDto, ItemPersonDto, MediaType, SearchHint, SearchHintResult,
+    ItemNamedCodeDto, ItemPersonDto, LocationType, MediaType, SearchHint, SearchHintResult,
     UpdateUserItemDataDto, UserItemDataDto,
 };
 pub use device::{DeviceInfoDto, DeviceInfoDtoQueryResult, DeviceOptionsDto};

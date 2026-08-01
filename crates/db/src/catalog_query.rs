@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult,
-    sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement},
+    sea_query::{
+        Alias, CommonTableExpression, Condition, Expr, Func, JoinType, LikeExpr, NullOrdering,
+        Order, Query, SelectStatement, UnionType, WithClause,
+    },
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +33,133 @@ pub enum CatalogItemType {
     Season,
     Episode,
     Folder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogSortField {
+    SortName,
+    DateCreated,
+    ProductionYear,
+    Runtime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogSortOrder {
+    Ascending,
+    Descending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CatalogSort {
+    field: CatalogSortField,
+    order: CatalogSortOrder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogItemsScope {
+    AllVisible,
+    Parent(BrowseParent),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogItemsQuery {
+    scope: CatalogItemsScope,
+    page: CatalogPageRequest,
+    search_term: Option<String>,
+    recursive: bool,
+    recursive_for_library: bool,
+    sorts: Vec<CatalogSort>,
+}
+
+impl CatalogItemsQuery {
+    #[must_use]
+    pub const fn new(scope: CatalogItemsScope, page: CatalogPageRequest) -> Self {
+        Self {
+            scope,
+            page,
+            search_term: None,
+            recursive: false,
+            recursive_for_library: false,
+            sorts: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_search_term(mut self, search_term: Option<String>) -> Self {
+        self.search_term = search_term;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_scope(mut self, scope: CatalogItemsScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_recursive(mut self, recursive: bool) -> Self {
+        self.recursive = recursive;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_recursive_for_library(mut self, recursive: bool) -> Self {
+        self.recursive_for_library = recursive;
+        self
+    }
+
+    #[must_use]
+    pub fn with_sorts(mut self, sorts: Vec<CatalogSort>) -> Self {
+        self.sorts = sorts;
+        self
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> CatalogItemsScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn page(&self) -> &CatalogPageRequest {
+        &self.page
+    }
+
+    #[must_use]
+    pub fn search_term(&self) -> Option<&str> {
+        self.search_term.as_deref()
+    }
+
+    #[must_use]
+    pub const fn recursive(&self) -> bool {
+        self.recursive
+    }
+
+    #[must_use]
+    pub const fn recursive_for_library(&self) -> bool {
+        self.recursive_for_library
+    }
+
+    #[must_use]
+    pub fn sorts(&self) -> &[CatalogSort] {
+        &self.sorts
+    }
+}
+
+impl CatalogSort {
+    #[must_use]
+    pub const fn new(field: CatalogSortField, order: CatalogSortOrder) -> Self {
+        Self { field, order }
+    }
+
+    #[must_use]
+    pub const fn field(self) -> CatalogSortField {
+        self.field
+    }
+
+    #[must_use]
+    pub const fn order(self) -> CatalogSortOrder {
+        self.order
+    }
 }
 
 impl CatalogItemType {
@@ -174,11 +304,14 @@ pub struct CatalogItemRecord {
     community_rating: Option<f64>,
     index_number: Option<i32>,
     runtime_ticks: Option<i64>,
+    date_created: DateTime<Utc>,
     is_favorite: bool,
     is_played: bool,
     play_count: i32,
     playback_position_ticks: i64,
     image_tags: BTreeMap<String, String>,
+    backdrop_image_tags: Vec<String>,
+    primary_image_aspect_ratio: Option<f64>,
 }
 
 impl CatalogItemRecord {
@@ -233,6 +366,11 @@ impl CatalogItemRecord {
     }
 
     #[must_use]
+    pub const fn date_created(&self) -> DateTime<Utc> {
+        self.date_created
+    }
+
+    #[must_use]
     pub const fn is_favorite(&self) -> bool {
         self.is_favorite
     }
@@ -255,6 +393,16 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn image_tags(&self) -> &BTreeMap<String, String> {
         &self.image_tags
+    }
+
+    #[must_use]
+    pub fn backdrop_image_tags(&self) -> &[String] {
+        &self.backdrop_image_tags
+    }
+
+    #[must_use]
+    pub const fn primary_image_aspect_ratio(&self) -> Option<f64> {
+        self.primary_image_aspect_ratio
     }
 }
 
@@ -749,44 +897,136 @@ impl<'connection> CatalogQueryRepository<'connection> {
         parent: BrowseParent,
         page: CatalogPageRequest,
     ) -> Result<CatalogPage, CatalogQueryError> {
-        let source = match parent {
-            BrowseParent::Library(_) => ItemQuerySource::Catalog,
-            BrowseParent::Item(parent_id) => {
-                active_structure_publication(self.database, parent_id.as_uuid())
-                    .await?
-                    .map_or(ItemQuerySource::Catalog, ItemQuerySource::Publication)
+        self.query_items(
+            user_id,
+            CatalogItemsQuery::new(CatalogItemsScope::Parent(parent), page),
+        )
+        .await
+    }
+
+    /// Returns a stable page for one complete catalog query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn query_items(
+        &self,
+        user_id: UserId,
+        query: CatalogItemsQuery,
+    ) -> Result<CatalogPage, CatalogQueryError> {
+        const DEFAULT_ITEM_TYPES: [CatalogItemType; 6] = [
+            CatalogItemType::Movie,
+            CatalogItemType::Audio,
+            CatalogItemType::Series,
+            CatalogItemType::Season,
+            CatalogItemType::Episode,
+            CatalogItemType::Folder,
+        ];
+        let requested_types = if query.page.item_types.is_empty() {
+            &DEFAULT_ITEM_TYPES[..]
+        } else {
+            &query.page.item_types
+        };
+        let item_type_names = requested_types
+            .iter()
+            .map(|item_type| item_type.as_database_value())
+            .collect::<Vec<_>>();
+
+        let recursive = query.recursive
+            || (query.recursive_for_library
+                && matches!(
+                    query.scope,
+                    CatalogItemsScope::Parent(BrowseParent::Library(_))
+                ));
+        let (source, mut statement, natural_index_order, recursive_scope) = match query.scope {
+            CatalogItemsScope::AllVisible => (
+                ItemQuerySource::Catalog,
+                home_item_query(user_id, &item_type_names, None),
+                false,
+                None,
+            ),
+            CatalogItemsScope::Parent(BrowseParent::Library(library_id)) if recursive => (
+                ItemQuerySource::Catalog,
+                home_item_query(user_id, &item_type_names, Some(library_id)),
+                false,
+                None,
+            ),
+            CatalogItemsScope::Parent(parent) => {
+                let source = match parent {
+                    BrowseParent::Library(_) => ItemQuerySource::Catalog,
+                    BrowseParent::Item(parent_id) => {
+                        active_structure_publication(self.database, parent_id.as_uuid())
+                            .await?
+                            .map_or(ItemQuerySource::Catalog, ItemQuerySource::Publication)
+                    }
+                };
+                let recursive_scope = recursive.then(|| recursive_descendants(source, parent));
+                (
+                    source,
+                    item_query(
+                        user_id,
+                        parent,
+                        &query.page.item_types,
+                        source,
+                        recursive_scope.is_some(),
+                    ),
+                    matches!(source, ItemQuerySource::Catalog)
+                        && matches!(parent, BrowseParent::Item(_)),
+                    recursive_scope,
+                )
             }
         };
-        let mut count = item_query(user_id, parent, &page.item_types, source);
+        if let Some(search_term) = query.search_term.as_deref() {
+            apply_search_term(&mut statement, source, search_term);
+        }
+        self.execute_item_page(
+            statement,
+            source,
+            &query,
+            natural_index_order,
+            recursive_scope,
+        )
+        .await
+    }
+
+    async fn execute_item_page(
+        &self,
+        statement: SelectStatement,
+        source: ItemQuerySource,
+        query: &CatalogItemsQuery,
+        natural_index_order: bool,
+        recursive_scope: Option<WithClause>,
+    ) -> Result<CatalogPage, CatalogQueryError> {
+        let page = &query.page;
+        let mut count = statement.clone();
         count.expr_as(source.id_expr().count(), Alias::new("count"));
         let backend = self.database.get_database_backend();
+        let count_statement = if let Some(scope) = recursive_scope.clone() {
+            backend.build(&count.with(scope))
+        } else {
+            backend.build(&count)
+        };
         let total: i64 = self
             .database
-            .query_one(backend.build(&count))
+            .query_one(count_statement)
             .await?
             .ok_or(CatalogQueryError::MissingCount)?
             .try_get("", "count")?;
         let total_record_count =
             u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
 
-        let mut query = item_query(user_id, parent, &page.item_types, source);
-        select_item_columns(&mut query, source);
-        if matches!(source, ItemQuerySource::Catalog) && matches!(parent, BrowseParent::Item(_)) {
-            query
-                .order_by_expr(
-                    Expr::cust("CASE WHEN ci.index_number IS NULL THEN 1 ELSE 0 END"),
-                    Order::Asc,
-                )
-                .order_by((Alias::new("ci"), Alias::new("index_number")), Order::Asc);
-        }
-        query
-            .order_by_expr(source.sort_expr().into(), Order::Asc)
-            .order_by_expr(source.id_expr().into(), Order::Asc)
-            .offset(page.start_index)
-            .limit(page.limit);
+        let mut data = statement;
+        select_item_columns(&mut data, source);
+        apply_item_sort(&mut data, source, query.sorts(), natural_index_order);
+        data.offset(page.start_index).limit(page.limit);
+        let data_statement = if let Some(scope) = recursive_scope {
+            backend.build(&data.with(scope))
+        } else {
+            backend.build(&data)
+        };
         let mut items = self
             .database
-            .query_all(backend.build(&query))
+            .query_all(data_statement)
             .await?
             .iter()
             .map(item_from_row)
@@ -810,72 +1050,16 @@ impl<'connection> CatalogQueryRepository<'connection> {
         search_term: &str,
         page: CatalogPageRequest,
     ) -> Result<CatalogPage, CatalogQueryError> {
-        const DEFAULT_ITEM_TYPES: [CatalogItemType; 6] = [
-            CatalogItemType::Movie,
-            CatalogItemType::Audio,
-            CatalogItemType::Series,
-            CatalogItemType::Season,
-            CatalogItemType::Episode,
-            CatalogItemType::Folder,
-        ];
-
-        let requested_types = if page.item_types.is_empty() {
-            &DEFAULT_ITEM_TYPES[..]
-        } else {
-            &page.item_types
-        };
-        let item_types = requested_types
-            .iter()
-            .map(|item_type| item_type.as_database_value())
-            .collect::<Vec<_>>();
-        let pattern = format!("%{search_term}%");
-        let query = || {
-            let mut query = home_item_query(user_id, &item_types, None);
-            query.and_where(Expr::col((Alias::new("ci"), Alias::new("name"))).like(&pattern));
-            query
-        };
-
-        let mut count = query();
-        count.expr_as(
-            Expr::col((Alias::new("ci"), Alias::new("id"))).count(),
-            Alias::new("count"),
-        );
-        let backend = self.database.get_database_backend();
-        let total: i64 = self
-            .database
-            .query_one(backend.build(&count))
-            .await?
-            .ok_or(CatalogQueryError::MissingCount)?
-            .try_get("", "count")?;
-        let total_record_count =
-            u64::try_from(total).map_err(|_| CatalogQueryError::InvalidCount)?;
-
-        let mut query = query();
-        select_item_columns(&mut query, ItemQuerySource::Catalog);
-        query
-            .order_by_expr(
-                Expr::col((Alias::new("ci"), Alias::new("sort_key"))).into(),
-                Order::Asc,
-            )
-            .order_by_expr(
-                Expr::col((Alias::new("ci"), Alias::new("id"))).into(),
-                Order::Asc,
-            )
-            .offset(page.start_index)
-            .limit(page.limit);
-        let mut items = self
-            .database
-            .query_all(backend.build(&query))
-            .await?
-            .iter()
-            .map(item_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        attach_image_tags(self.database, &mut items).await?;
-        Ok(CatalogPage {
-            items,
-            total_record_count,
-            start_index: page.start_index,
-        })
+        self.query_items(
+            user_id,
+            CatalogItemsQuery::new(CatalogItemsScope::AllVisible, page)
+                .with_search_term(Some(search_term.to_owned()))
+                .with_sorts(vec![CatalogSort::new(
+                    CatalogSortField::SortName,
+                    CatalogSortOrder::Ascending,
+                )]),
+        )
+        .await
     }
 
     /// Returns visible, unfinished items with a saved playback position.
@@ -1719,6 +1903,180 @@ impl ItemQuerySource {
             Self::Publication(_) => Expr::col((Alias::new("pci"), Alias::new("sort_key"))),
         }
     }
+
+    fn field_expr(self, field: CatalogSortField) -> Expr {
+        match (self, field) {
+            (Self::Catalog, CatalogSortField::SortName) => {
+                Expr::col((Alias::new("ci"), Alias::new("sort_key")))
+            }
+            (Self::Catalog, CatalogSortField::DateCreated) => {
+                Expr::col((Alias::new("ci"), Alias::new("date_created")))
+            }
+            (Self::Catalog, CatalogSortField::ProductionYear) => {
+                Expr::col((Alias::new("ci"), Alias::new("production_year")))
+            }
+            (Self::Catalog, CatalogSortField::Runtime) => {
+                Expr::col((Alias::new("ci"), Alias::new("runtime_ticks")))
+            }
+            (Self::Publication(_), CatalogSortField::SortName) => {
+                Expr::col((Alias::new("pci"), Alias::new("sort_key")))
+            }
+            (Self::Publication(_), CatalogSortField::ProductionYear) => {
+                Expr::col((Alias::new("pci"), Alias::new("production_year")))
+            }
+            (Self::Publication(_), CatalogSortField::DateCreated) => {
+                Expr::col((Alias::new("publication_item"), Alias::new("date_created")))
+            }
+            (Self::Publication(_), CatalogSortField::Runtime) => {
+                Expr::col((Alias::new("publication_item"), Alias::new("runtime_ticks")))
+            }
+        }
+    }
+}
+
+fn recursive_descendants(source: ItemQuerySource, parent: BrowseParent) -> WithClause {
+    let BrowseParent::Item(parent_id) = parent else {
+        unreachable!("recursive library browse uses the all-visible query")
+    };
+    let descendants = Alias::new("item_descendants");
+    let id = Alias::new("id");
+    let (mut anchor, recursive) = match source {
+        ItemQuerySource::Catalog => {
+            let anchor = Alias::new("descendant_anchor");
+            let child = Alias::new("descendant_child");
+            let mut base = Query::select();
+            base.expr_as(Expr::col((anchor.clone(), Alias::new("id"))), id.clone())
+                .from_as(Alias::new("catalog_items"), anchor.clone())
+                .and_where(
+                    Expr::col((anchor.clone(), Alias::new("parent_id"))).eq(parent_id.as_uuid()),
+                )
+                .and_where(Expr::col((anchor.clone(), Alias::new("is_present"))).eq(true))
+                .and_where(Expr::col((anchor, Alias::new("classification_state"))).eq("Matched"))
+                .and_where(Expr::exists(shared_enabled_membership(
+                    &Alias::new("descendant_anchor"),
+                    parent_id,
+                )));
+            let mut step = Query::select();
+            step.expr_as(Expr::col((child.clone(), Alias::new("id"))), id.clone())
+                .from_as(Alias::new("catalog_items"), child.clone())
+                .join_as(
+                    JoinType::InnerJoin,
+                    descendants.clone(),
+                    Alias::new("ancestor"),
+                    Expr::col((child.clone(), Alias::new("parent_id")))
+                        .equals((Alias::new("ancestor"), Alias::new("id"))),
+                )
+                .and_where(Expr::col((child.clone(), Alias::new("is_present"))).eq(true))
+                .and_where(Expr::col((child, Alias::new("classification_state"))).eq("Matched"))
+                .and_where(Expr::exists(shared_enabled_membership(
+                    &Alias::new("descendant_child"),
+                    parent_id,
+                )));
+            (base, step)
+        }
+        ItemQuerySource::Publication(publication_id) => {
+            let anchor = Alias::new("descendant_anchor");
+            let child = Alias::new("descendant_child");
+            let mut base = Query::select();
+            base.expr_as(
+                Expr::col((anchor.clone(), Alias::new("catalog_item_id"))),
+                id.clone(),
+            )
+            .from_as(Alias::new("publication_catalog_items"), anchor.clone())
+            .and_where(
+                Expr::col((anchor.clone(), Alias::new("publication_id")))
+                    .eq(publication_id.as_uuid()),
+            )
+            .and_where(
+                Expr::col((anchor, Alias::new("parent_catalog_item_id"))).eq(parent_id.as_uuid()),
+            );
+            let mut step = Query::select();
+            step.expr_as(
+                Expr::col((child.clone(), Alias::new("catalog_item_id"))),
+                id.clone(),
+            )
+            .from_as(Alias::new("publication_catalog_items"), child.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                descendants.clone(),
+                Alias::new("ancestor"),
+                Expr::col((child.clone(), Alias::new("parent_catalog_item_id")))
+                    .equals((Alias::new("ancestor"), Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((child, Alias::new("publication_id"))).eq(publication_id.as_uuid()),
+            );
+            (base, step)
+        }
+    };
+    let cte = CommonTableExpression::new()
+        .table_name(descendants)
+        .column(id)
+        .query(anchor.union(UnionType::Distinct, recursive).to_owned())
+        .to_owned();
+    WithClause::new().recursive(true).cte(cte).to_owned()
+}
+
+fn descendant_ids() -> SelectStatement {
+    Query::select()
+        .column(Alias::new("id"))
+        .from(Alias::new("item_descendants"))
+        .to_owned()
+}
+
+fn apply_search_term(query: &mut SelectStatement, source: ItemQuerySource, search_term: &str) {
+    let escaped = search_term
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = LikeExpr::new(format!("%{escaped}%")).escape('\\');
+    let (name, original_title) = match source {
+        ItemQuerySource::Catalog => (
+            Expr::col((Alias::new("ci"), Alias::new("name"))),
+            Expr::col((Alias::new("ci"), Alias::new("original_title"))),
+        ),
+        ItemQuerySource::Publication(_) => (
+            Expr::col((Alias::new("pci"), Alias::new("name"))),
+            Expr::col((Alias::new("publication_item"), Alias::new("original_title"))),
+        ),
+    };
+    query.cond_where(
+        Condition::any()
+            .add(Expr::expr(Func::lower(name)).like(pattern.clone()))
+            .add(Expr::expr(Func::lower(original_title)).like(pattern)),
+    );
+}
+
+fn apply_item_sort(
+    query: &mut SelectStatement,
+    source: ItemQuerySource,
+    sorts: &[CatalogSort],
+    natural_index_order: bool,
+) {
+    if sorts.is_empty() {
+        if natural_index_order {
+            query.order_by_expr_with_nulls(
+                Expr::col((Alias::new("ci"), Alias::new("index_number"))).into(),
+                Order::Asc,
+                NullOrdering::Last,
+            );
+        }
+        query.order_by_expr(source.sort_expr().into(), Order::Asc);
+    } else {
+        for sort in sorts {
+            let order = match sort.order() {
+                CatalogSortOrder::Ascending => Order::Asc,
+                CatalogSortOrder::Descending => Order::Desc,
+            };
+            query.order_by_expr_with_nulls(
+                source.field_expr(sort.field()).into(),
+                order,
+                NullOrdering::Last,
+            );
+        }
+    }
+    query.order_by_expr(source.id_expr().into(), Order::Asc);
 }
 
 fn home_item_query(
@@ -1850,6 +2208,7 @@ fn item_query(
     parent: BrowseParent,
     item_types: &[CatalogItemType],
     source: ItemQuerySource,
+    recursive: bool,
 ) -> SelectStatement {
     let ud = Alias::new("ud");
     let mut query = Query::select();
@@ -1882,7 +2241,18 @@ fn item_query(
                     ),
                 );
             }
-            apply_parent(&mut query, &ci, parent);
+            if recursive {
+                let BrowseParent::Item(parent_id) = parent else {
+                    unreachable!("recursive library browse uses the all-visible query")
+                };
+                query
+                    .and_where(source.id_expr().in_subquery(descendant_ids()))
+                    .and_where(source.id_expr().ne(parent_id.as_uuid()))
+                    .and_where(Expr::exists(shared_enabled_membership(&ci, parent_id)))
+                    .and_where(Expr::exists(visible_item(parent_id)));
+            } else {
+                apply_parent(&mut query, &ci, parent);
+            }
         }
         ItemQuerySource::Publication(publication_id) => {
             let pci = Alias::new("pci");
@@ -1909,18 +2279,22 @@ fn item_query(
                     )
                     .add(Expr::col((ud.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
             );
-            query
-                .and_where(
-                    Expr::col((pci.clone(), Alias::new("publication_id")))
-                        .eq(publication_id.as_uuid()),
-                )
-                .and_where(
+            query.and_where(
+                Expr::col((pci.clone(), Alias::new("publication_id"))).eq(publication_id.as_uuid()),
+            );
+            if recursive {
+                query
+                    .and_where(source.id_expr().in_subquery(descendant_ids()))
+                    .and_where(source.id_expr().ne(parent_id.as_uuid()));
+            } else {
+                query.and_where(
                     Expr::col((pci.clone(), Alias::new("parent_catalog_item_id")))
                         .eq(parent_id.as_uuid()),
-                )
-                .and_where(Expr::exists(current_structure_publication_visible(
-                    publication_id,
-                )));
+                );
+            }
+            query.and_where(Expr::exists(current_structure_publication_visible(
+                publication_id,
+            )));
             if !item_types.is_empty() {
                 query.and_where(
                     Expr::col((pci, Alias::new("item_type"))).is_in(
@@ -2284,41 +2658,42 @@ fn apply_parent(query: &mut SelectStatement, ci: &Alias, parent: BrowseParent) {
                 .and_where(Expr::exists(membership));
         }
         BrowseParent::Item(parent_id) => {
-            let child = Alias::new("child_membership");
-            let parent = Alias::new("parent_membership");
-            let library = Alias::new("shared_library");
-            let mut shared = Query::select();
-            shared
-                .expr(Expr::val(1_i32))
-                .from_as(Alias::new("library_catalog_items"), child.clone())
-                .join_as(
-                    JoinType::InnerJoin,
-                    Alias::new("library_catalog_items"),
-                    parent.clone(),
-                    Expr::col((parent.clone(), Alias::new("library_id")))
-                        .equals((child.clone(), Alias::new("library_id"))),
-                )
-                .join_as(
-                    JoinType::InnerJoin,
-                    Alias::new("libraries"),
-                    library.clone(),
-                    Expr::col((library.clone(), Alias::new("id")))
-                        .equals((child.clone(), Alias::new("library_id"))),
-                )
-                .and_where(
-                    Expr::col((child, Alias::new("catalog_item_id")))
-                        .equals((ci.clone(), Alias::new("id"))),
-                )
-                .and_where(
-                    Expr::col((parent, Alias::new("catalog_item_id"))).eq(parent_id.as_uuid()),
-                )
-                .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true));
             query
                 .and_where(Expr::col((ci.clone(), Alias::new("parent_id"))).eq(parent_id.as_uuid()))
-                .and_where(Expr::exists(shared))
+                .and_where(Expr::exists(shared_enabled_membership(ci, parent_id)))
                 .and_where(Expr::exists(visible_item(parent_id)));
         }
     }
+}
+
+fn shared_enabled_membership(item: &Alias, parent_id: CatalogItemId) -> SelectStatement {
+    let child = Alias::new("child_membership");
+    let parent = Alias::new("parent_membership");
+    let library = Alias::new("shared_library");
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("library_catalog_items"), child.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            parent.clone(),
+            Expr::col((parent.clone(), Alias::new("library_id")))
+                .equals((child.clone(), Alias::new("library_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((child.clone(), Alias::new("library_id"))),
+        )
+        .and_where(
+            Expr::col((child, Alias::new("catalog_item_id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((parent, Alias::new("catalog_item_id"))).eq(parent_id.as_uuid()))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .to_owned()
 }
 
 fn visible_item(item_id: CatalogItemId) -> SelectStatement {
@@ -2443,6 +2818,7 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 "community_rating",
                 "index_number",
                 "runtime_ticks",
+                "date_created",
             ] {
                 query.expr_as(
                     Expr::col((ci.clone(), Alias::new(column))),
@@ -2465,16 +2841,19 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                     Alias::new(alias),
                 );
             }
-            query.expr_as(
-                Expr::val(Option::<String>::None),
-                Alias::new("original_title"),
-            );
-            query.expr_as(
-                Expr::val(Option::<f64>::None),
-                Alias::new("community_rating"),
-            );
-            query.expr_as(Expr::val(Option::<i32>::None), Alias::new("index_number"));
-            query.expr_as(Expr::val(Option::<i64>::None), Alias::new("runtime_ticks"));
+            let catalog_item = Alias::new("publication_item");
+            for column in [
+                "original_title",
+                "community_rating",
+                "index_number",
+                "runtime_ticks",
+                "date_created",
+            ] {
+                query.expr_as(
+                    Expr::col((catalog_item.clone(), Alias::new(column))),
+                    Alias::new(column),
+                );
+            }
         }
     }
     for column in [
@@ -2512,6 +2891,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         community_rating: row.try_get("", "community_rating")?,
         index_number: row.try_get("", "index_number")?,
         runtime_ticks: row.try_get("", "runtime_ticks")?,
+        date_created: row.try_get("", "date_created")?,
         is_favorite: row
             .try_get::<Option<bool>>("", "is_favorite")?
             .unwrap_or(false),
@@ -2523,6 +2903,8 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
             .try_get::<Option<i64>>("", "playback_position_ticks")?
             .unwrap_or(0),
         image_tags: BTreeMap::new(),
+        backdrop_image_tags: Vec::new(),
+        primary_image_aspect_ratio: None,
     })
 }
 
@@ -2557,25 +2939,60 @@ async fn attach_image_tags(
             Expr::col((blob, Alias::new("sha256"))),
             Alias::new("sha256"),
         )
-        .and_where(Expr::col((asset.clone(), Alias::new("priority"))).eq(0))
+        .expr_as(
+            Expr::col((asset.clone(), Alias::new("priority"))),
+            Alias::new("priority"),
+        )
+        .expr_as(
+            Expr::col((Alias::new("blob"), Alias::new("width"))),
+            Alias::new("width"),
+        )
+        .expr_as(
+            Expr::col((Alias::new("blob"), Alias::new("height"))),
+            Alias::new("height"),
+        )
         .and_where(
             Expr::col((asset, Alias::new("item_id")))
                 .is_in(items.iter().map(|item| item.id.as_uuid())),
-        );
+        )
+        .order_by((Alias::new("asset"), Alias::new("item_id")), Order::Asc)
+        .order_by((Alias::new("asset"), Alias::new("image_type")), Order::Asc)
+        .order_by((Alias::new("asset"), Alias::new("priority")), Order::Asc)
+        .order_by((Alias::new("asset"), Alias::new("id")), Order::Asc);
     let backend = database.get_database_backend();
     let rows = database.query_all(backend.build(&query)).await?;
     let mut by_item = BTreeMap::<Uuid, BTreeMap<String, String>>::new();
+    let mut backdrops = BTreeMap::<Uuid, Vec<String>>::new();
+    let mut primary_aspect_ratios = BTreeMap::<Uuid, f64>::new();
     for row in rows {
         let item_id: Uuid = row.try_get("", "item_id")?;
         let image_type: String = row.try_get("", "image_type")?;
         let sha256: String = row.try_get("", "sha256")?;
-        by_item
-            .entry(item_id)
-            .or_default()
-            .insert(image_type, sha256);
+        let priority: i32 = row.try_get("", "priority")?;
+        if image_type == "Backdrop" {
+            backdrops.entry(item_id).or_default().push(sha256.clone());
+        }
+        if priority == 0 {
+            if image_type == "Primary" {
+                let width: Option<i32> = row.try_get("", "width")?;
+                let height: Option<i32> = row.try_get("", "height")?;
+                if let Some((width, height)) = width
+                    .zip(height)
+                    .filter(|(width, height)| *width > 0 && *height > 0)
+                {
+                    primary_aspect_ratios.insert(item_id, f64::from(width) / f64::from(height));
+                }
+            }
+            by_item
+                .entry(item_id)
+                .or_default()
+                .insert(image_type, sha256);
+        }
     }
     for item in items {
         item.image_tags = by_item.remove(&item.id.as_uuid()).unwrap_or_default();
+        item.backdrop_image_tags = backdrops.remove(&item.id.as_uuid()).unwrap_or_default();
+        item.primary_image_aspect_ratio = primary_aspect_ratios.remove(&item.id.as_uuid());
     }
     Ok(())
 }

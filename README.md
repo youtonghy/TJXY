@@ -310,15 +310,23 @@ those shared entities; active Emby import references block deletion with `409`.
 
 The current browse slice remains SQL-authoritative. Every authenticated enabled
 user sees every enabled library because per-library grants are not yet modeled.
-`/Items` supports root views, direct-parent browsing, item-type filtering,
-stable `SortName` ascending order, and bounded pagination. Published Series
-projections can be browsed recursively and inherit the active publication
-owner's enabled library memberships. Requests for an unexpanded Series enqueue
+`/Items` supports root views, optional parent scope, case-insensitive literal
+`searchTerm`, item-type filtering with or without a parent, bounded pagination,
+and explicit `SortName`, `DateCreated`, `ProductionYear`, or `Runtime` ordering.
+`recursive=true` walks canonical or active-publication descendants with cycle
+protection. A library-parent query with an item-type filter defaults to recursive
+only when `recursive` is absent, matching Jellyfin; an explicit false value wins.
+Search and recursion otherwise remain independent options. Published Series
+projections inherit the active publication owner's enabled library memberships.
+Requests for an unexpanded Series enqueue
 or join one durable high-priority Expand job and wait for a bounded interval;
 timeouts continue to return only the current active publication. Other sort
-modes and image transforms remain unimplemented;
-unsupported query shapes return `400` instead of being silently ignored. Item
-pages expose priority-zero `ImageTags`; image GET/HEAD serves only authorized
+modes and image transforms remain unimplemented. Known malformed pagination,
+boolean, and identifier parameters return `400`; unknown client hints and
+unsupported collection members are ignored for Jellyfin compatibility. The
+`fields` parameter is accepted, but list responses remain a compact projection.
+Item pages expose priority-zero `ImageTags`, all stable Backdrop tags, primary
+image aspect ratio, `DateCreated`, and `LocationType`; image GET/HEAD serves only authorized
 original `ItemAsset` files with strong ETags and private revalidation, including
 items visible through an active Series publication. Unix builds open each
 relative path component from a pinned root directory descriptor without
@@ -364,7 +372,10 @@ in the current process immediately after the durable binding commits.
 from the canonical catalog or its active Structure publication. It does not read
 staging/retired rows. A visible Movie without active sources enqueues or joins a
 durable Source Index job and waits for the configured bounded interval; this
-path never performs Media Probe.
+path never performs Media Probe. Rich details include normalized genres, people,
+studios, provider IDs, dates, image metadata, and every currently Probed and
+Available MediaSource plus the leading source's MediaStreams. Unprobed, hidden,
+or unavailable sources are omitted without scheduling Probe work.
 
 PlaybackInfo accepts an optional request or session `DeviceProfile`; without one
 it returns every currently Probed and Available source, while an explicit profile

@@ -99,6 +99,11 @@ pub struct MediaSourceInfo {
 }
 
 impl MediaSourceInfo {
+    #[must_use]
+    pub fn media_streams(&self) -> &[MediaStream] {
+        &self.media_streams
+    }
+
     /// Builds a byte-for-byte direct-play source using only TJXY routes.
     ///
     /// # Errors

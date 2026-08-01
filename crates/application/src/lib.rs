@@ -80,5 +80,8 @@ pub use storage_validate::{
 };
 pub use task::{TaskService, TaskServiceError};
 pub use tjxy_db::{AuthSessionRecord, DeviceOptionsRecord, DeviceRecord};
-pub use tjxy_db::{AuthenticatedPrincipal, CatalogItemType, CatalogPageRequest};
+pub use tjxy_db::{
+    AuthenticatedPrincipal, CatalogItemType, CatalogItemsQuery, CatalogItemsScope,
+    CatalogPageRequest, CatalogSort, CatalogSortField, CatalogSortOrder,
+};
 pub use user_data::{UserDataService, UserDataServiceError};

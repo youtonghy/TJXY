@@ -10,11 +10,12 @@ use axum::{
 use serde_json::json;
 use tjxy_api::{
     BaseItemDto, BaseItemDtoQueryResult, BaseItemKind, CollectionType, DeliveryMethod,
-    ItemNamedCodeDto, ItemPersonDto, MediaSourceInfo, MediaStream, MediaStreamType,
+    ItemNamedCodeDto, ItemPersonDto, LocationType, MediaSourceInfo, MediaStream, MediaStreamType,
     PlaybackInfoResponse, SearchHint, SearchHintResult, UserItemDataDto,
 };
 use tjxy_application::{
-    AuthError, CatalogItemType, CatalogPageRequest, CatalogServiceError, DeviceProfile,
+    AuthError, CatalogItemType, CatalogItemsQuery, CatalogItemsScope, CatalogPageRequest,
+    CatalogServiceError, CatalogSort, CatalogSortField, CatalogSortOrder, DeviceProfile,
     PlaybackSource, SessionCapabilities,
 };
 use tjxy_common::{CatalogItemId, PresentationKey, UserId};
@@ -225,12 +226,22 @@ pub(crate) async fn items(
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
+    let catalog_query = CatalogItemsQuery::new(CatalogItemsScope::AllVisible, query.page.clone())
+        .with_search_term(query.search_term)
+        .with_recursive(query.recursive)
+        .with_recursive_for_library(query.recursive_for_library)
+        .with_sorts(query.sorts);
     if let Some(parent_id) = query.parent_id {
         return match catalog
-            .items_by_parent_id(principal.user().id(), query.user_id, parent_id, query.page)
+            .query_items_by_parent_id(
+                principal.user().id(),
+                query.user_id,
+                parent_id,
+                catalog_query,
+            )
             .await
         {
-            Ok(Some(page)) => match item_result(state.identity.id, parent_id, &page) {
+            Ok(Some(page)) => match item_result(state.identity.id, Some(parent_id), &page) {
                 Ok(result) => Json(result).into_response(),
                 Err(error) => error.into_response(),
             },
@@ -239,12 +250,17 @@ pub(crate) async fn items(
         };
     }
 
-    if query.page.has_item_type_filter() {
-        return HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "item type filters require a catalog parent",
-        )
-        .into_response();
+    if query.has_catalog_selection {
+        return match catalog
+            .query_items(principal.user().id(), query.user_id, catalog_query)
+            .await
+        {
+            Ok(page) => match item_result(state.identity.id, None, &page) {
+                Ok(result) => Json(result).into_response(),
+                Err(error) => error.into_response(),
+            },
+            Err(error) => service_error(&error),
+        };
     }
     match catalog
         .user_views(principal.user().id(), query.user_id)
@@ -409,18 +425,34 @@ pub(crate) async fn item_detail(
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
+    let item_id = CatalogItemId::from_uuid(item_id);
     match catalog
-        .item_detail(
-            principal.user().id(),
-            requested_user,
-            CatalogItemId::from_uuid(item_id),
-        )
+        .item_detail(principal.user().id(), requested_user, item_id)
         .await
     {
-        Ok(Some(item)) => match item_detail_dto(state.identity.id, &item) {
-            Ok(item) => Json(item).into_response(),
-            Err(error) => error.into_response(),
-        },
+        Ok(Some(item)) => {
+            let sources = match catalog
+                .available_playback_sources(principal.user().id(), requested_user, item_id)
+                .await
+            {
+                Ok(Some(sources)) => sources,
+                Ok(None) => return error(StatusCode::NOT_FOUND, "catalog item was not found"),
+                Err(error) => return service_error(&error),
+            };
+            let media_sources = sources
+                .iter()
+                .map(|source| media_source_info(item_id.as_uuid(), source, true))
+                .collect::<Result<Vec<_>, _>>();
+            match media_sources {
+                Ok(media_sources) => {
+                    match item_detail_dto(state.identity.id, &item, media_sources) {
+                        Ok(item) => Json(item).into_response(),
+                        Err(error) => error.into_response(),
+                    }
+                }
+                Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "playback is unavailable"),
+            }
+        }
         Ok(None) => error(StatusCode::NOT_FOUND, "catalog item was not found"),
         Err(error) => service_error(&error),
     }
@@ -762,6 +794,11 @@ struct ItemsQuery {
     user_id: Option<UserId>,
     parent_id: Option<Uuid>,
     page: CatalogPageRequest,
+    search_term: Option<String>,
+    recursive: bool,
+    recursive_for_library: bool,
+    sorts: Vec<CatalogSort>,
+    has_catalog_selection: bool,
 }
 
 struct SearchQuery {
@@ -867,32 +904,22 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     let parent_id = take_uuid(&mut parameters, "parentId")?;
     let start_index = take_u64(&mut parameters, "startIndex")?.unwrap_or(0);
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(100);
-    let item_types = take_item_types(&mut parameters)?;
-    if take_bool(&mut parameters, "recursive")?.unwrap_or(false) {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "recursive catalog queries are not supported",
-        ));
+    let item_types = take_item_types(&mut parameters);
+    let recursive = take_bool(&mut parameters, "recursive")?;
+    let recursive_for_library = recursive.is_none() && !item_types.is_empty();
+    let recursive = recursive.unwrap_or(false);
+    let search_term = take_search_term(&mut parameters, false)?;
+    let sorts = take_catalog_sorts(&mut parameters);
+    for boolean in ["enableUserData", "enableImages", "enableTotalRecordCount"] {
+        take_bool(&mut parameters, boolean)?;
     }
-    if parameters
-        .remove("sortBy")
-        .is_some_and(|value| value != "SortName")
-    {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported catalog sort",
-        ));
+    if parameters.contains_key("imageTypeLimit") {
+        take_u64(&mut parameters, "imageTypeLimit")?;
     }
-    if parameters
-        .remove("sortOrder")
-        .is_some_and(|value| value != "Ascending")
-    {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported catalog sort order",
-        ));
-    }
-    reject_remaining(&parameters)?;
+    parameters.remove("fields");
+    parameters.remove("mediaTypes");
+    parameters.remove("enableImageTypes");
+    let has_catalog_selection = recursive || search_term.is_some() || !item_types.is_empty();
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?
         .with_item_types(item_types);
@@ -900,24 +927,21 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
         user_id,
         parent_id,
         page,
+        search_term,
+        recursive,
+        recursive_for_library,
+        sorts,
+        has_catalog_selection,
     })
 }
 
 fn parse_search_query(raw_query: Option<&str>) -> Result<SearchQuery, HttpBrowseError> {
     let mut parameters = endpoint_parameters(raw_query)?;
     let user_id = take_user_id(&mut parameters)?;
-    let search_term = parameters
-        .remove("searchTerm")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| {
-            !value.is_empty()
-                && value.chars().count() <= 256
-                && !value.chars().any(char::is_control)
-        })
-        .ok_or_else(|| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid search term"))?;
+    let search_term = take_search_term(&mut parameters, true)?.expect("required search term");
     let start_index = take_u64(&mut parameters, "startIndex")?.unwrap_or(0);
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(100);
-    let item_types = take_item_types(&mut parameters)?;
+    let item_types = take_item_types(&mut parameters);
     reject_remaining(&parameters)?;
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?
@@ -962,7 +986,7 @@ fn parse_latest_query(raw_query: Option<&str>) -> Result<LatestQuery, HttpBrowse
     let user_id = take_user_id(&mut parameters)?;
     let parent_id = take_uuid(&mut parameters, "parentId")?;
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(20);
-    let item_types = take_item_types(&mut parameters)?;
+    let item_types = take_item_types(&mut parameters);
     if take_bool(&mut parameters, "groupItems")?.unwrap_or(false) {
         return Err(HttpBrowseError::new(
             StatusCode::BAD_REQUEST,
@@ -1104,31 +1128,85 @@ fn take_bool(
         .transpose()
 }
 
-fn take_item_types(
+fn take_search_term(
     parameters: &mut HashMap<String, String>,
-) -> Result<Vec<CatalogItemType>, HttpBrowseError> {
-    let Some(value) = parameters.remove("includeItemTypes") else {
-        return Ok(Vec::new());
-    };
-    if value.is_empty() {
-        return Err(HttpBrowseError::new(
+    required: bool,
+) -> Result<Option<String>, HttpBrowseError> {
+    let search_term = parameters
+        .remove("searchTerm")
+        .map(|value| value.trim().to_owned());
+    match search_term {
+        None if required => Err(HttpBrowseError::new(
             StatusCode::BAD_REQUEST,
-            "empty catalog item type",
-        ));
+            "missing search term",
+        )),
+        Some(value)
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) =>
+        {
+            Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid search term",
+            ))
+        }
+        value => Ok(value),
     }
-    value
+}
+
+fn take_catalog_sorts(parameters: &mut HashMap<String, String>) -> Vec<CatalogSort> {
+    let fields = parameters
+        .remove("sortBy")
+        .unwrap_or_default()
+        .split(',')
+        .enumerate()
+        .filter_map(|(index, value)| match value {
+            "SortName" => Some((index, CatalogSortField::SortName)),
+            "DateCreated" => Some((index, CatalogSortField::DateCreated)),
+            "ProductionYear" => Some((index, CatalogSortField::ProductionYear)),
+            "Runtime" => Some((index, CatalogSortField::Runtime)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let orders = parameters
+        .remove("sortOrder")
+        .unwrap_or_default()
         .split(',')
         .map(|value| match value {
-            "Movie" => Ok(CatalogItemType::Movie),
-            "Audio" => Ok(CatalogItemType::Audio),
-            "Series" => Ok(CatalogItemType::Series),
-            "Season" => Ok(CatalogItemType::Season),
-            "Episode" => Ok(CatalogItemType::Episode),
-            "Folder" => Ok(CatalogItemType::Folder),
-            _ => Err(HttpBrowseError::new(
-                StatusCode::BAD_REQUEST,
-                "unsupported catalog item type",
-            )),
+            "Ascending" => Some(CatalogSortOrder::Ascending),
+            "Descending" => Some(CatalogSortOrder::Descending),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let broadcast_order = (orders.len() == 1).then(|| orders[0]).flatten();
+    fields
+        .into_iter()
+        .map(|(index, field)| {
+            CatalogSort::new(
+                field,
+                orders
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .or(broadcast_order)
+                    .unwrap_or(CatalogSortOrder::Ascending),
+            )
+        })
+        .collect()
+}
+
+fn take_item_types(parameters: &mut HashMap<String, String>) -> Vec<CatalogItemType> {
+    let Some(value) = parameters.remove("includeItemTypes") else {
+        return Vec::new();
+    };
+    value
+        .split(',')
+        .filter_map(|value| match value {
+            "Movie" => Some(CatalogItemType::Movie),
+            "Audio" => Some(CatalogItemType::Audio),
+            "Series" => Some(CatalogItemType::Series),
+            "Season" => Some(CatalogItemType::Season),
+            "Episode" => Some(CatalogItemType::Episode),
+            "Folder" => Some(CatalogItemType::Folder),
+            _ => None,
         })
         .collect()
 }
@@ -1184,13 +1262,21 @@ fn library_dto(server_id: Uuid, view: &LibraryViewRecord) -> Result<BaseItemDto,
 
 fn item_result(
     server_id: Uuid,
-    parent_id: Uuid,
+    fallback_parent_id: Option<Uuid>,
     page: &CatalogPage,
 ) -> Result<BaseItemDtoQueryResult, HttpBrowseError> {
     let items = page
         .items()
         .iter()
-        .map(|item| item_dto(server_id, Some(parent_id), item))
+        .map(|item| {
+            item_dto(
+                server_id,
+                item.parent_id()
+                    .map(CatalogItemId::as_uuid)
+                    .or(fallback_parent_id),
+                item,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(BaseItemDtoQueryResult::new(
         items,
@@ -1286,12 +1372,27 @@ fn item_dto(
         item.index_number(),
     )
     .with_runtime_ticks(item.runtime_ticks())
+    .with_catalog_metadata(
+        item.date_created(),
+        match item_type {
+            BaseItemKind::Movie | BaseItemKind::Audio | BaseItemKind::Episode => {
+                LocationType::FileSystem
+            }
+            BaseItemKind::CollectionFolder
+            | BaseItemKind::Series
+            | BaseItemKind::Season
+            | BaseItemKind::Folder => LocationType::Virtual,
+        },
+        item.backdrop_image_tags().to_vec(),
+        item.primary_image_aspect_ratio(),
+    )
     .with_image_tags(item.image_tags().clone()))
 }
 
 fn item_detail_dto(
     server_id: Uuid,
     detail: &CatalogItemDetailRecord,
+    media_sources: Vec<MediaSourceInfo>,
 ) -> Result<BaseItemDto, HttpBrowseError> {
     let item = detail.item();
     let countries = detail
@@ -1337,7 +1438,8 @@ fn item_detail_dto(
         people,
         detail.provider_ids().clone(),
         detail.has_media_sources(),
-    ))
+    )
+    .with_media_sources(media_sources))
 }
 
 fn item_kind(item: &CatalogItemRecord) -> Result<BaseItemKind, HttpBrowseError> {
