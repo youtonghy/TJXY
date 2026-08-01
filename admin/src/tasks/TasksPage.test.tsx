@@ -314,6 +314,8 @@ it('submits every root and item command with validated identifiers', async () =>
   expect(discoverMock).toHaveBeenCalledWith(rootId);
   expect(fullScanMock).toHaveBeenCalledWith(taskId, rootId);
 
+  const target = screen.getByRole('radiogroup', { name: 'Command target' });
+  await user.click(within(target).getByRole('radio', { name: 'Catalog item' }));
   const item = screen.getByRole('textbox', { name: 'Catalog item ID' });
   await user.type(item, taskId);
   await user.click(screen.getByRole('button', { name: 'Resolve metadata' }));
@@ -325,6 +327,44 @@ it('submits every root and item command with validated identifiers', async () =>
   expect(expandMock).toHaveBeenCalledWith(taskId);
   expect(indexMock).toHaveBeenCalledWith(taskId);
   expect(probeMock).toHaveBeenCalledWith(taskId);
+});
+
+it('switches manual command targets while preserving each target draft', async () => {
+  snapshotMock.mockResolvedValue({
+    ...snapshot,
+    roots: [
+      ...snapshot.roots,
+      {
+        key: `${taskId}:${runningTaskId}`,
+        libraryId: taskId,
+        storageRootId: runningTaskId,
+        label: 'TV Shows',
+      },
+    ],
+  });
+  renderTasks();
+  const user = userEvent.setup();
+
+  await screen.findByRole('list', { name: 'Scheduled tasks' });
+  const target = screen.getByRole('radiogroup', { name: 'Command target' });
+  const rootTarget = within(target).getByRole('radio', { name: 'Library root' });
+  const itemTarget = within(target).getByRole('radio', { name: 'Catalog item' });
+  expect(rootTarget).toBeChecked();
+  expect(screen.getByRole('button', { name: 'Full scan' })).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: 'Catalog item ID' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Movies Library root' }));
+  await user.click(screen.getByRole('option', { name: 'TV Shows' }));
+
+  await user.click(itemTarget);
+  const item = screen.getByRole('textbox', { name: 'Catalog item ID' });
+  await user.type(item, taskId);
+  expect(screen.queryByRole('button', { name: 'Full scan' })).not.toBeInTheDocument();
+
+  await user.click(rootTarget);
+  expect(screen.getByRole('button', { name: 'Full scan' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'TV Shows Library root' })).toBeVisible();
+  await user.click(itemTarget);
+  expect(screen.getByRole('textbox', { name: 'Catalog item ID' })).toHaveValue(taskId);
 });
 
 it('isolates pending state per command and reports the durable job count', async () => {

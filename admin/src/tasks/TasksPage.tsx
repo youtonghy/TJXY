@@ -1,6 +1,7 @@
 import {
   Alert,
   Button,
+  Card,
   FieldError,
   Input,
   Label,
@@ -11,6 +12,7 @@ import {
   TextField,
   Tooltip,
 } from '@heroui/react';
+import { Segment } from '@heroui-pro/react/segment';
 import {
   Activity,
   CirclePlay,
@@ -335,148 +337,183 @@ function ManualCommands({
   selectedRoot: string;
   selectedRootOption: StorageRootOption | undefined;
 }) {
+  const [commandTarget, setCommandTarget] = useState<'root' | 'item'>('root');
   const run = (operation: string, command: () => Promise<unknown>, success: string) => {
     void onRun(operation, command, success);
   };
   const validItem = isUuid(itemId);
   return (
-    <section aria-labelledby="manual-commands-heading" className="space-y-4">
-      <SectionHeading
-        description="Submit focused jobs without waiting for a scheduled maintenance cycle."
-        id="manual-commands-heading"
-        title="Manual commands"
-      />
-      <div className="grid gap-8 lg:grid-cols-2">
-        <section aria-labelledby="root-commands-heading" className="space-y-4 border-t border-border pt-5">
-          <h3 className="font-semibold text-foreground" id="root-commands-heading">Library root</h3>
-          {roots.length === 0 ? (
-            <Alert status="accent">
-              <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
-              <Alert.Content>
-                <Alert.Title>No library roots</Alert.Title>
-                <Alert.Description>No storage roots are attached to a library.</Alert.Description>
-              </Alert.Content>
-            </Alert>
-          ) : (
-            <Select fullWidth onChange={(key) => { if (typeof key === 'string') onRootChange(key); }} value={selectedRoot}>
-              <Label>Library root</Label>
-              <Select.Trigger>
-                <Select.Value />
-                <Select.Indicator />
-              </Select.Trigger>
-              <Select.Popover>
-                <ListBox>
-                  {roots.map((root) => (
-                    <ListBox.Item id={root.key} key={root.key} textValue={root.label}>
-                      {root.label}
-                      <ListBox.ItemIndicator />
-                    </ListBox.Item>
-                  ))}
-                </ListBox>
-              </Select.Popover>
-            </Select>
-          )}
-          <div className="flex flex-wrap gap-2">
-            <CommandButton
-              icon={<ShieldCheck aria-hidden="true" className="size-4" />}
-              isDisabled={selectedRootOption === undefined}
-              isPending={busyOperations.has('validate-storage')}
-              label="Validate storage"
-              onPress={() => {
-                run(
-                  'validate-storage',
-                  () => validateStorage(selectedRootOption?.storageRootId ?? ''),
-                  'Storage validation submitted.',
-                );
-              }}
-            />
-            <CommandButton
-              icon={<Search aria-hidden="true" className="size-4" />}
-              isDisabled={selectedRootOption === undefined}
-              isPending={busyOperations.has('discover-titles')}
-              label="Discover titles"
-              onPress={() => {
-                run(
-                  'discover-titles',
-                  () => discoverTitles(selectedRootOption?.storageRootId ?? ''),
-                  'Title discovery submitted.',
-                );
-              }}
-            />
-            <CommandButton
-              icon={<ScanSearch aria-hidden="true" className="size-4" />}
-              isDisabled={selectedRootOption === undefined}
-              isPending={busyOperations.has('full-scan-root')}
-              label="Full scan"
-              onPress={() => {
-                run(
-                  'full-scan-root',
-                  () => fullScanRoot(
-                    selectedRootOption?.libraryId ?? '',
-                    selectedRootOption?.storageRootId ?? '',
-                  ),
-                  'Full scan submitted.',
-                );
-              }}
-            />
+    <section aria-labelledby="manual-commands-heading">
+      <Card className="gap-0 overflow-hidden p-0" variant="secondary">
+        <Card.Header className="border-b border-border p-5 sm:p-6">
+          <div>
+            <Card.Title
+              className="text-lg"
+              id="manual-commands-heading"
+              render={(props) => <h2 {...props} />}
+              tabIndex={-1}
+            >
+              Manual commands
+            </Card.Title>
+            <Card.Description className="mt-1">Submit focused jobs without waiting for a scheduled maintenance cycle.</Card.Description>
           </div>
-        </section>
-
-        <section aria-labelledby="item-commands-heading" className="space-y-4 border-t border-border pt-5">
-          <h3 className="font-semibold text-foreground" id="item-commands-heading">Catalog item</h3>
-          <TextField
-            fullWidth
-            isInvalid={itemId.length > 0 && !validItem}
-            name="catalogItemId"
+        </Card.Header>
+        <Card.Content className="space-y-6 p-5 sm:p-6">
+          <Segment
+            aria-label="Command target"
+            className="w-full sm:max-w-sm"
+            onSelectionChange={(key) => {
+              if (key === 'root' || key === 'item') setCommandTarget(key);
+            }}
+            selectedKey={commandTarget}
           >
-            <Label>Catalog item ID</Label>
-            <Input
-              maxLength={64}
-              onChange={(event) => { onItemIdChange(event.currentTarget.value); }}
-              value={itemId}
-            />
-            <FieldError>Enter a valid UUID.</FieldError>
-          </TextField>
-          <div className="flex flex-wrap gap-2">
-            <CommandButton
-              icon={<Tags aria-hidden="true" className="size-4" />}
-              isDisabled={!validItem}
-              isPending={busyOperations.has('resolve-metadata')}
-              label="Resolve metadata"
-              onPress={() => {
-                run('resolve-metadata', () => resolveMetadata(itemId), 'Metadata resolution submitted.');
-              }}
-            />
-            <CommandButton
-              icon={<GitBranch aria-hidden="true" className="size-4" />}
-              isDisabled={!validItem}
-              isPending={busyOperations.has('expand-item')}
-              label="Expand item"
-              onPress={() => {
-                run('expand-item', () => expandItem(itemId), 'Item expansion submitted.');
-              }}
-            />
-            <CommandButton
-              icon={<ListPlus aria-hidden="true" className="size-4" />}
-              isDisabled={!validItem}
-              isPending={busyOperations.has('index-media-sources')}
-              label="Index sources"
-              onPress={() => {
-                run('index-media-sources', () => indexMediaSources(itemId), 'Source indexing submitted.');
-              }}
-            />
-            <CommandButton
-              icon={<Activity aria-hidden="true" className="size-4" />}
-              isDisabled={!validItem}
-              isPending={busyOperations.has('probe-media')}
-              label="Probe media"
-              onPress={() => {
-                run('probe-media', () => probeMedia(itemId), 'Media probe submitted.');
-              }}
-            />
-          </div>
-        </section>
-      </div>
+            <Segment.Item className="min-w-0 flex-1" id="root">Library root</Segment.Item>
+            <Segment.Item className="min-w-0 flex-1" id="item">Catalog item</Segment.Item>
+          </Segment>
+
+          {commandTarget === 'root' ? (
+            <section aria-labelledby="root-commands-heading" className="space-y-5">
+              <div>
+                <h3 className="font-semibold text-foreground" id="root-commands-heading">Library root</h3>
+                <p className="mt-1 text-sm text-muted">Run discovery or maintenance against one attached storage root.</p>
+              </div>
+              {roots.length === 0 ? (
+                <Alert status="accent">
+                  <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
+                  <Alert.Content>
+                    <Alert.Title>No library roots</Alert.Title>
+                    <Alert.Description>No storage roots are attached to a library.</Alert.Description>
+                  </Alert.Content>
+                </Alert>
+              ) : (
+                <Select fullWidth onChange={(key) => { if (typeof key === 'string') onRootChange(key); }} value={selectedRoot}>
+                  <Label>Library root</Label>
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      {roots.map((root) => (
+                        <ListBox.Item id={root.key} key={root.key} textValue={root.label}>
+                          {root.label}
+                          <ListBox.ItemIndicator />
+                        </ListBox.Item>
+                      ))}
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+              )}
+              <div className="space-y-3">
+                <CommandButton
+                  icon={<ScanSearch aria-hidden="true" className="size-4" />}
+                  isDisabled={selectedRootOption === undefined}
+                  isPending={busyOperations.has('full-scan-root')}
+                  label="Full scan"
+                  onPress={() => {
+                    run(
+                      'full-scan-root',
+                      () => fullScanRoot(
+                        selectedRootOption?.libraryId ?? '',
+                        selectedRootOption?.storageRootId ?? '',
+                      ),
+                      'Full scan submitted.',
+                    );
+                  }}
+                  variant="primary"
+                />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <CommandButton
+                    icon={<ShieldCheck aria-hidden="true" className="size-4" />}
+                    isDisabled={selectedRootOption === undefined}
+                    isPending={busyOperations.has('validate-storage')}
+                    label="Validate storage"
+                    onPress={() => {
+                      run(
+                        'validate-storage',
+                        () => validateStorage(selectedRootOption?.storageRootId ?? ''),
+                        'Storage validation submitted.',
+                      );
+                    }}
+                  />
+                  <CommandButton
+                    icon={<Search aria-hidden="true" className="size-4" />}
+                    isDisabled={selectedRootOption === undefined}
+                    isPending={busyOperations.has('discover-titles')}
+                    label="Discover titles"
+                    onPress={() => {
+                      run(
+                        'discover-titles',
+                        () => discoverTitles(selectedRootOption?.storageRootId ?? ''),
+                        'Title discovery submitted.',
+                      );
+                    }}
+                  />
+                </div>
+              </div>
+            </section>
+          ) : (
+            <section aria-labelledby="item-commands-heading" className="space-y-5">
+              <div>
+                <h3 className="font-semibold text-foreground" id="item-commands-heading">Catalog item</h3>
+                <p className="mt-1 text-sm text-muted">Submit metadata and media operations for one indexed catalog item.</p>
+              </div>
+              <TextField
+                fullWidth
+                isInvalid={itemId.length > 0 && !validItem}
+                name="catalogItemId"
+              >
+                <Label>Catalog item ID</Label>
+                <Input
+                  maxLength={64}
+                  onChange={(event) => { onItemIdChange(event.currentTarget.value); }}
+                  placeholder="Enter a catalog item UUID"
+                  value={itemId}
+                />
+                <FieldError>Enter a valid UUID.</FieldError>
+              </TextField>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <CommandButton
+                  icon={<Tags aria-hidden="true" className="size-4" />}
+                  isDisabled={!validItem}
+                  isPending={busyOperations.has('resolve-metadata')}
+                  label="Resolve metadata"
+                  onPress={() => {
+                    run('resolve-metadata', () => resolveMetadata(itemId), 'Metadata resolution submitted.');
+                  }}
+                />
+                <CommandButton
+                  icon={<GitBranch aria-hidden="true" className="size-4" />}
+                  isDisabled={!validItem}
+                  isPending={busyOperations.has('expand-item')}
+                  label="Expand item"
+                  onPress={() => {
+                    run('expand-item', () => expandItem(itemId), 'Item expansion submitted.');
+                  }}
+                />
+                <CommandButton
+                  icon={<ListPlus aria-hidden="true" className="size-4" />}
+                  isDisabled={!validItem}
+                  isPending={busyOperations.has('index-media-sources')}
+                  label="Index sources"
+                  onPress={() => {
+                    run('index-media-sources', () => indexMediaSources(itemId), 'Source indexing submitted.');
+                  }}
+                />
+                <CommandButton
+                  icon={<Activity aria-hidden="true" className="size-4" />}
+                  isDisabled={!validItem}
+                  isPending={busyOperations.has('probe-media')}
+                  label="Probe media"
+                  onPress={() => {
+                    run('probe-media', () => probeMedia(itemId), 'Media probe submitted.');
+                  }}
+                />
+              </div>
+            </section>
+          )}
+        </Card.Content>
+      </Card>
     </section>
   );
 }
@@ -487,21 +524,22 @@ function CommandButton({
   isPending,
   label,
   onPress,
+  variant = 'secondary',
 }: {
   icon: ReactNode;
   isDisabled: boolean;
   isPending: boolean;
   label: string;
   onPress: () => void;
+  variant?: 'primary' | 'secondary';
 }) {
   return (
     <Button
-      className="min-w-32"
+      fullWidth
       isDisabled={isDisabled}
       isPending={isPending}
       onPress={onPress}
-      size="sm"
-      variant="secondary"
+      variant={variant}
     >
       {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : icon}
       <span className="inline-flex min-h-5 items-center">{label}</span>
