@@ -35,15 +35,20 @@ The current foundation includes:
   image streaming; and
 - health routes that probe the SQL source of truth.
 
-The server is not yet a complete Jellyfin implementation. A React Admin slice
-is available for sign-in, local-user, library, and durable-task management, and the Google
-Drive/OneDrive Personal OAuth and root-selection flows; the compatibility matrix in
+The server is not yet a complete Jellyfin implementation. A HeroUI v3 administrator
+application is available for sign-in, local-user, library, durable-task, and access
+management, plus the Google Drive/OneDrive Personal OAuth and root-selection flows;
+the compatibility matrix in
 [`docs/api-parity.md`](docs/api-parity.md) remains the authoritative record of
 implemented behavior.
 
 ## Build the Admin application
 
 The Admin application requires Node.js 22.12 or newer; CI pins Node.js 22.22.3.
+It uses React 19, headless `ra-core` controllers, HeroUI v3, and Tailwind CSS v4.
+HeroUI owns the shell, forms, tables, overlays, feedback, and responsive presentation;
+Material UI, Emotion, and the React Admin Material UI package are not runtime
+dependencies.
 Install its locked dependencies and run the same static checks used by CI:
 
 ```bash
@@ -54,8 +59,9 @@ npm --prefix admin test -- --run
 npm --prefix admin run build
 ```
 
-The production server serves the resulting application at `/admin/` from the
-same origin as the API. It reads `admin/dist` by default, or the directory named
+The production server serves the resulting application at `/admin/` and the
+ordinary-user media client at `/app/` from the same origin as the API. `/` redirects
+to `/app/`. It reads `admin/dist` by default, or the directory named
 by `TJXY_ADMIN_DIST_DIR`, and fails startup explicitly when that distribution or
 its `index.html` is missing or invalid. Build the Admin application before
 starting the server. The current UI covers sign-in, Users list/create/edit/delete,
@@ -67,6 +73,19 @@ environment-driven, and storage status/reauthorization, task-log/cache-state, me
 migration, and conflict pages are not yet implemented. The browser session is
 stored in `sessionStorage`; logout clears that browser session but does not revoke
 the server-side token.
+
+The `/app/` client has an independent `tjxy.web.*` browser session and HeroUI shell
+for user sign-in, expanded home/library browsing, popular search suggestions, item details,
+favorites/played state, direct-play preparation, TMDB/server rankings, and a self-service
+profile with range-based viewing statistics. Profile edits are confirmed with the current
+password; username or password changes revoke the browser session and require a fresh login.
+Playback progress accumulates bounded watched time so seeks are not counted as viewing time.
+Browser media uses a short-lived, session-scoped playback ticket rather than placing the login
+token in a `<video>` or `<audio>` URL. Ticket URLs are restricted to currently visible
+direct-play sources; unsupported containers remain visible as an actionable browser-compatibility
+message. TMDB ranking credentials are decrypted only on the server, refreshed at most once per
+UTC day while the process is running, and fall back to the last successful in-memory result when
+a refresh fails.
 
 ## Run the HTTP server
 
@@ -127,6 +146,36 @@ downloaded only from the fixed TMDb image host with redirects disabled and
 bounded time/bytes, validated by the asset store, and published as local Primary
 images. Image failures are recorded as work warnings without discarding usable
 text metadata.
+
+For local UI development, a one-off importer can populate the current database
+with fixed manifests of 100 Movies and 100 Series. It reads only the enabled,
+encrypted database TMDB setting, imports normalized metadata associations and a
+bounded hierarchy of up to three Seasons with twelve Episodes per Season, and
+stores validated local poster/backdrop images. The public libraries are named
+`Movies` and `TV Shows`. Re-running the command updates the same deterministic
+catalog identities:
+
+```bash
+TJXY_DATABASE_URL='sqlite://tjxy.db?mode=rwc' \
+TJXY_ASSETS_DIR='./data/assets' \
+TJXY_CREDENTIAL_KEYRING='{"active_version":1,"keys":{"1":"<base64-32-bytes>"}}' \
+cargo run -p tjxy-server --bin import_tmdb_demo
+```
+
+Playable development media is attached explicitly after the metadata import.
+The command publishes ordinary filesystem-backed media sources through the same
+storage and source-projection tables used by the server. Every Movie and Episode
+receives a short valid H.264/AAC MP4. Twelve deterministic items additionally
+receive 1080p and 720p choices, Chinese and English WebVTT subtitles, and one
+low-priority zero-byte source for exercising player error recovery. The command
+is idempotent and is never run during normal server startup:
+
+```bash
+TJXY_DATABASE_URL='sqlite://tjxy.db?mode=rwc' \
+TJXY_DEV_MEDIA_ROOT='/absolute/path/to/development-media' \
+cargo run -p tjxy-server --bin attach_dev_media
+```
+
 Native Google accounts reference an encrypted `storage_credentials` row and are
 loaded automatically. Supply only the deployment keyring through the secret
 environment variable `TJXY_CREDENTIAL_KEYRING`, for example

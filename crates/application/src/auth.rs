@@ -27,6 +27,7 @@ const MAX_CAPABILITY_VALUE_CHARS: usize = 128;
 const MAX_CAPABILITY_URL_CHARS: usize = 255;
 const MAX_DEVICE_PROFILE_BYTES: usize = 64 * 1_024;
 const MAX_ACTIVE_WITHIN_SECONDS: u32 = 30 * 24 * 60 * 60;
+const MAX_BIO_CHARS: usize = 500;
 const MAX_DEVICE_DELETE_BATCH: usize = 128;
 
 pub trait AuthClock: Clone + Send + Sync + 'static {
@@ -370,6 +371,131 @@ where
             .rename_user(user_id, &username, self.clock.now())
             .await
             .map_err(Into::into)
+    }
+
+    /// Reads the current client profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the user is missing or profile persistence fails.
+    pub async fn user_profile(&self, user_id: UserId) -> Result<(AuthUser, String), AuthError> {
+        let repository = AuthRepository::new(&self.database);
+        let user = repository
+            .get_user(user_id)
+            .await?
+            .ok_or(AuthRepositoryError::UserNotFound)?;
+        let bio = repository.user_bio(user_id).await?;
+        Ok((user, bio))
+    }
+
+    /// Updates the authenticated user's username and biography after password confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] for invalid input, credentials, conflicts, or persistence failures.
+    pub async fn update_self_profile(
+        &self,
+        user_id: UserId,
+        username: &str,
+        bio: &str,
+        current_password: &str,
+    ) -> Result<(AuthUser, String), AuthError> {
+        if bio.chars().count() > MAX_BIO_CHARS || bio.chars().any(char::is_control) {
+            return Err(AuthError::InvalidProfile);
+        }
+        let current = self.verify_user_password(user_id, current_password).await?;
+        let parsed = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
+        let repository = AuthRepository::new(&self.database);
+        let user = if current.name() == parsed.as_str() {
+            repository
+                .update_bio(user_id, bio, self.clock.now())
+                .await?
+        } else {
+            repository
+                .update_profile(user_id, &parsed, bio, self.clock.now())
+                .await?
+        };
+        Ok((user, bio.to_owned()))
+    }
+
+    /// Updates the authenticated user's profile and optional password after one confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] for invalid input, credentials, hashing, or persistence failures.
+    pub async fn update_self_account(
+        &self,
+        user_id: UserId,
+        username: &str,
+        bio: &str,
+        current_password: &str,
+        new_password: Option<&str>,
+    ) -> Result<(AuthUser, String), AuthError> {
+        if bio.chars().count() > MAX_BIO_CHARS || bio.chars().any(char::is_control) {
+            return Err(AuthError::InvalidProfile);
+        }
+        self.verify_user_password(user_id, current_password).await?;
+        let parsed = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
+        let password_hash = if let Some(password) = new_password.filter(|value| !value.is_empty()) {
+            validate_password(password)?;
+            Some(hash_password(self.password_slots.clone(), password).await?)
+        } else {
+            None
+        };
+        let user = AuthRepository::new(&self.database)
+            .update_account(
+                user_id,
+                &parsed,
+                bio,
+                password_hash.as_deref(),
+                self.clock.now(),
+            )
+            .await?;
+        Ok((user, bio.to_owned()))
+    }
+
+    /// Changes the authenticated user's password after verifying the current credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] for invalid credentials, password input, hashing, or persistence.
+    pub async fn update_self_password(
+        &self,
+        user_id: UserId,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<AuthUser, AuthError> {
+        self.verify_user_password(user_id, current_password).await?;
+        self.update_user_password(user_id, new_password, false)
+            .await
+    }
+
+    async fn verify_user_password(
+        &self,
+        user_id: UserId,
+        password: &str,
+    ) -> Result<AuthUser, AuthError> {
+        validate_password(password).map_err(|_| AuthError::InvalidCredentials)?;
+        let current = AuthRepository::new(&self.database)
+            .get_user(user_id)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+        let username =
+            Username::parse(current.name()).map_err(|_| AuthError::InvalidCredentials)?;
+        let credential = AuthRepository::new(&self.database)
+            .find_credential(&username)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+        let matches = verify_password(
+            self.password_slots.clone(),
+            password,
+            credential.password_hash(),
+        )
+        .await?;
+        if !matches || credential.user().id() != user_id {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Ok(current)
     }
 
     /// Replaces or resets one local password and invalidates existing sessions.
@@ -791,6 +917,8 @@ pub enum AuthError {
     InvalidUsername,
     #[error("password exceeds the supported length")]
     InvalidPassword,
+    #[error("profile data is invalid")]
+    InvalidProfile,
     #[error("password must not be empty")]
     PasswordRequired,
     #[error("client identity is invalid")]

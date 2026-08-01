@@ -57,6 +57,104 @@ fn minimal_movie_response() -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn popular_pages_return_bounded_unique_ids_for_manifest_generation() {
+    let transport = Arc::new(FixtureTransport {
+        responses: BTreeMap::from([
+            (
+                "/movie/popular".to_owned(),
+                response(&json!({
+                    "page": 3,
+                    "total_pages": 50_000,
+                    "results": [
+                        {"id": 329_865, "title": "Arrival", "adult": false},
+                        {"id": 496_243, "title": "Parasite", "adult": false},
+                        {"id": 329_865, "title": "Arrival", "adult": false}
+                    ]
+                })),
+            ),
+            (
+                "/tv/popular".to_owned(),
+                response(&json!({
+                    "page": 2,
+                    "total_pages": 250,
+                    "results": [
+                        {"id": 87108, "name": "Chernobyl", "adult": false},
+                        {"id": 87739, "name": "The Queen's Gambit", "adult": false}
+                    ]
+                })),
+            ),
+        ]),
+        calls: Mutex::new(Vec::new()),
+    });
+    let client = TmdbCatalogClient::with_transport("zh-CN", transport.clone()).unwrap();
+
+    assert_eq!(
+        client.popular_movie_ids(3).await.unwrap(),
+        [329_865, 496_243]
+    );
+    assert_eq!(
+        client.popular_series_ids(2).await.unwrap(),
+        [87_108, 87_739]
+    );
+    assert_eq!(
+        transport.calls.lock().unwrap().as_slice(),
+        [
+            (
+                "/movie/popular".to_owned(),
+                vec![
+                    ("language".to_owned(), "zh-CN".to_owned()),
+                    ("page".to_owned(), "3".to_owned())
+                ]
+            ),
+            (
+                "/tv/popular".to_owned(),
+                vec![
+                    ("language".to_owned(), "zh-CN".to_owned()),
+                    ("page".to_owned(), "2".to_owned())
+                ]
+            )
+        ]
+    );
+}
+
+#[tokio::test]
+async fn popular_pages_expose_lightweight_ranked_summaries_without_detail_requests() {
+    let transport = Arc::new(FixtureTransport {
+        responses: BTreeMap::from([(
+            "/movie/popular".to_owned(),
+            response(&json!({
+                "page": 1,
+                "total_pages": 10,
+                "results": [{
+                    "id": 329_865,
+                    "title": "Arrival",
+                    "overview": "A linguist communicates with visitors.",
+                    "release_date": "2016-11-10",
+                    "poster_path": "/arrival.jpg",
+                    "vote_average": 8.1,
+                    "popularity": 120.4
+                }]
+            })),
+        )]),
+        calls: Mutex::new(Vec::new()),
+    });
+    let client = TmdbCatalogClient::with_transport("zh-CN", transport.clone()).unwrap();
+
+    let items = client.popular_movies(1).await.unwrap();
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id(), 329_865);
+    assert_eq!(items[0].name(), "Arrival");
+    assert_eq!(items[0].year(), Some(2016));
+    assert_eq!(items[0].rating(), Some(8.1));
+    assert_eq!(
+        items[0].poster_url(),
+        Some("https://image.tmdb.org/t/p/w500/arrival.jpg")
+    );
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn movie_details_map_rich_metadata_and_bounded_credits() {
     let mut cast = (0_u64..30)
         .map(|index| {
@@ -270,6 +368,9 @@ async fn series_details_fetch_every_season_and_map_ordered_episodes() {
     assert_eq!(series.seasons()[0].item().kind(), MetadataItemKind::Season);
     assert_eq!(series.seasons()[0].item().index_number(), Some(1));
     assert_eq!(series.seasons()[0].episodes().len(), 2);
+    let sampled = series.clone().with_structure_limits(1, 1);
+    assert_eq!(sampled.seasons().len(), 1);
+    assert_eq!(sampled.seasons()[0].episodes().len(), 1);
     assert_eq!(
         series.seasons()[0]
             .episodes()

@@ -364,6 +364,7 @@ async fn configured_environment_token_test_fails_closed_without_a_cipher() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn encrypted_updates_rotate_with_revision_fencing_and_hot_apply_only_after_persistence() {
     let fixture = fixture(true, false).await;
     let cipher = fixture.cipher.as_ref().unwrap();

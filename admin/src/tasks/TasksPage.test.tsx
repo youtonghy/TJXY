@@ -376,7 +376,8 @@ it('renders exhaustive visible status tones and readable identifiers', async () 
   expect(within(scheduled).getByText('Idle').closest('[data-tone="neutral"]')).not.toBeNull();
   expect(within(scheduled).getByText('Running').closest('[data-tone="accent"]')).not.toBeNull();
 
-  const jobsGrid = screen.getByRole('grid', { name: 'Recent durable jobs' });
+  const jobsGrid = await screen.findByRole('grid', { name: 'Recent durable jobs' });
+  await within(jobsGrid).findAllByRole('rowheader');
   const jobTones = new Map<string, string>([
     ['Pending', 'neutral'],
     ['Retrying', 'warning'],

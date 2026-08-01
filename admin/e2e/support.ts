@@ -1,8 +1,8 @@
-import { expect, type Page, type TestInfo } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 export async function login(page: Page, username: string, password: string) {
   await page.getByRole('textbox', { name: 'Username' }).fill(username);
-  await page.getByRole('textbox', { name: 'Password' }).fill(password);
+  await page.locator('input[name="password"]').fill(password);
   await page.getByRole('button', { name: /sign in/i }).click();
 }
 
@@ -17,9 +17,10 @@ export function safeRequestPath(url: string): string {
 export function monitorPage(page: Page) {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
+  const httpErrors: string[] = [];
   const failedRequests: string[] = [];
   const expectedHttpConsoleErrors: RegExp[] = [];
-  const expectedFailedHttpResponses: Array<{ status: number; path: RegExp }> = [];
+  const expectedHttpResponses: Array<{ status: number; path: RegExp }> = [];
   const responseStatuses = new WeakMap<object, number>();
   page.on('pageerror', (error) => { pageErrors.push(safeDiagnostic(error.message)); });
   page.on('console', (message) => {
@@ -34,31 +35,38 @@ export function monitorPage(page: Page) {
   });
   page.on('response', (response) => {
     responseStatuses.set(response.request(), response.status());
+    if (response.status() < 400) return;
+    if (new URL(response.url()).origin !== new URL(page.url()).origin) return;
+    const pathname = safeRequestPath(response.url());
+    const expected = expectedHttpResponses.findIndex(
+      (entry) => entry.status === response.status() && entry.path.test(pathname),
+    );
+    if (expected >= 0) {
+      expectedHttpResponses.splice(expected, 1);
+      return;
+    }
+    httpErrors.push(`${response.request().method()} ${pathname}: ${String(response.status())}`);
   });
   page.on('requestfailed', (request) => {
     if (new URL(request.url()).origin !== new URL(page.url()).origin) return;
-    const status = responseStatuses.get(request);
     const error = request.failure()?.errorText ?? 'failed';
-    if (status === 204 && error === 'net::ERR_ABORTED') return;
+    if (responseStatuses.get(request) === 204 && error === 'net::ERR_ABORTED') return;
     const pathname = safeRequestPath(request.url());
-    const expected = expectedFailedHttpResponses.findIndex(
-      (entry) => entry.status === status && entry.path.test(pathname),
-    );
-    if (expected >= 0 && error === 'net::ERR_ABORTED') {
-      expectedFailedHttpResponses.splice(expected, 1);
-      return;
-    }
     failedRequests.push(`${request.method()} ${pathname}: ${safeDiagnostic(error)}`);
   });
   return {
     pageErrors,
     consoleErrors,
+    httpErrors,
     failedRequests,
     expectHttpConsoleError(matcher: RegExp) {
       expectedHttpConsoleErrors.push(matcher);
     },
-    expectFailedHttpResponse(status: number, path: RegExp) {
-      expectedFailedHttpResponses.push({ status, path });
+    expectHttpErrorResponse(status: number, path: RegExp) {
+      expectedHttpResponses.push({ status, path });
+    },
+    assertExpectedResponsesObserved() {
+      expect(expectedHttpResponses, 'expected HTTP error responses').toEqual([]);
     },
   };
 }
@@ -114,10 +122,12 @@ export async function assertActionControlsDoNotIntersect(page: Page) {
   }
 }
 
-export async function screenshot(page: Page, testInfo: TestInfo, name: string) {
-  await page.screenshot({ path: testInfo.outputPath(name), fullPage: true });
+export async function assertUniqueH1(page: Page) {
+  await expect(page.locator('h1')).toHaveCount(1);
 }
 
 function safeDiagnostic(value: string): string {
-  return value.replace(/\/Auth\/Keys\/[^\s?"')]+/gu, '/Auth/Keys/[REDACTED]');
+  return value
+    .replace(/\/Auth\/Keys\/[^\s?"')]+/gu, '/Auth/Keys/[REDACTED]')
+    .replace(/\b[0-9a-f]{64}\b/giu, '[REDACTED-API-KEY]');
 }

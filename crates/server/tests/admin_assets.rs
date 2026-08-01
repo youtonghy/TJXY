@@ -22,6 +22,7 @@ fn state() -> AppState {
 fn distribution() -> TempDir {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("assets")).unwrap();
+    std::fs::create_dir(directory.path().join("brand")).unwrap();
     std::fs::write(
         directory.path().join("index.html"),
         "<!doctype html><title>TJXY Admin</title><div id=\"root\"></div>",
@@ -30,6 +31,11 @@ fn distribution() -> TempDir {
     std::fs::write(
         directory.path().join("assets/app.js"),
         "console.log('admin');",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("brand/tjxy-mark.webp"),
+        b"RIFF-brand-fixture-WEBP",
     )
     .unwrap();
     directory
@@ -94,6 +100,11 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
     }
     let response = request(&app, Method::GET, "/assets/app.js").await;
     assert_eq!(response.status(), StatusCode::OK);
+
+    let response = request(&app, Method::GET, "/brand/tjxy-mark.webp").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+    assert_eq!(body_text(response).await, "RIFF-brand-fixture-WEBP");
 }
 
 #[tokio::test]

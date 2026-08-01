@@ -368,6 +368,8 @@ async fn test_app() -> TestApp {
                 .with_playstate(playstate)
                 .with_tasks(tasks)
                 .with_user_data(user_data)
+                .with_dashboard(database.clone())
+                .with_client_portal(database.clone())
                 .with_ready(true),
         ),
         database,
@@ -3308,6 +3310,7 @@ async fn playback_info_requires_auth_and_never_invents_unprobed_sources() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn playback_info_exposes_only_stable_ids_and_local_routes() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
@@ -3321,6 +3324,55 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
         &app.subtitle_object_id,
     )
     .await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .values([
+                        (Alias::new("edition"), "Director's Cut".into()),
+                        (Alias::new("bitrate"), 8_000_000_i64.into()),
+                        (Alias::new("runtime_ticks"), 72_000_000_000_i64.into()),
+                        (Alias::new("is_default"), true.into()),
+                    ])
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("publication_media_sources"))
+                    .value(Alias::new("edition"), "Director's Cut")
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("subtitles"))
+                    .value(Alias::new("is_default"), true)
+                    .and_where(
+                        Expr::col(Alias::new("media_source_id")).in_subquery(
+                            Query::select()
+                                .column(Alias::new("id"))
+                                .from(Alias::new("media_sources"))
+                                .and_where(
+                                    Expr::col(Alias::new("presentation_key")).eq(presentation),
+                                )
+                                .to_owned(),
+                        ),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
     let (_, _, token) = login(&app.router).await;
     let response = post(
         &app.router,
@@ -3340,6 +3392,13 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
     assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
     assert_eq!(payload["MediaSources"][0]["Protocol"], "Http");
+    assert_eq!(payload["MediaSources"][0]["Name"], "Director's Cut");
+    assert_eq!(payload["MediaSources"][0]["Bitrate"], 8_000_000);
+    assert_eq!(
+        payload["MediaSources"][0]["RunTimeTicks"],
+        72_000_000_000_i64
+    );
+    assert_eq!(payload["MediaSources"][0]["IsDefault"], true);
     assert_eq!(
         payload["MediaSources"][0]["DirectStreamUrl"],
         format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}")
@@ -3347,6 +3406,10 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
     assert_eq!(
         payload["MediaSources"][0]["MediaStreams"][0]["DeliveryUrl"],
         format!("/Videos/{item}/{presentation}/Subtitles/3/Stream.srt")
+    );
+    assert_eq!(
+        payload["MediaSources"][0]["MediaStreams"][0]["IsDefault"],
+        true
     );
     let encoded = String::from_utf8(body.to_vec()).unwrap();
     for secret in [
@@ -6011,6 +6074,18 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
     let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("runtime_ticks"), 1_000_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
     let presentation = seed_playable_source(
         &app.database,
         item,
@@ -6175,6 +6250,7 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
     let result: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(result["TotalRecordCount"], 1);
     assert_eq!(result["Items"][0]["Id"], item.to_string());
+    assert_eq!(result["Items"][0]["RunTimeTicks"], 1_000);
     assert_eq!(result["Items"][0]["UserData"]["PlaybackPositionTicks"], 30);
     assert_eq!(
         stream_request(
@@ -6193,6 +6269,174 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let result: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(result["TotalRecordCount"], 0);
+}
+
+#[tokio::test]
+async fn administrator_dashboard_reports_real_catalog_playback_and_session_activity() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+    let play_session = Uuid::new_v4();
+    assert_eq!(
+        post(
+            &app.router,
+            "/Sessions/Playing",
+            &token,
+            json!({
+                "ItemId": item,
+                "MediaSourceId": presentation,
+                "PlaySessionId": play_session,
+                "PositionTicks": 250,
+                "UserId": user_id,
+                "CanSeek": true,
+                "PlayMethod": "DirectPlay"
+            })
+            .to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let now = Utc::now();
+    let summary_path = format!(
+        "/Admin/Dashboard/Summary?from={}&to={}&topLimit=5",
+        (now - Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        (now + Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    assert_eq!(
+        get(&app.router, &summary_path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &summary_path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let summary: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(summary["UsersTotal"], 1);
+    assert_eq!(summary["Movies"], 1);
+    assert_eq!(summary["PlayCount"], 1);
+    assert_eq!(summary["UniqueViewers"], 1);
+    assert_eq!(summary["CurrentlyWatching"], 1);
+    assert_eq!(summary["TopItems"][0]["Name"], "Arrival");
+    assert_eq!(summary["TopItems"][0]["PlayCount"], 1);
+
+    let response = get(
+        &app.router,
+        "/Admin/Dashboard/NowPlaying?activeWithinSeconds=60",
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let now_playing: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(now_playing[0]["UserName"], "Alice");
+    assert_eq!(now_playing[0]["ItemName"], "Arrival");
+
+    let response = get(
+        &app.router,
+        "/Admin/Dashboard/LoginHistory?startIndex=0&limit=25",
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let logins: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(logins["TotalRecordCount"], 1);
+    assert_eq!(logins["Items"][0]["UserName"], "Alice");
+
+    let response = get(
+        &app.router,
+        "/Admin/Dashboard/WatchHistory?startIndex=0&limit=25",
+        Some(&token),
+    )
+    .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let watches: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(watches["TotalRecordCount"], 1);
+    assert_eq!(watches["Items"][0]["ItemName"], "Arrival");
+}
+
+#[tokio::test]
+async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+    let play_session = Uuid::new_v4();
+    assert_eq!(
+        post(
+            &app.router,
+            "/Sessions/Playing",
+            &token,
+            json!({
+                "ItemId": item,
+                "MediaSourceId": presentation,
+                "PlaySessionId": play_session,
+                "PositionTicks": 0,
+                "UserId": user_id,
+                "CanSeek": true,
+                "PlayMethod": "DirectPlay"
+            })
+            .to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let yesterday = Utc::now() - Duration::days(1);
+    let update = Query::update()
+        .table(Alias::new("playback_sessions"))
+        .value(Alias::new("watched_ticks"), 1_200_000_000_i64)
+        .value(Alias::new("started_at"), yesterday)
+        .value(
+            Alias::new("last_event_at"),
+            yesterday + Duration::minutes(2),
+        )
+        .and_where(Expr::col(Alias::new("play_session_id")).eq(play_session))
+        .to_owned();
+    app.database
+        .execute(app.database.get_database_backend().build(&update))
+        .await
+        .unwrap();
+
+    let response = get(&app.router, "/Users/Me/Insights?range=all", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let insights: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(insights["WatchedTicks"], 1_200_000_000_i64);
+    assert_eq!(insights["PlayCount"], 1);
+    assert_eq!(insights["UniqueTitles"], 1);
+    assert_eq!(insights["Media"]["Movies"], 1);
+    assert_eq!(insights["Recent"][0]["Name"], "Arrival");
+
+    let response = get(
+        &app.router,
+        "/Discover/Server/Top?period=yesterday&limit=20",
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let ranking: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ranking["Items"][0]["Name"], "Arrival");
+    assert_eq!(ranking["Items"][0]["PlayCount"], 1);
 }
 
 #[tokio::test]

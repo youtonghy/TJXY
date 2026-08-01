@@ -1,5 +1,73 @@
-import { Skeleton } from '@heroui/react';
+import { Alert, Skeleton } from '@heroui/react';
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { getLibraries, type Library } from '../api/catalogApi';
-export function LibrariesPage() { const [libraries, setLibraries] = useState<Library[]>(); useEffect(() => { void getLibraries().then(setLibraries); }, []); return <div className="space-y-6"><div><h1 className="text-3xl font-semibold">Libraries</h1><p className="mt-1 text-muted">Browse every collection available to your account.</p></div>{!libraries ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton className="h-28 rounded-xl" key={index} />)}</div> : libraries.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{libraries.map((library) => <Link className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent" key={library.Id} to={`/app/libraries/${library.Id}`}><p className="font-medium">{library.Name}</p><p className="mt-1 text-sm text-muted">Open library</p></Link>)}</div> : <p className="rounded-xl border border-dashed border-border p-10 text-center text-muted">No libraries are available.</p>}</div>; }
+import {
+  getLatest,
+  getLibraries,
+  latestTypesForLibrary,
+  type Library,
+  type MediaItem,
+} from '../api/catalogApi';
+import { MediaRow } from '../ui/MediaRow';
+
+interface LibraryRow { library: Library; items: MediaItem[] }
+
+export function LibrariesPage() {
+  const [rows, setRows] = useState<LibraryRow[]>();
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void getLibraries().then(async (libraries) => {
+      const results = await Promise.allSettled(libraries.map(async (library) => ({
+        library,
+        items: await getLatest({
+          includeItemTypes: latestTypesForLibrary(library),
+          limit: 12,
+          parentId: library.Id,
+        }),
+      })));
+      if (!active) return;
+      setRows(results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []));
+      setUnavailable(results.some((result) => result.status === 'rejected'));
+    }).catch(() => { if (active) { setRows([]); setUnavailable(true); } });
+    return () => { active = false; };
+  }, []);
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <p className="text-sm font-medium text-accent">Your collections</p>
+        <h1 className="mt-1 text-3xl font-semibold">Libraries</h1>
+        <p className="mt-1 text-muted">Browse every collection available to your account.</p>
+      </div>
+      {unavailable && (
+        <Alert role="alert" status="warning">
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>Some libraries are unavailable</Alert.Title>
+            <Alert.Description>Refresh the page to try again.</Alert.Description>
+          </Alert.Content>
+        </Alert>
+      )}
+      {!rows ? (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">
+          {Array.from({ length: 12 }, (_, index) => (
+            <Skeleton className="aspect-[2/3] rounded-xl" key={index} />
+          ))}
+        </div>
+      ) : rows.length ? rows.map(({ library, items }) => (
+        <MediaRow
+          items={items}
+          key={library.Id}
+          limitToTwoRows
+          moreTo={`/app/libraries/${library.Id}`}
+          title={library.Name}
+        />
+      )) : (
+        <p className="rounded-xl border border-dashed border-border p-10 text-center text-muted">
+          No libraries are available.
+        </p>
+      )}
+    </div>
+  );
+}

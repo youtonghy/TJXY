@@ -77,6 +77,117 @@ pub(crate) async fn current_user(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct UpdateSelfProfileRequest {
+    username: String,
+    bio: String,
+    current_password: String,
+    new_password: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct UpdateSelfPasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct UserProfileDto {
+    username: String,
+    bio: String,
+}
+
+pub(crate) async fn current_user_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let principal = match authenticated_principal(&state, &headers, query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service.user_profile(principal.user().id()).await {
+        Ok((user, bio)) => Json(UserProfileDto {
+            username: user.name().to_owned(),
+            bio,
+        })
+        .into_response(),
+        Err(error) => HttpAuthError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn update_current_user_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    let principal = match authenticated_principal(&state, &headers, query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let payload: UpdateSelfProfileRequest = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .update_self_account(
+            principal.user().id(),
+            &payload.username,
+            &payload.bio,
+            &payload.current_password,
+            payload.new_password.as_deref(),
+        )
+        .await
+    {
+        Ok((user, bio)) => Json(UserProfileDto {
+            username: user.name().to_owned(),
+            bio,
+        })
+        .into_response(),
+        Err(error) => HttpAuthError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn update_current_user_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    let principal = match authenticated_principal(&state, &headers, query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let payload: UpdateSelfPasswordRequest = match json_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(status) => return status.into_response(),
+    };
+    let Some(service) = state.auth.as_ref() else {
+        return HttpAuthError::Unavailable.into_response();
+    };
+    match service
+        .update_self_password(
+            principal.user().id(),
+            &payload.current_password,
+            &payload.new_password,
+        )
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => HttpAuthError::from(error).into_response(),
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UsersQuery {
@@ -362,9 +473,10 @@ fn supported_provider(value: Option<&str>, expected: &str) -> bool {
 
 fn admin_error_response(error: &AuthError) -> Response {
     match error {
-        AuthError::InvalidUsername | AuthError::InvalidPassword | AuthError::PasswordRequired => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
+        AuthError::InvalidUsername
+        | AuthError::InvalidPassword
+        | AuthError::InvalidProfile
+        | AuthError::PasswordRequired => StatusCode::BAD_REQUEST.into_response(),
         AuthError::Repository(AuthRepositoryError::UserNotFound) => {
             StatusCode::NOT_FOUND.into_response()
         }
@@ -616,6 +728,7 @@ impl From<AuthError> for HttpAuthError {
             AuthError::Forbidden | AuthError::SessionRequired => Self::Forbidden,
             AuthError::InvalidUsername
             | AuthError::InvalidPassword
+            | AuthError::InvalidProfile
             | AuthError::PasswordRequired
             | AuthError::InvalidClientIdentity
             | AuthError::InvalidCapabilities

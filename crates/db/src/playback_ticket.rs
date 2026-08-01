@@ -23,6 +23,7 @@ pub struct PlaybackTicketDraft {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub struct PlaybackTicketGrant {
     ticket_id: Uuid,
     auth_session_id: Uuid,
@@ -74,6 +75,11 @@ impl<'connection> PlaybackTicketRepository<'connection> {
         Self { database }
     }
 
+    /// Issues one bounded ticket and evicts excess tickets for the same session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketRepositoryError`] for invalid drafts or persistence failures.
     pub async fn issue(
         &self,
         draft: PlaybackTicketDraft,
@@ -86,6 +92,11 @@ impl<'connection> PlaybackTicketRepository<'connection> {
         finish(transaction, result).await
     }
 
+    /// Authorizes one ticket for the requested item and media source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketRepositoryError`] when the query or stored row is invalid.
     pub async fn authorize(
         &self,
         token_digest: &[u8; 32],
@@ -166,10 +177,15 @@ impl<'connection> PlaybackTicketRepository<'connection> {
         self.database
             .query_one(self.database.get_database_backend().build(&query))
             .await?
-            .map(grant_from_row)
+            .map(|row| grant_from_row(&row))
             .transpose()
     }
 
+    /// Revokes one active ticket owned by the authenticated login session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketRepositoryError`] when the update fails.
     pub async fn revoke(
         &self,
         auth_session_id: Uuid,
@@ -288,7 +304,7 @@ async fn issue_on(
     Ok(actual_expiry)
 }
 
-fn grant_from_row(row: QueryResult) -> Result<PlaybackTicketGrant, PlaybackTicketRepositoryError> {
+fn grant_from_row(row: &QueryResult) -> Result<PlaybackTicketGrant, PlaybackTicketRepositoryError> {
     Ok(PlaybackTicketGrant {
         ticket_id: row.try_get("", "ticket_id")?,
         auth_session_id: row.try_get("", "auth_session_id")?,

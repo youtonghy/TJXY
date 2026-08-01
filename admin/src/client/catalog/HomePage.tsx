@@ -1,5 +1,101 @@
-import { Skeleton } from '@heroui/react';
+import { Alert, Skeleton } from '@heroui/react';
 import { useEffect, useState } from 'react';
-import { getLatest, getLibraries, type Library, type MediaItem } from '../api/catalogApi';
+
+import {
+  getLatest,
+  getLibraries,
+  getResumeItems,
+  latestTypesForLibrary,
+  type Library,
+  type MediaItem,
+} from '../api/catalogApi';
 import { MediaRow } from '../ui/MediaRow';
-export function HomePage() { const [latest, setLatest] = useState<MediaItem[]>([]); const [libraries, setLibraries] = useState<Library[]>([]); const [loading, setLoading] = useState(true); useEffect(() => { void Promise.all([getLatest(), getLibraries()]).then(([items, views]) => { setLatest(items); setLibraries(views); }).finally(() => { setLoading(false); }); }, []); return <div className="space-y-10"><div><p className="text-sm font-medium text-accent">Your library</p><h1 className="mt-1 text-3xl font-semibold text-foreground sm:text-4xl">What do you want to watch?</h1><p className="mt-2 max-w-2xl text-muted">Pick up where you left off or explore something new.</p></div>{loading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <Skeleton className="aspect-[2/3] rounded-xl" key={index} />)}</div> : <><MediaRow items={latest} title="Recently added" /><section className="space-y-3"><h2 className="text-lg font-semibold">Libraries</h2><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{libraries.map((library) => <a className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent" href={`/app/libraries/${library.Id}`} key={library.Id}><p className="font-medium">{library.Name}</p><p className="mt-1 text-sm text-muted">Browse collection</p></a>)}</div></section></>}</div>; }
+
+const HOME_LIBRARY_LIMIT = 12;
+const playbackDestination = (item: MediaItem): string => `/app/play/${item.Id}`;
+
+interface LibraryRow {
+  library: Library;
+  items: MediaItem[];
+}
+
+export function HomePage() {
+  const [resume, setResume] = useState<MediaItem[]>([]);
+  const [libraryRows, setLibraryRows] = useState<LibraryRow[]>([]);
+  const [hasUnavailableLibraries, setHasUnavailableLibraries] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    void Promise.all([getResumeItems(), getLibraries()])
+      .then(async ([resumeItems, libraries]) => {
+        const results = await Promise.allSettled(libraries.map(async (library) => ({
+          library,
+          items: await getLatest({
+            includeItemTypes: latestTypesForLibrary(library),
+            limit: HOME_LIBRARY_LIMIT,
+            parentId: library.Id,
+          }),
+        })));
+        if (!active) return;
+        setResume(resumeItems);
+        setLibraryRows(results.flatMap((result) => (
+          result.status === 'fulfilled' && result.value.items.length > 0
+            ? [result.value]
+            : []
+        )));
+        setHasUnavailableLibraries(results.some((result) => result.status === 'rejected'));
+      })
+      .catch(() => {
+        if (active) setHasUnavailableLibraries(true);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  return (
+    <div className="space-y-10">
+      <div>
+        <p className="text-sm font-medium text-accent">Your library</p>
+        <h1 className="mt-1 text-3xl font-semibold text-foreground sm:text-4xl">
+          What do you want to watch?
+        </h1>
+        <p className="mt-2 max-w-2xl text-muted">
+          Pick up where you left off or explore something new.
+        </p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">
+          {Array.from({ length: 6 }, (_, index) => (
+            <Skeleton className="aspect-[2/3] rounded-xl" key={index} />
+          ))}
+        </div>
+      ) : (
+        <>
+          {hasUnavailableLibraries && (
+            <Alert role="alert" status="warning">
+              <Alert.Indicator />
+              <Alert.Content>
+                <Alert.Title>Some library sections are unavailable</Alert.Title>
+                <Alert.Description>Refresh the page to try loading them again.</Alert.Description>
+              </Alert.Content>
+            </Alert>
+          )}
+          <MediaRow itemTo={playbackDestination} items={resume} title="Continue watching" />
+          {libraryRows.map(({ library, items }) => (
+            <MediaRow
+              items={items}
+              key={library.Id}
+              limitToTwoRows
+              moreTo={`/app/libraries/${library.Id}`}
+              title={library.Name}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}

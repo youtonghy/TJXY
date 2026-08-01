@@ -8,7 +8,8 @@ export default defineConfig({
   timeout: 120_000,
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  // The lifecycle specs share one disposable database and are intentionally not replayed in-place.
+  retries: 0,
   reporter: process.env.CI
     ? [['github'], ['html', { open: 'never', outputFolder: 'output/playwright/report' }]]
     : 'list',
@@ -16,10 +17,14 @@ export default defineConfig({
   use: {
     baseURL,
     actionTimeout: 10_000,
+    colorScheme: 'light',
+    contextOptions: { reducedMotion: 'reduce' },
+    locale: 'en-US',
     navigationTimeout: 15_000,
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
-    video: 'on-first-retry',
+    trace: 'off',
+    screenshot: 'off',
+    timezoneId: 'UTC',
+    video: 'off',
   },
   webServer: {
     command: './scripts/run-e2e-server.sh',
@@ -32,8 +37,17 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testIgnore: '**/webkit-smoke.spec.ts',
       use: {
         ...devices['Desktop Chrome'],
+        viewport: { width: 1440, height: 900 },
+      },
+    },
+    {
+      name: 'webkit',
+      testMatch: '**/webkit-smoke.spec.ts',
+      use: {
+        ...devices['Desktop Safari'],
         viewport: { width: 1440, height: 900 },
       },
     },

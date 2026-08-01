@@ -31,10 +31,18 @@ fn direct_play_response_matches_the_pinned_pascal_case_golden() {
             is_external_url: false,
             is_text_subtitle_stream: true,
             supports_external_stream: true,
+            is_default: true,
+            is_forced: false,
         }],
         true,
     )
-    .unwrap();
+    .unwrap()
+    .with_details(
+        Some("Director's Cut".to_owned()),
+        Some(8_000_000),
+        Some(72_000_000_000),
+        true,
+    );
     let response = PlaybackInfoResponse {
         media_sources: vec![source],
         play_session_id: "session-1".to_owned(),
@@ -80,6 +88,8 @@ fn direct_play_urls_must_be_local_tjxy_routes() {
         is_external_url: true,
         is_text_subtitle_stream: true,
         supports_external_stream: true,
+        is_default: false,
+        is_forced: false,
     };
     let error = MediaSourceInfo::direct_play(
         PresentationKey::new(),

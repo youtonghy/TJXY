@@ -63,25 +63,23 @@ function UserShowView() {
             title={record.Name}
           />
 
-          <dl
-            aria-label="User details"
-            className="max-w-3xl divide-y divide-border border-y border-border"
-            role="group"
-          >
-            <DetailRow label="Name">{record.Name}</DetailRow>
-            <DetailRow label="User ID">
-              <span className="break-all font-mono text-sm">{record.Id}</span>
-            </DetailRow>
-            <DetailRow label="Access">
-              <UserStatus
-                isAdministrator={record.Policy.IsAdministrator}
-                isDisabled={record.Policy.IsDisabled}
-              />
-            </DetailRow>
-            <DetailRow label="Password">
-              {record.HasConfiguredPassword ? 'Configured' : 'Not configured'}
-            </DetailRow>
-          </dl>
+          <section aria-label="User details" role="group">
+            <dl className="max-w-3xl divide-y divide-border border-y border-border">
+              <DetailRow label="Name">{record.Name}</DetailRow>
+              <DetailRow label="User ID">
+                <span className="break-all font-mono text-sm">{record.Id}</span>
+              </DetailRow>
+              <DetailRow label="Access">
+                <UserStatus
+                  isAdministrator={record.Policy.IsAdministrator}
+                  isDisabled={record.Policy.IsDisabled}
+                />
+              </DetailRow>
+              <DetailRow label="Password">
+                {record.HasConfiguredPassword ? 'Configured' : 'Not configured'}
+              </DetailRow>
+            </dl>
+          </section>
         </div>
       )}
     </AsyncContent>

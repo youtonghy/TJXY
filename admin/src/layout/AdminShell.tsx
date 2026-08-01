@@ -14,6 +14,7 @@ import {
 } from 'react';
 import { NavLink } from 'react-router-dom';
 
+import { BrandMark } from '../ui/BrandMark';
 import { adminNavigation } from './adminNavigation';
 
 export function AdminShell({ children }: { children: ReactNode }) {
@@ -78,7 +79,14 @@ export function AdminShell({ children }: { children: ReactNode }) {
               </Drawer.Content>
             </Drawer.Backdrop>
           </Drawer>
-          <p className="text-sm font-semibold text-foreground">TJXY Admin</p>
+          <NavLink
+            aria-label="TJXY Admin home"
+            className="flex items-center gap-2 rounded-md text-foreground"
+            to="/admin"
+          >
+            <BrandMark className="size-8" priority />
+            <span className="text-sm font-semibold">TJXY Admin</span>
+          </NavLink>
         </div>
 
         <main
@@ -95,12 +103,17 @@ export function AdminShell({ children }: { children: ReactNode }) {
 
 function Brand() {
   return (
-    <div className="flex h-20 items-center px-5">
+    <NavLink
+      aria-label="TJXY Admin home"
+      className="flex h-20 items-center gap-3 rounded-md px-5 text-foreground"
+      to="/admin"
+    >
+      <BrandMark className="size-10" priority />
       <div>
         <p className="text-base font-semibold text-foreground">TJXY Admin</p>
         <p className="text-xs text-muted">Administrator workspace</p>
       </div>
-    </div>
+    </NavLink>
   );
 }
 

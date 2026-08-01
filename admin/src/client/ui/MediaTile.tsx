@@ -1,16 +1,54 @@
-import { Star } from 'lucide-react';
+import { ProgressCircle } from '@heroui/react';
+import { Check, Heart, Star } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { MediaItem } from '../api/catalogApi';
 import { MediaImage } from './MediaImage';
 
-export function MediaTile({ item }: { item: MediaItem }) {
+export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
   const tag = item.ImageTags?.Primary ?? item.PrimaryImageTag;
   const episodeCode = item.Type === 'Episode' && item.IndexNumber !== undefined ? `E${String(item.IndexNumber)}` : undefined;
   const facts = [episodeCode, item.ProductionYear ? String(item.ProductionYear) : undefined].filter(Boolean);
+  const progress = watchedProgress(item);
   return (
-    <Link className="group block min-w-0" to={`/app/items/${item.Id}`}>
-      <div className="aspect-[2/3] overflow-hidden rounded-xl bg-default shadow-sm transition-transform group-hover:scale-[1.02]">
+    <Link className="group block min-w-0" to={to ?? `/app/items/${item.Id}`}>
+      <div className="relative aspect-[2/3] overflow-hidden rounded-xl bg-default shadow-sm transition-transform group-hover:scale-[1.02]">
         <MediaImage alt={`Poster for ${item.Name}`} className="h-full w-full object-cover" itemId={item.Id} tag={tag} />
+        <div className="absolute right-2 top-2 flex items-center gap-1.5">
+          {item.UserData?.IsFavorite && (
+            <span
+              aria-label="Favorite"
+              className="grid size-7 place-items-center rounded-full bg-background/90 shadow-sm"
+            >
+              <Heart aria-hidden="true" className="size-4 fill-pink-500 text-pink-500" />
+            </span>
+          )}
+          {item.UserData?.Played
+            ? (
+                <span
+                  aria-label="Watched"
+                  className="grid size-7 place-items-center rounded-full bg-success text-success-foreground shadow-sm"
+                >
+                  <Check aria-hidden="true" className="size-4" strokeWidth={3} />
+                </span>
+              )
+            : progress !== undefined
+              ? (
+                  <span className="grid size-7 place-items-center rounded-full bg-background/90 shadow-sm">
+                    <ProgressCircle
+                      aria-label={`${String(progress)}% watched`}
+                      color="success"
+                      size="sm"
+                      value={progress}
+                    >
+                      <ProgressCircle.Track>
+                        <ProgressCircle.TrackCircle />
+                        <ProgressCircle.FillCircle />
+                      </ProgressCircle.Track>
+                    </ProgressCircle>
+                  </span>
+                )
+              : null}
+        </div>
       </div>
       <p className="mt-2 truncate text-sm font-medium text-foreground">{item.Name}</p>
       {(facts.length > 0 || item.CommunityRating !== undefined) && (
@@ -26,4 +64,13 @@ export function MediaTile({ item }: { item: MediaItem }) {
       )}
     </Link>
   );
+}
+
+function watchedProgress(item: MediaItem): number | undefined {
+  const position = item.UserData?.PlaybackPositionTicks ?? 0;
+  const runtime = item.RunTimeTicks ?? 0;
+  if (position <= 0 || runtime <= 0 || !Number.isFinite(position) || !Number.isFinite(runtime)) {
+    return undefined;
+  }
+  return Math.max(1, Math.min(99, Math.round((position / runtime) * 100)));
 }

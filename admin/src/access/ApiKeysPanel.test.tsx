@@ -46,7 +46,9 @@ function renderApiKeys(authProvider = defaultTestAuthProvider) {
 }
 
 async function apiKeysGrid() {
-  return await screen.findByRole('grid', { name: 'API Keys' });
+  const grid = await screen.findByRole('grid', { name: 'API Keys' });
+  await within(grid).findAllByRole('rowheader');
+  return grid;
 }
 
 function documentContainsRawToken() {

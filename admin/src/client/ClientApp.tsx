@@ -10,9 +10,11 @@ import { LibrariesPage } from './catalog/LibrariesPage';
 import { SearchPage } from './catalog/SearchPage';
 import { ClientShell } from './layout/ClientShell';
 import { PlayerPage } from './playback/PlayerPage';
+import { ProfilePage } from './profile/ProfilePage';
+import { RankingsPage } from './rankings/RankingsPage';
 
 export function ClientApp() {
-  return <ClientAuthProvider><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></ClientAuthProvider>;
+  return <ClientAuthProvider><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<RankingsPage />} path="rankings" /><Route element={<ProfilePage />} path="profile" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></ClientAuthProvider>;
 }
 
 function ClientShellLayout() { return <ClientShell><Outlet /></ClientShell>; }

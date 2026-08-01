@@ -628,6 +628,8 @@ fn media_source_info(
                 is_external_url: false,
                 is_text_subtitle_stream: false,
                 supports_external_stream: false,
+                is_default: false,
+                is_forced: false,
             })
         })
         .collect::<Vec<_>>();
@@ -651,6 +653,8 @@ fn media_source_info(
         is_external_url: false,
         is_text_subtitle_stream: true,
         supports_external_stream: true,
+        is_default: subtitle.is_default(),
+        is_forced: subtitle.is_forced(),
     }));
     let route = if source.is_audio() { "Audio" } else { "Videos" };
     MediaSourceInfo::direct_play(
@@ -660,6 +664,14 @@ fn media_source_info(
         streams,
         supports_direct_play,
     )
+    .map(|info| {
+        info.with_details(
+            source.edition().map(str::to_owned),
+            source.bitrate(),
+            source.runtime_ticks(),
+            source.is_default(),
+        )
+    })
 }
 
 #[derive(Default)]
@@ -1273,6 +1285,7 @@ fn item_dto(
         item.community_rating(),
         item.index_number(),
     )
+    .with_runtime_ticks(item.runtime_ticks())
     .with_image_tags(item.image_tags().clone()))
 }
 

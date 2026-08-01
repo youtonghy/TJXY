@@ -1068,7 +1068,96 @@ async fn all_migrations_can_be_rolled_back() {
 }
 
 #[tokio::test]
+async fn provider_identity_scope_rollback_rejects_duplicates_before_changing_the_schema() {
+    const PROVIDER_ID_SCOPE_MIGRATION_POSITION: u32 = 41;
+
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(PROVIDER_ID_SCOPE_MIGRATION_POSITION))
+        .await
+        .unwrap();
+    let backend = database.get_database_backend();
+    let first_item = uuid::Uuid::new_v4();
+    let second_item = uuid::Uuid::new_v4();
+    for (id, name) in [(first_item, "Movie"), (second_item, "Series")] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("catalog_items"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("item_type"),
+                            Alias::new("name"),
+                            Alias::new("sort_name"),
+                            Alias::new("classification_state"),
+                            Alias::new("metadata_state"),
+                            Alias::new("structure_state"),
+                            Alias::new("source_state"),
+                            Alias::new("structure_expansion_revision"),
+                            Alias::new("source_index_revision"),
+                            Alias::new("is_present"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            name.into(),
+                            name.into(),
+                            name.to_lowercase().into(),
+                            "Matched".into(),
+                            "Ready".into(),
+                            "NotApplicable".into(),
+                            "Indexed".into(),
+                            0_i64.into(),
+                            0_i64.into(),
+                            true.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("provider_ids"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("provider"),
+                            Alias::new("provider_item_id"),
+                        ])
+                        .values_panic([
+                            uuid::Uuid::new_v4().into(),
+                            id.into(),
+                            "Tmdb".into(),
+                            "42".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let error = Migrator::down(&database, Some(1)).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("duplicate provider identities"),
+        "{error}"
+    );
+    let schema = SchemaManager::new(&database);
+    assert!(schema.has_table("provider_ids").await.unwrap());
+    assert!(
+        schema
+            .has_index("provider_ids", "uq_provider_ids_item_provider")
+            .await
+            .unwrap()
+    );
+    assert!(!schema.has_table("provider_ids_legacy").await.unwrap());
+}
+
+#[tokio::test]
 async fn metadata_provider_settings_migration_is_reversible() {
+    const METADATA_PROVIDER_SETTINGS_MIGRATION_POSITION: usize = 39;
+
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
     let schema = SchemaManager::new(&database);
@@ -1148,7 +1237,12 @@ async fn metadata_provider_settings_migration_is_reversible() {
         "metadata provider revision check accepted zero"
     );
 
-    Migrator::down(&database, Some(1)).await.unwrap();
+    let newer_migrations =
+        u32::try_from(Migrator::migrations().len() - METADATA_PROVIDER_SETTINGS_MIGRATION_POSITION)
+            .unwrap();
+    Migrator::down(&database, Some(newer_migrations))
+        .await
+        .unwrap();
 
     assert!(!schema.has_table("metadata_snapshots").await.unwrap());
     assert!(
@@ -1192,11 +1286,17 @@ async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight(
         ("auth_sessions", "uq_auth_sessions_token_digest"),
         ("auth_sessions", "idx_auth_sessions_user_state"),
         ("auth_sessions", "idx_auth_sessions_expiry"),
+        ("auth_sessions", "ix_auth_sessions_created_id"),
         ("api_keys", "uq_api_keys_envelope_id"),
         ("api_keys", "uq_api_keys_token_digest"),
         ("api_keys", "ix_api_keys_creator"),
         ("playback_tickets", "uq_playback_tickets_token_digest"),
         ("playback_tickets", "ix_playback_tickets_session_state"),
+        (
+            "playback_sessions",
+            "ix_playback_sessions_started_item_user",
+        ),
+        ("playback_sessions", "ix_playback_sessions_active_event"),
         ("user_data", "ix_user_data_hybrid_signals"),
         (
             "library_catalog_items",

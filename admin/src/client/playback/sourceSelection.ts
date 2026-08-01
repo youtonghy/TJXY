@@ -1,3 +1,27 @@
 import type { PlaybackSource } from '../api/playbackApi';
-export function selectBrowserSource(sources: PlaybackSource[]): PlaybackSource | null { return sources.filter((source) => source.SupportsDirectPlay !== false && !!source.DirectStreamUrl && ['mp4', 'm4v', 'webm', 'mp3', 'm4a', 'ogg'].includes((source.Container ?? '').toLowerCase())).sort((a, b) => rank(a) - rank(b))[0] ?? null; }
-function rank(source: PlaybackSource): number { const container = (source.Container ?? '').toLowerCase(); return container === 'mp4' ? 0 : container === 'webm' ? 1 : container === 'm4a' ? 2 : 3; }
+
+const BROWSER_CONTAINERS = new Set(['mp4', 'm4v', 'webm', 'mp3', 'm4a', 'ogg']);
+
+export function browserSources(sources: PlaybackSource[]): PlaybackSource[] {
+  return sources.filter((source) => (
+    source.SupportsDirectPlay !== false
+    && Boolean(source.DirectStreamUrl)
+    && BROWSER_CONTAINERS.has((source.Container ?? '').toLowerCase())
+  ));
+}
+
+export function selectBrowserSource(sources: PlaybackSource[]): PlaybackSource | null {
+  return browserSources(sources)[0] ?? null;
+}
+
+export function sourceLabel(source: PlaybackSource): string {
+  const video = source.MediaStreams?.find((stream) => stream.Type === 'Video');
+  const parts = [
+    source.Name,
+    video?.Width && video.Height ? `${String(video.Width)}×${String(video.Height)}` : undefined,
+    video?.Codec?.toUpperCase(),
+    source.Bitrate ? `${(source.Bitrate / 1_000_000).toFixed(1)} Mbps` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  if (parts.length) return parts.join(' · ');
+  return source.Container?.toUpperCase() ?? 'Source';
+}

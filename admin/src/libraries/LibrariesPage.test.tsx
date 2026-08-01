@@ -47,6 +47,12 @@ function CurrentRoute() {
   return <span data-testid="current-route">{location.pathname}</span>;
 }
 
+async function librariesGrid() {
+  const grid = await screen.findByRole('grid', { name: 'Libraries' });
+  await within(grid).findAllByRole('rowheader');
+  return grid;
+}
+
 beforeEach(() => {
   listMock.mockReset();
   createMock.mockReset();
@@ -66,7 +72,7 @@ it('renders a stable skeleton followed by readable desktop and mobile records', 
   await waitFor(() => { expect(listMock).toHaveBeenCalledOnce(); });
   finishLoad?.([movies]);
 
-  const grid = await screen.findByRole('grid', { name: 'Libraries' });
+  const grid = await librariesGrid();
   expect(grid).toHaveClass('table-fixed');
   expect(within(grid).getByText('Title layer / Basic metadata / On browse / On playback')).toBeVisible();
   expect(within(grid).getByText('Enabled')).toBeVisible();
@@ -101,7 +107,7 @@ it('keeps existing records and shows an inline stale warning after refresh failu
     .mockRejectedValueOnce(new Error('private-library-refresh-detail'));
   renderLibraries();
   const user = userEvent.setup();
-  const grid = await screen.findByRole('grid', { name: 'Libraries' });
+  const grid = await librariesGrid();
 
   await user.click(screen.getByRole('button', { name: 'Reload libraries' }));
 
@@ -115,7 +121,7 @@ it('creates with approved defaults, closes the modal, and reloads the authoritat
   listMock.mockResolvedValueOnce([movies]).mockResolvedValueOnce([movies]);
   renderLibraries();
   const user = userEvent.setup();
-  await screen.findByRole('grid', { name: 'Libraries' });
+  await librariesGrid();
 
   await user.click(screen.getByRole('button', { name: 'Add library' }));
   await user.type(screen.getByRole('textbox', { name: 'Library name' }), 'Shows');
@@ -138,7 +144,7 @@ it('preserves the create draft and reports only safe copy after failure', async 
   createMock.mockRejectedValue(new Error('private-create-detail'));
   renderLibraries();
   const user = userEvent.setup();
-  await screen.findByRole('grid', { name: 'Libraries' });
+  await librariesGrid();
 
   await user.click(screen.getByRole('button', { name: 'Add library' }));
   const name = screen.getByRole('textbox', { name: 'Library name' });

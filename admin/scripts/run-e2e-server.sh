@@ -26,4 +26,4 @@ export TJXY_BOOTSTRAP_ADMIN_PASSWORD="admin-password"
 export TJXY_ADMIN_DIST_DIR="$admin_dir/dist"
 
 cd "$repo_dir"
-cargo +1.88.0 run -p tjxy-server --locked
+cargo +1.88.0 run -p tjxy-server --bin tjxy-server --locked

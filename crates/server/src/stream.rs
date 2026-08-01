@@ -29,6 +29,7 @@ pub(crate) async fn head(
     serve(state, item_id, headers, raw_query, true).await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve(
     state: AppState,
     item_id: Uuid,

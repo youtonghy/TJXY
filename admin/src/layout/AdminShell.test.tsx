@@ -26,6 +26,7 @@ describe('AdminShell', () => {
     const navigation = screen.getByRole('navigation', { name: 'Primary' });
     expect(within(navigation).getAllByText(/Manage|Operations|Storage|System/u)).toHaveLength(4);
     expect(within(navigation).getAllByRole('link').map((link) => link.textContent.trim())).toEqual([
+      'Dashboard',
       'Users',
       'Access',
       'Libraries',
@@ -39,6 +40,11 @@ describe('AdminShell', () => {
       'page',
     );
     expect(screen.getByRole('main')).toHaveAttribute('id', 'main-content');
+    const brandLinks = screen.getAllByRole('link', { name: 'TJXY Admin home' });
+    expect(brandLinks).toHaveLength(2);
+    for (const link of brandLinks) {
+      expect(link.querySelector('img')).toHaveAttribute('src', '/brand/tjxy-mark.webp');
+    }
     expect(await screen.findByText('Ada')).toBeVisible();
     expect(screen.getByText('A')).toBeVisible();
   });

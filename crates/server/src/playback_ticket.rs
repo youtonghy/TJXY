@@ -58,7 +58,7 @@ pub(crate) async fn issue(
         .await
     {
         Ok(ticket) => ticket,
-        Err(error) => return service_error(error),
+        Err(error) => return service_error(&error),
     };
     let route = if source.is_audio() { "Audio" } else { "Videos" };
     let stream_url = format!(
@@ -101,7 +101,7 @@ pub(crate) async fn revoke(
     };
     match service.revoke(&principal, ticket_id).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => service_error(error),
+        Err(error) => service_error(&error),
     }
 }
 
@@ -114,7 +114,7 @@ fn catalog_error(catalog_error: &CatalogServiceError) -> Response {
     }
 }
 
-fn service_error(error_value: PlaybackTicketServiceError) -> Response {
+fn service_error(error_value: &PlaybackTicketServiceError) -> Response {
     match error_value {
         PlaybackTicketServiceError::SessionRequired | PlaybackTicketServiceError::InvalidTicket => {
             error(StatusCode::UNAUTHORIZED, "authentication is required")

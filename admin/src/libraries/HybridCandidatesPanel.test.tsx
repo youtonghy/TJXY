@@ -89,7 +89,9 @@ function CandidateLibrarySwitcher() {
 }
 
 async function candidatesGrid() {
-  return await screen.findByRole('grid', { name: 'Pinned background candidates' });
+  const grid = await screen.findByRole('grid', { name: 'Pinned background candidates' });
+  await within(grid).findAllByRole('rowheader');
+  return grid;
 }
 
 beforeEach(() => {

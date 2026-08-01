@@ -1,11 +1,17 @@
 /* eslint-disable @typescript-eslint/no-misused-promises */
-import { Alert, Avatar, Button, Card, Chip, Skeleton, Tabs } from '@heroui/react';
-import { ArrowLeft, CalendarDays, Check, Clock3, Heart, Info, Play, Star } from 'lucide-react';
+import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
+import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play, Star } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useClientAuth } from '../auth/ClientAuthContext';
-import { getChildren, getItem, toggleFavorite, togglePlayed, type MediaItem } from '../api/catalogApi';
+import { getChildren, getItem, getLibraries, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
 import { MediaImage } from '../ui/MediaImage';
+
+interface ItemBreadcrumbContext {
+  ancestors: MediaItem[];
+  itemId?: string;
+  library?: Library;
+}
 
 export function ItemPage() {
   const { id } = useParams();
@@ -13,7 +19,11 @@ export function ItemPage() {
   const { user } = useClientAuth();
   const [item, setItem] = useState<MediaItem>();
   const [children, setChildren] = useState<MediaItem[]>([]);
+  const [breadcrumbContext, setBreadcrumbContext] = useState<ItemBreadcrumbContext>({ ancestors: [] });
   const [failed, setFailed] = useState(false);
+  const breadcrumbItemId = item?.Id;
+  const breadcrumbParentId = item?.ParentId;
+  const breadcrumbItemType = item?.Type;
 
   useEffect(() => {
     if (!id) return;
@@ -33,6 +43,21 @@ export function ItemPage() {
         setFailed(true);
       });
   }, [id]);
+
+  useEffect(() => {
+    if (!breadcrumbItemId) return;
+    let active = true;
+    void loadItemBreadcrumbContext(breadcrumbItemId, breadcrumbParentId, breadcrumbItemType)
+      .then((context) => {
+        if (active) setBreadcrumbContext({ ...context, itemId: breadcrumbItemId });
+      })
+      .catch(() => {
+        if (active) setBreadcrumbContext({ ancestors: [], itemId: breadcrumbItemId });
+      });
+    return () => {
+      active = false;
+    };
+  }, [breadcrumbItemId, breadcrumbItemType, breadcrumbParentId]);
 
   if (!id) return <NotFound />;
   if (failed) {
@@ -56,10 +81,7 @@ export function ItemPage() {
 
   return (
     <article className="space-y-8">
-      <Link className="inline-flex items-center gap-2 text-sm text-muted hover:text-foreground" to="/app/">
-        <ArrowLeft className="size-4" />
-        Back to home
-      </Link>
+      <ItemBreadcrumb context={breadcrumbContext} item={item} onNavigate={navigate} />
 
       <div className="grid gap-8 lg:grid-cols-[15rem_minmax(0,1fr)]">
         <div className="mx-auto aspect-[2/3] w-full max-w-[15rem] overflow-hidden rounded-2xl bg-default shadow-sm lg:mx-0">
@@ -128,13 +150,16 @@ export function ItemPage() {
         <Alert status="warning">
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>Demo metadata only</Alert.Title>
+            <Alert.Title>No video source available</Alert.Title>
             <Alert.Description>
-              This title includes real catalog information, but no video file has been added to the development library.
+              Add a media file to this title before starting playback.
             </Alert.Description>
           </Alert.Content>
         </Alert>
       )}
+
+      {seasons.length ? <SeasonBrowser seasons={seasons} /> : null}
+      {episodes.length ? <EpisodeRail episodes={episodes} label="Episodes" /> : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <MetadataCard item={item} />
@@ -142,9 +167,50 @@ export function ItemPage() {
       </div>
 
       {item.People?.length ? <PeopleCard people={item.People} /> : null}
-      {seasons.length ? <SeasonBrowser seasons={seasons} /> : null}
-      {episodes.length ? <EpisodeList episodes={episodes} /> : null}
     </article>
+  );
+}
+
+function ItemBreadcrumb({
+  context,
+  item,
+  onNavigate,
+}: {
+  context: ItemBreadcrumbContext;
+  item: MediaItem;
+  onNavigate: (to: string) => void;
+}) {
+  const entries = [
+    { id: 'home', label: 'Home', to: '/app/' },
+    { id: 'libraries', label: 'Libraries', to: '/app/libraries' },
+    ...(context.itemId === item.Id && context.library
+      ? [{ id: `library-${context.library.Id}`, label: context.library.Name, to: `/app/libraries/${context.library.Id}` }]
+      : []),
+    ...(context.itemId === item.Id ? context.ancestors : []).map((ancestor) => ({
+      id: `item-${ancestor.Id}`,
+      label: ancestor.Name,
+      to: `/app/items/${ancestor.Id}`,
+    })),
+    { id: `current-${item.Id}`, label: item.Name },
+  ];
+
+  return (
+    <nav aria-label="Item breadcrumb" className="max-w-full overflow-x-auto pb-1">
+      <Breadcrumbs aria-label="Item breadcrumb" className="min-w-max flex-nowrap">
+        {entries.map((entry, index) => {
+          const isCurrent = index === entries.length - 1;
+          return (
+            <Breadcrumbs.Item
+              isDisabled={isCurrent}
+              key={entry.id}
+              onPress={isCurrent || !entry.to ? undefined : () => { onNavigate(entry.to); }}
+            >
+              {entry.label}
+            </Breadcrumbs.Item>
+          );
+        })}
+      </Breadcrumbs>
+    </nav>
   );
 }
 
@@ -210,6 +276,9 @@ function TaxonomyCard({ item }: { item: MediaItem }) {
 }
 
 function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
+  const previewCount = useCreditPreviewCount();
+  const [expanded, setExpanded] = useState(false);
+  const visiblePeople = expanded ? people : people.slice(0, previewCount);
   return (
     <Card>
       <Card.Header>
@@ -217,7 +286,7 @@ function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
         <Card.Description>People credited on this title.</Card.Description>
       </Card.Header>
       <Card.Content className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {people.map((person) => (
+        {visiblePeople.map((person) => (
           <div className="flex min-w-0 items-center gap-3" key={`${person.Id}-${person.Role ?? ''}`}>
             <Avatar color={person.Type === 'Crew' ? 'accent' : 'default'} size="sm">
               <Avatar.Fallback>{initials(person.Name)}</Avatar.Fallback>
@@ -229,6 +298,22 @@ function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
           </div>
         ))}
       </Card.Content>
+      {people.length > previewCount && (
+        <Card.Footer>
+          <Button
+            onPress={() => {
+              setExpanded((current) => !current);
+            }}
+            size="sm"
+            variant="ghost"
+          >
+            {expanded
+              ? <ChevronUp aria-hidden="true" className="size-4" />
+              : <ChevronDown aria-hidden="true" className="size-4" />}
+            {expanded ? 'Show fewer credits' : `View all ${String(people.length)} credits`}
+          </Button>
+        </Card.Footer>
+      )}
     </Card>
   );
 }
@@ -251,30 +336,38 @@ function SeasonBrowser({ seasons }: { seasons: MediaItem[] }) {
         <Card.Description>Browse the episodes in each season.</Card.Description>
       </Card.Header>
       <Card.Content>
-        <Tabs selectedKey={selectedSeason?.Id} onSelectionChange={(key) => { setSelected(key.toString()); }} variant="secondary">
-          <Tabs.ListContainer>
-            <Tabs.List aria-label="Seasons">
+        <div className="space-y-5">
+          <div className="overflow-x-auto pb-1">
+            <ToggleButtonGroup
+              aria-label="Seasons"
+              className="min-w-max"
+              disallowEmptySelection
+              onSelectionChange={(keys) => {
+                const next = [...keys][0];
+                if (next !== undefined) setSelected(next.toString());
+              }}
+              selectedKeys={new Set(selectedSeason ? [selectedSeason.Id] : [])}
+              selectionMode="single"
+              size="md"
+            >
               {orderedSeasons.map((season) => (
-                <Tabs.Tab id={season.Id} key={season.Id}>
+                <ToggleButton className="min-w-32" id={season.Id} key={season.Id}>
                   {season.Name}
-                  <Tabs.Indicator />
-                </Tabs.Tab>
+                </ToggleButton>
               ))}
-            </Tabs.List>
-          </Tabs.ListContainer>
+            </ToggleButtonGroup>
+          </div>
           {selectedSeason && (
-            <Tabs.Panel className="pt-5" id={selectedSeason.Id}>
-              <div className="space-y-5">
-                <SeasonSummary season={selectedSeason} />
-                {episodes
-                  ? episodes.length
-                    ? <EpisodeList episodes={episodes} compact />
-                    : <p className="py-6 text-sm text-muted">No episodes are available for this season.</p>
-                  : <EpisodeListSkeleton />}
-              </div>
-            </Tabs.Panel>
+            <div aria-live="polite" className="space-y-5">
+              <SeasonSummary season={selectedSeason} />
+              {episodes
+                ? episodes.length
+                  ? <EpisodeRail episodes={episodes} label={`Episodes in ${selectedSeason.Name}`} />
+                  : <p className="py-6 text-sm text-muted">No episodes are available for this season.</p>
+                : <EpisodeListSkeleton />}
+            </div>
           )}
-        </Tabs>
+        </div>
       </Card.Content>
     </Card>
   );
@@ -290,39 +383,48 @@ function SeasonSummary({ season }: { season: MediaItem }) {
   );
 }
 
-function EpisodeList({ episodes, compact = false }: { episodes: MediaItem[]; compact?: boolean }) {
-  const content = (
-    <div className="divide-y divide-border">
-      {[...episodes].sort(sortByIndex).map((episode) => (
-        <Link className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-default" key={episode.Id} to={`/app/items/${episode.Id}`}>
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-sm font-semibold text-accent">
-            {episode.IndexNumber ?? '—'}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{episode.Name}</p>
-            <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{episode.Overview ?? 'No episode synopsis.'}</p>
-          </div>
-          {episode.RunTimeTicks && <span className="shrink-0 text-xs text-muted">{formatRuntime(episode.RunTimeTicks)}</span>}
-        </Link>
-      ))}
-    </div>
-  );
-  if (compact) return content;
+function EpisodeRail({ episodes, label }: { episodes: MediaItem[]; label: string }) {
   return (
-    <Card>
-      <Card.Header>
-        <Card.Title>Episodes</Card.Title>
-        <Card.Description>{episodes.length} episodes in this collection.</Card.Description>
-      </Card.Header>
-      <Card.Content className="p-0">{content}</Card.Content>
-    </Card>
+    <ul
+      aria-label={label}
+      className="-mx-2 flex snap-x snap-mandatory gap-4 overflow-x-auto px-2 pb-3 scrollbar-thin"
+    >
+      {[...episodes].sort(sortByIndex).map((episode) => (
+        <li className="w-[17rem] shrink-0 snap-start sm:w-[20rem]" key={episode.Id}>
+          <Link
+            className="group block h-full overflow-hidden rounded-lg border border-border bg-surface transition-colors hover:border-accent"
+            to={`/app/items/${episode.Id}`}
+          >
+            <div className="aspect-video overflow-hidden bg-default">
+              <MediaImage
+                alt={`Still for episode ${String(episode.IndexNumber ?? 'unknown')}: ${episode.Name}`}
+                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                itemId={episode.Id}
+                tag={episode.ImageTags?.Primary}
+              />
+            </div>
+            <div className="space-y-2 p-4">
+              <div className="flex items-center gap-2 text-xs text-muted">
+                <span className="font-semibold text-accent">E{episode.IndexNumber ?? '—'}</span>
+                {episode.ProductionYear && <span>{episode.ProductionYear}</span>}
+                {episode.RunTimeTicks && <span>{formatRuntime(episode.RunTimeTicks)}</span>}
+              </div>
+              <p className="truncate text-sm font-semibold text-foreground">{episode.Name}</p>
+              <p className="line-clamp-2 text-xs leading-5 text-muted">{episode.Overview ?? 'No episode synopsis.'}</p>
+            </div>
+          </Link>
+        </li>
+      ))}
+    </ul>
   );
 }
 
 function EpisodeListSkeleton() {
   return (
-    <div className="space-y-3">
-      {Array.from({ length: 3 }, (_, index) => <Skeleton className="h-16 rounded-lg" key={index} />)}
+    <div className="flex gap-4 overflow-hidden">
+      {Array.from({ length: 3 }, (_, index) => (
+        <Skeleton className="aspect-video w-[17rem] shrink-0 rounded-lg sm:w-[20rem]" key={index} />
+      ))}
     </div>
   );
 }
@@ -347,8 +449,66 @@ function NotFound() {
   return <p className="text-muted">This title could not be found.</p>;
 }
 
+async function loadItemBreadcrumbContext(
+  itemId: string,
+  itemParentId?: string,
+  itemType?: string,
+): Promise<ItemBreadcrumbContext> {
+  const libraries = await getLibraries();
+  const libraryIds = new Set(libraries.map((library) => library.Id));
+  const visited = new Set([itemId]);
+  const ancestors: MediaItem[] = [];
+  let parentId = itemParentId;
+
+  while (parentId && !libraryIds.has(parentId) && ancestors.length < 8) {
+    if (visited.has(parentId)) break;
+    visited.add(parentId);
+    const parent = await getItem(parentId);
+    ancestors.push(parent);
+    parentId = parent.ParentId;
+  }
+
+  const directLibrary = parentId ? libraries.find((library) => library.Id === parentId) : undefined;
+  const matchingLibraries = libraries.filter((library) => library.CollectionType === collectionTypeFor(itemType));
+  return {
+    ancestors: ancestors.reverse(),
+    library: directLibrary ?? (matchingLibraries.length === 1 ? matchingLibraries[0] : undefined),
+  };
+}
+
+function collectionTypeFor(itemType?: string) {
+  if (itemType === 'Movie') return 'movies';
+  if (itemType === 'Series' || itemType === 'Season' || itemType === 'Episode') return 'tvshows';
+  return undefined;
+}
+
 function sortByIndex(a: MediaItem, b: MediaItem) {
   return (a.IndexNumber ?? Number.MAX_SAFE_INTEGER) - (b.IndexNumber ?? Number.MAX_SAFE_INTEGER) || a.Name.localeCompare(b.Name);
+}
+
+function useCreditPreviewCount() {
+  const getCount = () => {
+    if (window.matchMedia('(min-width: 1024px)').matches) return 6;
+    if (window.matchMedia('(min-width: 640px)').matches) return 4;
+    return 2;
+  };
+  const [count, setCount] = useState(getCount);
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const tablet = window.matchMedia('(min-width: 640px)');
+    const update = () => {
+      setCount(desktop.matches ? 6 : tablet.matches ? 4 : 2);
+    };
+    desktop.addEventListener('change', update);
+    tablet.addEventListener('change', update);
+    return () => {
+      desktop.removeEventListener('change', update);
+      tablet.removeEventListener('change', update);
+    };
+  }, []);
+
+  return count;
 }
 
 function formatRuntime(ticks: number) {

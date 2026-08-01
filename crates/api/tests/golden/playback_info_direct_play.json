@@ -5,6 +5,10 @@
       "Id": "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11",
       "Path": null,
       "Container": "mkv",
+      "Name": "Director's Cut",
+      "Bitrate": 8000000,
+      "RunTimeTicks": 72000000000,
+      "IsDefault": true,
       "IsRemote": false,
       "SupportsTranscoding": false,
       "SupportsDirectStream": false,
@@ -25,7 +29,8 @@
           "DeliveryUrl": "/Videos/41/018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11/Subtitles/3/Stream.srt",
           "IsExternalUrl": false,
           "IsTextSubtitleStream": true,
-          "SupportsExternalStream": true
+          "SupportsExternalStream": true,
+          "IsDefault": true
         }
       ],
       "TranscodingUrl": null,

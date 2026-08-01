@@ -89,6 +89,10 @@ vi.mock('./settings/MetadataSettingsPage', async () => {
   const React = await import('react');
   return { MetadataSettingsPage: () => React.createElement('h1', null, 'Metadata page') };
 });
+vi.mock('./dashboard/DashboardPage', async () => {
+  const React = await import('react');
+  return { DashboardPage: () => React.createElement('h1', null, 'Dashboard page') };
+});
 
 const readinessMock = vi.mocked(checkServerReadiness);
 
@@ -123,15 +127,15 @@ it('restores an anonymous deep link including search after login', async () => {
   expect(`${window.location.pathname}${window.location.search}`).toBe('/admin/tasks?view=recent');
 });
 
-it('uses Users as the direct-login fallback', async () => {
+it('uses Dashboard as the direct-login fallback', async () => {
   const user = userEvent.setup();
   renderRoute('/admin/login', false);
   await user.type(await screen.findByRole('textbox', { name: 'Username' }), 'Admin');
   await user.type(screen.getByLabelText('Password'), 'password');
   await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-  expect(await screen.findByRole('heading', { name: 'Users page' })).toBeVisible();
-  expect(window.location.pathname).toBe('/admin/users');
+  expect(await screen.findByRole('heading', { name: 'Dashboard page' })).toBeVisible();
+  expect(window.location.pathname).toBe('/admin');
 });
 
 it('renders the ordinary HeroUI client without mounting the administrator shell', async () => {
@@ -145,6 +149,7 @@ it('renders the ordinary HeroUI client without mounting the administrator shell'
 });
 
 it.each([
+  ['/admin', 'Dashboard page'],
   ['/admin/access', 'Access page'],
   ['/admin/tasks', 'Tasks page'],
   ['/admin/libraries', 'Libraries page'],

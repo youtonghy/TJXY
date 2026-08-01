@@ -137,6 +137,89 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
 }
 
 #[tokio::test]
+async fn current_user_can_read_and_update_their_profile_with_password_confirmation() {
+    let app = app().await;
+    let authentication = json_response(login(app.clone(), "correct horse").await).await;
+    let token = authentication["AccessToken"].as_str().unwrap();
+
+    let response = token_request(app.clone(), Method::GET, "/Users/Me/Profile", token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_response(response).await,
+        json!({"Username": "Alice", "Bio": ""})
+    );
+
+    let response = token_request(
+        app.clone(),
+        Method::PATCH,
+        "/Users/Me/Profile",
+        token,
+        Some(json!({
+            "Username": "AliceTwo",
+            "Bio": "Thrillers and science fiction.",
+            "CurrentPassword": "correct horse",
+            "NewPassword": "new correct horse"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_response(response).await,
+        json!({"Username": "AliceTwo", "Bio": "Thrillers and science fiction."})
+    );
+
+    let stale = token_request(app.clone(), Method::GET, "/Users/Me", token, None).await;
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        login_as(app.clone(), "AliceTwo", "correct horse")
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login_as(app, "AliceTwo", "new correct horse")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn current_user_password_change_requires_the_existing_password() {
+    let app = app().await;
+    let authentication = json_response(login(app.clone(), "correct horse").await).await;
+    let token = authentication["AccessToken"].as_str().unwrap();
+
+    let rejected = token_request(
+        app.clone(),
+        Method::POST,
+        "/Users/Me/Password",
+        token,
+        Some(json!({"CurrentPassword": "wrong", "NewPassword": "new correct horse"})),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+    let accepted = token_request(
+        app.clone(),
+        Method::POST,
+        "/Users/Me/Password",
+        token,
+        Some(json!({"CurrentPassword": "correct horse", "NewPassword": "new correct horse"})),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        login(app.clone(), "correct horse").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login(app, "new correct horse").await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn wrong_and_unknown_credentials_have_the_same_response() {
     let wrong = login(app().await, "wrong").await;
     let unknown = app()

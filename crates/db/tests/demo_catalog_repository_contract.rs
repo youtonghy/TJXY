@@ -52,13 +52,31 @@ fn fixture_transport() -> Arc<FixtureTransport> {
                     "vote_count": 19_000,
                     "poster_path": "/arrival.jpg",
                     "original_language": "en",
-                    "genres": [{"id": 878, "name": "Science Fiction"}],
-                    "production_companies": [{"id": 1, "name": "FilmNation"}],
-                    "production_countries": [{"iso_3166_1": "US", "name": "United States"}],
-                    "spoken_languages": [{"english_name": "English", "iso_639_1": "en", "name": "English"}],
+                    "genres": [
+                        {"id": 878, "name": "Science Fiction"},
+                        {"id": 878, "name": "Science Fiction"}
+                    ],
+                    "production_companies": [
+                        {"id": 1, "name": "FilmNation"},
+                        {"id": 1, "name": "FilmNation"}
+                    ],
+                    "production_countries": [
+                        {"iso_3166_1": "US", "name": "United States"},
+                        {"iso_3166_1": "US", "name": "United States"}
+                    ],
+                    "spoken_languages": [
+                        {"english_name": "English", "iso_639_1": "en", "name": "English"},
+                        {"english_name": "English", "iso_639_1": "en", "name": "English"}
+                    ],
                     "credits": {
-                        "cast": [{"id": 101, "name": "Amy Adams", "character": "Louise Banks", "order": 0, "profile_path": "/amy.jpg"}],
-                        "crew": [{"id": 102, "name": "Denis Villeneuve", "job": "Director", "department": "Directing", "profile_path": "/denis.jpg"}]
+                        "cast": [
+                            {"id": 101, "name": "Amy Adams", "character": "Louise Banks", "order": 0, "profile_path": "/amy.jpg"},
+                            {"id": 101, "name": "Amy Adams", "character": "Louise Banks", "order": 0, "profile_path": "/amy.jpg"}
+                        ],
+                        "crew": [
+                            {"id": 102, "name": "Denis Villeneuve", "job": "Director", "department": "Directing", "profile_path": "/denis.jpg"},
+                            {"id": 102, "name": "Denis Villeneuve", "job": "Director", "department": "Directing", "profile_path": "/denis.jpg"}
+                        ]
                     },
                     "external_ids": {"imdb_id": "tt2543164"}
                 }))
@@ -67,7 +85,7 @@ fn fixture_transport() -> Arc<FixtureTransport> {
             (
                 "/tv/87108".to_owned(),
                 serde_json::to_vec(&json!({
-                    "id": 87_108,
+                    "id": 329_865,
                     "name": "Chernobyl",
                     "original_name": "Chernobyl",
                     "overview": "A disaster and its aftermath.",
@@ -159,6 +177,60 @@ async fn generation(database: &DatabaseConnection) -> i64 {
         .unwrap()
 }
 
+async fn library_names(database: &DatabaseConnection) -> Vec<String> {
+    let backend = database.get_database_backend();
+    let rows = database
+        .query_all(
+            backend.build(
+                &Query::select()
+                    .column(Alias::new("name"))
+                    .from(Alias::new("libraries"))
+                    .order_by(Alias::new("name"), sea_orm::sea_query::Order::Asc)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    rows.into_iter()
+        .map(|row| row.try_get("", "name").unwrap())
+        .collect()
+}
+
+async fn library_policies(
+    database: &DatabaseConnection,
+) -> Vec<(String, String, String, String, String)> {
+    let backend = database.get_database_backend();
+    let rows = database
+        .query_all(
+            backend.build(
+                &Query::select()
+                    .columns([
+                        Alias::new("scan_profile"),
+                        Alias::new("object_selection_scope"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("probe_policy"),
+                    ])
+                    .from(Alias::new("libraries"))
+                    .order_by(Alias::new("name"), sea_orm::sea_query::Order::Asc)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.try_get("", "scan_profile").unwrap(),
+                row.try_get("", "object_selection_scope").unwrap(),
+                row.try_get("", "metadata_policy").unwrap(),
+                row.try_get("", "expansion_policy").unwrap(),
+                row.try_get("", "probe_policy").unwrap(),
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn demo_publication_is_idempotent_and_keeps_every_descendant_visible_without_sources() {
     let database = database().await;
@@ -196,6 +268,26 @@ async fn demo_publication_is_idempotent_and_keeps_every_descendant_visible_witho
     assert_eq!(first.episodes(), 1);
     assert_eq!(second, first);
     assert_eq!(count(&database, "libraries").await, 2);
+    assert_eq!(library_names(&database).await, ["Movies", "TV Shows"]);
+    assert_eq!(
+        library_policies(&database).await,
+        [
+            (
+                "Manual".to_owned(),
+                "library_roots".to_owned(),
+                "none".to_owned(),
+                "manual".to_owned(),
+                "on_playback".to_owned(),
+            ),
+            (
+                "Manual".to_owned(),
+                "library_roots".to_owned(),
+                "none".to_owned(),
+                "manual".to_owned(),
+                "on_playback".to_owned(),
+            ),
+        ]
+    );
     assert_eq!(count(&database, "catalog_items").await, 4);
     assert_eq!(count(&database, "library_catalog_items").await, 4);
     assert_eq!(count(&database, "provider_ids").await, 7);
@@ -212,6 +304,47 @@ async fn demo_publication_is_idempotent_and_keeps_every_descendant_visible_witho
     assert_eq!(count(&database, "media_locations").await, 0);
     assert_eq!(after_first, initial_generation + 1);
     assert_eq!(generation(&database).await, after_first + 1);
+}
+
+#[tokio::test]
+async fn demo_publication_accepts_a_complete_hundred_series_image_set_with_a_bounded_limit() {
+    let client = TmdbCatalogClient::with_transport("en-US", fixture_transport()).unwrap();
+    let movie = client.movie(329_865).await.unwrap();
+    let series = client.series(87_108).await.unwrap();
+    let poster = AssetPublication::new(
+        CatalogItemId::from_uuid(demo_catalog_item_id(MetadataItemKind::Movie, 329_865)),
+        ImageType::Primary,
+        0,
+        "a".repeat(64),
+        "image/jpeg",
+        1000,
+        1500,
+        42,
+        "aa/arrival.jpg",
+        "Tmdb",
+        Some("/arrival.jpg".to_owned()),
+    )
+    .unwrap();
+    let publication = DemoCatalogPublication::new(
+        vec![movie.clone()],
+        vec![series.clone()],
+        "en-US",
+        Utc::now(),
+    )
+    .unwrap();
+
+    assert!(
+        publication
+            .clone()
+            .with_assets(vec![poster.clone(); 1_001])
+            .is_ok()
+    );
+    assert!(
+        DemoCatalogPublication::new(vec![movie], vec![series], "en-US", Utc::now())
+            .unwrap()
+            .with_assets(vec![poster; 50_001])
+            .is_err()
+    );
 }
 
 #[tokio::test]

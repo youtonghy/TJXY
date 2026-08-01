@@ -1,4 +1,4 @@
-const FALLBACK_DESTINATION = '/admin/users';
+const FALLBACK_DESTINATION = '/admin';
 const BLOCKED_DESTINATIONS = [
   '/admin/login',
   '/admin/authentication-error',

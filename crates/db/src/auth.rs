@@ -349,6 +349,116 @@ impl<'connection> AuthRepository<'connection> {
         get_user_on(self.database, user_id).await
     }
 
+    /// Reads the optional user biography used by the client profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthRepositoryError`] when the user is missing or stored data is invalid.
+    pub async fn user_bio(&self, user_id: UserId) -> Result<String, AuthRepositoryError> {
+        let query = Query::select()
+            .column(Alias::new("bio"))
+            .from(Alias::new("users"))
+            .and_where(Expr::col(Alias::new("id")).eq(user_id.as_uuid()))
+            .limit(1)
+            .to_owned();
+        self.database
+            .query_one(self.database.get_database_backend().build(&query))
+            .await?
+            .ok_or(AuthRepositoryError::UserNotFound)?
+            .try_get::<Option<String>>("", "bio")
+            .map(Option::unwrap_or_default)
+            .map_err(Into::into)
+    }
+
+    /// Updates a biography without changing authentication state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthRepositoryError`] when the user is missing or the update fails.
+    pub async fn update_bio(
+        &self,
+        user_id: UserId,
+        bio: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AuthUser, AuthRepositoryError> {
+        let update = Query::update()
+            .table(Alias::new("users"))
+            .value(Alias::new("bio"), bio)
+            .value(Alias::new("updated_at"), now)
+            .and_where(Expr::col(Alias::new("id")).eq(user_id.as_uuid()))
+            .to_owned();
+        if self
+            .database
+            .execute(self.database.get_database_backend().build(&update))
+            .await?
+            .rows_affected()
+            != 1
+        {
+            return Err(AuthRepositoryError::UserNotFound);
+        }
+        self.get_user(user_id)
+            .await?
+            .ok_or(AuthRepositoryError::UserNotFound)
+    }
+
+    /// Updates username and biography atomically and invalidates existing sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthRepositoryError`] when validation, locking, or persistence fails.
+    pub async fn update_profile(
+        &self,
+        user_id: UserId,
+        username: &Username,
+        bio: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AuthUser, AuthRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = update_user_fields(
+            &transaction,
+            user_id,
+            [
+                (Alias::new("username"), username.as_str().into()),
+                (Alias::new("username_key"), username.key().to_vec().into()),
+                (Alias::new("bio"), bio.into()),
+                (Alias::new("updated_at"), now.into()),
+            ],
+        )
+        .await;
+        finish(transaction, result).await
+    }
+
+    /// Updates username, biography, and an optional password hash in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthRepositoryError`] for an empty hash, conflict, missing user, or SQL failure.
+    pub async fn update_account(
+        &self,
+        user_id: UserId,
+        username: &Username,
+        bio: &str,
+        password_hash: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<AuthUser, AuthRepositoryError> {
+        if password_hash.is_some_and(str::is_empty) {
+            return Err(AuthRepositoryError::EmptyPasswordHash);
+        }
+        let transaction = self.database.begin().await?;
+        let mut values = vec![
+            (Alias::new("username"), username.as_str().into()),
+            (Alias::new("username_key"), username.key().to_vec().into()),
+            (Alias::new("bio"), bio.into()),
+            (Alias::new("updated_at"), now.into()),
+        ];
+        if let Some(password_hash) = password_hash {
+            values.push((Alias::new("password_hash"), password_hash.into()));
+            values.push((Alias::new("has_password"), true.into()));
+        }
+        let result = update_user_fields(&transaction, user_id, values).await;
+        finish(transaction, result).await
+    }
+
     /// Renames a local user and invalidates all existing sessions.
     ///
     /// # Errors
@@ -976,10 +1086,10 @@ where
         .transpose()
 }
 
-async fn update_user_fields<const N: usize>(
+async fn update_user_fields(
     transaction: &DatabaseTransaction,
     user_id: UserId,
-    values: [(Alias, sea_orm::sea_query::SimpleExpr); N],
+    values: impl IntoIterator<Item = (Alias, sea_orm::sea_query::SimpleExpr)>,
 ) -> Result<AuthUser, AuthRepositoryError> {
     let current = get_user_on(transaction, user_id)
         .await?

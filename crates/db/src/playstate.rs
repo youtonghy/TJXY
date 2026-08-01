@@ -334,10 +334,20 @@ async fn advance_in_transaction(
         return Err(PlaystateRepositoryError::SessionStopped);
     }
     let changed = session.last_position_ticks != position_ticks;
+    let watched_delta = watched_delta_ticks(
+        session.last_position_ticks,
+        position_ticks,
+        session.last_event_at,
+        now,
+    );
     let mut update = Query::update()
         .table(Alias::new("playback_sessions"))
         .value(Alias::new("last_position_ticks"), position_ticks)
         .value(Alias::new("last_event_at"), now)
+        .value(
+            Alias::new("watched_ticks"),
+            Expr::col(Alias::new("watched_ticks")).add(watched_delta),
+        )
         .and_where(Expr::col(Alias::new("auth_session_id")).eq(auth_session_id))
         .and_where(Expr::col(Alias::new("play_session_id")).eq(play_session_id))
         .to_owned();
@@ -396,6 +406,7 @@ async fn load_session(
             Alias::new("catalog_item_id"),
             Alias::new("presentation_key"),
             Alias::new("last_position_ticks"),
+            Alias::new("last_event_at"),
             Alias::new("stopped_at"),
         ])
         .from(Alias::new("playback_sessions"))
@@ -416,6 +427,7 @@ struct PlaybackSessionRow {
     item_id: CatalogItemId,
     presentation_key: PresentationKey,
     last_position_ticks: i64,
+    last_event_at: DateTime<Utc>,
     stopped_at: Option<DateTime<Utc>>,
 }
 
@@ -427,9 +439,30 @@ impl PlaybackSessionRow {
             item_id: CatalogItemId::from_uuid(row.try_get("", "catalog_item_id")?),
             presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
             last_position_ticks: row.try_get("", "last_position_ticks")?,
+            last_event_at: row.try_get("", "last_event_at")?,
             stopped_at: row.try_get("", "stopped_at")?,
         })
     }
+}
+
+fn watched_delta_ticks(
+    previous_position_ticks: i64,
+    position_ticks: i64,
+    previous_event_at: DateTime<Utc>,
+    event_at: DateTime<Utc>,
+) -> i64 {
+    const TICKS_PER_MILLISECOND: i64 = 10_000;
+    const SEEK_GRACE_TICKS: i64 = 5 * 10_000_000;
+
+    let position_delta = position_ticks.saturating_sub(previous_position_ticks);
+    let elapsed_milliseconds = event_at
+        .signed_duration_since(previous_event_at)
+        .num_milliseconds();
+    if position_delta <= 0 || elapsed_milliseconds <= 0 {
+        return 0;
+    }
+    let elapsed_ticks = elapsed_milliseconds.saturating_mul(TICKS_PER_MILLISECOND);
+    position_delta.min(elapsed_ticks.saturating_add(SEEK_GRACE_TICKS))
 }
 
 fn validate_identity(
@@ -470,5 +503,56 @@ async fn finish<T>(
                 rollback,
             }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+
+    use super::watched_delta_ticks;
+
+    const SECOND: i64 = 10_000_000;
+
+    #[test]
+    fn watched_delta_tracks_forward_progress_but_not_seeks_or_rewinds() {
+        let previous = Utc.with_ymd_and_hms(2026, 7, 31, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            watched_delta_ticks(
+                10 * SECOND,
+                25 * SECOND,
+                previous,
+                previous + Duration::seconds(15)
+            ),
+            15 * SECOND
+        );
+        assert_eq!(
+            watched_delta_ticks(
+                10 * SECOND,
+                610 * SECOND,
+                previous,
+                previous + Duration::seconds(15)
+            ),
+            20 * SECOND
+        );
+        assert_eq!(
+            watched_delta_ticks(
+                25 * SECOND,
+                10 * SECOND,
+                previous,
+                previous + Duration::seconds(15)
+            ),
+            0
+        );
+        assert_eq!(
+            watched_delta_ticks(
+                10 * SECOND,
+                25 * SECOND,
+                previous,
+                previous - Duration::seconds(1)
+            ),
+            0
+        );
     }
 }

@@ -41,6 +41,7 @@ pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
         .route_service("/app/", get_service(ServeFile::new(index_path.clone())))
         .route_service("/admin/", get_service(ServeFile::new(index_path)))
         .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
+        .nest_service("/brand", ServeDir::new(dist_dir.join("brand")))
         .nest_service("/admin/assets", ServeDir::new(dist_dir.join("assets")))
         .route(
             "/app/{*path}",

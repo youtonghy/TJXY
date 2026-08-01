@@ -127,7 +127,8 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
         Some(2016),
         Some("First contact.".to_owned()),
         Some(user_data),
-    );
+    )
+    .with_runtime_ticks(Some(69_600_000_000));
 
     assert_eq!(
         serde_json::to_value(BaseItemDtoQueryResult::new(vec![library, movie], 0, 2)).unwrap(),
@@ -151,6 +152,7 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
                     "MediaType": "Video",
                     "ProductionYear": 2016,
                     "Overview": "First contact.",
+                    "RunTimeTicks": 69_600_000_000_i64,
                     "IsFolder": false,
                     "ImageTags": {},
                     "UserData": {

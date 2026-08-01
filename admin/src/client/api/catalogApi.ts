@@ -37,6 +37,7 @@ export interface MediaItem {
 }
 export interface ItemPage { Items: MediaItem[]; TotalRecordCount: number; StartIndex: number; }
 export interface Library { Id: string; Name: string; CollectionType?: string; ImageTags?: Record<string, string>; }
+export interface LatestItemsOptions { limit?: number; parentId?: string; includeItemTypes?: string; }
 export type SearchHint = MediaItem;
 
 export async function getLibraries(): Promise<Library[]> { const value = await clientRequest<{ Items?: unknown }>('/UserViews'); return Array.isArray(value.Items) ? value.Items.filter(isRecord).map((item) => item as unknown as Library) : []; }
@@ -46,10 +47,37 @@ export async function getItems(params: { parentId?: string; startIndex?: number;
   if (params.includeItemTypes) query.set('includeItemTypes', params.includeItemTypes);
   return clientRequest<ItemPage>(`/Items?${query}`);
 }
-export async function getLatest(limit = 18): Promise<MediaItem[]> { const value = await clientRequest<unknown>(`/Items/Latest?limit=${limit}`); return Array.isArray(value) ? value.filter(isRecord).map((item) => item as unknown as MediaItem) : []; }
+export async function getLatest(options: number | LatestItemsOptions = 18): Promise<MediaItem[]> {
+  const normalized = typeof options === 'number' ? { limit: options } : options;
+  const query = new URLSearchParams({ limit: String(normalized.limit ?? 18) });
+  if (normalized.parentId) query.set('parentId', normalized.parentId);
+  if (normalized.includeItemTypes) query.set('includeItemTypes', normalized.includeItemTypes);
+  const value = await clientRequest<unknown>(`/Items/Latest?${query}`);
+  return Array.isArray(value)
+    ? value.filter(isRecord).map((item) => item as unknown as MediaItem)
+    : [];
+}
+export async function getResumeItems(limit = 12): Promise<MediaItem[]> { const value = await clientRequest<ItemPage>(`/UserItems/Resume?mediaTypes=Video&limit=${limit}&enableUserData=true`); return Array.isArray(value.Items) ? value.Items : []; }
+export async function getPopular(limit = 12): Promise<MediaItem[]> {
+  const value = await clientRequest<ItemPage>(`/Discover/Popular?limit=${limit}`);
+  const summaries = Array.isArray(value.Items) ? value.Items : [];
+  return Promise.all(summaries.map(async (summary) => {
+    try {
+      return await getItem(summary.Id);
+    } catch {
+      return summary;
+    }
+  }));
+}
 export async function getItem(id: string): Promise<MediaItem> { return clientRequest<MediaItem>(`/Items/${encodeURIComponent(id)}`); }
 export async function getChildren(parentId: string): Promise<MediaItem[]> { return (await getItems({ parentId, limit: 200 })).Items; }
 export async function searchHints(term: string): Promise<SearchHint[]> { const value = await clientRequest<{ SearchHints?: unknown }>(`/Search/Hints?searchTerm=${encodeURIComponent(term)}&limit=24`); return Array.isArray(value.SearchHints) ? value.SearchHints.filter(isRecord).map((item) => item as unknown as SearchHint) : []; }
 export async function toggleFavorite(userId: string, itemId: string, favorite: boolean): Promise<void> { await clientRequest(`/Users/${userId}/FavoriteItems/${itemId}`, { method: favorite ? 'POST' : 'DELETE' }); }
 export async function togglePlayed(userId: string, itemId: string, played: boolean): Promise<void> { await clientRequest(`/Users/${userId}/PlayedItems/${itemId}`, { method: played ? 'POST' : 'DELETE' }); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null; }
+
+export function latestTypesForLibrary(library: Library): string | undefined {
+  if (library.CollectionType === 'movies') return 'Movie';
+  if (library.CollectionType === 'tvshows') return 'Series';
+  return undefined;
+}

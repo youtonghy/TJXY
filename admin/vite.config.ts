@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
         output: {
           codeSplitting: {
             groups: [
+              { name: 'charts', test: /node_modules[\\/](recharts|victory-vendor|@reduxjs[\\/]toolkit|react-redux|redux|reselect|immer|decimal\.js-light|es-toolkit|eventemitter3|react-smooth)[\\/]/ },
               { name: 'heroui', test: /node_modules[\\/](@heroui|react-aria|@react-aria|tailwind-variants)[\\/]/ },
               { name: 'ra-core', test: /node_modules[\\/](ra-core|@tanstack|react-hook-form)[\\/]/ },
               { name: 'react', test: /node_modules[\\/](react|react-dom|react-router)[\\/]/ },

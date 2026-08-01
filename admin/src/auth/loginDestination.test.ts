@@ -2,8 +2,8 @@ import { loginDestination } from './loginDestination';
 
 const origin = 'https://admin.example.test';
 
-it('falls back to Users for direct login without router state', () => {
-  expect(loginDestination(null, origin)).toBe('/admin/users');
+it('falls back to Dashboard for direct login without router state', () => {
+  expect(loginDestination(null, origin)).toBe('/admin');
 });
 
 it('restores a validated admin pathname and search', () => {
@@ -23,7 +23,7 @@ it.each([
   ['malformed search', { nextPathname: '/admin/users', nextSearch: 'page=2' }],
   ['control character', { nextPathname: '/admin/users\u0000' }],
 ])('rejects %s', (_label, state) => {
-  expect(loginDestination(state, origin)).toBe('/admin/users');
+  expect(loginDestination(state, origin)).toBe('/admin');
 });
 
 it('discards fragments from an otherwise safe destination', () => {

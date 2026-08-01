@@ -6,7 +6,7 @@ import {
   TextField,
   Tooltip,
 } from '@heroui/react';
-import { CircleAlert, Eye, EyeOff, ShieldCheck } from 'lucide-react';
+import { CircleAlert, Eye, EyeOff } from 'lucide-react';
 import { useLogin } from 'ra-core';
 import {
   useEffect,
@@ -17,6 +17,7 @@ import {
 import { useLocation } from 'react-router-dom';
 
 import { checkServerReadiness } from '../api/readiness';
+import { BrandMark } from '../ui/BrandMark';
 import { loginDestination } from './loginDestination';
 
 type ReadinessState = 'checking' | 'ready' | 'unavailable';
@@ -81,9 +82,7 @@ export function LoginPage() {
         className="mb-8 flex items-center gap-3 lg:fixed lg:left-8 lg:top-8 lg:mb-0"
         data-testid="login-brand"
       >
-        <span className="inline-flex size-10 items-center justify-center rounded-md bg-foreground text-background">
-          <ShieldCheck aria-hidden="true" className="size-5" />
-        </span>
+        <BrandMark className="size-10" priority />
         <span>
           <span className="block text-sm font-semibold text-foreground">TJXY Admin</span>
           <span className="block text-xs text-muted">Administrator workspace</span>

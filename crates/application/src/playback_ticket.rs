@@ -70,6 +70,11 @@ where
         Self { database, clock }
     }
 
+    /// Issues a short-lived ticket scoped to the current login session and media source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketServiceError`] when a session is missing or persistence fails.
     pub async fn issue(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -104,6 +109,11 @@ where
         })
     }
 
+    /// Authorizes one raw ticket for the requested item and source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketServiceError`] for invalid ticket syntax or repository failures.
     pub async fn authorize(
         &self,
         raw_ticket: &str,
@@ -124,6 +134,11 @@ where
             .map_err(map_repository_error)
     }
 
+    /// Revokes one ticket owned by the current login session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketServiceError`] when a session is missing or persistence fails.
     pub async fn revoke(
         &self,
         principal: &AuthenticatedPrincipal,

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -6,7 +10,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::{MetadataError, MetadataItemKind, MetadataProviderError, valid_text};
+use crate::{
+    MetadataError, MetadataImageReference, MetadataItemKind, MetadataProviderError, valid_text,
+};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const TICKS_PER_MINUTE: i64 = 600_000_000;
@@ -313,6 +319,20 @@ impl RichSeries {
     pub fn seasons(&self) -> &[RichSeason] {
         &self.seasons
     }
+
+    /// Retains a bounded, ordered subset of the fetched Season and Episode structure.
+    #[must_use]
+    pub fn with_structure_limits(
+        mut self,
+        max_seasons: usize,
+        max_episodes_per_season: usize,
+    ) -> Self {
+        self.seasons.truncate(max_seasons);
+        for season in &mut self.seasons {
+            season.episodes.truncate(max_episodes_per_season);
+        }
+        self
+    }
 }
 
 #[async_trait]
@@ -332,6 +352,48 @@ pub trait TmdbCatalogTransport: Send + Sync {
 pub struct TmdbCatalogClient {
     transport: Arc<dyn TmdbCatalogTransport>,
     language: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TmdbPopularItem {
+    id: u64,
+    name: String,
+    overview: Option<String>,
+    year: Option<i32>,
+    rating: Option<f64>,
+    popularity: Option<f64>,
+    poster_url: Option<String>,
+}
+
+impl TmdbPopularItem {
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub fn overview(&self) -> Option<&str> {
+        self.overview.as_deref()
+    }
+    #[must_use]
+    pub const fn year(&self) -> Option<i32> {
+        self.year
+    }
+    #[must_use]
+    pub const fn rating(&self) -> Option<f64> {
+        self.rating
+    }
+    #[must_use]
+    pub const fn popularity(&self) -> Option<f64> {
+        self.popularity
+    }
+    #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
+    }
 }
 
 impl TmdbCatalogClient {
@@ -446,6 +508,52 @@ impl TmdbCatalogClient {
         Ok(RichSeries { item, seasons })
     }
 
+    /// Returns one validated page of popular Movie IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn popular_movie_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.popular_movies(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
+    /// Returns one validated page of popular Series IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn popular_series_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.popular_series(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
+    /// Returns one lightweight page of ranked Movies without detail requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn popular_movies(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/movie/popular", page, true).await
+    }
+
+    /// Returns one lightweight page of ranked Series without season requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn popular_series(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/tv/popular", page, false).await
+    }
+
     fn root_query(&self, kind: &str) -> Vec<(String, String)> {
         Self::root_query_for(kind, &self.language)
     }
@@ -478,6 +586,66 @@ impl TmdbCatalogClient {
                 included_image_languages(&self.language),
             ),
         ]
+    }
+
+    async fn popular_items(
+        &self,
+        path: &str,
+        page: u16,
+        movie: bool,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        if !(1..=500).contains(&page) {
+            return Err(MetadataProviderError::Rejected);
+        }
+        let query = vec![
+            ("language".to_owned(), self.language.clone()),
+            ("page".to_owned(), page.to_string()),
+        ];
+        let bytes = self.fetch(path, &query).await?;
+        let (wire, _) = parse_response::<PopularPageWire>(&bytes)?;
+        if wire.page != page || wire.total_pages < u32::from(page) || wire.results.len() > 20 {
+            return Err(MetadataProviderError::InvalidResponse);
+        }
+        let mut seen = HashSet::with_capacity(wire.results.len());
+        wire.results
+            .into_iter()
+            .filter(|result| seen.insert(result.id))
+            .map(|result| {
+                if result.id == 0 {
+                    return Err(MetadataProviderError::InvalidResponse);
+                }
+                let name = if movie { result.title } else { result.name }
+                    .filter(|value| valid_text(value, 512))
+                    .ok_or(MetadataProviderError::InvalidResponse)?;
+                let date = if movie {
+                    result.release_date
+                } else {
+                    result.first_air_date
+                };
+                let year = date
+                    .as_deref()
+                    .and_then(|value| value.get(..4))
+                    .and_then(|value| value.parse::<i32>().ok());
+                let poster_url = result
+                    .poster_path
+                    .as_deref()
+                    .and_then(MetadataImageReference::tmdb)
+                    .map(|image| image.url().to_owned());
+                Ok(TmdbPopularItem {
+                    id: result.id,
+                    name,
+                    overview: result.overview.filter(|value| valid_text(value, 32 * 1024)),
+                    year,
+                    rating: result
+                        .vote_average
+                        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 10.0),
+                    popularity: result
+                        .popularity
+                        .filter(|value| value.is_finite() && *value >= 0.0),
+                    poster_url,
+                })
+            })
+            .collect()
     }
 
     async fn fetch(
@@ -1183,6 +1351,26 @@ struct MovieWire {
     release_dates: ReleaseDatesWire,
     #[serde(default, deserialize_with = "deserialize_default_or_null")]
     external_ids: ExternalIdsWire,
+}
+
+#[derive(Deserialize)]
+struct PopularPageWire {
+    page: u16,
+    total_pages: u32,
+    results: Vec<PopularResultWire>,
+}
+
+#[derive(Deserialize)]
+struct PopularResultWire {
+    id: u64,
+    title: Option<String>,
+    name: Option<String>,
+    overview: Option<String>,
+    release_date: Option<String>,
+    first_air_date: Option<String>,
+    poster_path: Option<String>,
+    vote_average: Option<f64>,
+    popularity: Option<f64>,
 }
 
 #[derive(Deserialize)]

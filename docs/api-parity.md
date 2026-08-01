@@ -11,6 +11,12 @@ Playlists、DisplayPreferences、Devices 与 API Keys 最小兼容均已有 HTTP
 L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体库；尚无细粒度媒体库 ACL。
 发布门禁：钉扎 Jellyfin OpenAPI/HTTP 契约；不固定客户端应用版本。
 
+TJXY Web 另有同源自用接口：`GET|PATCH /Users/Me/Profile`、
+`POST /Users/Me/Password`、`GET /Users/Me/Insights`、`GET /Discover/Popular`、
+`GET /Discover/Tmdb/Popular` 与 `GET /Discover/Server/Top`。这些接口要求正常用户
+session，不冒充其他用户；TMDB token 只在服务端解密，排行榜按 UTC 日期进行进程内
+日缓存，刷新失败时使用最近一次成功结果。
+
 ---
 
 ## 1. 客户端最小链路
@@ -29,7 +35,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | 10 | 播放信息 | `GET|POST /Items/{id}/PlaybackInfo` | 多 MediaSource；首次可惰性 Probe | ⚠️ 鉴权、DeviceProfile 容器门禁、多 active source、Probe single-flight、catalog/user/probe-revision 隔离的 source-metadata cache-aside 及 Filesystem Matroska/ISO-BMFF worker 已实现；Filesystem 与 provider-neutral 云端请求/完整规范化响应 golden 已固定，云端 deterministic contract 通过真实 Source Index、双源 Probe、Admin 默认策略和 TCP 验证完整有序列表。完整 stream 字段仍待补齐 |
 | 11 | 原文件 | `GET|HEAD /Videos/{id}/stream` | 本地读取或云盘统一 Range 代理 | ✅ active source/location 鉴权、Filesystem/云端 provider-neutral 原文件 GET/HEAD、单 Range、206/416、ETag/If-Range、字节一致及上游身份隐藏已验证 |
 | 12 | 外挂字幕 | 两种 `/Videos/{id}/{mediaSourceId}/Subtitles/.../Stream.{format}` | 鉴权、本机路由、仅源格式 byte-for-byte | ⚠️ 两种路由、活动发布/索引/库授权、原格式直出已实现；转换与非零时间偏移明确拒绝，待真实客户端验证 |
-| 13 | 进度 | Sessions Playing/Progress/Stopped/Ping | SQL SoT + Redis 热点刷新 | ⚠️ 持久 playback session、Playing/Progress/Stopped 幂等写入与 Ping 活跃刷新已实现；Jellyfin OpenAPI 的可选 `ItemId`/`MediaSourceId`/`PlaySessionId` 可被兼容接受，无 item 的遥测 no-op，item-only 事件选择首选 source 并派生稳定 session；Redis、完成阈值和真实客户端验证未实现 |
+| 13 | 进度 | Sessions Playing/Progress/Stopped/Ping | SQL SoT + Redis 热点刷新 | ⚠️ 持久 playback session、Playing/Progress/Stopped 幂等写入与 Ping 活跃刷新已实现；前进进度按心跳墙钟时间封顶累计 `watched_ticks`，快进、倒退与异常时钟不会虚增观看时长；Jellyfin OpenAPI 的可选 `ItemId`/`MediaSourceId`/`PlaySessionId` 可被兼容接受，无 item 的遥测 no-op，item-only 事件选择首选 source 并派生稳定 session；Redis、完成阈值和真实客户端验证未实现 |
 | 14 | UserData | `GET|POST /UserItems/{id}/UserData`、Favorite/Played | 绑定稳定 CatalogItem ID | ⚠️ UserItems GET/字段级 POST、Favorite/Played POST/DELETE、同事务库授权锁与 user revision 已实现；Redis 与真实客户端验证未实现 |
 | 15 | 实时刷新 | `GET /socket` | `LibraryChanged` / `UserDataChanged` | ⚠️ 认证 WebSocket、进程内有界广播、完成 durable cache invalidation 后的 `LibraryChanged` 及仅目标用户可见的 `UserDataChanged` revision 事件已实现；断线客户端通过 SQL revision 重读，跨实例消息投递与真实客户端验证未实现 |
 
@@ -47,11 +53,12 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | legacy X-Emby/X-MediaBrowser aliases | ✅ | ⚠️ X-Emby-Authorization、X-Emby-Token、X-MediaBrowser-Token、`api_key` 已实现，可配置关闭 |
 | Users / Me / Admin CRUD | ✅ | ✅ Me、启动时首管理员及鉴权 Admin list/get/create/rename/password/policy/delete 已实现；策略持久化限于 TJXY 支持的 administrator/disabled，本地 provider 与 Direct Play-only 能力不可被请求改写；所有敏感变更撤销旧 auth revision，且禁止移除最后一个 enabled admin |
 | DisplayPreferences | ✅ 最小 | ✅ 认证 `GET|POST /DisplayPreferences/{id}` 已实现；非 UUID ID 使用 Jellyfin UTF-16LE MD5 GUID 兼容映射，偏好按 user/display/client 原子替换并持久化，跨用户访问返回 403，DTO 默认值与 PascalCase golden 已固定 |
-| React Admin 登录与 Users CRUD | ✅ | ✅ 同源 `/admin/` 生产构建、登录、用户列表/创建/改名/密码/策略/删除与移动端布局已实现，并有完整 Playwright 生命周期门禁 |
-| React Admin Libraries | ✅ | ✅ 管理员可列出、创建空库、重命名和删除 Library，并以 `profile_version` CAS 编辑 Full/Lazy/Hybrid/Manual 或完整四项 effective policy；可分页查看各库的持久化 Series 候选，仅为 enabled `background` 库新增 pin，并可清除 dormant pin；表格仅显示 root 数量且不暴露路径。生产 Playwright 覆盖 Library/策略 SQL 生命周期与候选真实空页，候选 pin/unpin SQL 生命周期由 server 集成契约覆盖 |
-| React Admin Tasks | ✅ | ⚠️ 管理员可启动/取消 Full Media Scan、查看有界 newest-first durable job 安全状态，并按现有 Library root 或 CatalogItem 显式提交 Validate/Discover/root Full/Resolve/Expand/Index/Probe；root Full 使用 Library-root binding scope，shared root 不跨库推进 Discover。原始错误、lease、路径与凭据不出站；日志摘要与缓存状态未实现 |
-| React Admin cloud Storage | ✅ | ⚠️ 管理员可选择目标库、启动服务端 OAuth、确认回调、选择 My Drive 或分页 Shared Drive、通过服务端 OAuth-session UUID cursor 完整分页并逐层选择 Google/OneDrive Personal 目录、提交绑定；确定性 fake-provider/HTTP 契约已覆盖追加、去重、空页续翻、失败重试和上下文/owner/state 隔离，但尚非 live Google/Microsoft 验收；Storage 状态/重授权、metadata、迁移及冲突管理页面未实现 |
-| React Admin Access | ✅ | ✅ 已认证的 `/admin/access` 以 Devices/API Keys 标签页提供设备改名、确认撤销、API key 创建/遮罩/显示/复制/确认删除；权威重载可取消并防旧响应覆盖，密钥不写 Web Storage 或诊断产物。生产 Playwright 已覆盖持久化恢复、API key 鉴权、撤销/删除失效，以及桌面、768px 和 390px 布局 |
+| HeroUI Admin 登录与 Users CRUD | ✅ | ✅ 同源 `/admin/` 生产构建采用 `ra-core` + HeroUI v3，登录、用户列表/创建/改名/密码/策略/删除与移动端布局已实现，并有完整 Playwright 生命周期门禁 |
+| HeroUI Admin Libraries | ✅ | ✅ 管理员可列出、创建空库、重命名和删除 Library，并以 `profile_version` CAS 编辑 Full/Lazy/Hybrid/Manual 或完整四项 effective policy；可分页查看各库的持久化 Series 候选，仅为 enabled `background` 库新增 pin，并可清除 dormant pin；表格仅显示 root 数量且不暴露路径。生产 Playwright 覆盖 Library/策略 SQL 生命周期与候选真实空页，候选 pin/unpin SQL 生命周期由 server 集成契约覆盖 |
+| HeroUI Admin Tasks | ✅ | ⚠️ 管理员可启动/取消 Full Media Scan、查看有界 newest-first durable job 安全状态，并按现有 Library root 或 CatalogItem 显式提交 Validate/Discover/root Full/Resolve/Expand/Index/Probe；root Full 使用 Library-root binding scope，shared root 不跨库推进 Discover。原始错误、lease、路径与凭据不出站；日志摘要与缓存状态未实现 |
+| HeroUI Admin cloud Storage | ✅ | ⚠️ 管理员可选择目标库、启动服务端 OAuth、确认回调、选择 My Drive 或分页 Shared Drive、通过服务端 OAuth-session UUID cursor 完整分页并逐层选择 Google/OneDrive Personal 目录、提交绑定；确定性 fake-provider/HTTP 契约已覆盖追加、去重、空页续翻、失败重试和上下文/owner/state 隔离，但尚非 live Google/Microsoft 验收；Storage 状态/重授权、metadata、迁移及冲突管理页面未实现 |
+| HeroUI Admin Access | ✅ | ✅ 已认证的 `/admin/access` 以 Devices/API Keys 标签页提供设备改名、确认撤销、API key 创建/遮罩/显示/复制/确认删除；权威重载可取消并防旧响应覆盖，密钥不写 Web Storage 或诊断产物。生产 Playwright 已覆盖持久化恢复、API key 鉴权、撤销/删除失效，以及桌面、768px 和 390px 布局 |
+| HeroUI Admin Dashboard | ✅ | ✅ `/admin/` 首页通过仅管理员可访问的 Summary、NowPlaying、LoginHistory、WatchHistory API 展示用户、影片、电视剧、剧集、播放趋势、Top 10、60 秒内在线会话和分页活动记录；时间范围限制为 31 天，登录记录仅包含成功建立的会话 |
 | API Keys / Devices / Sessions | ✅ 最小 | ⚠️ 登录 session 与 capabilities 已持久化；认证 `GET /Sessions` 支持管理员全局/普通用户本人范围及 device、recent、controllable 过滤，`POST /Sessions/Logout` 会立即撤销当前 token。管理员 `GET|DELETE /Devices`、`GET /Devices/Info` 与 `GET|POST /Devices/Options` 已实现；DeviceId 以 SHA-256 natural key 保持跨数据库大小写精确语义，列表在 SQL 中先按设备选择最新活跃 session 再应用 256 项上限，options 更新与批量删除锁定相关活跃 session，删除会先全量校验再原子撤销。`UserId` 会校验用户存在；当前尚无设备 ACL，因此已有用户仍可见全部活跃设备。API Keys 后端已完成：管理员 canonical `GET|POST|DELETE /Auth/Keys`、256 项全局上限、digest-only 鉴权索引、版本化 AEAD 可恢复密文、用户 revision 变更同事务物理撤销、全响应 `no-store` 与 fail-closed 启动校验均已由 SQLite/PostgreSQL 17/MySQL 8.4、HTTP/TCP 和重启契约验证；Devices 仍待真实第三方客户端验证 |
 | Quick Connect | ❌ v1 | ❌ |
 
@@ -129,6 +136,7 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 | 能力 | v2.6 语义 | 状态 |
 |------|-----------|------|
 | PlaybackInfo GET + POST | ✅ | ⚠️ 鉴权 GET/POST、可选 session/request DeviceProfile、query 覆盖 body 的 UserId/MediaSourceId/EnableDirectPlay 与安全空降级已实现；其余可选选择字段待通用契约矩阵验证 |
+| Browser playback tickets | ✅ | ✅ `POST /Items/{itemId}/PlaybackTicket` 签发登录会话/媒体源/播放会话绑定的短期票据，`DELETE /PlaybackTickets/{ticketId}` 按当前会话撤销；视频/音频 GET/HEAD 在无 Authorization 时接受票据，并保持 Range/ETag/If-Range/206/416 与容器 MIME |
 | 多 MediaSource DTO | ✅ 始终可多源；默认排序正式；客户端 UI 仅 observation | ⚠️ 全量可播放 source 列表、本机 URL、七层默认排序及管理员 `PUT /Admin/Items/{itemId}/MediaSources/{mediaSourceId}/PlaybackPolicy` 已实现；deterministic cloud contract 固定两个 MKV source 的完整字段与顺序，按数据库 provider-object 语义归一化动态 ID，并证明显式 default 第一项可播、alternate 仍完整可取。隐藏源同时拒绝 PlaybackInfo、视频、字幕和播放事件，账号健康当前为持久化账号状态代理；真实客户端多版本选择 UI 仍仅作 observation |
 | 详情请求 Probe | ❌；只允许 Source Indexing | ✅ 仅 enqueue/join Source Index，不执行 Probe |
 | 首次 PlaybackInfo Probe | 有界头/尾 Range，single-flight | ⚠️ MediaSource-scope durable single-flight、精确 storage-root affinity、root-local 祖先/事实来源授权、Filesystem worker 与两端各最多 1 MiB 的 Matroska、ISO-BMFF MP4/M4V 解析，以及 AVC/HEVC profile/level 配置记录提取已实现；provider-neutral 云端 adapter 已覆盖 runtime registry、对象快照、有界 Range 与 Probe commit 门禁 |

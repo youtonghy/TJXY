@@ -5,6 +5,7 @@
       "Id": "{{default_source_id}}",
       "Path": null,
       "Container": "mkv",
+      "IsDefault": true,
       "IsRemote": false,
       "SupportsTranscoding": false,
       "SupportsDirectStream": false,

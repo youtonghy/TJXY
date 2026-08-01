@@ -493,6 +493,8 @@ pub struct PublishedMediaSource {
     container: Option<String>,
     probe_state: String,
     probe_revision: i64,
+    bitrate: Option<i64>,
+    runtime_ticks: Option<i64>,
     admin_priority: i32,
     is_default: bool,
     is_hidden: bool,
@@ -652,6 +654,16 @@ impl PublishedMediaSource {
     #[must_use]
     pub const fn probe_revision(&self) -> i64 {
         self.probe_revision
+    }
+
+    #[must_use]
+    pub const fn bitrate(&self) -> Option<i64> {
+        self.bitrate
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
     }
 
     #[must_use]
@@ -2389,6 +2401,14 @@ async fn active_sources(
             Alias::new("probe_revision"),
         )
         .expr_as(
+            Expr::col((canonical.clone(), Alias::new("bitrate"))),
+            Alias::new("bitrate"),
+        )
+        .expr_as(
+            Expr::col((canonical.clone(), Alias::new("runtime_ticks"))),
+            Alias::new("runtime_ticks"),
+        )
+        .expr_as(
             Expr::col((canonical.clone(), Alias::new("admin_priority"))),
             Alias::new("admin_priority"),
         )
@@ -3545,6 +3565,8 @@ fn published_source_from_row(
         container: row.try_get("", "container")?,
         probe_state: row.try_get("", "probe_state")?,
         probe_revision: row.try_get("", "probe_revision")?,
+        bitrate: row.try_get("", "bitrate")?,
+        runtime_ticks: row.try_get("", "runtime_ticks")?,
         admin_priority: row.try_get("", "admin_priority")?,
         is_default: row.try_get("", "is_default")?,
         is_hidden: row.try_get("", "is_hidden")?,

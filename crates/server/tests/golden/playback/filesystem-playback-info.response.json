@@ -60,6 +60,7 @@
       ],
       "Path": null,
       "Protocol": "Http",
+      "RunTimeTicks": 10000000,
       "SupportsDirectPlay": true,
       "SupportsDirectStream": false,
       "SupportsTranscoding": false,

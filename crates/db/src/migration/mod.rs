@@ -38,6 +38,9 @@ mod m20260726_000037_api_keys;
 mod m20260730_000038_playback_tickets;
 mod m20260730_000039_metadata_provider_settings;
 mod m20260730_000040_rich_catalog_metadata;
+mod m20260731_000041_provider_id_scope;
+mod m20260731_000042_dashboard_indexes;
+mod m20260731_000043_user_profile_and_watch_time;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -98,6 +101,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260730_000038_playback_tickets::Migration),
             Box::new(m20260730_000039_metadata_provider_settings::Migration),
             Box::new(m20260730_000040_rich_catalog_metadata::Migration),
+            Box::new(m20260731_000041_provider_id_scope::Migration),
+            Box::new(m20260731_000042_dashboard_indexes::Migration),
+            Box::new(m20260731_000043_user_profile_and_watch_time::Migration),
         ]
     }
 }

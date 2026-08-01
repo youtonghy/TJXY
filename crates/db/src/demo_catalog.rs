@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{AssetPublication, AssetRepositoryError};
 
 const DEMO_NAMESPACE: Uuid = Uuid::from_u128(0x8fd6_fbd6_d3e4_4cf5_9488_49ce_0585_97aa);
+const MAX_ASSET_PUBLICATIONS: usize = 50_000;
 const MOVIE_LIBRARY_KEY: &str = "library:movies";
 const SERIES_LIBRARY_KEY: &str = "library:series";
 
@@ -96,7 +97,7 @@ impl DemoCatalogPublication {
         mut self,
         assets: Vec<AssetPublication>,
     ) -> Result<Self, DemoCatalogPublicationError> {
-        if assets.len() > 1_000 {
+        if assets.len() > MAX_ASSET_PUBLICATIONS {
             return Err(DemoCatalogPublicationError::InvalidPublication);
         }
         self.assets = assets;
@@ -186,7 +187,7 @@ async fn publish_in_transaction(
     let movie_library_id = upsert_library(
         transaction,
         MOVIE_LIBRARY_KEY,
-        "TMDB Demo Movies",
+        "Movies",
         "movies",
         publication.fetched_at,
     )
@@ -194,7 +195,7 @@ async fn publish_in_transaction(
     let series_library_id = upsert_library(
         transaction,
         SERIES_LIBRARY_KEY,
-        "TMDB Demo Television",
+        "TV Shows",
         "tvshows",
         publication.fetched_at,
     )
@@ -289,11 +290,11 @@ async fn upsert_library(
         .values_panic([
             id.into(),
             name.into(),
-            "Demo".into(),
-            "MetadataOnly".into(),
-            "Tmdb".into(),
-            "Imported".into(),
-            "Disabled".into(),
+            "Manual".into(),
+            "library_roots".into(),
+            "none".into(),
+            "manual".into(),
+            "on_playback".into(),
             1_i32.into(),
             now.into(),
             now.into(),
@@ -571,7 +572,11 @@ async fn publish_named_links(
     foreign_key: &str,
     names: &[String],
 ) -> Result<(), DbErr> {
+    let mut seen = HashSet::new();
     for name in names {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
         let entity_id = stable_id(&format!("{entity_table}:{name}"));
         let entity = Query::insert()
             .into_table(Alias::new(entity_table))
@@ -606,7 +611,11 @@ async fn publish_countries(
     item_id: Uuid,
     item: &RichCatalogItem,
 ) -> Result<(), DemoCatalogPublicationError> {
-    for (order, country) in item.countries().iter().enumerate() {
+    let mut seen = HashSet::new();
+    for country in item.countries() {
+        if !seen.insert(country.code()) {
+            continue;
+        }
         let country_id = stable_id(&format!("country:{}", country.code()));
         upsert_code_name(
             transaction,
@@ -622,7 +631,7 @@ async fn publish_countries(
             "country_id",
             item_id,
             country_id,
-            order,
+            seen.len() - 1,
         )
         .await?;
     }
@@ -634,7 +643,11 @@ async fn publish_languages(
     item_id: Uuid,
     item: &RichCatalogItem,
 ) -> Result<(), DemoCatalogPublicationError> {
-    for (order, language) in item.languages().iter().enumerate() {
+    let mut seen = HashSet::new();
+    for language in item.languages() {
+        if !seen.insert(language.code()) {
+            continue;
+        }
         let language_id = stable_id(&format!("language:{}", language.code()));
         upsert_code_name(
             transaction,
@@ -650,7 +663,7 @@ async fn publish_languages(
             "language_id",
             item_id,
             language_id,
-            order,
+            seen.len() - 1,
         )
         .await?;
     }
@@ -710,8 +723,13 @@ async fn publish_credits(
     item_id: Uuid,
     item: &RichCatalogItem,
 ) -> Result<(), DemoCatalogPublicationError> {
+    let mut seen = HashSet::new();
     for credit in item.credits() {
         let person_id = stable_id(&format!("person:tmdb:{}", credit.person_provider_id()));
+        let role = credit.role().unwrap_or(credit.credit_type());
+        if !seen.insert((person_id, role)) {
+            continue;
+        }
         let person = Query::insert()
             .into_table(Alias::new("people"))
             .columns([
@@ -758,7 +776,6 @@ async fn publish_credits(
             .execute(transaction.get_database_backend().build(&person_provider))
             .await?;
 
-        let role = credit.role().unwrap_or(credit.credit_type());
         let sort_order = i32::try_from(credit.order())
             .map_err(|_| DemoCatalogPublicationError::InvalidPublication)?;
         insert_values(

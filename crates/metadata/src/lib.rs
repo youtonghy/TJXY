@@ -5,6 +5,7 @@ mod tmdb_catalog;
 pub use tmdb_catalog::{
     RichCatalogItem, RichCountry, RichCredit, RichEpisode, RichLanguage, RichRemoteImage,
     RichRemoteImageKind, RichSeason, RichSeries, TmdbCatalogClient, TmdbCatalogTransport,
+    TmdbPopularItem,
 };
 
 use std::{

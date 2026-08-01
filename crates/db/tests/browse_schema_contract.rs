@@ -100,6 +100,7 @@ async fn rich_catalog_schema_persists_details_and_ordered_associations() {
     for (table, index) in [
         ("catalog_items", "idx_catalog_items_parent_index"),
         ("item_people", "idx_item_people_order"),
+        ("provider_ids", "uq_provider_ids_item_provider"),
         ("person_provider_ids", "uq_person_provider_ids_identity"),
         ("metadata_snapshots", "uq_metadata_snapshots_identity"),
     ] {

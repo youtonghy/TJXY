@@ -7,6 +7,7 @@ mod cache_invalidation;
 mod catalog_publication;
 mod catalog_query;
 mod catalog_storage_scope;
+mod dashboard;
 mod demo_catalog;
 mod device;
 mod discover;
@@ -62,6 +63,10 @@ pub use catalog_query::{
     CatalogItemRecord, CatalogItemType, CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest,
     CatalogQueryError, CatalogQueryRepository, LazyCatalogWorkTarget, LazyStorageScope,
     LibraryViewRecord,
+};
+pub use dashboard::{
+    DashboardLoginRecord, DashboardNowPlaying, DashboardPage, DashboardPlaybackEvent,
+    DashboardRepository, DashboardSnapshot, DashboardTopItem, DashboardWatchRecord,
 };
 pub use demo_catalog::{
     DemoCatalogPublication, DemoCatalogPublicationError, DemoCatalogPublicationReport,

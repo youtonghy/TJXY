@@ -4,7 +4,9 @@ mod admin_assets;
 mod api_key;
 mod auth;
 mod browse;
+mod client_portal;
 mod configuration;
+mod dashboard_admin;
 mod device;
 mod display_preferences;
 mod hybrid_admin;
@@ -119,6 +121,8 @@ pub struct AppState {
     auth: Option<Arc<AuthService<SystemClock>>>,
     catalog: Option<Arc<CatalogQueryService>>,
     display_preferences: Option<Arc<DisplayPreferencesService>>,
+    dashboard_admin: Option<Arc<dashboard_admin::DashboardAdminService>>,
+    client_portal: Option<Arc<client_portal::ClientPortalService>>,
     libraries: Option<Arc<LibraryService>>,
     assets: Option<Arc<AssetReadService>>,
     media: Option<Arc<MediaReadService>>,
@@ -146,6 +150,8 @@ impl AppState {
             auth: None,
             catalog: None,
             display_preferences: None,
+            dashboard_admin: None,
+            client_portal: None,
             libraries: None,
             assets: None,
             media: None,
@@ -189,6 +195,20 @@ impl AppState {
         display_preferences: Arc<DisplayPreferencesService>,
     ) -> Self {
         self.display_preferences = Some(display_preferences);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dashboard(mut self, database: sea_orm::DatabaseConnection) -> Self {
+        self.dashboard_admin = Some(Arc::new(dashboard_admin::DashboardAdminService::new(
+            database,
+        )));
+        self
+    }
+
+    #[must_use]
+    pub fn with_client_portal(mut self, database: sea_orm::DatabaseConnection) -> Self {
+        self.client_portal = Some(Arc::new(client_portal::ClientPortalService::new(database)));
         self
     }
 
@@ -323,6 +343,15 @@ pub fn build_router(state: AppState) -> Router {
             post(auth::authenticate_by_name),
         )
         .route("/Users/Me", get(auth::current_user))
+        .route("/Users/Me/Insights", get(client_portal::insights))
+        .route(
+            "/Users/Me/Profile",
+            get(auth::current_user_profile).patch(auth::update_current_user_profile),
+        )
+        .route(
+            "/Users/Me/Password",
+            post(auth::update_current_user_password),
+        )
         .route(
             "/Auth/Keys",
             get(api_key::list)
@@ -345,6 +374,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/Users/{user_id}/Policy", post(auth::update_user_policy))
         .route("/UserViews", get(browse::user_views))
+        .route("/Discover/Popular", get(client_portal::popular))
+        .route("/Discover/Tmdb/Popular", get(client_portal::tmdb_top))
+        .route("/Discover/Server/Top", get(client_portal::server_top))
         .route("/Search/Hints", get(browse::search_hints))
         .route(
             "/DisplayPreferences/{display_preferences_id}",
@@ -406,6 +438,19 @@ pub fn build_router(state: AppState) -> Router {
             post(browse::full_capabilities),
         )
         .route("/Sessions", get(session::list))
+        .route("/Admin/Dashboard/Summary", get(dashboard_admin::summary))
+        .route(
+            "/Admin/Dashboard/NowPlaying",
+            get(dashboard_admin::now_playing),
+        )
+        .route(
+            "/Admin/Dashboard/LoginHistory",
+            get(dashboard_admin::login_history),
+        )
+        .route(
+            "/Admin/Dashboard/WatchHistory",
+            get(dashboard_admin::watch_history),
+        )
         .route("/Sessions/Logout", post(session::logout))
         .route("/Devices", get(device::list).delete(device::delete))
         .route("/Devices/Info", get(device::info))

@@ -173,6 +173,7 @@ pub struct CatalogItemRecord {
     overview: Option<String>,
     community_rating: Option<f64>,
     index_number: Option<i32>,
+    runtime_ticks: Option<i64>,
     is_favorite: bool,
     is_played: bool,
     play_count: i32,
@@ -224,6 +225,11 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn index_number(&self) -> Option<i32> {
         self.index_number
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
     }
 
     #[must_use]
@@ -1880,10 +1886,18 @@ fn item_query(
         }
         ItemQuerySource::Publication(publication_id) => {
             let pci = Alias::new("pci");
+            let catalog_item = Alias::new("publication_item");
             let BrowseParent::Item(parent_id) = parent else {
                 unreachable!("library browse cannot use a structure publication")
             };
             query.from_as(Alias::new("publication_catalog_items"), pci.clone());
+            query.join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                catalog_item.clone(),
+                Expr::col((catalog_item, Alias::new("id")))
+                    .equals((pci.clone(), Alias::new("catalog_item_id"))),
+            );
             query.join_as(
                 JoinType::LeftJoin,
                 Alias::new("user_data"),
@@ -2428,6 +2442,7 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 "overview",
                 "community_rating",
                 "index_number",
+                "runtime_ticks",
             ] {
                 query.expr_as(
                     Expr::col((ci.clone(), Alias::new(column))),
@@ -2453,6 +2468,10 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
             for column in ["original_title", "community_rating", "index_number"] {
                 query.expr_as(Expr::val(Option::<String>::None), Alias::new(column));
             }
+            query.expr_as(
+                Expr::col((Alias::new("publication_item"), Alias::new("runtime_ticks"))),
+                Alias::new("runtime_ticks"),
+            );
         }
     }
     for column in [
@@ -2489,6 +2508,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         overview: row.try_get("", "overview")?,
         community_rating: row.try_get("", "community_rating")?,
         index_number: row.try_get("", "index_number")?,
+        runtime_ticks: row.try_get("", "runtime_ticks")?,
         is_favorite: row
             .try_get::<Option<bool>>("", "is_favorite")?
             .unwrap_or(false),

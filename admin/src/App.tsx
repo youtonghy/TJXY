@@ -1,4 +1,5 @@
 import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 
 import { AccessPage } from './access/AccessPage';
@@ -24,6 +25,11 @@ import { UserEdit } from './users/UserEdit';
 import { UserList } from './users/UserList';
 import { UserShow } from './users/UserShow';
 import { ClientApp } from './client/ClientApp';
+
+const DashboardPage = lazy(async () => {
+  const module = await import('./dashboard/DashboardPage');
+  return { default: module.DashboardPage };
+});
 
 export function App() {
   return (
@@ -55,6 +61,10 @@ export function App() {
                 show={UserShow}
               />
               <CustomRoutes>
+                <Route
+                  element={<Suspense fallback={<LoadingPage />}><DashboardPage /></Suspense>}
+                  path="/"
+                />
                 <Route element={<AccessPage />} path="/access" />
                 <Route element={<TasksPage />} path="/tasks" />
                 <Route element={<LibrariesPage />} path="/libraries" />

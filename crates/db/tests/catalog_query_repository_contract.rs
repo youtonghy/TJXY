@@ -186,6 +186,7 @@ async fn set_rich_item_fields(
         .unwrap();
 }
 
+#[allow(clippy::too_many_lines)]
 async fn seed_rich_detail_associations(database: &DatabaseConnection, item_id: CatalogItemId) {
     let backend = database.get_database_backend();
     let genre = Uuid::new_v4();

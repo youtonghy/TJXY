@@ -460,7 +460,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     let media_collections = Arc::new(MediaCollectionService::new(database.clone()));
     let playback_tickets = Arc::new(PlaybackTicketService::new(database.clone(), SystemClock));
     let display_preferences = Arc::new(DisplayPreferencesService::new(database.clone()));
-    let user_data = Arc::new(UserDataService::new(database));
+    let user_data = Arc::new(UserDataService::new(database.clone()));
     let warm_home_cache = cache.is_enabled();
     let state = AppState::new(
         options
@@ -475,6 +475,8 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_playback_tickets(playback_tickets)
     .with_media_collections(media_collections)
     .with_display_preferences(display_preferences)
+    .with_dashboard(database.clone())
+    .with_client_portal(database.clone())
     .with_playstate(playstate)
     .with_tasks(tasks)
     .with_user_data(user_data)

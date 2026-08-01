@@ -3,9 +3,9 @@ import { expect, test } from '@playwright/test';
 import {
   assertActionControlsDoNotIntersect,
   assertNoHorizontalOverflow,
+  assertUniqueH1,
   login,
   monitorPage,
-  screenshot,
 } from './support';
 
 const adminPassword = 'admin-password';
@@ -15,18 +15,20 @@ const secondaryDeviceId = 'playwright-access-secondary';
 test.use({ screenshot: 'off', trace: 'off', video: 'off' });
 
 test.describe.serial('administrator access lifecycle', () => {
-  test('manages durable API keys and secondary devices through the production application', async ({ page }, testInfo) => {
+  test('manages durable API keys and secondary devices through the production application', async ({ page }) => {
     const diagnostics = monitorPage(page);
 
     await page.goto('/admin/access');
     await login(page, 'Admin', adminPassword);
     await expect(page).toHaveURL(/\/admin\/access$/);
+    await assertUniqueH1(page);
     await page.getByRole('tab', { name: 'API Keys' }).click();
+    await expect(page).toHaveURL(/\/admin\/access\?tab=api-keys$/);
     await page.getByRole('button', { name: 'Create API key' }).click();
     await page.getByRole('textbox', { name: 'Application name' }).fill(appName);
     await page.getByRole('button', { name: 'Create key' }).click();
 
-    const keyRow = page.getByRole('row').filter({ hasText: appName });
+    const keyRow = page.getByRole('grid', { name: 'API Keys' }).getByRole('row').filter({ hasText: appName });
     await expect(keyRow).toBeVisible();
     await expect(keyRow.locator('code')).toHaveText('****************');
     await keyRow.getByRole('button', { name: `Show key for ${appName}` }).click();
@@ -39,7 +41,7 @@ test.describe.serial('administrator access lifecycle', () => {
 
     await page.reload();
     await page.getByRole('tab', { name: 'API Keys' }).click();
-    const reloadedKeyRow = page.getByRole('row').filter({ hasText: appName });
+    const reloadedKeyRow = page.getByRole('grid', { name: 'API Keys' }).getByRole('row').filter({ hasText: appName });
     await expect(reloadedKeyRow.locator('code')).toHaveText('****************');
     await reloadedKeyRow.getByRole('button', { name: `Show key for ${appName}` }).click();
     const recoveredKey = await reloadedKeyRow.locator('code').innerText();
@@ -61,7 +63,10 @@ test.describe.serial('administrator access lifecycle', () => {
     const customName = page.getByRole('textbox', { name: 'Custom device name' });
     await customName.fill('Playwright secondary');
     await page.getByRole('button', { name: 'Save device name' }).click();
-    await expect(page.getByText('Playwright secondary', { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole('grid', { name: 'Devices' })
+        .getByText('Playwright secondary', { exact: true }),
+    ).toBeVisible();
     await assertNoHorizontalOverflow(page);
     await assertActionControlsDoNotIntersect(page);
     await page.getByRole('button', { name: 'Revoke Playwright secondary' }).click();
@@ -75,43 +80,44 @@ test.describe.serial('administrator access lifecycle', () => {
     await page.getByRole('tab', { name: 'API Keys' }).click();
     await assertNoHorizontalOverflow(page);
     await assertActionControlsDoNotIntersect(page);
-    await screenshot(page, testInfo, 'access-desktop.png');
 
     await page.setViewportSize({ width: 768, height: 1024 });
     await page.reload();
     await page.getByRole('tab', { name: 'API Keys' }).click();
-    await expect(page.getByRole('row').filter({ hasText: appName })).toBeVisible();
+    await expect(page.getByRole('grid', { name: 'API Keys' }).getByRole('row').filter({ hasText: appName })).toBeVisible();
     await assertNoHorizontalOverflow(page);
     await assertActionControlsDoNotIntersect(page);
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.reload();
     await page.getByRole('tab', { name: 'API Keys' }).click();
-    const mobileKeyRow = page.getByRole('row').filter({ hasText: appName });
+    const mobileKeyRow = page.getByRole('list', { name: 'API Keys mobile' })
+      .getByRole('listitem', { name: appName });
     await expect(mobileKeyRow.locator('code')).toHaveText('****************');
     await assertNoHorizontalOverflow(page);
     await assertActionControlsDoNotIntersect(page);
-    await screenshot(page, testInfo, 'access-api-keys-mobile.png');
     await page.getByRole('tab', { name: 'Devices' }).click();
-    await expect(page.getByRole('table', { name: 'Devices' })).toBeVisible();
+    await expect(page).toHaveURL(/\/admin\/access$/);
+    await expect(page.getByRole('list', { name: 'Devices mobile' })).toBeVisible();
     await assertNoHorizontalOverflow(page);
     await assertActionControlsDoNotIntersect(page);
-    await screenshot(page, testInfo, 'access-devices-mobile.png');
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.reload();
     await page.getByRole('tab', { name: 'API Keys' }).click();
     await page.getByRole('button', { name: `Delete key for ${appName}` }).click();
     await expect(page.getByRole('dialog')).toContainText(appName);
-    await page.getByRole('button', { name: 'Delete key' }).click();
-    await expect(page.getByRole('row').filter({ hasText: appName })).toHaveCount(0);
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete key' }).click();
+    await expect(page.getByRole('grid', { name: 'API Keys' }).getByRole('row').filter({ hasText: appName })).toHaveCount(0);
     const deletedKey = await page.request.get('/Users/Me', {
       headers: { Authorization: tokenHeader(rawKey) },
     });
     expect(deletedKey.status()).toBe(401);
 
+    diagnostics.assertExpectedResponsesObserved();
     expect(diagnostics.pageErrors, 'page errors').toEqual([]);
     expect(diagnostics.consoleErrors, 'console errors').toEqual([]);
+    expect(diagnostics.httpErrors, 'unexpected HTTP error responses').toEqual([]);
     expect(diagnostics.failedRequests, 'failed same-origin requests').toEqual([]);
   });
 });

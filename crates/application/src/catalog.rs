@@ -26,6 +26,9 @@ pub struct PlaybackSource {
     id: tjxy_common::MediaSourceId,
     presentation_key: tjxy_common::PresentationKey,
     container: String,
+    edition: Option<String>,
+    bitrate: Option<i64>,
+    runtime_ticks: Option<i64>,
     #[serde(default)]
     is_audio: bool,
     last_used: bool,
@@ -52,6 +55,21 @@ impl PlaybackSource {
     #[must_use]
     pub fn container(&self) -> &str {
         &self.container
+    }
+
+    #[must_use]
+    pub fn edition(&self) -> Option<&str> {
+        self.edition.as_deref()
+    }
+
+    #[must_use]
+    pub const fn bitrate(&self) -> Option<i64> {
+        self.bitrate
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
     }
 
     #[must_use]
@@ -165,6 +183,8 @@ pub struct PlaybackSubtitle {
     format: String,
     language: Option<String>,
     delivery_index: i32,
+    is_default: bool,
+    is_forced: bool,
 }
 
 impl PlaybackSubtitle {
@@ -181,6 +201,16 @@ impl PlaybackSubtitle {
     #[must_use]
     pub const fn delivery_index(&self) -> i32 {
         self.delivery_index
+    }
+
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.is_default
+    }
+
+    #[must_use]
+    pub const fn is_forced(&self) -> bool {
+        self.is_forced
     }
 }
 
@@ -1046,6 +1076,8 @@ fn playable_sources(
                         format: subtitle.format().to_owned(),
                         language: subtitle.language().map(str::to_owned),
                         delivery_index: subtitle.delivery_index()?,
+                        is_default: subtitle.is_default(),
+                        is_forced: subtitle.is_forced(),
                     })
                 })
                 .collect();
@@ -1084,6 +1116,9 @@ fn playable_sources(
                     id: source.id(),
                     presentation_key: source.presentation_key(),
                     container,
+                    edition: source.edition().map(str::to_owned),
+                    bitrate: source.bitrate(),
+                    runtime_ticks: source.runtime_ticks(),
                     is_audio,
                     last_used: last_used == Some(source.presentation_key()),
                     admin_priority: source.admin_priority(),
@@ -1182,6 +1217,9 @@ mod tests {
             id: MediaSourceId::new(),
             presentation_key: PresentationKey::new(),
             container: "mkv".to_owned(),
+            edition: None,
+            bitrate: None,
+            runtime_ticks: None,
             is_audio: false,
             last_used: false,
             admin_priority: 0,
@@ -1196,6 +1234,9 @@ mod tests {
             id: MediaSourceId::new(),
             presentation_key: PresentationKey::new(),
             container: "mkv".to_owned(),
+            edition: None,
+            bitrate: None,
+            runtime_ticks: None,
             is_audio: false,
             last_used: true,
             admin_priority: 0,

@@ -91,6 +91,12 @@ function renderUsers(getList: UserListRequest, initialEntry = '/admin/users') {
   );
 }
 
+async function usersGrid() {
+  const grid = await screen.findByRole('grid', { name: 'Users' });
+  await within(grid).findAllByRole('rowheader');
+  return grid;
+}
+
 it('shows a stable skeleton during the initial request', () => {
   const getList = vi.fn<UserListRequest>(() => new Promise(() => undefined));
   renderUsers(getList);
@@ -136,7 +142,7 @@ it('retains existing rows and shows a stale-data alert when a filtered refresh f
     .mockRejectedValue(new Error('offline'));
   renderUsers(getList);
 
-  const table = await screen.findByRole('grid', { name: 'Users' });
+  const table = await usersGrid();
   await user.type(screen.getByRole('searchbox', { name: 'Search users' }), 'A');
 
   expect(await screen.findByText('Showing the last available data')).toBeVisible();
@@ -169,7 +175,7 @@ it('renders summaries, a named desktop table, complete mobile records, and encod
     '/admin/users/create',
   );
 
-  const table = screen.getByRole('grid', { name: 'Users' });
+  const table = await usersGrid();
   expect(within(table).getByRole('columnheader', { name: 'Name' })).toBeVisible();
   expect(within(table).getByText('Administrator')).toBeVisible();
   expect(within(table).getByText('Enabled')).toBeVisible();
@@ -238,7 +244,7 @@ it('cancels a pending search update when the access filter changes', async () =>
   });
   renderUsers(getList);
 
-  await screen.findByRole('grid', { name: 'Users' });
+  await usersGrid();
   getList.mockClear();
   await user.type(screen.getByRole('searchbox', { name: 'Search users' }), 'Ada');
   await user.click(screen.getByRole('button', { name: /Access/ }));
@@ -309,7 +315,7 @@ it('marks placeholder rows as updating and disables stale actions until the next
     }));
   renderUsers(getList);
 
-  const table = await screen.findByRole('grid', { name: 'Users' });
+  const table = await usersGrid();
   expect(within(table).getByText('First page user')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Next page' }));
 

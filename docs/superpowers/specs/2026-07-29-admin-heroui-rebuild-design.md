@@ -4,7 +4,9 @@
 
 Approved on 2026-07-29. The visual direction, frontend architecture, information
 architecture, key page patterns, interaction states, migration order, and verification
-scope were approved during design review.
+scope were approved during design review. The presentation migration is implemented;
+the lifecycle, visual-baseline, accessibility, and WebKit browser matrix remains pending
+until the isolated local test server is authorized.
 
 ## Context
 
@@ -352,8 +354,8 @@ npm --prefix admin run build
 npm --prefix admin run e2e
 ```
 
-The current 104 unit tests and production lifecycle tests are migrated rather than
-discarded. New coverage includes:
+Existing unit and production lifecycle tests are migrated rather than discarded. New
+coverage includes:
 
 - stable visual screenshots for login, shell, Users, Access, Tasks, Libraries, library
   edit, storage workflows, and representative dialogs at all three viewports; visual

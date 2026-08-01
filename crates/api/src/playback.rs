@@ -67,6 +67,10 @@ pub struct MediaStream {
     pub is_external_url: bool,
     pub is_text_subtitle_stream: bool,
     pub supports_external_stream: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_default: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_forced: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -77,6 +81,14 @@ pub struct MediaSourceInfo {
     id: PresentationKey,
     path: Option<String>,
     container: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitrate: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "is_false")]
+    is_default: bool,
     is_remote: bool,
     supports_transcoding: bool,
     supports_direct_stream: bool,
@@ -117,6 +129,10 @@ impl MediaSourceInfo {
             id,
             path: None,
             container: container.into(),
+            name: None,
+            bitrate: None,
+            run_time_ticks: None,
+            is_default: false,
             is_remote: false,
             supports_transcoding: false,
             supports_direct_stream: false,
@@ -125,6 +141,21 @@ impl MediaSourceInfo {
             transcoding_url: None,
             direct_stream_url,
         })
+    }
+
+    #[must_use]
+    pub fn with_details(
+        mut self,
+        name: Option<String>,
+        bitrate: Option<i64>,
+        run_time_ticks: Option<i64>,
+        is_default: bool,
+    ) -> Self {
+        self.name = name;
+        self.bitrate = bitrate;
+        self.run_time_ticks = run_time_ticks;
+        self.is_default = is_default;
+        self
     }
 }
 
@@ -149,4 +180,10 @@ fn is_local_media_route(url: &str) -> bool {
 
 fn is_local_subtitle_route(url: &str) -> bool {
     url.starts_with("/Videos/") && url.contains("/Subtitles/") && !url.contains("://")
+}
+
+// Serde's skip_serializing_if callback contract requires a shared reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }

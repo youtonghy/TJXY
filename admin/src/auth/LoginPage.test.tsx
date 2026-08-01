@@ -43,7 +43,9 @@ it('renders visible credentials, password reveal, and anchored branding', async 
   expect(screen.getByRole('textbox', { name: 'Username' })).toBeVisible();
   const password = screen.getByLabelText('Password');
   expect(password).toHaveAttribute('type', 'password');
-  expect(screen.getByTestId('login-brand')).toHaveClass('lg:fixed');
+  const brand = screen.getByTestId('login-brand');
+  expect(brand).toHaveClass('lg:fixed');
+  expect(brand.querySelector('img')).toHaveAttribute('src', '/brand/tjxy-mark.webp');
 
   await user.click(screen.getByRole('button', { name: 'Show password' }));
   expect(password).toHaveAttribute('type', 'text');

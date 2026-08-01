@@ -49,7 +49,9 @@ function renderDevices(authProvider = defaultTestAuthProvider) {
 }
 
 async function devicesGrid() {
-  return await screen.findByRole('grid', { name: 'Devices' });
+  const grid = await screen.findByRole('grid', { name: 'Devices' });
+  await within(grid).findAllByRole('rowheader');
+  return grid;
 }
 
 beforeEach(() => {

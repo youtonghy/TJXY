@@ -3,6 +3,7 @@ import {
   DatabaseZap,
   FolderKanban,
   ListTodo,
+  LayoutDashboard,
   ShieldCheck,
   UsersRound,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
   {
     label: 'Manage',
     items: [
+      { label: 'Dashboard', to: '/admin', icon: LayoutDashboard },
       { label: 'Users', to: '/admin/users', icon: UsersRound },
       { label: 'Access', to: '/admin/access', icon: ShieldCheck },
       { label: 'Libraries', to: '/admin/libraries', icon: FolderKanban },

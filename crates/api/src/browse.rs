@@ -232,6 +232,12 @@ impl BaseItemDto {
     }
 
     #[must_use]
+    pub const fn with_runtime_ticks(mut self, runtime_ticks: Option<i64>) -> Self {
+        self.run_time_ticks = runtime_ticks;
+        self
+    }
+
+    #[must_use]
     #[allow(clippy::too_many_arguments)] // Mirrors the bounded rich detail wire contract.
     pub fn with_rich_details(
         mut self,

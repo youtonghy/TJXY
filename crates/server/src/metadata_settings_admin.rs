@@ -15,7 +15,8 @@ use tjxy_db::{
     MetadataProviderSettingsRepositoryError,
 };
 use tjxy_metadata::{
-    MetadataError, MetadataProviderError, ReloadableMetadataProvider, TmdbProvider,
+    MetadataError, MetadataProviderError, ReloadableMetadataProvider, TmdbCatalogClient,
+    TmdbProvider,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -63,6 +64,26 @@ impl MetadataSettingsAdminService {
             environment_fallback,
             provider_factory,
         }
+    }
+
+    pub(crate) async fn tmdb_catalog_client(
+        &self,
+    ) -> Result<TmdbCatalogClient, MetadataSettingsAdminError> {
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or(MetadataSettingsAdminError::CipherUnavailable)?;
+        let stored = MetadataProviderSettingsRepository::new(&self.database)
+            .get(TMDB_PROVIDER_KEY)
+            .await?
+            .filter(MetadataProviderSettingRecord::enabled)
+            .ok_or(MetadataSettingsAdminError::CredentialUnavailable)?;
+        let plaintext =
+            cipher.open(stored.credential_id(), stored.provider(), stored.envelope())?;
+        let access_token = str::from_utf8(&plaintext)
+            .map_err(|_| MetadataSettingsAdminError::InvalidCredential)?;
+        TmdbCatalogClient::new(access_token, stored.language())
+            .map_err(|_| MetadataSettingsAdminError::InvalidConfiguration)
     }
 
     async fn settings(&self) -> Result<MetadataSettingsDto, MetadataSettingsAdminError> {
@@ -400,7 +421,7 @@ fn error_response(error: &MetadataSettingsAdminError) -> Response {
 }
 
 #[derive(Debug, Error)]
-enum MetadataSettingsAdminError {
+pub(crate) enum MetadataSettingsAdminError {
     #[error("metadata provider credential encryption is unavailable")]
     CipherUnavailable,
     #[error("metadata provider credential is unavailable")]
