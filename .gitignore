@@ -9,3 +9,5 @@
 /admin/playwright-report/
 /admin/output/
 /.worktrees/
+__pycache__/
+*.pyc
