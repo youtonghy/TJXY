@@ -808,20 +808,27 @@ async fn assert_playback_delivery_contract(
     user_id: &str,
     episode_id: &str,
 ) -> PlaybackContractSnapshot {
-    let detail = json_response(
-        client
-            .get(format!(
-                "{}/Items/{episode_id}?userId={user_id}",
-                server.base_url
-            ))
-            .header("Authorization", token_header(token))
-            .send()
-            .await
-            .expect("episode detail request"),
+    let detail_response = client
+        .get(format!(
+            "{}/Items/{episode_id}?userId={user_id}",
+            server.base_url
+        ))
+        .header("Authorization", token_header(token))
+        .send()
+        .await
+        .expect("episode detail request");
+    let detail_status = detail_response.status();
+    let detail_body = detail_response
+        .text()
+        .await
+        .expect("read episode detail body");
+    assert_eq!(
+        detail_status,
         StatusCode::OK,
-        "read episode detail",
-    )
-    .await;
+        "read episode detail: {detail_body}\n{}",
+        server.logs()
+    );
+    let detail: Value = serde_json::from_str(&detail_body).expect("parse episode detail JSON");
     assert_eq!(detail["Id"], episode_id);
     assert_eq!(detail["Type"], "Episode");
 

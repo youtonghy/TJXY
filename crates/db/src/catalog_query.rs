@@ -2465,13 +2465,16 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                     Alias::new(alias),
                 );
             }
-            for column in ["original_title", "community_rating", "index_number"] {
-                query.expr_as(Expr::val(Option::<String>::None), Alias::new(column));
-            }
             query.expr_as(
-                Expr::col((Alias::new("publication_item"), Alias::new("runtime_ticks"))),
-                Alias::new("runtime_ticks"),
+                Expr::val(Option::<String>::None),
+                Alias::new("original_title"),
             );
+            query.expr_as(
+                Expr::val(Option::<f64>::None),
+                Alias::new("community_rating"),
+            );
+            query.expr_as(Expr::val(Option::<i32>::None), Alias::new("index_number"));
+            query.expr_as(Expr::val(Option::<i64>::None), Alias::new("runtime_ticks"));
         }
     }
     for column in [
