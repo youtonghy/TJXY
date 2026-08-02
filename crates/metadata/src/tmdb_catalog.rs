@@ -530,6 +530,50 @@ impl TmdbCatalogClient {
             .map(|items| items.into_iter().map(|item| item.id).collect())
     }
 
+    /// Returns one validated page of top-rated Series IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn top_rated_series_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.top_rated_series(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
+    /// Returns one validated page of top-rated Movie IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn top_rated_movie_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.top_rated_movies(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
+    /// Returns one validated page of now-playing Movie IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn now_playing_movie_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.now_playing_movies(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
+    /// Returns one validated page of upcoming Movie IDs for manifest generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid page numbers or response data.
+    pub async fn upcoming_movie_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+        self.upcoming_movies(page)
+            .await
+            .map(|items| items.into_iter().map(|item| item.id).collect())
+    }
+
     /// Returns one lightweight page of ranked Movies without detail requests.
     ///
     /// # Errors
@@ -552,6 +596,54 @@ impl TmdbCatalogClient {
         page: u16,
     ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
         self.popular_items("/tv/popular", page, false).await
+    }
+
+    /// Returns one lightweight page of top-rated Series without season requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn top_rated_series(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/tv/top_rated", page, false).await
+    }
+
+    /// Returns one lightweight page of top-rated Movies without detail requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn top_rated_movies(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/movie/top_rated", page, true).await
+    }
+
+    /// Returns one lightweight page of now-playing Movies without detail requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn now_playing_movies(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/movie/now_playing", page, true).await
+    }
+
+    /// Returns one lightweight page of upcoming Movies without detail requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid pages, transport failures, or invalid data.
+    pub async fn upcoming_movies(
+        &self,
+        page: u16,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        self.popular_items("/movie/upcoming", page, true).await
     }
 
     fn root_query(&self, kind: &str) -> Vec<(String, String)> {

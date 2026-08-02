@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-misused-promises */
 import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
-import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play, Star } from 'lucide-react';
+import { Rating } from '@heroui-pro/react/rating';
+import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useClientAuth } from '../auth/ClientAuthContext';
@@ -216,14 +217,12 @@ function ItemBreadcrumb({
 
 function MetadataCard({ item }: { item: MediaItem }) {
   const facts = [
-    item.CommunityRating !== undefined
-      ? { icon: Star, label: 'Rating', value: `${item.CommunityRating.toFixed(1)}${item.VoteCount ? ` · ${item.VoteCount.toLocaleString()} votes` : ''}` }
-      : undefined,
     item.RunTimeTicks ? { icon: Clock3, label: 'Runtime', value: formatRuntime(item.RunTimeTicks) } : undefined,
     item.PremiereDate ? { icon: CalendarDays, label: 'Premiere', value: formatDate(item.PremiereDate) } : undefined,
     item.EndDate ? { icon: CalendarDays, label: 'Ended', value: formatDate(item.EndDate) } : undefined,
     item.OriginalLanguage ? { icon: Info, label: 'Original language', value: item.OriginalLanguage.toUpperCase() } : undefined,
-  ].filter((fact): fact is { icon: typeof Star; label: string; value: string } => Boolean(fact));
+  ].filter((fact): fact is { icon: typeof Clock3; label: string; value: string } => Boolean(fact));
+  const rating = item.CommunityRating;
 
   return (
     <Card>
@@ -232,6 +231,23 @@ function MetadataCard({ item }: { item: MediaItem }) {
         <Card.Description>Key information from the catalog record.</Card.Description>
       </Card.Header>
       <Card.Content className="grid gap-4 sm:grid-cols-2">
+        {rating !== undefined ? (
+          <div className="min-w-0">
+            <p className="text-xs text-muted">Rating</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <Rating
+                isReadOnly
+                aria-label={`${rating.toFixed(1)} out of 10${item.VoteCount ? ` from ${item.VoteCount.toLocaleString()} votes` : ''}`}
+                size="sm"
+                value={rating / 2}
+              >
+                {[1, 2, 3, 4, 5].map((value) => <Rating.Item key={value} value={value} />)}
+              </Rating>
+              <span className="text-sm font-medium tabular-nums">{rating.toFixed(1)}</span>
+              {item.VoteCount ? <span className="text-xs text-muted">{item.VoteCount.toLocaleString()} votes</span> : null}
+            </div>
+          </div>
+        ) : null}
         {facts.map(({ icon: Icon, label, value }) => (
           <div className="flex items-start gap-3" key={label}>
             <Icon className="mt-0.5 size-4 shrink-0 text-accent" />
@@ -241,7 +257,7 @@ function MetadataCard({ item }: { item: MediaItem }) {
             </div>
           </div>
         ))}
-        {!facts.length && <p className="text-sm text-muted">No additional details are available.</p>}
+        {rating === undefined && !facts.length && <p className="text-sm text-muted">No additional details are available.</p>}
       </Card.Content>
     </Card>
   );

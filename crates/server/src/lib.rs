@@ -394,6 +394,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/socket", get(socket::connect))
         .merge(media_collection_routes())
+        .route("/Items/Filters", get(browse::item_filters))
         .route("/Items/Latest", get(browse::latest_items))
         .route("/UserItems/Resume", get(browse::resume_items))
         .route("/Shows/NextUp", get(browse::next_up_items))

@@ -1,0 +1,22 @@
+- generic [ref=f3e3]:
+  - navigation "TJXY navigation" [ref=f3e4]:
+    - generic [ref=f3e5]:
+      - link "TJXY home" [ref=f3e7] [cursor=pointer]:
+        - /url: /app/
+        - generic [ref=f3e9]: TJXY
+      - generic [ref=f3e10]:
+        - link "Home" [ref=f3e11] [cursor=pointer]:
+          - /url: /app/
+        - link "Libraries" [ref=f3e16] [cursor=pointer]:
+          - /url: /app/libraries
+        - link "Search" [ref=f3e20] [cursor=pointer]:
+          - /url: /app/search
+        - link "Rankings" [ref=f3e25] [cursor=pointer]:
+          - /url: /app/rankings
+      - generic [ref=f3e33]:
+        - button [ref=f3e34]:
+          - button "Switch to dark theme" [ref=f3e35] [cursor=pointer]
+        - button "Open account menu for admin" [ref=f3e36] [cursor=pointer]:
+          - generic [ref=f3e37]: A
+          - generic [ref=f3e39]: admin
+  - main [ref=f3e40]

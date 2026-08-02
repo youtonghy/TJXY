@@ -102,7 +102,9 @@ it('renders rich series metadata and loads ordered episodes for the selected sea
   renderItem('series-1');
 
   expect(await screen.findByRole('heading', { name: 'Chernobyl' })).toBeInTheDocument();
-  expect(screen.getByText('8.7 · 7,000 votes')).toBeInTheDocument();
+  expect(screen.getByRole('radiogroup', { name: '8.7 out of 10 from 7,000 votes' })).toBeVisible();
+  expect(screen.getByText('8.7')).toBeVisible();
+  expect(screen.getByText('7,000 votes')).toBeVisible();
   expect(screen.getByText('1h 0m')).toBeInTheDocument();
   expect(screen.getByText('TV-MA')).toBeInTheDocument();
   expect(screen.getByText('United States')).toBeInTheDocument();

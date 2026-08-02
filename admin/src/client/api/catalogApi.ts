@@ -38,14 +38,35 @@ export interface MediaItem {
 export interface ItemPage { Items: MediaItem[]; TotalRecordCount: number; StartIndex: number; }
 export interface Library { Id: string; Name: string; CollectionType?: string; ImageTags?: Record<string, string>; }
 export interface LatestItemsOptions { limit?: number; parentId?: string; includeItemTypes?: string; }
+export interface GetItemsOptions {
+  genre?: string;
+  includeItemTypes?: string;
+  limit?: number;
+  parentId?: string;
+  productionYear?: number;
+  recursive?: boolean;
+  sortBy?: 'DateCreated' | 'ProductionYear' | 'Runtime' | 'SortName';
+  sortOrder?: 'Ascending' | 'Descending';
+  startIndex?: number;
+}
+export interface LibraryFilterFacets { Genres: string[]; ProductionYears: number[] }
 export type SearchHint = MediaItem;
 
 export async function getLibraries(): Promise<Library[]> { const value = await clientRequest<{ Items?: unknown }>('/UserViews'); return Array.isArray(value.Items) ? value.Items.filter(isRecord).map((item) => item as unknown as Library) : []; }
-export async function getItems(params: { parentId?: string; startIndex?: number; limit?: number; includeItemTypes?: string } = {}): Promise<ItemPage> {
+export async function getItems(params: GetItemsOptions = {}): Promise<ItemPage> {
   const query = new URLSearchParams({ limit: String(params.limit ?? 24), startIndex: String(params.startIndex ?? 0) });
   if (params.parentId) query.set('parentId', params.parentId);
   if (params.includeItemTypes) query.set('includeItemTypes', params.includeItemTypes);
+  if (params.genre) query.set('genre', params.genre);
+  if (params.productionYear) query.set('productionYear', String(params.productionYear));
+  if (params.recursive !== undefined) query.set('recursive', String(params.recursive));
+  if (params.sortBy) query.set('sortBy', params.sortBy);
+  if (params.sortOrder) query.set('sortOrder', params.sortOrder);
   return clientRequest<ItemPage>(`/Items?${query}`);
+}
+export function getLibraryFilterFacets(parentId: string): Promise<LibraryFilterFacets> {
+  const query = new URLSearchParams({ parentId });
+  return clientRequest<LibraryFilterFacets>(`/Items/Filters?${query}`);
 }
 export async function getLatest(options: number | LatestItemsOptions = 18): Promise<MediaItem[]> {
   const normalized = typeof options === 'number' ? { limit: options } : options;

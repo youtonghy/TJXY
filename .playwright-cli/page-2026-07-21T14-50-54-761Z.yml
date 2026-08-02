@@ -1,0 +1,24 @@
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - generic [ref=e12]:
+      - heading "TJXY Admin" [level=1] [ref=e13]
+      - paragraph [ref=e14]: Administrator access
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: Username *
+        - generic [ref=e20]:
+          - textbox "Username" [ref=e21]: Admin
+          - group:
+            - generic: Username *
+        - paragraph [ref=e22]
+      - generic [ref=e23]:
+        - generic [ref=e33]: Password *
+        - generic [ref=e24]:
+          - textbox "Password" [ref=e25]: wrong-password
+          - button "Show password" [ref=e27] [cursor=pointer]
+          - group:
+            - generic: Password *
+        - paragraph [ref=e30]
+      - button "Sign in" [ref=e31] [cursor=pointer]
+  - alert [ref=e35]:
+    - generic [ref=e36]: Your session is not valid.

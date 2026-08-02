@@ -1,7 +1,9 @@
-import { Alert, Button, Card, Skeleton, Tabs } from '@heroui/react';
-import { CirclePlay, Film, RefreshCw, Tv, UsersRound } from 'lucide-react';
+import { Alert, Button, Skeleton, Tabs } from '@heroui/react';
+import { KPI } from '@heroui-pro/react/kpi';
+import { KPIGroup } from '@heroui-pro/react/kpi-group';
+import { CirclePlay, Eye, LibraryBig, RefreshCw, UsersRound } from 'lucide-react';
 import { useLogoutIfAccessDenied } from 'ra-core';
-import { useCallback, useEffect, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { PageHeader } from '../ui/PageHeader';
 import { PlaybackTrendChart, TopItemsChart } from './DashboardCharts';
@@ -160,25 +162,37 @@ function RangeTabs({ range, onRangeChange }: { range: DashboardRange; onRangeCha
 
 function KpiGrid({ snapshot }: { snapshot: DashboardSnapshot }) {
   const summary = snapshot.summary;
-  const items: KpiProps[] = [
-    { label: 'Users', value: summary.usersTotal, detail: `${String(summary.usersDisabled)} disabled`, icon: UsersRound },
-    { label: 'Movies', value: summary.movies, detail: `${String(summary.catalogTotal)} total catalog records`, icon: Film },
-    { label: 'TV series', value: summary.series, detail: `${String(summary.episodes)} episodes`, icon: Tv },
-    { label: 'Playback starts', value: summary.playCount, detail: `${String(summary.uniqueViewers)} viewers · ${String(summary.currentlyWatching)} live`, icon: CirclePlay },
-  ];
-  return <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{items.map((item) => <KpiCard key={item.label} {...item} />)}</div>;
+  return (
+    <div aria-label="Server KPIs" className="grid gap-3 lg:grid-cols-2" role="group">
+      <KPIGroup aria-label="Accounts and library">
+        <DashboardKpi detail={`${summary.usersDisabled.toLocaleString()} disabled`} icon={UsersRound} label="Users" value={summary.usersTotal} />
+        <KPIGroup.Separator />
+        <DashboardKpi
+          detail={`${summary.movies.toLocaleString()} movies · ${summary.series.toLocaleString()} series · ${summary.episodes.toLocaleString()} episodes`}
+          icon={LibraryBig}
+          label="Catalog records"
+          value={summary.catalogTotal}
+        />
+      </KPIGroup>
+      <KPIGroup aria-label="Selected period activity">
+        <DashboardKpi detail="In the selected period" icon={CirclePlay} label="Playback starts" value={summary.playCount} />
+        <KPIGroup.Separator />
+        <DashboardKpi detail="Distinct accounts with playback" icon={Eye} label="Unique viewers" value={summary.uniqueViewers} />
+      </KPIGroup>
+    </div>
+  );
 }
 
-interface KpiProps { label: string; value: number; detail: string; icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }> }
-
-function KpiCard({ label, value, detail, icon: Icon }: KpiProps) {
+function DashboardKpi({ detail, icon: Icon, label, value }: { detail: string; icon: typeof UsersRound; label: string; value: number }) {
   return (
-    <Card>
-      <Card.Content className="flex-row items-start justify-between gap-4 p-5">
-        <div><p className="text-sm font-medium text-muted">{label}</p><p className="mt-2 text-3xl font-semibold tabular-nums text-foreground">{value.toLocaleString()}</p><p className="mt-1 text-xs text-muted">{detail}</p></div>
-        <span className="grid size-10 shrink-0 place-items-center rounded-md bg-accent/12 text-accent"><Icon aria-hidden={true} className="size-5" /></span>
-      </Card.Content>
-    </Card>
+    <KPI>
+      <KPI.Header>
+        <KPI.Icon className="bg-accent/10 text-accent"><Icon aria-hidden="true" className="size-4" /></KPI.Icon>
+        <KPI.Title>{label}</KPI.Title>
+      </KPI.Header>
+      <KPI.Content><KPI.Value maximumFractionDigits={0} value={value} /></KPI.Content>
+      <KPI.Footer className="text-xs text-muted">{detail}</KPI.Footer>
+    </KPI>
   );
 }
 

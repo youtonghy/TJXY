@@ -1,4 +1,4 @@
-import { getItems, getLatest, getPopular, getResumeItems, searchHints } from './catalogApi';
+import { getItems, getLatest, getLibraryFilterFacets, getPopular, getResumeItems, searchHints } from './catalogApi';
 
 const client = vi.hoisted(() => ({ clientRequest: vi.fn() }));
 vi.mock('./clientApi', () => client);
@@ -9,24 +9,39 @@ beforeEach(() => {
 });
 
 it('uses the server camelCase query contract for catalog reads', async () => {
-  await getItems({ parentId: 'library-1', startIndex: 24, limit: 12, includeItemTypes: 'Movie' });
+  await getItems({
+    genre: 'Drama',
+    includeItemTypes: 'Movie',
+    limit: 12,
+    parentId: 'library-1',
+    productionYear: 2016,
+    recursive: true,
+    sortBy: 'ProductionYear',
+    sortOrder: 'Descending',
+    startIndex: 24,
+  });
+  await getLibraryFilterFacets('library / films');
   await getLatest({ limit: 12, parentId: 'library / films', includeItemTypes: 'Movie' });
   await getResumeItems(12);
   await searchHints('arrival');
 
   expect(client.clientRequest).toHaveBeenNthCalledWith(
     1,
-    '/Items?limit=12&startIndex=24&parentId=library-1&includeItemTypes=Movie',
+    '/Items?limit=12&startIndex=24&parentId=library-1&includeItemTypes=Movie&genre=Drama&productionYear=2016&recursive=true&sortBy=ProductionYear&sortOrder=Descending',
   );
   expect(client.clientRequest).toHaveBeenNthCalledWith(
     2,
-    '/Items/Latest?limit=12&parentId=library+%2F+films&includeItemTypes=Movie',
+    '/Items/Filters?parentId=library+%2F+films',
   );
   expect(client.clientRequest).toHaveBeenNthCalledWith(
     3,
+    '/Items/Latest?limit=12&parentId=library+%2F+films&includeItemTypes=Movie',
+  );
+  expect(client.clientRequest).toHaveBeenNthCalledWith(
+    4,
     '/UserItems/Resume?mediaTypes=Video&limit=12&enableUserData=true',
   );
-  expect(client.clientRequest).toHaveBeenNthCalledWith(4, '/Search/Hints?searchTerm=arrival&limit=24');
+  expect(client.clientRequest).toHaveBeenNthCalledWith(5, '/Search/Hints?searchTerm=arrival&limit=24');
 });
 
 it('hydrates popular summaries with full catalog records for poster metadata', async () => {

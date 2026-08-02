@@ -1,0 +1,2 @@
+[      50ms] [WARNING] <Router basename="/admin"> is not able to match the URL "/" because it does not start with the basename, so the <Router> won't render anything. @ http://127.0.0.1:18096/admin/assets/react-admin-C-Ze05ux.js:0
+[      83ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:18096/favicon.ico:0

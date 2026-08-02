@@ -326,8 +326,10 @@ those shared entities; active Emby import references block deletion with `409`.
 The current browse slice remains SQL-authoritative. Every authenticated enabled
 user sees every enabled library because per-library grants are not yet modeled.
 `/Items` supports root views, optional parent scope, case-insensitive literal
-`searchTerm`, item-type filtering with or without a parent, bounded pagination,
-and explicit `SortName`, `DateCreated`, `ProductionYear`, or `Runtime` ordering.
+`searchTerm`, item-type filtering with or without a parent, exact `genre` and
+`productionYear` filters, bounded pagination, and explicit `SortName`,
+`DateCreated`, `ProductionYear`, or `Runtime` ordering. Filters apply before the
+reported total and page offset, and participate in the complete cache descriptor.
 `recursive=true` walks canonical or active-publication descendants with cycle
 protection. A library-parent query with an item-type filter defaults to recursive
 only when `recursive` is absent, matching Jellyfin; an explicit false value wins.

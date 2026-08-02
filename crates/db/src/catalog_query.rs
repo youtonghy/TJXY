@@ -69,6 +69,26 @@ pub struct CatalogItemsQuery {
     recursive: bool,
     recursive_for_library: bool,
     sorts: Vec<CatalogSort>,
+    genre: Option<String>,
+    production_year: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogFilterFacets {
+    genres: Vec<String>,
+    production_years: Vec<i32>,
+}
+
+impl CatalogFilterFacets {
+    #[must_use]
+    pub fn genres(&self) -> &[String] {
+        &self.genres
+    }
+
+    #[must_use]
+    pub fn production_years(&self) -> &[i32] {
+        &self.production_years
+    }
 }
 
 impl CatalogItemsQuery {
@@ -81,6 +101,8 @@ impl CatalogItemsQuery {
             recursive: false,
             recursive_for_library: false,
             sorts: Vec::new(),
+            genre: None,
+            production_year: None,
         }
     }
 
@@ -115,6 +137,18 @@ impl CatalogItemsQuery {
     }
 
     #[must_use]
+    pub fn with_genre(mut self, genre: Option<String>) -> Self {
+        self.genre = genre;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_production_year(mut self, production_year: Option<i32>) -> Self {
+        self.production_year = production_year;
+        self
+    }
+
+    #[must_use]
     pub const fn scope(&self) -> CatalogItemsScope {
         self.scope
     }
@@ -142,6 +176,16 @@ impl CatalogItemsQuery {
     #[must_use]
     pub fn sorts(&self) -> &[CatalogSort] {
         &self.sorts
+    }
+
+    #[must_use]
+    pub fn genre(&self) -> Option<&str> {
+        self.genre.as_deref()
+    }
+
+    #[must_use]
+    pub const fn production_year(&self) -> Option<i32> {
+        self.production_year
     }
 }
 
@@ -750,6 +794,73 @@ impl<'connection> CatalogQueryRepository<'connection> {
         Self { database }
     }
 
+    /// Returns complete genre and production-year choices for one visible library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when either distinct query fails.
+    pub async fn filter_facets(
+        &self,
+        user_id: UserId,
+        library_id: Uuid,
+    ) -> Result<CatalogFilterFacets, CatalogQueryError> {
+        const FILTER_TYPES: [&str; 4] = ["Movie", "Series", "Episode", "Audio"];
+        let ci = Alias::new("ci");
+        let mut year_query = home_item_query(user_id, &FILTER_TYPES, Some(library_id));
+        year_query
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("production_year"))),
+                Alias::new("production_year"),
+            )
+            .and_where(Expr::col((ci.clone(), Alias::new("production_year"))).is_not_null())
+            .distinct()
+            .order_by((ci.clone(), Alias::new("production_year")), Order::Desc);
+
+        let link = Alias::new("facet_item_genre");
+        let genre = Alias::new("facet_genre");
+        let mut genre_query = home_item_query(user_id, &FILTER_TYPES, Some(library_id));
+        genre_query
+            .expr_as(
+                Expr::col((genre.clone(), Alias::new("name"))),
+                Alias::new("genre"),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("item_genres"),
+                link.clone(),
+                Expr::col((link.clone(), Alias::new("catalog_item_id")))
+                    .equals((ci, Alias::new("id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("genres"),
+                genre.clone(),
+                Expr::col((genre.clone(), Alias::new("id"))).equals((link, Alias::new("genre_id"))),
+            )
+            .distinct()
+            .order_by((genre, Alias::new("name")), Order::Asc);
+
+        let backend = self.database.get_database_backend();
+        let production_years = self
+            .database
+            .query_all(backend.build(&year_query))
+            .await?
+            .iter()
+            .map(|row| row.try_get("", "production_year"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let genres = self
+            .database
+            .query_all(backend.build(&genre_query))
+            .await?
+            .iter()
+            .map(|row| row.try_get("", "genre"))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CatalogFilterFacets {
+            genres,
+            production_years,
+        })
+    }
+
     /// Returns every enabled library in database-independent order.
     ///
     /// # Errors
@@ -979,6 +1090,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         if let Some(search_term) = query.search_term.as_deref() {
             apply_search_term(&mut statement, source, search_term);
         }
+        apply_catalog_filters(&mut statement, source, &query);
         self.execute_item_page(
             statement,
             source,
@@ -1633,6 +1745,34 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .as_ref()
             .map(asset_from_row)
             .transpose()
+    }
+}
+
+fn apply_catalog_filters(
+    statement: &mut SelectStatement,
+    source: ItemQuerySource,
+    query: &CatalogItemsQuery,
+) {
+    if let Some(year) = query.production_year() {
+        statement.and_where(source.field_expr(CatalogSortField::ProductionYear).eq(year));
+    }
+    if let Some(genre) = query.genre() {
+        let link = Alias::new("filter_item_genre");
+        let entity = Alias::new("filter_genre");
+        let genre_match = Query::select()
+            .expr(Expr::val(1))
+            .from_as(Alias::new("item_genres"), link.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("genres"),
+                entity.clone(),
+                Expr::col((entity.clone(), Alias::new("id")))
+                    .equals((link.clone(), Alias::new("genre_id"))),
+            )
+            .and_where(Expr::col((link, Alias::new("catalog_item_id"))).eq(source.id_expr()))
+            .and_where(Expr::col((entity, Alias::new("name"))).eq(genre))
+            .to_owned();
+        statement.and_where(Expr::exists(genre_match));
     }
 }
 

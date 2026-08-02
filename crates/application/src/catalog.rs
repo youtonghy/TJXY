@@ -10,8 +10,8 @@ use tjxy_cache::{
 };
 use tjxy_common::{CatalogItemId, UserId, WorkJobId};
 use tjxy_db::{
-    BrowseParent, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogItemsQuery,
-    CatalogItemsScope, CatalogPage, CatalogPageRequest, CatalogPublicationError,
+    BrowseParent, CatalogFilterFacets, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType,
+    CatalogItemsQuery, CatalogItemsScope, CatalogPage, CatalogPageRequest, CatalogPublicationError,
     CatalogPublicationRepository, CatalogQueryError, CatalogQueryRepository, CatalogSortField,
     CatalogSortOrder, LazyCatalogWorkTarget, LibraryViewRecord, PlaystateRepository,
     PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError, WorkJobRepository,
@@ -322,6 +322,25 @@ impl CatalogQueryService {
                 Ok(views)
             }
         }
+    }
+
+    /// Returns complete filter choices for one enabled library.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for impersonation or propagates a catalog
+    /// query failure.
+    pub async fn filter_facets(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        library_id: Uuid,
+    ) -> Result<CatalogFilterFacets, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
+        CatalogQueryRepository::new(&self.database)
+            .filter_facets(principal, library_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Fills the default home cache entries for the supplied users.
@@ -1265,6 +1284,10 @@ fn items_cache_descriptor(query: &CatalogItemsQuery) -> String {
         .collect::<Vec<_>>()
         .join(",");
     let search = query.search_term().unwrap_or_default();
+    let genre = query.genre().unwrap_or_default();
+    let production_year = query
+        .production_year()
+        .map_or_else(String::new, |year| year.to_string());
     let recursive = query.recursive()
         || (query.recursive_for_library()
             && matches!(
@@ -1272,9 +1295,10 @@ fn items_cache_descriptor(query: &CatalogItemsQuery) -> String {
                 CatalogItemsScope::Parent(BrowseParent::Library(_))
             ));
     format!(
-        "query-items/v1;scope={scope};recursive={};search-length={};search={search};start={};limit={};types={};sorts={sorts}",
+        "query-items/v2;scope={scope};recursive={};search-length={};search={search};genre-length={};genre={genre};production-year={production_year};start={};limit={};types={};sorts={sorts}",
         recursive,
         search.len(),
+        genre.len(),
         page.start_index(),
         page.limit(),
         item_types.join(",")

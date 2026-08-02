@@ -1,4 +1,5 @@
-import { Card, Chip, Pagination, ProgressBar, Table, Tabs } from '@heroui/react';
+import { Card, Chip, Pagination, ProgressBar, Table } from '@heroui/react';
+import { Segment } from '@heroui-pro/react/segment';
 
 import type {
   DashboardPage,
@@ -80,30 +81,27 @@ export function HistorySection({
         <Card.Description>Successful logins and playback attempts across the server.</Card.Description>
       </Card.Header>
       <Card.Content>
-        <Tabs
+        <Segment
+          aria-label="Activity record type"
           selectedKey={selectedTab}
           onSelectionChange={(key) => {
             if (key === 'logins' || key === 'watching') onTabChange(key);
           }}
         >
-          <Tabs.ListContainer>
-            <Tabs.List aria-label="Activity record type">
-              <Tabs.Tab id="logins">Login records<Tabs.Indicator /></Tabs.Tab>
-              <Tabs.Tab id="watching">Watch history<Tabs.Indicator /></Tabs.Tab>
-            </Tabs.List>
-          </Tabs.ListContainer>
-          <Tabs.Panel className="pt-4" id={selectedTab} key={selectedTab}>
-            {loading ? <TableLoading /> : <HistoryTable result={result} />}
-            {result !== null && result.page.totalRecordCount > 0 && (
-              <HistoryPagination
-                pageIndex={pageIndex}
-                pageSize={pageSize}
-                total={result.page.totalRecordCount}
-                onPageChange={onPageChange}
-              />
-            )}
-          </Tabs.Panel>
-        </Tabs>
+          <Segment.Item id="logins">Login records</Segment.Item>
+          <Segment.Item id="watching">Watch history</Segment.Item>
+        </Segment>
+        <div className="pt-4" key={selectedTab}>
+          {loading ? <TableLoading /> : <HistoryTable result={result} />}
+          {result !== null && result.page.totalRecordCount > 0 && (
+            <HistoryPagination
+              pageIndex={pageIndex}
+              pageSize={pageSize}
+              total={result.page.totalRecordCount}
+              onPageChange={onPageChange}
+            />
+          )}
+        </div>
       </Card.Content>
     </Card>
   );

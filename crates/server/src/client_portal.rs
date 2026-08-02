@@ -9,7 +9,7 @@ use axum::{
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
-    sea_query::{Alias, Expr, JoinType, Order, Query},
+    sea_query::{Alias, Condition, Expr, JoinType, Order, Query},
 };
 use serde::Serialize;
 use tjxy_db::{DashboardRepository, DashboardTopItem};
@@ -67,6 +67,7 @@ impl ClientPortalService {
             }
         }
         let genres = self.user_genres(user_id, from, now).await?;
+        let timeline = self.user_timeline(user_id, from, now, &sessions).await?;
         Ok(UserInsightsDto {
             watched_ticks,
             play_count: sessions.len() as u64,
@@ -81,6 +82,7 @@ impl ClientPortalService {
                 .collect(),
             genres,
             recent,
+            timeline,
         })
     }
 
@@ -92,6 +94,8 @@ impl ClientPortalService {
     ) -> Result<Vec<UserSessionRow>, DbErr> {
         let sessions = Alias::new("ps");
         let items = Alias::new("ci");
+        let parent = Alias::new("parent_item");
+        let grandparent = Alias::new("grandparent_item");
         let mut query = Query::select();
         query
             .from_as(Alias::new("playback_sessions"), sessions.clone())
@@ -101,6 +105,20 @@ impl ClientPortalService {
                 items.clone(),
                 Expr::col((items.clone(), Alias::new("id")))
                     .equals((sessions.clone(), Alias::new("catalog_item_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("catalog_items"),
+                parent.clone(),
+                Expr::col((parent.clone(), Alias::new("id")))
+                    .equals((items.clone(), Alias::new("parent_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("catalog_items"),
+                grandparent.clone(),
+                Expr::col((grandparent.clone(), Alias::new("id")))
+                    .equals((parent.clone(), Alias::new("parent_id"))),
             )
             .and_where(Expr::col((sessions.clone(), Alias::new("user_id"))).eq(user_id))
             .and_where(Expr::col((sessions.clone(), Alias::new("started_at"))).gte(from))
@@ -117,6 +135,18 @@ impl ClientPortalService {
             .expr_as(
                 Expr::col((sessions.clone(), Alias::new("started_at"))),
                 Alias::new("started_at"),
+            )
+            .expr_as(
+                Expr::col((sessions.clone(), Alias::new("stopped_at"))),
+                Alias::new("stopped_at"),
+            )
+            .expr_as(
+                Expr::cust("CASE WHEN ci.item_type = 'Series' THEN ci.id WHEN parent_item.item_type = 'Series' THEN parent_item.id WHEN grandparent_item.item_type = 'Series' THEN grandparent_item.id ELSE NULL END"),
+                Alias::new("series_id"),
+            )
+            .expr_as(
+                Expr::cust("CASE WHEN ci.item_type = 'Series' THEN ci.name WHEN parent_item.item_type = 'Series' THEN parent_item.name WHEN grandparent_item.item_type = 'Series' THEN grandparent_item.name ELSE NULL END"),
+                Alias::new("series_name"),
             );
         for (column, alias) in [
             ("name", "name"),
@@ -134,6 +164,194 @@ impl ClientPortalService {
             .iter()
             .map(UserSessionRow::from_row)
             .collect()
+    }
+
+    async fn user_timeline(
+        &self,
+        user_id: Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        sessions: &[UserSessionRow],
+    ) -> Result<Vec<InsightTimelineEventDto>, DbErr> {
+        let mut events = sessions
+            .iter()
+            .filter(|session| session.item_type == "Movie" && session.stopped_at.is_some())
+            .map(|session| InsightTimelineEventDto {
+                at: session.started_at,
+                item_id: session.item_id,
+                kind: InsightTimelineKind::MovieWatched,
+                name: session.name.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut started_series = self.series_started_before(user_id, from).await?;
+        let mut chronological = sessions.iter().collect::<Vec<_>>();
+        chronological.sort_by_key(|session| session.started_at);
+        for session in chronological {
+            let (Some(series_id), Some(series_name)) =
+                (session.series_id, session.series_name.as_ref())
+            else {
+                continue;
+            };
+            if started_series.insert(series_id) {
+                events.push(InsightTimelineEventDto {
+                    at: session.started_at,
+                    item_id: series_id,
+                    kind: InsightTimelineKind::SeriesStarted,
+                    name: series_name.clone(),
+                });
+            }
+        }
+        events.extend(self.completed_series(user_id, from, to).await?);
+        events.sort_by(|left, right| {
+            right
+                .at
+                .cmp(&left.at)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        events.truncate(12);
+        Ok(events)
+    }
+
+    async fn series_started_before(
+        &self,
+        user_id: Uuid,
+        before: DateTime<Utc>,
+    ) -> Result<HashSet<Uuid>, DbErr> {
+        let sessions = Alias::new("ps");
+        let item = Alias::new("ci");
+        let parent = Alias::new("parent_item");
+        let grandparent = Alias::new("grandparent_item");
+        let series_expr = "CASE WHEN ci.item_type = 'Series' THEN ci.id WHEN parent_item.item_type = 'Series' THEN parent_item.id WHEN grandparent_item.item_type = 'Series' THEN grandparent_item.id ELSE NULL END";
+        let query = Query::select()
+            .expr_as(Expr::cust(series_expr), Alias::new("series_id"))
+            .from_as(Alias::new("playback_sessions"), sessions.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                item.clone(),
+                Expr::col((item.clone(), Alias::new("id")))
+                    .equals((sessions.clone(), Alias::new("catalog_item_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("catalog_items"),
+                parent.clone(),
+                Expr::col((parent.clone(), Alias::new("id")))
+                    .equals((item, Alias::new("parent_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("catalog_items"),
+                grandparent.clone(),
+                Expr::col((grandparent, Alias::new("id")))
+                    .equals((parent, Alias::new("parent_id"))),
+            )
+            .and_where(Expr::col((sessions.clone(), Alias::new("user_id"))).eq(user_id))
+            .and_where(Expr::col((sessions, Alias::new("started_at"))).lt(before))
+            .and_where(Expr::cust(format!("({series_expr}) IS NOT NULL")))
+            .distinct()
+            .to_owned();
+        Ok(self
+            .database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .filter_map(|row| row.try_get("", "series_id").ok())
+            .collect())
+    }
+
+    async fn completed_series(
+        &self,
+        user_id: Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<InsightTimelineEventDto>, DbErr> {
+        let episode = Alias::new("episode");
+        let parent = Alias::new("episode_parent");
+        let series = Alias::new("series");
+        let user_data = Alias::new("ud");
+        let series_join = Condition::any()
+            .add(
+                Condition::all()
+                    .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Series"))
+                    .add(
+                        Expr::col((series.clone(), Alias::new("id")))
+                            .equals((parent.clone(), Alias::new("id"))),
+                    ),
+            )
+            .add(
+                Condition::all()
+                    .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Season"))
+                    .add(
+                        Expr::col((series.clone(), Alias::new("id")))
+                            .equals((parent.clone(), Alias::new("parent_id"))),
+                    ),
+            );
+        let query = Query::select()
+            .expr_as(
+                Expr::col((series.clone(), Alias::new("id"))),
+                Alias::new("series_id"),
+            )
+            .expr_as(
+                Expr::col((series.clone(), Alias::new("name"))),
+                Alias::new("series_name"),
+            )
+            .expr_as(
+                Expr::col((user_data.clone(), Alias::new("updated_at"))).max(),
+                Alias::new("completed_at"),
+            )
+            .from_as(Alias::new("catalog_items"), episode.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                parent.clone(),
+                Expr::col((parent.clone(), Alias::new("id")))
+                    .equals((episode.clone(), Alias::new("parent_id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                series.clone(),
+                series_join,
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("user_data"),
+                user_data.clone(),
+                Condition::all()
+                    .add(
+                        Expr::col((user_data.clone(), Alias::new("catalog_item_id")))
+                            .equals((episode.clone(), Alias::new("id"))),
+                    )
+                    .add(Expr::col((user_data.clone(), Alias::new("user_id"))).eq(user_id)),
+            )
+            .and_where(Expr::col((episode, Alias::new("item_type"))).eq("Episode"))
+            .group_by_col((series.clone(), Alias::new("id")))
+            .group_by_col((series, Alias::new("name")))
+            .and_having(Expr::cust(
+                "COUNT(*) = SUM(CASE WHEN ud.is_played THEN 1 ELSE 0 END)",
+            ))
+            .to_owned();
+        let events = self
+            .database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .filter_map(|row| {
+                let at: DateTime<Utc> = row.try_get("", "completed_at").ok()?;
+                if at < from || at >= to {
+                    return None;
+                }
+                Some(InsightTimelineEventDto {
+                    at,
+                    item_id: row.try_get("", "series_id").ok()?,
+                    kind: InsightTimelineKind::SeriesCompleted,
+                    name: row.try_get("", "series_name").ok()?,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(events)
     }
 
     async fn user_genres(
@@ -499,6 +717,9 @@ struct UserSessionRow {
     production_year: Option<i32>,
     watched_ticks: i64,
     started_at: DateTime<Utc>,
+    stopped_at: Option<DateTime<Utc>>,
+    series_id: Option<Uuid>,
+    series_name: Option<String>,
 }
 
 impl UserSessionRow {
@@ -510,6 +731,9 @@ impl UserSessionRow {
             production_year: row.try_get("", "production_year")?,
             watched_ticks: row.try_get("", "watched_ticks")?,
             started_at: row.try_get("", "started_at")?,
+            stopped_at: row.try_get("", "stopped_at")?,
+            series_id: row.try_get("", "series_id")?,
+            series_name: row.try_get("", "series_name")?,
         })
     }
 }
@@ -524,6 +748,23 @@ struct UserInsightsDto {
     daily: Vec<InsightDailyDto>,
     genres: Vec<InsightGenreDto>,
     recent: Vec<MediaItemDto>,
+    timeline: Vec<InsightTimelineEventDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct InsightTimelineEventDto {
+    at: DateTime<Utc>,
+    item_id: Uuid,
+    kind: InsightTimelineKind,
+    name: String,
+}
+
+#[derive(Serialize)]
+enum InsightTimelineKind {
+    MovieWatched,
+    SeriesCompleted,
+    SeriesStarted,
 }
 
 #[derive(Serialize)]

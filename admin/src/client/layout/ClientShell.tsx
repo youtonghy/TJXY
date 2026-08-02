@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unnecessary-condition */
-import { Avatar, Button, Drawer, Dropdown, Toolbar, Tooltip } from '@heroui/react';
-import { Home, Library, LogOut, Menu, Moon, Search, Sun, Trophy, UserRound } from 'lucide-react';
-import { useRef, useState, type ReactNode } from 'react';
-import { Link, NavLink, useNavigate } from 'react-router-dom';
+import { Avatar, Button, Dropdown, Tooltip } from '@heroui/react';
+import { Navbar } from '@heroui-pro/react/navbar';
+import { Home, Library, LogOut, Moon, Search, Sun, Trophy, UserRound } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../ui/BrandMark';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { useClientTheme } from './clientTheme';
@@ -17,52 +18,38 @@ const links = [
 export function ClientShell({ children }: { children: ReactNode }) {
   const { user, signOut } = useClientAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const { theme, toggleTheme } = useClientTheme();
   const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-20 border-b border-border bg-surface/95 backdrop-blur">
-        <Toolbar aria-label="TJXY navigation" className="mx-auto flex h-16 max-w-[96rem] items-center gap-2 border-0 bg-transparent px-4 shadow-none sm:px-6 lg:gap-5 lg:px-8">
-          <Drawer isOpen={open} onOpenChange={setOpen}>
-            <Drawer.Trigger
-              aria-label="Open navigation"
-              className="inline-flex size-10 items-center justify-center rounded-lg text-muted hover:bg-default hover:text-foreground lg:hidden"
-              ref={trigger}
+      <Navbar
+        aria-label="TJXY navigation"
+        className="border-b border-border bg-surface/95 backdrop-blur"
+        height="4rem"
+        isMenuOpen={open}
+        maxWidth="full"
+        navigate={(href) => { void navigate(href); }}
+        onMenuOpenChange={setOpen}
+        position="sticky"
+      >
+        <Navbar.Header className="max-w-[96rem] gap-2 px-4 sm:px-6 lg:gap-5 lg:px-8">
+          <Navbar.MenuToggle className="lg:hidden" srLabel="Open navigation" />
+          <Navbar.Brand>
+            <Link
+              aria-label="TJXY home"
+              className="flex items-center gap-2 rounded-md px-1 text-base font-semibold text-foreground"
+              to="/app/"
             >
-              <Menu aria-hidden="true" className="size-5" />
-            </Drawer.Trigger>
-            <Drawer.Backdrop variant="blur">
-              <Drawer.Content className="max-w-[20rem]" placement="left">
-                <Drawer.Dialog aria-label="Browse TJXY">
-                  <Drawer.Header className="border-b border-border">
-                    <div>
-                      <Drawer.Heading>Browse TJXY</Drawer.Heading>
-                      <p className="mt-1 text-xs text-muted">Your personal media library</p>
-                    </div>
-                    <Drawer.CloseTrigger aria-label="Close navigation" />
-                  </Drawer.Header>
-                  <Drawer.Body className="px-3 py-4">
-                    <nav aria-label="Mobile navigation">
-                      <ClientNavigation mobile onNavigate={() => { setOpen(false); }} />
-                    </nav>
-                  </Drawer.Body>
-                </Drawer.Dialog>
-              </Drawer.Content>
-            </Drawer.Backdrop>
-          </Drawer>
-          <Link
-            aria-label="TJXY home"
-            className="flex items-center gap-2 rounded-md px-1 text-base font-semibold text-foreground"
-            to="/app/"
-          >
-            <BrandMark className="size-8" priority />
-            <span>TJXY</span>
-          </Link>
-          <nav aria-label="Primary" className="hidden items-center gap-1 lg:flex">
-            <ClientNavigation />
-          </nav>
-          <div className="ml-auto flex items-center gap-1">
+              <BrandMark className="size-8" priority />
+              <span>TJXY</span>
+            </Link>
+          </Navbar.Brand>
+          <Navbar.Content className="hidden lg:flex">
+            <ClientNavigation pathname={pathname} />
+          </Navbar.Content>
+          <Navbar.Spacer />
+          <Navbar.Content>
             <Tooltip>
               <Tooltip.Trigger>
                 <Button
@@ -97,33 +84,37 @@ export function ClientShell({ children }: { children: ReactNode }) {
                 </Dropdown.Menu>
               </Dropdown.Popover>
             </Dropdown>
-          </div>
-        </Toolbar>
-      </header>
+          </Navbar.Content>
+        </Navbar.Header>
+        <Navbar.Menu aria-label="Mobile navigation" role="navigation">
+          <ClientNavigation mobile pathname={pathname} />
+        </Navbar.Menu>
+      </Navbar>
       <main className="mx-auto w-full max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>
   );
 }
 
-function ClientNavigation({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
+function ClientNavigation({ mobile = false, pathname }: { mobile?: boolean; pathname: string }) {
   return (
-    <div className={mobile ? 'flex flex-col gap-1' : 'contents'}>
-      {links.map(({ to, label, icon: Icon }) => (
-        <NavLink
-          className={({ isActive }) => [
-            'inline-flex items-center gap-3 rounded-lg text-sm font-medium transition-colors',
-            mobile ? 'w-full px-3 py-3' : 'px-3 py-2',
-            isActive ? 'bg-accent/12 text-accent' : 'text-muted hover:bg-default hover:text-foreground',
-          ].join(' ')}
-          end={to === '/app/'}
+    links.map(({ to, label, icon: Icon }) => {
+      const Item = mobile ? Navbar.MenuItem : Navbar.Item;
+      return (
+        <Item
+          className={mobile ? 'gap-3' : 'gap-2'}
+          href={to}
+          isCurrent={isCurrentRoute(pathname, to)}
           key={to}
-          onClick={onNavigate}
-          to={to}
         >
           <Icon aria-hidden="true" className={mobile ? 'size-5' : 'size-4'} />
-          {label}
-        </NavLink>
-      ))}
-    </div>
+          <Navbar.Label>{label}</Navbar.Label>
+        </Item>
+      );
+    })
   );
+}
+
+function isCurrentRoute(pathname: string, to: string) {
+  if (to === '/app/') return pathname === '/app' || pathname === '/app/';
+  return pathname === to || pathname.startsWith(`${to}/`);
 }

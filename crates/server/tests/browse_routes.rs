@@ -2517,6 +2517,86 @@ async fn items_apply_parent_paging_and_findroid_type_filter() {
 }
 
 #[tokio::test]
+async fn items_filter_genre_and_production_year_before_counting_and_paging() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let arrival = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let dune = seed_item(&app.database, library, "Dune", "Movie").await;
+    let drama = Uuid::new_v4();
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("genres"))
+                    .columns([Alias::new("id"), Alias::new("name")])
+                    .values_panic([drama.into(), "Drama".into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("item_genres"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("genre_id"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        arrival.as_uuid().into(),
+                        drama.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    for (item, year) in [(arrival, 2016_i32), (dune, 2021_i32)] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("production_year"), year)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(
+        &app.router,
+        &format!(
+            "/Items?parentId={library}&includeItemTypes=Movie&genre=Drama&productionYear=2016&startIndex=0&limit=1"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Name"], "Arrival");
+
+    let response = get(
+        &app.router,
+        &format!("/Items/Filters?parentId={library}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let facets: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(facets["Genres"], json!(["Drama"]));
+    assert_eq!(facets["ProductionYears"], json!([2021, 2016]));
+}
+
+#[tokio::test]
 async fn items_search_term_returns_visible_type_filtered_items() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Library", true).await;
@@ -6783,6 +6863,7 @@ async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
             Alias::new("last_event_at"),
             yesterday + Duration::minutes(2),
         )
+        .value(Alias::new("stopped_at"), yesterday + Duration::minutes(2))
         .and_where(Expr::col(Alias::new("play_session_id")).eq(play_session))
         .to_owned();
     app.database
@@ -6799,6 +6880,8 @@ async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
     assert_eq!(insights["UniqueTitles"], 1);
     assert_eq!(insights["Media"]["Movies"], 1);
     assert_eq!(insights["Recent"][0]["Name"], "Arrival");
+    assert_eq!(insights["Timeline"][0]["Kind"], "MovieWatched");
+    assert_eq!(insights["Timeline"][0]["Name"], "Arrival");
 
     let response = get(
         &app.router,

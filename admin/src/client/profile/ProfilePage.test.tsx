@@ -23,6 +23,7 @@ beforeEach(() => {
     Media: { Movies: 2, Series: 1 },
     PlayCount: 4,
     Recent: [{ Id: 'movie-1', Name: 'Arrival', ProductionYear: 2016, Type: 'Movie' }],
+    Timeline: [{ At: '2026-07-31T12:00:00Z', ItemId: 'movie-1', Kind: 'MovieWatched', Name: 'Arrival' }],
     UniqueTitles: 3,
     WatchedTicks: 18_000_000_000,
   });
@@ -72,13 +73,15 @@ it('reloads all statistic cards when the selected range changes', async () => {
 
   expect(api.getUserInsights).toHaveBeenLastCalledWith('30d');
   expect(screen.getByText('Watch time')).toBeVisible();
+  expect(screen.getByRole('group', { name: 'Viewing KPIs' })).toBeVisible();
+  expect(screen.getByRole('img', { name: 'Daily watch time bar chart' })).toBeVisible();
   expect(screen.getByRole('heading', { name: 'Genre mix' })).toBeVisible();
   expect(screen.getByRole('img', { name: 'Genre watch time radar chart' })).toBeVisible();
   expect(screen.getByText('Drama: 30m')).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Movies and series' })).toBeVisible();
   expect(screen.getByLabelText('2 movies')).toBeVisible();
   expect(screen.getByLabelText('1 series')).toBeVisible();
-  expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Viewing timeline' })).toBeVisible();
   expect(screen.getByRole('link', { name: /Arrival/ })).toHaveAttribute('href', '/app/items/movie-1');
 });
 
@@ -93,6 +96,7 @@ it('keeps the genre radar visible when every genre has zero watch time', async (
     Media: { Movies: 0, Series: 0 },
     PlayCount: 0,
     Recent: [],
+    Timeline: [],
     UniqueTitles: 0,
     WatchedTicks: 0,
   });

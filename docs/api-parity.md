@@ -15,7 +15,9 @@ TJXY Web 另有同源自用接口：`GET|PATCH /Users/Me/Profile`、
 `POST /Users/Me/Password`、`GET /Users/Me/Insights`、`GET /Discover/Popular`、
 `GET /Discover/Tmdb/Popular` 与 `GET /Discover/Server/Top`。这些接口要求正常用户
 session，不冒充其他用户；TMDB token 只在服务端解密，排行榜按 UTC 日期进行进程内
-日缓存，刷新失败时使用最近一次成功结果。
+日缓存，刷新失败时使用最近一次成功结果。Insights 同时返回观看时长聚合与真实播放
+里程碑时间线：已停止的电影播放、首次剧集播放，以及当前入库剧集全部标记已播放的
+完成事件。
 
 ---
 
@@ -28,7 +30,7 @@ session，不冒充其他用户；TMDB token 只在服务端解密，排行榜�
 | 3 | 当前用户 | `GET /Users/Me` | SQL SoT | ⚠️ token digest 查询已实现，待真实客户端验证 |
 | 4 | 能力 | `POST /Sessions/Capabilities/Full` | DeviceProfile 参与 Direct Play 判断 | ⚠️ Full 与 legacy capability adapter 已持久化当前 session，并参与 PlaybackInfo 容器门禁；代表性请求方言矩阵待补齐 |
 | 5 | 首页 | `GET /UserViews` | Redis 预热，miss 回源 SQL | ⚠️ SQL SoT、generation/user-revision cache-aside、miss/损坏/断连回源已实现；Redis 启用时 ready 后异步预热最多 128 个启用用户，失败只记录且不阻断 ready；ACL 未实现 |
-| 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⚠️ 根视图、可选父项、`searchTerm`、无父级类型过滤、canonical/active publication 递归读取、Library 父项搭配类型过滤时的 Jellyfin 默认递归语义、`SortName`/`DateCreated`/`ProductionYear`/`Runtime` 双向稳定排序、容错客户端提示参数、稳定分页与完整 query-dimension cache-aside 已实现；`fields` 可兼容接收但列表仍为紧凑投影，更完整命名分类未实现 |
+| 6 | 浏览 | `GET /Items` | 未展开 Series 可触发高优先级 Expand | ⚠️ 根视图、可选父项、`searchTerm`、媒体类型、精确 `genre`、`productionYear`、canonical/active publication 递归读取、Library 父项搭配类型过滤时的 Jellyfin 默认递归语义、`SortName`/`DateCreated`/`ProductionYear`/`Runtime` 双向稳定排序、容错客户端提示参数、筛选前计数、稳定分页与完整 query-dimension cache-aside 已实现；`fields` 可兼容接收但列表仍为紧凑投影，更完整命名分类未实现 |
 | 7 | 主页行 | Latest / Resume / NextUp | SQL + Redis user revision | ⚠️ Latest、Resume、NextUp 的 SQL 可见性、用户隔离、稳定排序/分页及 cache-aside 已实现；启动预热覆盖全局 Latest、最多 64 个 Library Latest 以及默认 Resume/NextUp；NextUp 高级筛选/重看模式未实现 |
 | 8 | 详情 | `GET /Items/{id}` | 不触发 Media Probe | ⚠️ 鉴权、用户边界、active publication、富元数据、`DateCreated`/`LocationType`/图片元数据及当前已 Probed+Available 的 MediaSources/MediaStreams 已实现；Movie Source Index 可 enqueue/join/有界等待，但详情不会调度 Probe；其余 fields 扩展未实现 |
 | 9 | 图片 | `GET /Items/{id}/Images/{type}` | 内容寻址 AssetBlob | ⚠️ 鉴权原图 GET/HEAD、priority-zero ImageTags、完整 BackdropImageTags、PrimaryImageAspectRatio、ETag/304、受限解码/原子内容寻址写入及 TMDb Primary 采集已实现；本地图/import 下载器与变换未接入 |

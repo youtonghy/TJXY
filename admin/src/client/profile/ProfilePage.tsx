@@ -8,7 +8,11 @@ import {
   TextArea,
   TextField,
 } from '@heroui/react';
-import { Clock3, Film, Pencil, Play, Tags, Tv } from 'lucide-react';
+import { BarChart } from '@heroui-pro/react/bar-chart';
+import { KPI } from '@heroui-pro/react/kpi';
+import { KPIGroup } from '@heroui-pro/react/kpi-group';
+import { Timeline } from '@heroui-pro/react/timeline';
+import { CheckCircle2, Clock3, Film, Pencil, Play, Tags, Tv } from 'lucide-react';
 import { useEffect, useState, type SyntheticEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -25,6 +29,7 @@ import {
   getUserInsights,
   updateProfile,
   type InsightRange,
+  type InsightTimelineEvent,
   type UserInsights,
   type UserProfile,
 } from '../api/portalApi';
@@ -70,14 +75,20 @@ export function ProfilePage() {
             {ranges.map((item) => <Button key={item.key} onPress={() => { setRange(item.key); }} size="sm" variant={range === item.key ? 'primary' : 'secondary'}>{item.label}</Button>)}
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard icon={Clock3} label="Watch time" value={formatTicks(insights?.WatchedTicks)} />
-          <MetricCard icon={Play} label="Playback starts" value={String(insights?.PlayCount ?? 0)} />
-          <MetricCard icon={Film} label="Unique titles" value={String(insights?.UniqueTitles ?? 0)} />
-          <MetricCard icon={Tags} label="Genre mix" value={insights?.Genres[0]?.Name ?? 'No activity'} />
+        <div aria-label="Viewing KPIs" className="grid gap-3 lg:grid-cols-2" role="group">
+          <KPIGroup aria-label="Viewing totals">
+            <InsightKpi icon={Clock3} label="Watch time" value={formatTicks(insights?.WatchedTicks)} />
+            <KPIGroup.Separator />
+            <InsightKpi icon={Play} label="Playback starts" value={String(insights?.PlayCount ?? 0)} />
+          </KPIGroup>
+          <KPIGroup aria-label="Viewing variety">
+            <InsightKpi icon={Film} label="Unique titles" value={String(insights?.UniqueTitles ?? 0)} />
+            <KPIGroup.Separator />
+            <InsightKpi icon={Tags} label="Top genre" value={insights?.Genres[0]?.Name ?? 'No activity'} />
+          </KPIGroup>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
-          <Card><Card.Header><Card.Title>Daily watch time</Card.Title><Card.Description>Minutes watched by day.</Card.Description></Card.Header><Card.Content><DailyBars insights={insights} /></Card.Content></Card>
+          <Card><Card.Header><Card.Title>Daily watch time</Card.Title><Card.Description>Minutes watched by day.</Card.Description></Card.Header><Card.Content><DailyWatchChart insights={insights} /></Card.Content></Card>
           <Card><Card.Header><Card.Title>Genre mix</Card.Title><Card.Description>Genres receiving the most watch time.</Card.Description></Card.Header><Card.Content><GenreRadar insights={insights} /></Card.Content></Card>
           <Card>
             <Card.Header><Card.Title>Movies and series</Card.Title><Card.Description>Playback starts grouped by media type.</Card.Description></Card.Header>
@@ -86,37 +97,76 @@ export function ProfilePage() {
               <MediaCount icon={Tv} label="series" value={insights?.Media.Series ?? 0} />
             </Card.Content>
           </Card>
-          <Card>
-            <Card.Header><Card.Title>Recent activity</Card.Title><Card.Description>Your latest titles in this period.</Card.Description></Card.Header>
-            <Card.Content className="space-y-2">
-              {insights?.Recent.length
-                ? insights.Recent.slice(0, 6).map((item) => (
-                    <Link className="flex items-center justify-between gap-4 rounded-lg px-2 py-2 hover:bg-default" key={item.Id} to={`/app/items/${item.Id}`}>
-                      <span className="min-w-0"><span className="block truncate font-medium">{item.Name}</span><span className="text-xs text-muted">{[item.Type, item.ProductionYear].filter(Boolean).join(' · ')}</span></span>
-                      <Play aria-hidden="true" className="size-4 shrink-0 text-accent" />
-                    </Link>
-                  ))
-                : <p className="text-sm text-muted">No viewing history in this period.</p>}
-            </Card.Content>
-          </Card>
         </div>
+        <ViewingTimeline events={insights?.Timeline ?? []} />
       </section>
       {editing ? <ProfileDialog profile={profile} onClose={() => { setEditing(false); }} onSaved={setProfile} onSessionInvalidated={async () => { await signOut(); void navigate('/app/login?redirect=%2Fapp%2Fprofile', { replace: true }); }} /> : null}
     </div>
   );
 }
 
-function MetricCard({ icon: Icon, label, value }: { icon: typeof Clock3; label: string; value: string }) {
-  return <Card><Card.Content className="flex items-start justify-between gap-4"><div><p className="text-sm text-muted">{label}</p><p className="mt-2 text-2xl font-semibold">{value}</p></div><span className="grid size-10 place-items-center rounded-lg bg-accent/12 text-accent"><Icon className="size-5" /></span></Card.Content></Card>;
+function InsightKpi({ icon: Icon, label, value }: { icon: typeof Clock3; label: string; value: string }) {
+  return <KPI><KPI.Header><KPI.Icon className="bg-accent/10 text-accent"><Icon aria-hidden="true" className="size-4" /></KPI.Icon><KPI.Title>{label}</KPI.Title></KPI.Header><KPI.Content><p className="truncate text-2xl font-semibold tabular-nums text-foreground">{value}</p></KPI.Content></KPI>;
 }
 
 function MediaCount({ icon: Icon, label, value }: { icon: typeof Film; label: string; value: number }) {
   return <div aria-label={`${String(value)} ${label}`} className="rounded-xl bg-default p-4"><Icon aria-hidden="true" className="size-5 text-accent" /><p className="mt-3 text-2xl font-semibold">{value} <span className="text-sm font-normal text-muted">{label}</span></p></div>;
 }
 
-function DailyBars({ insights }: { insights?: UserInsights }) {
-  const maximum = Math.max(1, ...(insights?.Daily.map((point) => point.WatchedTicks) ?? [1]));
-  return <div className="flex h-36 items-end gap-2">{insights?.Daily.length ? insights.Daily.map((point) => <div className="flex min-w-0 flex-1 flex-col items-center gap-2" key={point.Date}><div aria-label={`${point.Date}: ${formatTicks(point.WatchedTicks)}`} className="w-full rounded-t bg-accent" style={{ height: `${String(Math.max(8, (point.WatchedTicks / maximum) * 112))}px` }} /><span className="truncate text-[10px] text-muted">{point.Date.slice(5)}</span></div>) : <p className="self-center text-sm text-muted">No activity in this period.</p>}</div>;
+function DailyWatchChart({ insights }: { insights?: UserInsights }) {
+  const data = insights?.Daily.map((point) => ({ date: point.Date.slice(5), minutes: Math.round(point.WatchedTicks / 600_000_000) })) ?? [];
+  if (!data.length) return <p className="py-20 text-center text-sm text-muted">No activity in this period.</p>;
+  return (
+    <figure aria-label="Daily watch time bar chart" role="img">
+      <BarChart data={data} height={220}>
+        <BarChart.Grid vertical={false} />
+        <BarChart.XAxis dataKey="date" tickMargin={8} />
+        <BarChart.YAxis tickMargin={4} width={36} />
+        <BarChart.Bar barSize={18} dataKey="minutes" fill="var(--color-accent)" name="Minutes watched" radius={[4, 4, 0, 0]} />
+        <BarChart.Tooltip content={<BarChart.TooltipContent valueFormatter={(value) => `${String(value)} min`} />} />
+      </BarChart>
+      <figcaption className="sr-only">{data.map((point) => `${point.date}: ${String(point.minutes)} minutes`).join('; ')}</figcaption>
+    </figure>
+  );
+}
+
+function ViewingTimeline({ events }: { events: InsightTimelineEvent[] }) {
+  return (
+    <Card>
+      <Card.Header><Card.Title>Viewing timeline</Card.Title><Card.Description>Milestones from your playback history.</Card.Description></Card.Header>
+      <Card.Content>
+        {events.length ? (
+          <Timeline density="compact" size="sm">
+            {events.map((event) => {
+              const presentation = timelinePresentation(event);
+              const Icon = presentation.icon;
+              return (
+                <Timeline.Item key={`${event.Kind}-${event.ItemId}-${event.At}`} status={presentation.status}>
+                  <Timeline.Marker aria-hidden="true"><Icon /></Timeline.Marker>
+                  <Timeline.Content>
+                    <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                      <p className="min-w-0 text-sm"><span className="text-muted">{presentation.prefix} </span><Link className="font-medium text-foreground hover:text-accent" to={`/app/items/${event.ItemId}`}>{event.Name}</Link></p>
+                      <time className="shrink-0 text-xs text-muted" dateTime={event.At}>{formatTimelineDate(event.At)}</time>
+                    </div>
+                  </Timeline.Content>
+                </Timeline.Item>
+              );
+            })}
+          </Timeline>
+        ) : <p className="py-8 text-center text-sm text-muted">No viewing milestones in this period.</p>}
+      </Card.Content>
+    </Card>
+  );
+}
+
+function timelinePresentation(event: InsightTimelineEvent) {
+  if (event.Kind === 'SeriesCompleted') return { icon: CheckCircle2, prefix: 'Finished', status: 'success' as const };
+  if (event.Kind === 'SeriesStarted') return { icon: Tv, prefix: 'Started', status: 'current' as const };
+  return { icon: Film, prefix: 'Watched', status: 'default' as const };
+}
+
+function formatTimelineDate(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
 function GenreRadar({ insights }: { insights?: UserInsights }) {

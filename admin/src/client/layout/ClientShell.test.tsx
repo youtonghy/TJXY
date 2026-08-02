@@ -35,16 +35,18 @@ it('presents the same primary destinations in the top bar and mobile navigation'
   const user = userEvent.setup();
   renderShell('/app/libraries');
 
-  expect(screen.getByRole('navigation', { name: 'Primary' })).toBeVisible();
-  expect(screen.getByRole('link', { name: 'Libraries' })).toHaveAttribute('aria-current', 'page');
+  const topNavigation = screen.getByRole('navigation', { name: 'TJXY navigation' });
+  expect(topNavigation).toBeVisible();
+  expect(within(topNavigation).getByRole('link', { name: 'Libraries' })).toHaveAttribute('aria-current', 'page');
 
   await user.click(screen.getByRole('button', { name: 'Open navigation' }));
 
-  const dialog = await screen.findByRole('dialog', { name: 'Browse TJXY' });
-  expect(dialog).toHaveTextContent('Home');
-  expect(dialog).toHaveTextContent('Libraries');
-  expect(dialog).toHaveTextContent('Search');
-  expect(screen.getByRole('navigation', { name: 'Mobile navigation' })).toBeVisible();
+  const mobileNavigation = await screen.findByRole('navigation', { name: 'Mobile navigation' });
+  expect(mobileNavigation).toHaveTextContent('Home');
+  expect(mobileNavigation).toHaveTextContent('Libraries');
+  expect(mobileNavigation).toHaveTextContent('Search');
+  expect(within(mobileNavigation).getByRole('link', { name: 'Libraries' })).toHaveAttribute('aria-current', 'page');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 it('exposes rankings and a profile destination from the account menu', async () => {
@@ -64,12 +66,13 @@ it('uses the shared system mark for the home brand link', () => {
   expect(brand.querySelector('img')).toHaveAttribute('src', '/brand/tjxy-mark.webp');
 });
 
-it('groups the desktop header controls as one accessible navigation toolbar', () => {
+it('groups the header controls in the HeroUI Pro navigation landmark', () => {
   renderShell('/app/rankings');
 
-  const toolbar = screen.getByRole('toolbar', { name: 'TJXY navigation' });
-  expect(within(toolbar).getByRole('link', { name: 'Rankings' })).toHaveAttribute('aria-current', 'page');
-  expect(within(toolbar).getByRole('button', { name: 'Switch to dark theme' })).toBeVisible();
+  const navigation = screen.getByRole('navigation', { name: 'TJXY navigation' });
+  expect(within(navigation).getByRole('link', { name: 'Rankings' })).toHaveAttribute('aria-current', 'page');
+  expect(within(navigation).getByRole('button', { name: 'Switch to dark theme' })).toBeVisible();
+  expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
 });
 
 function renderShell(path: string) {

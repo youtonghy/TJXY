@@ -1,0 +1,8 @@
+.Fm6LxG_react-spectrum-ColorField-input:not(:placeholder-shown) {
+  unicode-bidi: plaintext;
+
+  &:dir(rtl) {
+    text-align: end;
+  }
+}
+/*# sourceMappingURL=colorfield.css.map */

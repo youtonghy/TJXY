@@ -1,0 +1,101 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e23]:
+    - navigation "TJXY navigation" [ref=e24]:
+      - generic [ref=e25]:
+        - link "TJXY home" [ref=e27] [cursor=pointer]:
+          - /url: /app/
+          - generic [ref=e29]: TJXY
+        - generic [ref=e30]:
+          - link "Home" [ref=e31] [cursor=pointer]:
+            - /url: /app/
+          - link "Libraries" [ref=e36] [cursor=pointer]:
+            - /url: /app/libraries
+          - link "Search" [ref=e40] [cursor=pointer]:
+            - /url: /app/search
+          - link "Rankings" [ref=e45] [cursor=pointer]:
+            - /url: /app/rankings
+        - generic [ref=e53]:
+          - button [ref=e54]:
+            - button "Switch to dark theme" [ref=e55] [cursor=pointer]
+          - button "Open account menu for admin" [ref=e56] [cursor=pointer]:
+            - generic [ref=e57]: A
+            - generic [ref=e59]: admin
+    - main [ref=e60]:
+      - generic [ref=e61]:
+        - generic [ref=e63]:
+          - generic [ref=e64]: A
+          - generic [ref=e66]:
+            - paragraph [ref=e67]: Your account
+            - heading "admin" [level=1] [ref=e68]
+            - paragraph [ref=e69]: Add a short introduction about yourself.
+          - button "Edit profile" [ref=e70] [cursor=pointer]
+        - region [ref=e71]:
+          - generic [ref=e72]:
+            - generic [ref=e73]:
+              - heading "Viewing statistics" [level=2] [ref=e74]
+              - paragraph [ref=e75]: Your activity across the selected period.
+            - group "Statistics period" [ref=e76]:
+              - button "Today" [ref=e77] [cursor=pointer]
+              - button "7 days" [ref=e78] [cursor=pointer]
+              - button "30 days" [ref=e79] [cursor=pointer]
+              - button "All time" [ref=e80] [cursor=pointer]
+          - group "Viewing KPIs" [ref=e81]:
+            - group "Viewing totals" [ref=e82]:
+              - generic [ref=e83]:
+                - term [ref=e89]: Watch time
+                - paragraph [ref=e91]: 7h 1m
+              - generic [ref=e93]:
+                - term [ref=e98]: Playback starts
+                - paragraph [ref=e100]: "6"
+            - group "Viewing variety" [ref=e101]:
+              - generic [ref=e102]:
+                - term [ref=e107]: Unique titles
+                - paragraph [ref=e109]: "6"
+              - generic [ref=e111]:
+                - term [ref=e118]: Top genre
+                - paragraph [ref=e120]: 剧情
+          - generic [ref=e121]:
+            - generic [ref=e122]:
+              - generic [ref=e123]:
+                - heading "Daily watch time" [level=3] [ref=e124]
+                - paragraph [ref=e125]: Minutes watched by day.
+              - img "Daily watch time bar chart" [ref=e127]:
+                - application [ref=e131]:
+                  - generic [ref=e147]:
+                    - generic [ref=e148]: 08-01
+                    - generic [ref=e151]:
+                      - generic [ref=e152]: "0"
+                      - generic [ref=e154]: "150"
+                      - generic [ref=e156]: "300"
+                      - generic [ref=e158]: "450"
+                      - generic [ref=e160]: "600"
+                - generic [ref=e162]: "08-01: 421 minutes"
+            - generic [ref=e163]:
+              - generic [ref=e164]:
+                - heading "Genre mix" [level=3] [ref=e165]
+                - paragraph [ref=e166]: Genres receiving the most watch time.
+              - img "Genre watch time radar chart" [ref=e168]:
+                - application [ref=e172]:
+                  - generic [ref=e192]:
+                    - generic [ref=e193]: 剧情
+                    - generic [ref=e195]: 爱情
+                    - generic [ref=e198]: 历史
+                    - generic [ref=e201]: 喜剧
+                    - generic [ref=e203]: 动作
+                    - generic [ref=e206]: 奇幻
+                - generic [ref=e217]: "剧情: 5h 46m; 爱情: 2h 51m; 历史: 2h 48m; 喜剧: 2h 39m; 动作: 1h 26m; 奇幻: 1h 24m"
+            - generic [ref=e218]:
+              - generic [ref=e219]:
+                - heading "Movies and series" [level=3] [ref=e220]
+                - paragraph [ref=e221]: Playback starts grouped by media type.
+              - generic [ref=e222]:
+                - generic "6 movies" [ref=e223]:
+                  - paragraph [ref=e226]: 6 movies
+                - generic "0 series" [ref=e227]:
+                  - paragraph [ref=e231]: 0 series
+          - generic [ref=e232]:
+            - generic [ref=e233]:
+              - heading "Viewing timeline" [level=3] [ref=e234]
+              - paragraph [ref=e235]: Milestones from your playback history.
+            - paragraph [ref=e237]: No viewing milestones in this period.
+  - generic [ref=e238]: "0"

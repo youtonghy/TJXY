@@ -230,7 +230,9 @@ pub(crate) async fn items(
         .with_search_term(query.search_term)
         .with_recursive(query.recursive)
         .with_recursive_for_library(query.recursive_for_library)
-        .with_sorts(query.sorts);
+        .with_sorts(query.sorts)
+        .with_genre(query.genre)
+        .with_production_year(query.production_year);
     if let Some(parent_id) = query.parent_id {
         return match catalog
             .query_items_by_parent_id(
@@ -270,6 +272,48 @@ pub(crate) async fn items(
             Ok(result) => Json(result).into_response(),
             Err(error) => error.into_response(),
         },
+        Err(error) => service_error(&error),
+    }
+}
+
+pub(crate) async fn item_filters(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let principal =
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
+    let mut parameters = match endpoint_parameters(raw_query.as_deref()) {
+        Ok(parameters) => parameters,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match take_user_id(&mut parameters) {
+        Ok(user_id) => user_id,
+        Err(error) => return error.into_response(),
+    };
+    let library_id = match take_uuid(&mut parameters, "parentId") {
+        Ok(Some(library_id)) => library_id,
+        Ok(None) => return error(StatusCode::BAD_REQUEST, "missing catalog parent"),
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = reject_remaining(&parameters) {
+        return error.into_response();
+    }
+    let Some(catalog) = state.catalog.as_ref() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
+    };
+    match catalog
+        .filter_facets(principal.user().id(), user_id, library_id)
+        .await
+    {
+        Ok(facets) => Json(CatalogFilterFacetsDto {
+            genres: facets.genres().to_vec(),
+            production_years: facets.production_years().to_vec(),
+        })
+        .into_response(),
         Err(error) => service_error(&error),
     }
 }
@@ -798,7 +842,16 @@ struct ItemsQuery {
     recursive: bool,
     recursive_for_library: bool,
     sorts: Vec<CatalogSort>,
+    genre: Option<String>,
+    production_year: Option<i32>,
     has_catalog_selection: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct CatalogFilterFacetsDto {
+    genres: Vec<String>,
+    production_years: Vec<i32>,
 }
 
 struct SearchQuery {
@@ -910,6 +963,8 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     let recursive = recursive.unwrap_or(false);
     let search_term = take_search_term(&mut parameters, false)?;
     let sorts = take_catalog_sorts(&mut parameters);
+    let genre = take_filter_text(&mut parameters, "genre")?;
+    let production_year = take_production_year(&mut parameters)?;
     for boolean in ["enableUserData", "enableImages", "enableTotalRecordCount"] {
         take_bool(&mut parameters, boolean)?;
     }
@@ -919,7 +974,11 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     parameters.remove("fields");
     parameters.remove("mediaTypes");
     parameters.remove("enableImageTypes");
-    let has_catalog_selection = recursive || search_term.is_some() || !item_types.is_empty();
+    let has_catalog_selection = recursive
+        || search_term.is_some()
+        || !item_types.is_empty()
+        || genre.is_some()
+        || production_year.is_some();
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?
         .with_item_types(item_types);
@@ -931,8 +990,45 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
         recursive,
         recursive_for_library,
         sorts,
+        genre,
+        production_year,
         has_catalog_selection,
     })
+}
+
+fn take_filter_text(
+    parameters: &mut HashMap<String, String>,
+    name: &str,
+) -> Result<Option<String>, HttpBrowseError> {
+    let value = parameters.remove(name).map(|value| value.trim().to_owned());
+    match value {
+        Some(value)
+            if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) =>
+        {
+            Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid catalog filter",
+            ))
+        }
+        value => Ok(value),
+    }
+}
+
+fn take_production_year(
+    parameters: &mut HashMap<String, String>,
+) -> Result<Option<i32>, HttpBrowseError> {
+    parameters
+        .remove("productionYear")
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .ok()
+                .filter(|year| (1800..=2100).contains(year))
+                .ok_or_else(|| {
+                    HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid production year")
+                })
+        })
+        .transpose()
 }
 
 fn parse_search_query(raw_query: Option<&str>) -> Result<SearchQuery, HttpBrowseError> {

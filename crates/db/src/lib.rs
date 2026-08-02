@@ -59,9 +59,9 @@ pub use catalog_publication::{
     StructurePublicationRow,
 };
 pub use catalog_query::{
-    AssetRecord, BrowseParent, CacheRevisions, CatalogCreditRecord, CatalogItemDetailRecord,
-    CatalogItemRecord, CatalogItemType, CatalogItemsQuery, CatalogItemsScope,
-    CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest, CatalogQueryError,
+    AssetRecord, BrowseParent, CacheRevisions, CatalogCreditRecord, CatalogFilterFacets,
+    CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogItemsQuery,
+    CatalogItemsScope, CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest, CatalogQueryError,
     CatalogQueryRepository, CatalogSort, CatalogSortField, CatalogSortOrder, LazyCatalogWorkTarget,
     LazyStorageScope, LibraryViewRecord,
 };

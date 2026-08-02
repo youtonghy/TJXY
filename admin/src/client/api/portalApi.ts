@@ -9,6 +9,12 @@ export interface UpdateProfileRequest { Username: string; Bio: string; CurrentPa
 export interface ChangePasswordRequest { CurrentPassword: string; NewPassword: string }
 export interface InsightDailyPoint { Date: string; WatchedTicks: number }
 export interface InsightGenre { Name: string; WatchedTicks: number }
+export interface InsightTimelineEvent {
+  At: string;
+  ItemId: string;
+  Kind: 'MovieWatched' | 'SeriesCompleted' | 'SeriesStarted';
+  Name: string;
+}
 export interface UserInsights {
   WatchedTicks: number;
   PlayCount: number;
@@ -17,6 +23,7 @@ export interface UserInsights {
   Daily: InsightDailyPoint[];
   Genres: InsightGenre[];
   Recent: MediaItem[];
+  Timeline: InsightTimelineEvent[];
 }
 export interface TmdbRankingItem {
   Rank: number;

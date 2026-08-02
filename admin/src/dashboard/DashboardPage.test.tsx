@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { renderWithAdmin } from '../test/renderWithAdmin';
@@ -112,8 +112,13 @@ it('renders server KPIs, current viewers, and successful login records', async (
     expect(tab).toHaveClass('whitespace-nowrap');
   }
   expect(screen.getByRole('button', { name: 'Refresh dashboard' })).toHaveClass('shrink-0');
-  expect(screen.getAllByText('100', { selector: 'p' })).toHaveLength(2);
-  expect(screen.getByText('24', { selector: 'p' })).toBeVisible();
+  const kpis = screen.getByRole('group', { name: 'Server KPIs' });
+  expect(kpis).toHaveTextContent('Users12');
+  expect(kpis).toHaveTextContent('Catalog records263');
+  expect(kpis).toHaveTextContent('Playback starts24');
+  expect(kpis).toHaveTextContent('Unique viewers7');
+  expect(screen.getByRole('group', { name: 'Accounts and library' })).toBeVisible();
+  expect(screen.getByRole('group', { name: 'Selected period activity' })).toBeVisible();
   expect(screen.getByRole('grid', { name: 'Currently watching users' })).toHaveTextContent('Arrival');
   expect(await screen.findByRole('grid', { name: 'Login records' })).toHaveTextContent('Alex');
   expect(snapshotMock).toHaveBeenCalledWith('today', expect.any(AbortSignal));
@@ -128,7 +133,8 @@ it('reloads the summary for a new range and switches to watch history', async ()
   await user.click(screen.getByRole('tab', { name: '7 days' }));
   await waitFor(() => { expect(snapshotMock).toHaveBeenLastCalledWith('7d', expect.any(AbortSignal)); });
 
-  await user.click(screen.getByRole('tab', { name: 'Watch history' }));
+  const activityType = screen.getByRole('radiogroup', { name: 'Activity record type' });
+  await user.click(within(activityType).getByRole('radio', { name: 'Watch history' }));
   expect(await screen.findByRole('grid', { name: 'Watch history' })).toHaveTextContent('Arrival');
   expect(watchMock).toHaveBeenCalledWith(0, 25, expect.any(AbortSignal));
 });

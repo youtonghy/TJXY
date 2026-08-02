@@ -1,0 +1,21 @@
+- generic [ref=f4e3]:
+  - banner [ref=f4e4]:
+    - generic [ref=f4e6]:
+      - generic [ref=f4e7]: TJXY Admin
+      - generic [ref=f4e8]: Administrator workspace
+  - main [ref=f4e9]:
+    - generic [ref=f4e10]:
+      - generic [ref=f4e11]:
+        - heading "Administrator sign in" [level=1] [ref=f4e12]
+        - paragraph [ref=f4e13]: Use an enabled administrator account.
+      - form "Administrator sign in" [ref=f4e14]:
+        - generic [ref=f4e15]:
+          - generic [ref=f4e16]: Username*
+          - textbox "Username*" [ref=f4e17]
+        - generic [ref=f4e18]:
+          - generic [ref=f4e19]: Password*
+          - generic [ref=f4e20]:
+            - textbox "Password*" [ref=f4e21]
+            - button "Show password" [ref=f4e22] [cursor=pointer]
+        - button "Sign in" [ref=f4e23] [cursor=pointer]
+      - status [ref=f4e25]: Server ready
