@@ -517,14 +517,16 @@ async fn daily_quota_consumption_is_atomic_across_five_connections() {
         quota_database_connection(fixture.database_url()).await,
     ]);
 
-    let calls = (0..10).map(|index| {
-        let connections = Arc::clone(&connections);
-        tokio::spawn(async move {
-            AiUsageRepository::new(&connections[index % connections.len()])
-                .try_consume_daily_quota(user_id, usage_day, 5)
-                .await
+    let calls = (0..10)
+        .map(|index| {
+            let connections = Arc::clone(&connections);
+            tokio::spawn(async move {
+                AiUsageRepository::new(&connections[index % connections.len()])
+                    .try_consume_daily_quota(user_id, usage_day, 5)
+                    .await
+            })
         })
-    });
+        .collect::<Vec<_>>();
     let mut successful = 0;
     for call in calls {
         successful += usize::from(call.await.unwrap().unwrap());
