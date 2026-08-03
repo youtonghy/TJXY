@@ -272,12 +272,7 @@ pub(crate) fn is_public_address(address: IpAddr) -> bool {
 async fn bounded_json_response(
     mut response: reqwest::Response,
 ) -> Result<Value, AiProviderTransportError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
-    {
-        return Err(AiProviderTransportError::ResponseTooLarge);
-    }
+    validate_response_content_length(response.content_length())?;
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         let timeout = error.is_timeout();
@@ -289,6 +284,15 @@ async fn bounded_json_response(
         body.extend_from_slice(&chunk);
     }
     decode_bounded_json(&body)
+}
+
+fn validate_response_content_length(
+    content_length: Option<u64>,
+) -> Result<(), AiProviderTransportError> {
+    if content_length.is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64) {
+        return Err(AiProviderTransportError::ResponseTooLarge);
+    }
+    Ok(())
 }
 
 fn decode_bounded_json(body: &[u8]) -> Result<Value, AiProviderTransportError> {
@@ -312,8 +316,9 @@ mod tests {
 
     use super::{
         AiProviderTransport, AiProviderTransportError, MAX_PROVIDER_RESPONSE_BYTES,
-        ProviderDnsResolver, ProviderMethod, SafeReqwestTransport, decode_bounded_json,
-        is_public_address, validate_dns_answers,
+        ProviderDnsResolver, ProviderMethod, SafeReqwestTransport, bounded_json_response,
+        decode_bounded_json, is_public_address, validate_dns_answers,
+        validate_response_content_length,
     };
 
     fn address(value: &str) -> SocketAddr {
@@ -398,6 +403,46 @@ mod tests {
             decode_bounded_json(br#"{"ok":true}"#).unwrap(),
             serde_json::json!({"ok": true})
         );
+    }
+
+    #[test]
+    fn response_content_length_rejects_declared_body_over_limit() {
+        assert!(validate_response_content_length(None).is_ok());
+        assert!(validate_response_content_length(Some(MAX_PROVIDER_RESPONSE_BYTES as u64)).is_ok());
+        assert!(matches!(
+            validate_response_content_length(Some(MAX_PROVIDER_RESPONSE_BYTES as u64 + 1)),
+            Err(AiProviderTransportError::ResponseTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_response_rejects_chunked_body_when_accumulated_size_exceeds_limit() {
+        let chunks = futures_util::stream::iter([
+            Ok::<_, std::io::Error>(vec![b' '; MAX_PROVIDER_RESPONSE_BYTES]),
+            Ok(vec![b' '; 1]),
+        ]);
+        let response: reqwest::Response = axum::http::Response::builder()
+            .body(reqwest::Body::wrap_stream(chunks))
+            .unwrap()
+            .into();
+
+        assert!(matches!(
+            bounded_json_response(response).await,
+            Err(AiProviderTransportError::ResponseTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_response_rejects_invalid_json_within_limit() {
+        let response: reqwest::Response = axum::http::Response::builder()
+            .body(reqwest::Body::from(b"not-json".to_vec()))
+            .unwrap()
+            .into();
+
+        assert!(matches!(
+            bounded_json_response(response).await,
+            Err(AiProviderTransportError::InvalidJson(_))
+        ));
     }
 
     struct ScriptedResolver {
