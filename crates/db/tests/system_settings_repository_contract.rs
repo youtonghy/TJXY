@@ -1,12 +1,31 @@
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+};
 use sea_orm_migration::MigratorTrait;
 use tjxy_db::{
     Migrator, SystemSettingsInput, SystemSettingsRepository, SystemSettingsRepositoryError,
 };
-use tjxy_test_support::test_database;
+use tjxy_test_support::{reconnectable_test_database, test_database};
 
 async fn database() -> sea_orm::DatabaseConnection {
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
+    database
+}
+
+async fn settings_database_connection(database_url: &str) -> DatabaseConnection {
+    let mut options = ConnectOptions::new(database_url);
+    options.max_connections(1).min_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    if database.get_database_backend() == DbBackend::Sqlite {
+        database
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA busy_timeout = 5000",
+            ))
+            .await
+            .unwrap();
+    }
     database
 }
 
@@ -49,10 +68,25 @@ async fn settings_create_and_update_follow_compare_and_swap_contract() {
 #[tokio::test]
 async fn expected_revision_conflicts_when_singleton_is_missing() {
     let database = database().await;
+    let repository = SystemSettingsRepository::new(&database);
     assert!(matches!(
-        SystemSettingsRepository::new(&database)
-            .put(&input("Missing"), Some(1))
-            .await,
+        repository.put(&input("Missing"), Some(1)).await,
+        Err(SystemSettingsRepositoryError::Conflict)
+    ));
+    assert!(matches!(
+        repository.put_locale("invalid", Some(1)).await,
+        Err(SystemSettingsRepositoryError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn locale_create_only_conflicts_when_singleton_exists() {
+    let database = database().await;
+    let repository = SystemSettingsRepository::new(&database);
+    repository.put(&input("Initial"), None).await.unwrap();
+
+    assert!(matches!(
+        repository.put_locale("en-US", None).await,
         Err(SystemSettingsRepositoryError::Conflict)
     ));
 }
@@ -78,13 +112,15 @@ async fn locale_update_preserves_other_fields_and_increments_revision() {
 
 #[tokio::test]
 async fn concurrent_saves_have_exactly_one_revision_winner() {
-    let database = database().await;
+    let fixture = reconnectable_test_database().await.unwrap();
+    let database = fixture.connection();
+    Migrator::up(database, None).await.unwrap();
     SystemSettingsRepository::new(&database)
         .put(&input("Initial"), None)
         .await
         .unwrap();
-    let first_database = database.clone();
-    let second_database = database.clone();
+    let first_database = settings_database_connection(fixture.database_url()).await;
+    let second_database = settings_database_connection(fixture.database_url()).await;
     let first = input("First writer");
     let second = input("Second writer");
 
@@ -115,7 +151,7 @@ async fn concurrent_saves_have_exactly_one_revision_winner() {
         .find_map(|result| result.as_ref().ok())
         .unwrap();
     assert_eq!(winner.revision(), 2);
-    let stored = SystemSettingsRepository::new(&database)
+    let stored = SystemSettingsRepository::new(database)
         .get()
         .await
         .unwrap()

@@ -156,9 +156,13 @@ impl<'connection> SystemSettingsRepository<'connection> {
         let transaction = self.database.begin().await?;
         let result = async {
             let current = get_on(&transaction).await?;
-            let mut input = current
-                .as_ref()
-                .map_or_else(SystemSettingsInput::default, Into::into);
+            let mut input = match (current, expected_revision) {
+                (None, None) => SystemSettingsInput::default(),
+                (None, Some(_)) | (Some(_), None) => {
+                    return Err(SystemSettingsRepositoryError::Conflict);
+                }
+                (Some(record), Some(_)) => SystemSettingsInput::from(&record),
+            };
             input.locale = locale.to_owned();
             let input = validate(&input)?;
             put_on(&transaction, &input, expected_revision).await
