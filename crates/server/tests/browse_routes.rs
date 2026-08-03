@@ -316,6 +316,10 @@ impl MediaInspector for CloudProbeInspector {
 }
 
 async fn test_app() -> TestApp {
+    test_app_with_user(true).await
+}
+
+async fn test_app_with_user(create_user: bool) -> TestApp {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
@@ -323,9 +327,11 @@ async fn test_app() -> TestApp {
             .await
             .unwrap(),
     );
-    auth.create_user("Alice", "correct horse", true)
-        .await
-        .unwrap();
+    if create_user {
+        auth.create_user("Alice", "correct horse", true)
+            .await
+            .unwrap();
+    }
     let catalog = Arc::new(CatalogQueryService::new(database.clone()));
     let libraries = Arc::new(LibraryService::new(database.clone()));
     let assets = TempDir::new().unwrap();
@@ -7076,6 +7082,117 @@ async fn system_settings_reject_missing_media_browser_roots_without_advancing_re
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(settings["Revision"], 0);
     assert_eq!(settings["MediaBrowserRoots"], json!([]));
+}
+
+#[tokio::test]
+async fn concurrent_system_settings_updates_return_one_conflict() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let initial = json!({
+        "Locale": "zh-CN",
+        "SiteTitle": "Initial",
+        "SiteSubtitle": "Your media library",
+        "LogoUrl": "/brand/tjxy-mark.webp",
+        "IconUrl": "/brand/favicon.svg",
+        "PublicUrl": null,
+        "ListenHost": "127.0.0.1",
+        "Port": 8096,
+        "MediaBrowserRoots": []
+    });
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        initial.to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let first = json!({
+        "Locale": "zh-CN",
+        "SiteTitle": "First writer",
+        "SiteSubtitle": "Your media library",
+        "LogoUrl": "/brand/tjxy-mark.webp",
+        "IconUrl": "/brand/favicon.svg",
+        "PublicUrl": null,
+        "ListenHost": "127.0.0.1",
+        "Port": 8096,
+        "MediaBrowserRoots": [],
+        "Revision": 1
+    });
+    let mut second = first.clone();
+    second["SiteTitle"] = json!("Second writer");
+    let (first_response, second_response) = tokio::join!(
+        put(
+            &app.router,
+            "/Admin/System/Settings",
+            &token,
+            first.to_string(),
+        ),
+        put(
+            &app.router,
+            "/Admin/System/Settings",
+            &token,
+            second.to_string(),
+        )
+    );
+    let statuses = [first_response.status(), second_response.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_setup_system_settings_language_updates_map_cas_conflict_to_409() {
+    let app = test_app_with_user(false).await;
+    tjxy_db::SystemSettingsRepository::new(&app.database)
+        .put(&tjxy_db::SystemSettingsInput::default(), None)
+        .await
+        .unwrap();
+
+    let request = |locale: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri("/System/Language")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"Locale": locale, "Revision": 1}).to_string(),
+            ))
+            .unwrap()
+    };
+    let (first_response, second_response) = tokio::join!(
+        app.router.clone().oneshot(request("en-US")),
+        app.router.clone().oneshot(request("zh-CN"))
+    );
+    let statuses = [
+        first_response.unwrap().status(),
+        second_response.unwrap().status(),
+    ];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

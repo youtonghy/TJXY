@@ -161,10 +161,7 @@ pub(crate) async fn put_setup(State(state): State<AppState>, body: Bytes) -> Res
     };
     match service.put_locale(&request.locale, revision).await {
         Ok(record) => Json(language_dto(Some(&record))).into_response(),
-        Err(SystemSettingsRepositoryError::InvalidLocale) => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(error) => repository_error(error),
     }
 }
 
@@ -532,7 +529,9 @@ fn repository_error(error: SystemSettingsRepositoryError) -> Response {
         | SystemSettingsRepositoryError::InvalidPort
         | SystemSettingsRepositoryError::InvalidMediaBrowserRoots
         | SystemSettingsRepositoryError::InvalidRevision => StatusCode::BAD_REQUEST.into_response(),
-        SystemSettingsRepositoryError::Database(_) => {
+        SystemSettingsRepositoryError::Database(_)
+        | SystemSettingsRepositoryError::MissingPersistedSettings
+        | SystemSettingsRepositoryError::RollbackFailed { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
