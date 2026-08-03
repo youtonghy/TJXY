@@ -39,7 +39,12 @@ use url::Host;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{AppState, auth, client_portal::ClientPortalService};
+use crate::{
+    AppState,
+    ai_admission::{AiAdmissionConfig, AiAdmissionController},
+    auth,
+    client_portal::ClientPortalService,
+};
 
 const MAX_MESSAGE_CHARS: usize = 16_000;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -54,12 +59,21 @@ pub(crate) struct AiService {
     database: sea_orm::DatabaseConnection,
     cipher: Option<Arc<CredentialCipher>>,
     client: reqwest::Client,
+    pub(crate) admission: Arc<AiAdmissionController>,
 }
 
 impl AiService {
     pub(crate) fn new(
         database: sea_orm::DatabaseConnection,
         cipher: Option<Arc<CredentialCipher>>,
+    ) -> Self {
+        Self::new_with_config(database, cipher, AiAdmissionConfig::default())
+    }
+
+    pub(crate) fn new_with_config(
+        database: sea_orm::DatabaseConnection,
+        cipher: Option<Arc<CredentialCipher>>,
+        admission_config: AiAdmissionConfig,
     ) -> Self {
         Self {
             database,
@@ -70,6 +84,7 @@ impl AiService {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("AI HTTP client configuration is valid"),
+            admission: Arc::new(AiAdmissionController::new(admission_config)),
         }
     }
 

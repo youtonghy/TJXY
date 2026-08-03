@@ -6,9 +6,10 @@ use tjxy_metadata::{
     MusicBrainzProvider, ReloadableMetadataProvider, TheAudioDbProvider, TmdbProvider,
 };
 use tjxy_server::{
-    AdminAssetsError, BootstrapAdmin, GoogleDriveOAuthConfiguration, InitializationError,
-    MicrosoftOneDriveOAuthConfiguration, ServerIdentity, StartupOptions,
-    build_router_with_admin_dist, initialize, parse_credential_keyring,
+    AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin,
+    GoogleDriveOAuthConfiguration, InitializationError, MicrosoftOneDriveOAuthConfiguration,
+    ServerIdentity, StartupOptions, build_router_with_admin_dist, initialize,
+    parse_credential_keyring,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -65,6 +66,10 @@ enum StartupError {
     IncompleteOneDriveOAuth,
     #[error("OneDrive OAuth configuration is invalid")]
     InvalidOneDriveOAuth,
+    #[error("{0} must be an integer from 1 through {1}")]
+    InvalidAiAdmissionNumber(&'static str, u64),
+    #[error("AI admission configuration is invalid: {0}")]
+    InvalidAiAdmissionConfiguration(#[source] AiAdmissionConfigError),
     #[error("service initialization failed: {0}")]
     Initialization(#[from] InitializationError),
     #[error("TJXY admin assets are invalid: {0}")]
@@ -93,6 +98,7 @@ async fn main() -> Result<(), StartupError> {
         .with_tmdb_provider(Arc::clone(&tmdb))
         .with_theaudiodb_provider(Arc::clone(&the_audio_db))
         .with_musicbrainz_provider(Arc::clone(&musicbrainz));
+    startup = startup.with_ai_admission_config(ai_admission_config(|name| env::var(name))?);
     let audio_db_key = env::var("TJXY_THEAUDIODB_API_KEY").unwrap_or_else(|_| "2".to_owned());
     let musicbrainz_user_agent = env::var("TJXY_MUSICBRAINZ_USER_AGENT").unwrap_or_else(|_| {
         format!(
@@ -282,6 +288,55 @@ fn admin_dist_dir(lookup: impl FnOnce() -> Result<String, env::VarError>) -> Pat
     lookup().map_or_else(|_| PathBuf::from("admin/dist"), PathBuf::from)
 }
 
+fn ai_admission_config(
+    mut lookup: impl FnMut(&'static str) -> Result<String, env::VarError>,
+) -> Result<AiAdmissionConfig, StartupError> {
+    let requests_per_minute =
+        ai_admission_number(&mut lookup, "TJXY_AI_REQUESTS_PER_MINUTE", 10, 1_000)?;
+    let max_user_concurrent_sse = ai_admission_number(
+        &mut lookup,
+        "TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER",
+        2,
+        100,
+    )?;
+    let max_global_concurrent_sse =
+        ai_admission_number(&mut lookup, "TJXY_AI_MAX_CONCURRENT_STREAMS", 8, 1_000)?;
+    let daily_quota = ai_admission_number(&mut lookup, "TJXY_AI_DAILY_QUOTA", 100, 100_000)?;
+    AiAdmissionConfig::new(
+        u32::try_from(requests_per_minute).map_err(|_| {
+            StartupError::InvalidAiAdmissionNumber("TJXY_AI_REQUESTS_PER_MINUTE", 1_000)
+        })?,
+        usize::try_from(max_user_concurrent_sse).map_err(|_| {
+            StartupError::InvalidAiAdmissionNumber("TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER", 100)
+        })?,
+        usize::try_from(max_global_concurrent_sse).map_err(|_| {
+            StartupError::InvalidAiAdmissionNumber("TJXY_AI_MAX_CONCURRENT_STREAMS", 1_000)
+        })?,
+        u32::try_from(daily_quota)
+            .map_err(|_| StartupError::InvalidAiAdmissionNumber("TJXY_AI_DAILY_QUOTA", 100_000))?,
+    )
+    .map_err(StartupError::InvalidAiAdmissionConfiguration)
+}
+
+fn ai_admission_number(
+    lookup: &mut impl FnMut(&'static str) -> Result<String, env::VarError>,
+    name: &'static str,
+    default: u64,
+    maximum: u64,
+) -> Result<u64, StartupError> {
+    match lookup(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (1..=maximum).contains(value))
+            .ok_or(StartupError::InvalidAiAdmissionNumber(name, maximum)),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(StartupError::InvalidAiAdmissionNumber(name, maximum))
+        }
+    }
+}
+
 fn media_refresh_interval(
     lookup: impl FnOnce() -> Result<String, env::VarError>,
 ) -> Result<Option<Duration>, StartupError> {
@@ -312,11 +367,64 @@ fn redis_number(name: &'static str, default: u64) -> Result<u64, StartupError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env::VarError, path::PathBuf, time::Duration};
+    use std::{collections::HashMap, env::VarError, path::PathBuf, time::Duration};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-    use super::{admin_dist_dir, media_refresh_interval, parse_credential_keyring};
+    use super::{
+        admin_dist_dir, ai_admission_config, media_refresh_interval, parse_credential_keyring,
+    };
+
+    #[test]
+    fn ai_admission_configuration_defaults_and_accepts_overrides() {
+        let defaults = ai_admission_config(|_| Err(VarError::NotPresent)).unwrap();
+        assert_eq!(defaults.requests_per_minute(), 10);
+        assert_eq!(defaults.max_user_concurrent_sse(), 2);
+        assert_eq!(defaults.max_global_concurrent_sse(), 8);
+        assert_eq!(defaults.daily_quota(), 100);
+
+        let values = HashMap::from([
+            ("TJXY_AI_REQUESTS_PER_MINUTE", "12"),
+            ("TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER", "3"),
+            ("TJXY_AI_MAX_CONCURRENT_STREAMS", "9"),
+            ("TJXY_AI_DAILY_QUOTA", "250"),
+        ]);
+        let configured = ai_admission_config(|name| {
+            values
+                .get(name)
+                .map(|value| (*value).to_owned())
+                .ok_or(VarError::NotPresent)
+        })
+        .unwrap();
+        assert_eq!(configured.requests_per_minute(), 12);
+        assert_eq!(configured.max_user_concurrent_sse(), 3);
+        assert_eq!(configured.max_global_concurrent_sse(), 9);
+        assert_eq!(configured.daily_quota(), 250);
+    }
+
+    #[test]
+    fn ai_admission_configuration_rejects_invalid_environment_values() {
+        for (name, value) in [
+            ("TJXY_AI_REQUESTS_PER_MINUTE", "0"),
+            ("TJXY_AI_REQUESTS_PER_MINUTE", "1001"),
+            ("TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER", "101"),
+            ("TJXY_AI_MAX_CONCURRENT_STREAMS", "1001"),
+            ("TJXY_AI_DAILY_QUOTA", "100001"),
+            ("TJXY_AI_DAILY_QUOTA", "invalid"),
+        ] {
+            assert!(
+                ai_admission_config(|requested| {
+                    if requested == name {
+                        Ok(value.to_owned())
+                    } else {
+                        Err(VarError::NotPresent)
+                    }
+                })
+                .is_err(),
+                "{name}={value} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn admin_distribution_path_defaults_and_accepts_an_override() {

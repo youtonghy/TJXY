@@ -36,7 +36,7 @@ use tjxy_storage_onedrive::{
 };
 use uuid::Uuid;
 
-use crate::{AppState, ServerIdentity, worker};
+use crate::{AiAdmissionConfig, AppState, ServerIdentity, worker};
 
 pub struct BootstrapAdmin {
     username: String,
@@ -93,6 +93,7 @@ pub struct StartupOptions {
         Option<crate::metadata_settings_admin::MusicProviderEnvironmentFallback>,
     musicbrainz_provider_factory: Arc<crate::metadata_settings_admin::MusicProviderFactory>,
     media_refresh_interval: Option<StdDuration>,
+    ai_admission: AiAdmissionConfig,
 }
 
 struct ConfiguredStorageBackend {
@@ -149,6 +150,7 @@ impl fmt::Debug for StartupOptions {
             .field("the_audio_db_provider", &"[RELOADABLE]")
             .field("musicbrainz_provider", &"[RELOADABLE]")
             .field("media_refresh_interval", &self.media_refresh_interval)
+            .field("ai_admission", &self.ai_admission)
             .finish()
     }
 }
@@ -192,6 +194,7 @@ impl StartupOptions {
                     .map(|provider| Arc::new(provider) as Arc<dyn MetadataProvider>)
             }),
             media_refresh_interval: None,
+            ai_admission: AiAdmissionConfig::default(),
         }
     }
 
@@ -204,6 +207,12 @@ impl StartupOptions {
     #[must_use]
     pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
         self.legacy_auth_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_ai_admission_config(mut self, config: AiAdmissionConfig) -> Self {
+        self.ai_admission = config;
         self
     }
 
@@ -637,7 +646,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .with_startup_wizard_completed(has_enabled_admin),
     )
     .with_auth(auth.clone())
-    .with_ai(database.clone(), ai_settings_cipher)
+    .with_ai_config(database.clone(), ai_settings_cipher, options.ai_admission)
     .with_catalog(catalog.clone())
     .with_libraries(libraries)
     .with_assets(assets)

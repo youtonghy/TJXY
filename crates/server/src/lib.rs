@@ -2,6 +2,7 @@
 
 mod admin_assets;
 mod ai;
+mod ai_admission;
 mod ai_settings;
 mod api_key;
 mod auth;
@@ -61,6 +62,7 @@ use tjxy_application::{
 use uuid::Uuid;
 
 pub use admin_assets::AdminAssetsError;
+pub use ai_admission::{AiAdmissionConfig, AiAdmissionConfigError};
 pub use configuration::{CredentialKeyringError, parse_credential_keyring};
 pub use runtime_storage::RuntimeStorageError;
 pub use startup::{
@@ -201,12 +203,26 @@ impl AppState {
 
     #[must_use]
     pub fn with_ai(
-        mut self,
+        self,
         database: sea_orm::DatabaseConnection,
         cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
     ) -> Self {
+        self.with_ai_config(database, cipher, AiAdmissionConfig::default())
+    }
+
+    #[must_use]
+    pub fn with_ai_config(
+        mut self,
+        database: sea_orm::DatabaseConnection,
+        cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
+        admission_config: AiAdmissionConfig,
+    ) -> Self {
         self.ai_encryption_available = cipher.is_some();
-        self.ai = Some(Arc::new(ai::AiService::new(database, cipher)));
+        self.ai = Some(Arc::new(ai::AiService::new_with_config(
+            database,
+            cipher,
+            admission_config,
+        )));
         self
     }
 
