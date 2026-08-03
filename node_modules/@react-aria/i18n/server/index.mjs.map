@@ -1,1 +1,0 @@
-{"mappings":"","sources":["packages/@react-aria/i18n/src/server.ts"],"sourcesContent":["export {\n  PackageLocalizationProvider,\n  getPackageLocalizationScript\n} from 'react-aria/private/i18n/server';\n"],"names":[],"version":3,"file":"index.mjs.map"}

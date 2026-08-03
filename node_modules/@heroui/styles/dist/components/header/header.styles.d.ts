@@ -1,2 +1,0 @@
-export declare const headerVariants: import("tailwind-variants").TVReturnType<{} | {} | {}, undefined, "header", {} | {}, undefined, import("tailwind-variants").TVReturnTypeLike<unknown, undefined>>;
-//# sourceMappingURL=header.styles.d.ts.map
