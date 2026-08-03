@@ -7,7 +7,7 @@ use sea_orm_migration::MigratorTrait;
 use tjxy_common::{CatalogItemId, ImageType, UserId, Username};
 use tjxy_db::{
     AuthRepository, BrowseParent, CatalogItemType, CatalogItemsQuery, CatalogItemsScope,
-    CatalogPageRequest, CatalogQueryRepository,
+    CatalogPageRequest, CatalogQueryRepository, catalog_item_visibility_condition,
 };
 use tjxy_db::{UserDataPatch, UserDataRepository};
 use tjxy_test_support::test_database;
@@ -156,6 +156,71 @@ async fn add_to_library(database: &DatabaseConnection, library_id: Uuid, item_id
         )
         .await
         .unwrap();
+}
+
+async fn canonical_visibility(database: &DatabaseConnection, item_id: CatalogItemId) -> bool {
+    let item = Alias::new("visibility_item");
+    let query = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_items"), item.clone())
+        .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
+        .cond_where(catalog_item_visibility_condition(&item))
+        .limit(1)
+        .to_owned();
+    database
+        .query_one(database.get_database_backend().build(&query))
+        .await
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn canonical_visibility_requires_enabled_current_library_membership() {
+    let database = database().await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let item = seed_item(&database, "Arrival", "Movie", None, true, "Matched").await;
+    add_to_library(&database, library, item).await;
+
+    assert!(canonical_visibility(&database, item).await);
+
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), false)
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!canonical_visibility(&database, item).await);
+
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), true)
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(canonical_visibility(&database, item).await);
+
+    database
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!canonical_visibility(&database, item).await);
 }
 
 async fn set_rich_item_fields(

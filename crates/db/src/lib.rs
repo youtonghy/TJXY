@@ -9,6 +9,7 @@ mod cache_invalidation;
 mod catalog_publication;
 mod catalog_query;
 mod catalog_storage_scope;
+mod catalog_visibility;
 mod dashboard;
 mod demo_catalog;
 mod device;
@@ -77,6 +78,7 @@ pub use catalog_query::{
     CatalogQueryRepository, CatalogSort, CatalogSortField, CatalogSortOrder, LazyCatalogWorkTarget,
     LazyStorageScope, LibraryViewRecord,
 };
+pub use catalog_visibility::catalog_item_visibility_condition;
 pub use dashboard::{
     DashboardLoginRecord, DashboardNowPlaying, DashboardPage, DashboardPlaybackEvent,
     DashboardRepository, DashboardSnapshot, DashboardTopItem, DashboardWatchRecord,

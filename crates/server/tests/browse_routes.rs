@@ -6820,7 +6820,7 @@ async fn administrator_dashboard_reports_real_catalog_playback_and_session_activ
 }
 
 #[tokio::test]
-async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
+async fn client_portal_reports_personal_insights_and_discover_rankings() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
     let item = seed_item(&app.database, library, "Arrival", "Movie").await;
@@ -6917,6 +6917,80 @@ async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
         format!("/Items/{item}/Images/Primary?tag={poster_tag}")
     );
     assert_eq!(ranking["Items"][0]["PrimaryImageTag"], poster_tag);
+
+    let dashboard_path = format!(
+        "/Admin/Dashboard/Summary?from={}&to={}&topLimit=5",
+        (yesterday - Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        (yesterday + Duration::hours(3)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), false)
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_visibility_sensitive_routes_hide_item(&app.router, &token, &dashboard_path).await;
+
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), true)
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_visibility_sensitive_routes_hide_item(&app.router, &token, &dashboard_path).await;
+}
+
+async fn assert_visibility_sensitive_routes_hide_item(
+    router: &axum::Router,
+    token: &str,
+    dashboard_path: &str,
+) {
+    let response = get(router, "/Users/Me/Insights?range=all", Some(token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let insights: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(insights["PlayCount"], 0);
+    assert_eq!(insights["Recent"], json!([]));
+    assert_eq!(insights["Timeline"], json!([]));
+
+    for path in [
+        "/Discover/Popular?limit=20",
+        "/Discover/Server/Top?period=yesterday&limit=20",
+    ] {
+        let response = get(router, path, Some(token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(page["Items"], json!([]), "{path}");
+    }
+
+    let response = get(router, dashboard_path, Some(token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let dashboard: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(dashboard["TopItems"], json!([]));
 }
 
 #[tokio::test]

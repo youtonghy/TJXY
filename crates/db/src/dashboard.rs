@@ -7,6 +7,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::catalog_visibility::catalog_item_visibility_condition;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DashboardSnapshot {
     pub users_total: u64,
@@ -464,6 +466,7 @@ impl<'a> DashboardRepository<'a> {
                 Expr::col((items.clone(), Alias::new("id")))
                     .equals((ps.clone(), Alias::new("catalog_item_id"))),
             )
+            .cond_where(catalog_item_visibility_condition(&items))
             .and_where(Expr::col((ps.clone(), Alias::new("started_at"))).gte(from))
             .and_where(Expr::col((ps.clone(), Alias::new("started_at"))).lt(to))
             .expr_as(

@@ -33,7 +33,7 @@ use tjxy_db::{
     AiExecutionInput, AiExecutionOutcome, AiMessageRecord, AiModelInput, AiReasoningEffort,
     AiSettingsRecord, AiSettingsRepository, AiSettingsRepositoryError, AiUsageAnalytics,
     AiUsageRepository, AiUsageRepositoryError, CatalogItemRecord, CatalogItemType,
-    CatalogPageRequest,
+    CatalogPageRequest, catalog_item_visibility_condition,
 };
 use url::Host;
 use uuid::Uuid;
@@ -1095,8 +1095,7 @@ impl AiService {
             )
             .and_where(Expr::col((user_data.clone(), Alias::new("user_id"))).eq(user_id.as_uuid()))
             .and_where(Expr::col((user_data, Alias::new("is_favorite"))).eq(true))
-            .and_where(Expr::col((items.clone(), Alias::new("is_present"))).eq(true))
-            .and_where(Expr::col((items.clone(), Alias::new("classification_state"))).eq("Matched"))
+            .cond_where(catalog_item_visibility_condition(&items))
             .order_by((items, Alias::new("name")), Order::Asc)
             .limit(limit)
             .to_owned();

@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -10,12 +10,18 @@ use axum::{
 };
 use chrono::{Duration, Local};
 use http_body_util::BodyExt;
+use sea_orm::{
+    ConnectionTrait,
+    sea_query::{Alias, Expr, Query},
+};
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tjxy_application::{AuthService, CatalogQueryService, SystemClock};
+use tjxy_common::CatalogItemId;
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     AI_PROVIDER_KEY, AiModelInput, AiReasoningEffort, AiSettingsRepository, AiUsageRepository,
+    UserDataPatch, UserDataRepository,
 };
 use tjxy_server::{
     AiAdmissionConfig, AiProviderSession, AiProviderTransport, AiProviderTransportError, AppState,
@@ -52,6 +58,8 @@ struct TestProvider {
     releases: Option<Arc<tokio::sync::Semaphore>>,
     failures: Arc<AtomicUsize>,
     always_reject: bool,
+    favorites_tool: bool,
+    requests: Arc<Mutex<Vec<Value>>>,
 }
 
 impl TestProvider {
@@ -65,6 +73,12 @@ impl TestProvider {
 
     async fn rejecting() -> Arc<Self> {
         Self::start_with_behavior(false, true).await
+    }
+
+    async fn favorites_tool() -> Arc<Self> {
+        let mut provider = Self::start_with_behavior(false, false).await;
+        Arc::get_mut(&mut provider).unwrap().favorites_tool = true;
+        provider
     }
 
     async fn start_with_behavior(blocking: bool, always_reject: bool) -> Arc<Self> {
@@ -82,6 +96,8 @@ impl TestProvider {
             releases,
             failures,
             always_reject,
+            favorites_tool: false,
+            requests: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -102,6 +118,10 @@ impl TestProvider {
 
     fn reject_next(&self) {
         self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn requests(&self) -> Vec<Value> {
+        self.requests.lock().unwrap().clone()
     }
 
     async fn wait_for_hits(&self, expected: usize) {
@@ -127,6 +147,8 @@ struct TestProviderSession {
     releases: Option<Arc<tokio::sync::Semaphore>>,
     failures: Arc<AtomicUsize>,
     always_reject: bool,
+    favorites_tool: bool,
+    requests: Arc<Mutex<Vec<Value>>>,
 }
 
 #[async_trait]
@@ -144,6 +166,8 @@ impl AiProviderTransport for TestProvider {
             releases: self.releases.clone(),
             failures: Arc::clone(&self.failures),
             always_reject: self.always_reject,
+            favorites_tool: self.favorites_tool,
+            requests: Arc::clone(&self.requests),
         }))
     }
 }
@@ -161,7 +185,8 @@ impl AiProviderSession for TestProviderSession {
         assert_eq!(endpoint.path(), "/v1/chat/completions");
         assert_eq!(api_key, "test-secret");
         let request = body.expect("chat completions include a request body");
-        self.hits.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(request.clone());
+        let request_index = self.hits.fetch_add(1, Ordering::SeqCst);
         let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(current, Ordering::SeqCst);
         let _activity = ProviderActivity(Arc::clone(&self.active));
@@ -181,7 +206,25 @@ impl AiProviderSession for TestProviderSession {
         } else {
             StatusCode::OK
         };
-        let body = if status.is_success() {
+        let body = if status.is_success() && self.favorites_tool && request_index.is_multiple_of(2)
+        {
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "favorites-1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_favorites",
+                                "arguments": "{\"limit\":10}"
+                            }
+                        }]
+                    }
+                }]
+            })
+        } else if status.is_success() {
             json!({
                 "choices": [{
                     "message": {
@@ -644,6 +687,189 @@ fn authenticated_request(
 async fn json_body(response: axum::response::Response) -> Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn favorites_tool_excludes_items_from_disabled_or_unlinked_libraries() {
+    let provider = TestProvider::favorites_tool().await;
+    let app = configured_app_with(provider.clone()).await;
+    let (hidden_item, library_id) = seed_favorite_item(&app, "Hidden Favorite").await;
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(events.contains("event: done"));
+
+    assert_hidden_favorite_tool_round(&provider.requests()[1], hidden_item);
+
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), true)
+                    .and_where(Expr::col(Alias::new("id")).eq(library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(hidden_item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert_hidden_favorite_tool_round(&requests[3], hidden_item);
+}
+
+fn assert_hidden_favorite_tool_round(request: &Value, hidden_item: CatalogItemId) {
+    let tool_round = request.to_string();
+    assert!(tool_round.contains(r#"\"Items\":[]"#));
+    assert!(!tool_round.contains("Hidden Favorite"));
+    assert!(!tool_round.contains(&hidden_item.to_string()));
+}
+
+async fn seed_favorite_item(app: &ConfiguredApp, name: &str) -> (CatalogItemId, Uuid) {
+    let backend = app.database.get_database_backend();
+    let library_id = Uuid::new_v4();
+    let item_id = CatalogItemId::new();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("libraries"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("name"),
+                        Alias::new("scan_profile"),
+                        Alias::new("object_selection_scope"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("probe_policy"),
+                        Alias::new("profile_version"),
+                        Alias::new("collection_type"),
+                        Alias::new("sort_key"),
+                        Alias::new("is_enabled"),
+                    ])
+                    .values_panic([
+                        library_id.into(),
+                        "Hidden library".into(),
+                        "Lazy".into(),
+                        "title_layer".into(),
+                        "basic".into(),
+                        "on_browse".into(),
+                        "on_playback".into(),
+                        1.into(),
+                        "movies".into(),
+                        b"hidden-library".to_vec().into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("sort_key"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item_id.as_uuid().into(),
+                        "Movie".into(),
+                        name.into(),
+                        name.to_lowercase().into(),
+                        name.as_bytes().to_vec().into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "NotApplicable".into(),
+                        "Indexed".into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("catalog_item_id"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        library_id.into(),
+                        item_id.as_uuid().into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    UserDataRepository::new(&app.database)
+        .commit(app.alice_user_id, item_id, UserDataPatch::favorite(true))
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), false)
+                    .and_where(Expr::col(Alias::new("id")).eq(library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    (item_id, library_id)
 }
 
 #[tokio::test]
