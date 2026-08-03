@@ -72,6 +72,8 @@ pub enum CollectionType {
     Movies,
     #[serde(rename = "tvshows")]
     TvShows,
+    #[serde(rename = "music")]
+    Music,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

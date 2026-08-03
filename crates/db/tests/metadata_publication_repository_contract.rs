@@ -5,7 +5,10 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::CatalogItemId;
 use tjxy_db::MetadataPublicationRepository;
-use tjxy_metadata::{MetadataLookup, MetadataResolution, NfoDocument};
+use tjxy_metadata::{
+    MetadataCandidate, MetadataItemKind, MetadataLookup, MetadataResolution, MetadataSource,
+    NfoDocument,
+};
 use tjxy_test_support::test_database;
 
 async fn database() -> DatabaseConnection {
@@ -55,6 +58,75 @@ async fn seed_item(database: &DatabaseConnection) -> CatalogItemId {
         .await
         .unwrap();
     id
+}
+
+#[tokio::test]
+async fn audio_metadata_publishes_music_provider_identities() {
+    let database = database().await;
+    let item = seed_item(&database).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("item_type"), "Audio")
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Audio, "Coldplay - Yellow", None).unwrap();
+    let source = MetadataSource::new(
+        "MusicBrainz",
+        Some("recording:a1f8f8e1-1d21-4b82-9e6f-1f6020480173"),
+        7_500,
+    )
+    .unwrap();
+    let resolution = MetadataResolution::from_candidate(
+        &lookup,
+        MetadataCandidate::new(source)
+            .with_title("Yellow")
+            .with_year(2000)
+            .with_provider_id(
+                "musicbrainz:recording",
+                "a1f8f8e1-1d21-4b82-9e6f-1f6020480173",
+            )
+            .with_provider_id("theaudiodb", "32778411"),
+    )
+    .unwrap();
+    let repository = MetadataPublicationRepository::new(&database);
+
+    assert!(
+        repository
+            .publish(item, &resolution)
+            .await
+            .unwrap()
+            .changed()
+    );
+    assert!(
+        !repository
+            .publish(item, &resolution)
+            .await
+            .unwrap()
+            .changed()
+    );
+
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("name"), Alias::new("production_year")])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "name").unwrap(), "Yellow");
+    assert_eq!(row.try_get::<i32>("", "production_year").unwrap(), 2000);
+    assert_eq!(count(&database, "provider_ids").await, 2);
 }
 
 #[tokio::test]

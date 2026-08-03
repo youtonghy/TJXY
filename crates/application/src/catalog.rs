@@ -813,7 +813,10 @@ impl CatalogQueryService {
         let item = repository.item(principal, item_id).await?;
         if item.is_some()
             && let Some(target) = repository.lazy_work_target(principal, item_id).await?
-            && target.item_type() == CatalogItemType::Movie
+            && matches!(
+                target.item_type(),
+                CatalogItemType::Movie | CatalogItemType::Audio
+            )
             && !target.has_current_sources()
         {
             self.enqueue_and_wait(target, item_id, WorkTaskKind::IndexMediaSources)
@@ -873,7 +876,7 @@ impl CatalogQueryService {
             && let Some(target) = query.lazy_work_target(principal, item_id).await?
             && matches!(
                 target.item_type(),
-                CatalogItemType::Movie | CatalogItemType::Episode
+                CatalogItemType::Movie | CatalogItemType::Episode | CatalogItemType::Audio
             )
         {
             self.enqueue_and_wait(target, item_id, WorkTaskKind::IndexMediaSources)
@@ -1016,29 +1019,37 @@ impl CatalogQueryService {
         };
         let jobs = WorkJobRepository::new(&self.database);
         let deadline = Instant::now() + self.lazy_wait_timeout;
-        let media_spec = if scope.is_ready() {
-            WorkJobSpec::new(task_kind, WorkScope::CatalogItem(item_id), revision, 100)?
-                .with_input_sync_revision(scope.children_revision())?
-        } else {
-            let sync = jobs
-                .enqueue_or_join(
-                    &WorkJobSpec::new(
-                        WorkTaskKind::ScopedStorageSync,
-                        WorkScope::StorageObject(scope.storage_object_id()),
-                        scope.children_revision(),
-                        100,
-                    )?
-                    .with_storage_root_affinity(scope.storage_root_id())?,
-                )
-                .await?;
-            self.wait_for_job(&jobs, sync.job().id(), deadline).await?;
-            let Some(sync_revision) = jobs.completed_sync_revision(sync.job().id()).await? else {
-                return Ok(());
-            };
-            WorkJobSpec::new(task_kind, WorkScope::CatalogItem(item_id), revision, 100)?
-                .with_required_sync(sync.job().id(), sync_revision)
-        }
-        .with_storage_root_affinity(scope.storage_root_id())?;
+        let direct_audio = task_kind == WorkTaskKind::IndexMediaSources
+            && target.item_type() == CatalogItemType::Audio;
+        let media_spec =
+            if scope.is_ready() || (direct_audio && scope.is_ready_for_direct_source()) {
+                WorkJobSpec::new(task_kind, WorkScope::CatalogItem(item_id), revision, 100)?
+                    .with_input_sync_revision(if direct_audio {
+                        scope.metadata_input_revision()
+                    } else {
+                        scope.children_revision()
+                    })?
+            } else {
+                let sync = jobs
+                    .enqueue_or_join(
+                        &WorkJobSpec::new(
+                            WorkTaskKind::ScopedStorageSync,
+                            WorkScope::StorageObject(scope.storage_object_id()),
+                            scope.children_revision(),
+                            100,
+                        )?
+                        .with_storage_root_affinity(scope.storage_root_id())?,
+                    )
+                    .await?;
+                self.wait_for_job(&jobs, sync.job().id(), deadline).await?;
+                let Some(sync_revision) = jobs.completed_sync_revision(sync.job().id()).await?
+                else {
+                    return Ok(());
+                };
+                WorkJobSpec::new(task_kind, WorkScope::CatalogItem(item_id), revision, 100)?
+                    .with_required_sync(sync.job().id(), sync_revision)
+            }
+            .with_storage_root_affinity(scope.storage_root_id())?;
         let Some(submission) = jobs.enqueue_lazy_or_join(&media_spec).await? else {
             return Ok(());
         };

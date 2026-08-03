@@ -41,6 +41,9 @@ export interface ServerRankingItem {
   Name: string;
   ItemType: string;
   ProductionYear?: number;
+  Overview?: string;
+  PrimaryImageTag?: string;
+  PosterUrl?: string;
   PlayCount: number;
   UniqueViewers: number;
 }

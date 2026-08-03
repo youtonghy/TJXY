@@ -1346,6 +1346,7 @@ fn library_dto(server_id: Uuid, view: &LibraryViewRecord) -> Result<BaseItemDto,
         "folders" => CollectionType::Folders,
         "movies" => CollectionType::Movies,
         "tvshows" => CollectionType::TvShows,
+        "music" => CollectionType::Music,
         _ => return Err(()),
     };
     Ok(BaseItemDto::library_view(

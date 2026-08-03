@@ -104,7 +104,9 @@ export function LibraryCreateDialog({
                   isDisabled={isPending}
                   label="Content type"
                   onChange={setCollectionType}
-                  options={collectionOptions.filter((option) => option.value === 'movies' || option.value === 'tvshows')}
+                  options={collectionOptions.filter((option) => (
+                    option.value === 'movies' || option.value === 'tvshows' || option.value === 'music'
+                  ))}
                   value={collectionType}
                 />
                 <div className="space-y-2">

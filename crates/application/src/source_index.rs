@@ -29,7 +29,11 @@ impl SourceIndexService {
         let snapshot = SourceIndexRepository::new(&self.database)
             .snapshot(claimed)
             .await?;
-        let graph = build_graph(snapshot.objects(), snapshot.restrict_to_stable_sources())?;
+        let graph = build_graph(
+            snapshot.objects(),
+            snapshot.restrict_to_stable_sources(),
+            snapshot.is_audio(),
+        )?;
         let manifest = SourcePublicationManifest::from_rows(
             &graph.sources,
             &graph.locations,
@@ -64,7 +68,7 @@ struct SourceGraph {
     subtitles: Vec<SubtitlePublicationRow>,
 }
 
-struct Video {
+struct MediaFile {
     stem: String,
     source: MediaSourceId,
 }
@@ -72,16 +76,17 @@ struct Video {
 fn build_graph(
     objects: &[SourceIndexObject],
     restrict_to_stable_sources: bool,
+    is_audio: bool,
 ) -> Result<SourceGraph, SourceIndexError> {
     let mut sources = Vec::new();
     let mut source_ids = HashSet::new();
     let mut locations = Vec::new();
-    let mut videos = Vec::new();
+    let mut media_files = Vec::new();
     for object in objects {
         let Some((stem, extension)) = file_parts(object.name()) else {
             continue;
         };
-        if !matches!(extension.as_str(), "mkv" | "mp4" | "m4v" | "webm") {
+        if !supported_media_extension(&extension, is_audio) {
             continue;
         }
         if restrict_to_stable_sources && object.stable_source().is_none() {
@@ -113,15 +118,22 @@ fn build_graph(
             kind,
             0,
         )?);
-        videos.push(Video {
+        media_files.push(MediaFile {
             stem: stem.to_lowercase(),
             source,
         });
     }
-    if videos.is_empty() {
-        return Err(SourceIndexError::NoVideo);
+    if media_files.is_empty() {
+        return Err(SourceIndexError::NoMedia);
     }
     let mut subtitles = Vec::new();
+    if is_audio {
+        return Ok(SourceGraph {
+            sources,
+            locations,
+            subtitles,
+        });
+    }
     for object in objects {
         let Some((subtitle_stem, format)) = file_parts(object.name()) else {
             continue;
@@ -130,7 +142,7 @@ fn build_graph(
             continue;
         }
         let normalized = subtitle_stem.to_lowercase();
-        let Some(video) = videos
+        let Some(video) = media_files
             .iter()
             .filter(|video| {
                 normalized == video.stem || normalized.starts_with(&format!("{}.", video.stem))
@@ -175,6 +187,17 @@ fn build_graph(
     })
 }
 
+fn supported_media_extension(extension: &str, is_audio: bool) -> bool {
+    if is_audio {
+        matches!(
+            extension,
+            "aac" | "flac" | "m4a" | "mp3" | "oga" | "ogg" | "opus" | "wav" | "wave" | "webm"
+        )
+    } else {
+        matches!(extension, "mkv" | "mp4" | "m4v" | "webm")
+    }
+}
+
 fn file_parts(name: &str) -> Option<(String, String)> {
     let path = Path::new(name);
     Some((
@@ -185,8 +208,8 @@ fn file_parts(name: &str) -> Option<(String, String)> {
 
 #[derive(Debug, Error)]
 pub enum SourceIndexError {
-    #[error("source-index input has no supported video object")]
-    NoVideo,
+    #[error("source-index input has no supported media object")]
+    NoMedia,
     #[error("source-index input query failed: {0}")]
     Repository(#[from] SourceIndexRepositoryError),
     #[error("source-index publication failed: {0}")]

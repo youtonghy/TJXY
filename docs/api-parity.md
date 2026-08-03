@@ -13,6 +13,8 @@ L2 当前策略是所有已认证且未禁用的用户可见全部启用媒体�
 
 TJXY Web 另有同源自用接口：`GET|PATCH /Users/Me/Profile`、
 `POST /Users/Me/Password`、`GET /Users/Me/Insights`、`GET /Discover/Popular`、
+`GET /System/Language`、安装阶段 `PUT /System/Language` 与管理员 `GET/PUT /Admin/System/Language`、
+`GET /System/Settings`、管理员 `GET/PUT /Admin/System/Settings`、品牌图片上传与管理员自重启，
 `GET /Discover/Tmdb/Popular` 与 `GET /Discover/Server/Top`。这些接口要求正常用户
 session，不冒充其他用户；TMDB token 只在服务端解密，排行榜按 UTC 日期进行进程内
 日缓存，刷新失败时使用最近一次成功结果。Insights 同时返回观看时长聚合与真实播放
@@ -56,7 +58,7 @@ session，不冒充其他用户；TMDB token 只在服务端解密，排行榜�
 | Users / Me / Admin CRUD | ✅ | ✅ Me、启动时首管理员及鉴权 Admin list/get/create/rename/password/policy/delete 已实现；策略持久化限于 TJXY 支持的 administrator/disabled，本地 provider 与 Direct Play-only 能力不可被请求改写；所有敏感变更撤销旧 auth revision，且禁止移除最后一个 enabled admin |
 | DisplayPreferences | ✅ 最小 | ✅ 认证 `GET|POST /DisplayPreferences/{id}` 已实现；非 UUID ID 使用 Jellyfin UTF-16LE MD5 GUID 兼容映射，偏好按 user/display/client 原子替换并持久化，跨用户访问返回 403，DTO 默认值与 PascalCase golden 已固定 |
 | HeroUI Admin 登录与 Users CRUD | ✅ | ✅ 同源 `/admin/` 生产构建采用 `ra-core` + HeroUI v3，登录、用户列表/创建/改名/密码/策略/删除与移动端布局已实现，并有完整 Playwright 生命周期门禁 |
-| HeroUI Admin Libraries | ✅ | ✅ 管理员可列出、创建空库、重命名和删除 Library，并以 `profile_version` CAS 编辑 Full/Lazy/Hybrid/Manual 或完整四项 effective policy；可分页查看各库的持久化 Series 候选，仅为 enabled `background` 库新增 pin，并可清除 dormant pin；表格仅显示 root 数量且不暴露路径。生产 Playwright 覆盖 Library/策略 SQL 生命周期与候选真实空页，候选 pin/unpin SQL 生命周期由 server 集成契约覆盖 |
+| HeroUI Admin Libraries | ✅ | ✅ 管理员可列出、创建电影、剧集或音乐 Library，重命名和删除 Library，并以 `profile_version` CAS 编辑 Full/Lazy/Hybrid/Manual 或完整四项 effective policy；音乐库递归发现受支持的音频文件，发布为可播放 `Audio` 项并使用 1:1 封面；可分页查看各库的持久化 Series 候选，仅为 enabled `background` 库新增 pin，并可清除 dormant pin；表格仅显示 root 数量且不暴露路径。生产 Playwright 覆盖 Library/策略 SQL 生命周期与候选真实空页，候选 pin/unpin SQL 生命周期由 server 集成契约覆盖 |
 | HeroUI Admin Tasks | ✅ | ⚠️ 管理员可启动/取消 Full Media Scan、查看有界 newest-first durable job 安全状态，并按现有 Library root 或 CatalogItem 显式提交 Validate/Discover/root Full/Resolve/Expand/Index/Probe；root Full 使用 Library-root binding scope，shared root 不跨库推进 Discover。原始错误、lease、路径与凭据不出站；日志摘要与缓存状态未实现 |
 | HeroUI Admin cloud Storage | ✅ | ⚠️ 管理员可选择目标库、启动服务端 OAuth、确认回调、选择 My Drive 或分页 Shared Drive、通过服务端 OAuth-session UUID cursor 完整分页并逐层选择 Google/OneDrive Personal 目录、提交绑定；确定性 fake-provider/HTTP 契约已覆盖追加、去重、空页续翻、失败重试和上下文/owner/state 隔离，但尚非 live Google/Microsoft 验收；Storage 状态/重授权、metadata、迁移及冲突管理页面未实现 |
 | HeroUI Admin Access | ✅ | ✅ 已认证的 `/admin/access` 以 Devices/API Keys 标签页提供设备改名、确认撤销、API key 创建/遮罩/显示/复制/确认删除；权威重载可取消并防旧响应覆盖，密钥不写 Web Storage 或诊断产物。生产 Playwright 已覆盖持久化恢复、API key 鉴权、撤销/删除失效，以及桌面、768px 和 390px 布局 |
@@ -102,7 +104,7 @@ session，不冒充其他用户；TMDB token 只在服务端解密，排行榜�
 | StorageObject 稳定身份 | provider ID/可靠 file ID；Filesystem 路径 fallback 标为 weak | ✅ provider stable ID、Unix dev/inode 与非 Unix canonical-path `PathWeak` 已进入持久化 identity_quality；稳定 ID rename 保持对象身份，弱身份只生成待确认 relink candidate |
 | Items query/filter/sort/page | 索引 SQL + Redis cache-aside | ⚠️ SQL 类型过滤、`SortName` 升序、1..=200 分页及 cache-aside 已实现；其他排序未实现 |
 | UserViews / Latest / Resume / NextUp | 首页预热 | ⚠️ 四个 SQL-authoritative 路由及 generation/user-revision cache-aside 已实现；Redis 启用时 ready 后预热最多 128 个启用用户的 UserViews、全局 Latest、最多 64 个 Library Latest、默认 Resume/NextUp；NextUp 高级筛选/重看模式未实现 |
-| Lazy 初始基础 metadata | title/year/overview/provider/Primary | ⚠️ 根层 Discover 生成 title/year，Resolve 支持 NFO、可选 TMDb、Naming fallback 与 Movie/Series Primary 本地化；Structure 投影 Season 已可从持久化 storage scope 读取 NFO，Season/Episode 在线 provider parent-aware 查询和本地图仍未接入 |
+| Lazy 初始基础 metadata | title/year/overview/provider/Primary | ⚠️ 根层 Discover 生成 title/year，Resolve 支持 NFO、可选 TMDb、TheAudioDB、MusicBrainz、Naming fallback，以及 Movie/Series/Audio Primary 本地化；Audio 可发布 recording/artist/release-group identity、流派与 artist credit，Structure 投影 Season 已可从持久化 storage scope 读取 NFO；Season/Episode 在线 provider parent-aware 查询和音乐标签读取仍未接入 |
 | Lazy Movie 首次展开 | 详情触发 Source Index；PlaybackInfo 可等待同一任务；成功 bump generation | ⚠️ 详情 enqueue/join/有界等待、SQL inventory 分类、外挂字幕关联及 Source 原子发布 worker 已实现；更完整容器/命名分类未实现 |
 | Lazy Series 首次展开 | publication staging 后一次切换全部 Season/Episode；子 Episode source 已 Indexed | ⚠️ 递归 scoped inventory 调度、确定性子项 ID、Episode Source/Location/Subtitle 与单一 Structure pointer 原子发布 worker 已实现；更完整季/集命名解析未实现 |
 | Expand single-flight | 先等待 sync/result/reconciled revision，再由多实例 join 持久化 leased job | ✅ 请求协调器、sync-first 编排、持久化 join/fencing、递归 inventory retry 及 Structure worker 已实现 |
@@ -121,8 +123,8 @@ session，不冒充其他用户；TMDB token 只在服务端解密，排行榜�
 |------|-----------|------|
 | 结构化 metadata | 全部写 SQL | ⚠️ title/original title/year/overview、Provider IDs、metadata state、请求等级/尝试水位与 generation 通过单事务发布；Basic/Full 调度和竞态已区分，Full NFO 会原子替换已评估的 People/Genres/Studios，Basic 不触碰关联；在线 provider 的 Full 关联获取、关联 provenance 与版本化完成证据尚未接入 |
 | NFO / 本地图 | 导入来源，不是运行时 SoT | ⚠️ 有界 NFO parser、管理员导入、SQL direct-child sidecar 选择、snapshot/commit 双重 scope/fact revision fence、平铺 Episode 按 active video Location 同 stem 精确关联且不借用兄弟/目录级 NFO、bounded 读取与 durable 发布已实现；直接管理员导入会串行合并并推进 metadata revision，使更早领取的 resolver 无法覆盖新结果；本地图发现未实现 |
-| 在线 provider | v1 仅 TMDb，可选；失败不失败整次任务 | ⚠️ 默认关闭、显式 bearer token/language、bounded Movie/Series search、固定 host 的 bounded Primary 下载与 warning 降级已实现；Season/Episode parent-aware 查询未实现 |
-| Provider identity | 可存 TMDb/TVDB/IMDb 等键；在线解析以 TMDb 为主 | ⚠️ NFO/Emby/TMDb identity 可原子写入，部分来源合并保留未提及 identity；跨来源自动复用/冲突队列未实现 |
+| 在线 provider | TMDb、TheAudioDB、MusicBrainz；失败不失败整次任务 | ⚠️ TMDb 显式 bearer token/language、TheAudioDB key、MusicBrainz 识别 User-Agent 与单请求节流、bounded search、固定 host 的 bounded Primary 下载与 warning 降级已实现；三项 provider 均支持管理员加密数据库配置、连接测试、环境 fallback 和无需重启的运行时替换，TheAudioDB key 不回传；Season/Episode parent-aware 查询和音乐 album/tag 精确输入未实现 |
+| Provider identity | 可存 TMDb/TVDB/IMDb/MusicBrainz/TheAudioDB 等键 | ⚠️ NFO/Emby/TMDb/TheAudioDB/MusicBrainz identity 可原子写入，部分来源合并保留未提及 identity；跨来源自动复用/冲突队列未实现 |
 | Jellyfin/Emby metadata 插件宿主 | ❌ | ❌ |
 | 弱匹配 | 只生成候选，不强制合并 | ⚠️ Filesystem PathWeak rename 候选、脱敏 Admin 队列、过期校验及 CAS Confirm/Reject 已实现；title/year/provider 跨来源候选尚未实现 |
 | metadata provenance | 字段来源可追踪 | ⚠️ 基础字段与 Provider ID 保存 provider/reference/value SHA-256，来源切换按字段替换且重放不 bump generation；关联字段 provenance 未实现 |
@@ -130,6 +132,20 @@ session，不冒充其他用户；TMDB token 只在服务端解密，排行榜�
 | ItemAsset 引用 | 图片不归属媒体目录 | ⚠️ metadata 文本、TMDb Primary 引用及 WorkJob 结果同事务提交，支持原子替换、单次 generation bump、priority-zero ImageTags 与授权原图解析；本地图/import 采集器尚未接入 |
 | Admin merge/split/rematch | ✅ | ⚠️ Filesystem PathWeak storage relink 的 list/confirm/reject 已实现，并保留稳定 CatalogItem/UserData/MediaSource identity；通用 CatalogItem merge/split 与 provider rematch 尚未实现 |
 | Chapter images / Trickplay | ❌，需要视频帧处理 | ❌ |
+
+---
+
+### AI 影视助手
+
+| 能力 | 状态 |
+|------|------|
+| 管理员 Provider 配置 | ✅ `/Admin/Ai/Settings` 支持 OpenAI-compatible base URL、write-only API key、附加 system prompt、模型别名/上游 ID、前端可见性、默认模型、revision 冲突检测与连接测试；`POST /Admin/Ai/Settings/Models` 由服务端调用 provider `GET /models`，返回有界、排序、去重的模型 ID 供管理员选择，同时保留手动填写；凭据通过 `TJXY_CREDENTIAL_KEYRING` 加密后写入 SQL；provider origin 改变时必须重新输入 key，非 loopback 明文 HTTP 与私有 literal IP URL 被拒绝 |
+| 管理员使用统计 | ✅ `GET /Admin/Ai/Analytics` 返回服务器本地“今天”的请求数、活跃用户、成功率、真实上游 Token usage，以及最近 14 天趋势、用户/模型排行和有界失败记录；多轮工具调用会累计各次 completion usage，任一请求或轮次缺少可信 usage 时对应聚合 Token 返回 `null` 并附 `KnownTokenRequests`，不以字符数估算；失败仅保存 `upstream_rejected`、`upstream_invalid`、`upstream_timeout`、`tool_failed`、`persistence_failed`、`internal_error` 安全分类、耗时和模型/用户快照，不保存提示词、回答、API key、工具参数或上游错误正文；响应为 `Cache-Control: no-store` |
+| 前端模型发现 | ✅ `/Ai/Models` 只返回已启用且管理员允许显示的模型 UUID、显示名称和默认标记，不返回 provider URL、API key 或上游模型 ID |
+| 用户会话 | ✅ `/Ai/Conversations` 支持当前认证用户的有界列表、详情和单会话删除；详情按时间正序仅返回最近 200 条消息，当前尚无向前分页；所有读取按 session principal 隔离并返回 `Cache-Control: no-store` |
+| SSE 对话 Agent | ✅ `/Ai/Chat` 使用固定事件白名单、大小限制和终止事件；上游协议错误被脱敏，完整回答成功持久化后才向浏览器发送内容；新会话由客户端预生成 UUID，pending ID 会保存在当前标签页并在重载、重新联网或页面重新聚焦后继续对账首轮原子提交 |
+| 影视限定与上下文工具 | ✅ 服务端不可覆盖的影视 policy；有界只读 MCP-style 工具覆盖目录搜索、详情、最近观看、用户统计、收藏、继续观看和推荐候选；用户 ID 只从认证 principal 获取 |
+| 语义索引 | ⚠️ 当前基于 SQL 结构化 metadata 与用户数据检索；尚无 embedding、向量数据库或语义相似度索引，内部工具注册表也不是公开 MCP transport |
 
 ---
 

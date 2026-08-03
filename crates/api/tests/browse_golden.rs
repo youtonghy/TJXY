@@ -170,3 +170,16 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
         })
     );
 }
+
+#[test]
+fn music_library_view_uses_the_jellyfin_collection_type() {
+    let server_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+    let library_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+
+    let library = BaseItemDto::library_view(library_id, "Music", server_id, CollectionType::Music);
+
+    assert_eq!(
+        serde_json::to_value(library).unwrap()["CollectionType"],
+        "music"
+    );
+}

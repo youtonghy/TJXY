@@ -27,7 +27,7 @@ export async function clientBlob(path: string, signal?: AbortSignal): Promise<Bl
 export async function clientFetch(path: string, options: RequestInit = {}): Promise<Response> {
   if (!path.startsWith('/') || path.startsWith('//')) throw new ClientApiError(0, 'validation');
   const headers = new Headers(options.headers);
-  headers.set('Accept', 'application/json');
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
   const token = getClientToken();
   if (token) headers.set('Authorization', `MediaBrowser Token="${token}"`);
   else headers.set('Authorization', clientIdentityHeader());

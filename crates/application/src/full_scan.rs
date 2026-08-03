@@ -346,7 +346,9 @@ fn eager_media_task(
         CatalogItemType::Series if !target.has_current_structure() => {
             Some(WorkTaskKind::ExpandItem)
         }
-        CatalogItemType::Movie | CatalogItemType::Episode if !target.has_current_sources() => {
+        CatalogItemType::Movie | CatalogItemType::Episode | CatalogItemType::Audio
+            if !target.has_current_sources() =>
+        {
             Some(WorkTaskKind::IndexMediaSources)
         }
         _ => None,
@@ -367,10 +369,16 @@ fn eager_child_spec(
     let Some(scope) = target.storage_scope() else {
         return Err(FullScanError::MissingStorageScope(item));
     };
-    if scope.is_ready() {
+    let direct_audio =
+        task == WorkTaskKind::IndexMediaSources && target.item_type() == CatalogItemType::Audio;
+    if scope.is_ready() || (direct_audio && scope.is_ready_for_direct_source()) {
         let spec = root_affine_spec(
             WorkJobSpec::new(task, WorkScope::CatalogItem(item), revision, priority)?
-                .with_input_sync_revision(scope.children_revision())?,
+                .with_input_sync_revision(if direct_audio {
+                    scope.metadata_input_revision()
+                } else {
+                    scope.children_revision()
+                })?,
             storage_root.or(Some(scope.storage_root_id())),
         )?;
         Ok((format!("{}:{item}:{revision}", task.as_str()), spec))

@@ -80,8 +80,15 @@ export async function getLatest(options: number | LatestItemsOptions = 18): Prom
 }
 export async function getResumeItems(limit = 12): Promise<MediaItem[]> { const value = await clientRequest<ItemPage>(`/UserItems/Resume?mediaTypes=Video&limit=${limit}&enableUserData=true`); return Array.isArray(value.Items) ? value.Items : []; }
 export async function getPopular(limit = 12): Promise<MediaItem[]> {
-  const value = await clientRequest<ItemPage>(`/Discover/Popular?limit=${limit}`);
-  const summaries = Array.isArray(value.Items) ? value.Items : [];
+  let value: ItemPage;
+  try {
+    value = await clientRequest<ItemPage>(`/Discover/Popular?limit=${limit}`);
+  } catch {
+    return getLatest({ limit, includeItemTypes: 'Movie,Series' });
+  }
+  const summaries = Array.isArray(value.Items) && value.Items.length > 0
+    ? value.Items
+    : (await getLatest({ limit, includeItemTypes: 'Movie,Series' }));
   return Promise.all(summaries.map(async (summary) => {
     try {
       return await getItem(summary.Id);
@@ -100,5 +107,6 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 export function latestTypesForLibrary(library: Library): string | undefined {
   if (library.CollectionType === 'movies') return 'Movie';
   if (library.CollectionType === 'tvshows') return 'Series';
+  if (library.CollectionType === 'music') return 'Audio';
   return undefined;
 }

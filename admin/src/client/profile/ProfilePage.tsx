@@ -34,6 +34,8 @@ import {
   type UserProfile,
 } from '../api/portalApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
+import { useTranslate } from '../../settings/i18n';
+import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 
 const ranges: { key: InsightRange; label: string }[] = [
   { key: 'today', label: 'Today' },
@@ -49,52 +51,54 @@ export function ProfilePage() {
   const [insights, setInsights] = useState<UserInsights>();
   const [range, setRange] = useState<InsightRange>('today');
   const [editing, setEditing] = useState(false);
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
 
   useEffect(() => { void getProfile().then(setProfile); }, []);
   useEffect(() => { void getUserInsights(range).then(setInsights); }, [range]);
 
-  if (!profile) return <div aria-label="Loading profile" className="h-52 animate-pulse rounded-2xl bg-default" role="status" />;
+  if (!profile) return <div aria-label={tr('Loading profile', '正在加载个人资料')} className="h-52 animate-pulse rounded-2xl bg-default" role="status" />;
   return (
     <div className="space-y-8">
       <Card className="overflow-hidden p-0">
         <Card.Content className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:p-8">
           <Avatar className="size-20 text-2xl"><Avatar.Fallback>{profile.Username.slice(0, 1).toUpperCase()}</Avatar.Fallback></Avatar>
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-accent">Your account</p>
+            <p className="text-sm font-medium text-accent">{tr('Your account', '你的账户')}</p>
             <h1 className="mt-1 text-3xl font-semibold">{profile.Username}</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{profile.Bio || 'Add a short introduction about yourself.'}</p>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{profile.Bio || tr('Add a short introduction about yourself.', '添加一段简短的自我介绍。')}</p>
           </div>
-          <Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />Edit profile</Button>
+          <Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button>
         </Card.Content>
       </Card>
 
       <section className="space-y-5" aria-labelledby="statistics-heading">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-          <div><h2 className="text-2xl font-semibold" id="statistics-heading">Viewing statistics</h2><p className="mt-1 text-sm text-muted">Your activity across the selected period.</p></div>
-          <div aria-label="Statistics period" className="flex flex-wrap gap-2" role="group">
-            {ranges.map((item) => <Button key={item.key} onPress={() => { setRange(item.key); }} size="sm" variant={range === item.key ? 'primary' : 'secondary'}>{item.label}</Button>)}
+          <div><h2 className="text-2xl font-semibold" id="statistics-heading">{tr('Viewing statistics', '观看统计')}</h2><p className="mt-1 text-sm text-muted">{tr('Your activity across the selected period.', '所选时间范围内的观看活动。')}</p></div>
+          <div aria-label={tr('Statistics period', '统计时间范围')} className="flex flex-wrap gap-2" role="group">
+            {ranges.map((item) => <Button key={item.key} onPress={() => { setRange(item.key); }} size="sm" variant={range === item.key ? 'primary' : 'secondary'}>{tr(item.label, ({ Today: '今天', '7 days': '7 天', '30 days': '30 天', 'All time': '全部时间' } as Record<string, string>)[item.label] ?? item.label)}</Button>)}
           </div>
         </div>
-        <div aria-label="Viewing KPIs" className="grid gap-3 lg:grid-cols-2" role="group">
-          <KPIGroup aria-label="Viewing totals">
-            <InsightKpi icon={Clock3} label="Watch time" value={formatTicks(insights?.WatchedTicks)} />
+        <div aria-label={tr('Viewing KPIs', '观看指标')} className="grid gap-3 lg:grid-cols-2" role="group">
+          <KPIGroup aria-label={tr('Viewing totals', '观看总量')}>
+            <InsightKpi icon={Clock3} label={tr('Watch time', '观看时长')} value={formatTicks(insights?.WatchedTicks, locale)} />
             <KPIGroup.Separator />
-            <InsightKpi icon={Play} label="Playback starts" value={String(insights?.PlayCount ?? 0)} />
+            <InsightKpi icon={Play} label={tr('Playback starts', '播放次数')} value={String(insights?.PlayCount ?? 0)} />
           </KPIGroup>
-          <KPIGroup aria-label="Viewing variety">
-            <InsightKpi icon={Film} label="Unique titles" value={String(insights?.UniqueTitles ?? 0)} />
+          <KPIGroup aria-label={tr('Viewing variety', '观看内容分布')}>
+            <InsightKpi icon={Film} label={tr('Unique titles', '观看内容数')} value={String(insights?.UniqueTitles ?? 0)} />
             <KPIGroup.Separator />
-            <InsightKpi icon={Tags} label="Top genre" value={insights?.Genres[0]?.Name ?? 'No activity'} />
+            <InsightKpi icon={Tags} label={tr('Top genre', '最常看类型')} value={insights?.Genres[0]?.Name ?? tr('No activity', '暂无活动')} />
           </KPIGroup>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
-          <Card><Card.Header><Card.Title>Daily watch time</Card.Title><Card.Description>Minutes watched by day.</Card.Description></Card.Header><Card.Content><DailyWatchChart insights={insights} /></Card.Content></Card>
-          <Card><Card.Header><Card.Title>Genre mix</Card.Title><Card.Description>Genres receiving the most watch time.</Card.Description></Card.Header><Card.Content><GenreRadar insights={insights} /></Card.Content></Card>
+          <Card><Card.Header><Card.Title>{tr('Daily watch time', '每日观看时长')}</Card.Title><Card.Description>{tr('Minutes watched by day.', '每天观看的分钟数。')}</Card.Description></Card.Header><Card.Content><DailyWatchChart insights={insights} /></Card.Content></Card>
+          <Card><Card.Header><Card.Title>{tr('Genre mix', '类型分布')}</Card.Title><Card.Description>{tr('Genres receiving the most watch time.', '观看时间最多的内容类型。')}</Card.Description></Card.Header><Card.Content><GenreRadar insights={insights} /></Card.Content></Card>
           <Card>
-            <Card.Header><Card.Title>Movies and series</Card.Title><Card.Description>Playback starts grouped by media type.</Card.Description></Card.Header>
+            <Card.Header><Card.Title>{tr('Movies and series', '电影与剧集')}</Card.Title><Card.Description>{tr('Playback starts grouped by media type.', '按媒体类型统计播放次数。')}</Card.Description></Card.Header>
             <Card.Content className="grid grid-cols-2 gap-3">
-              <MediaCount icon={Film} label="movies" value={insights?.Media.Movies ?? 0} />
-              <MediaCount icon={Tv} label="series" value={insights?.Media.Series ?? 0} />
+              <MediaCount icon={Film} label={tr('movies', '电影')} value={insights?.Media.Movies ?? 0} />
+              <MediaCount icon={Tv} label={tr('series', '剧集')} value={insights?.Media.Series ?? 0} />
             </Card.Content>
           </Card>
         </div>
@@ -114,31 +118,34 @@ function MediaCount({ icon: Icon, label, value }: { icon: typeof Film; label: st
 }
 
 function DailyWatchChart({ insights }: { insights?: UserInsights }) {
+  const tr = useTranslate();
   const data = insights?.Daily.map((point) => ({ date: point.Date.slice(5), minutes: Math.round(point.WatchedTicks / 600_000_000) })) ?? [];
-  if (!data.length) return <p className="py-20 text-center text-sm text-muted">No activity in this period.</p>;
+  if (!data.length) return <p className="py-20 text-center text-sm text-muted">{tr('No activity in this period.', '此时间范围内暂无活动。')}</p>;
   return (
-    <figure aria-label="Daily watch time bar chart" role="img">
+    <figure aria-label={tr('Daily watch time bar chart', '每日观看时长柱状图')} role="img">
       <BarChart data={data} height={220}>
         <BarChart.Grid vertical={false} />
         <BarChart.XAxis dataKey="date" tickMargin={8} />
         <BarChart.YAxis tickMargin={4} width={36} />
-        <BarChart.Bar barSize={18} dataKey="minutes" fill="var(--color-accent)" name="Minutes watched" radius={[4, 4, 0, 0]} />
-        <BarChart.Tooltip content={<BarChart.TooltipContent valueFormatter={(value) => `${String(value)} min`} />} />
+        <BarChart.Bar barSize={18} dataKey="minutes" fill="var(--color-accent)" name={tr('Minutes watched', '观看分钟数')} radius={[4, 4, 0, 0]} />
+        <BarChart.Tooltip content={<BarChart.TooltipContent valueFormatter={(value) => tr(`${String(value)} min`, `${String(value)} 分钟`)} />} />
       </BarChart>
-      <figcaption className="sr-only">{data.map((point) => `${point.date}: ${String(point.minutes)} minutes`).join('; ')}</figcaption>
+      <figcaption className="sr-only">{data.map((point) => tr(`${point.date}: ${String(point.minutes)} minutes`, `${point.date}：${String(point.minutes)} 分钟`)).join('; ')}</figcaption>
     </figure>
   );
 }
 
 function ViewingTimeline({ events }: { events: InsightTimelineEvent[] }) {
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
   return (
     <Card>
-      <Card.Header><Card.Title>Viewing timeline</Card.Title><Card.Description>Milestones from your playback history.</Card.Description></Card.Header>
+      <Card.Header><Card.Title>{tr('Viewing timeline', '观影时间线')}</Card.Title><Card.Description>{tr('Milestones from your playback history.', '播放历史中的重要节点。')}</Card.Description></Card.Header>
       <Card.Content>
         {events.length ? (
           <Timeline density="compact" size="sm">
             {events.map((event) => {
-              const presentation = timelinePresentation(event);
+              const presentation = timelinePresentation(event, tr);
               const Icon = presentation.icon;
               return (
                 <Timeline.Item key={`${event.Kind}-${event.ItemId}-${event.At}`} status={presentation.status}>
@@ -146,49 +153,51 @@ function ViewingTimeline({ events }: { events: InsightTimelineEvent[] }) {
                   <Timeline.Content>
                     <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
                       <p className="min-w-0 text-sm"><span className="text-muted">{presentation.prefix} </span><Link className="font-medium text-foreground hover:text-accent" to={`/app/items/${event.ItemId}`}>{event.Name}</Link></p>
-                      <time className="shrink-0 text-xs text-muted" dateTime={event.At}>{formatTimelineDate(event.At)}</time>
+                      <time className="shrink-0 text-xs text-muted" dateTime={event.At}>{formatTimelineDate(event.At, locale)}</time>
                     </div>
                   </Timeline.Content>
                 </Timeline.Item>
               );
             })}
           </Timeline>
-        ) : <p className="py-8 text-center text-sm text-muted">No viewing milestones in this period.</p>}
+        ) : <p className="py-8 text-center text-sm text-muted">{tr('No viewing milestones in this period.', '此时间范围内暂无观影节点。')}</p>}
       </Card.Content>
     </Card>
   );
 }
 
-function timelinePresentation(event: InsightTimelineEvent) {
-  if (event.Kind === 'SeriesCompleted') return { icon: CheckCircle2, prefix: 'Finished', status: 'success' as const };
-  if (event.Kind === 'SeriesStarted') return { icon: Tv, prefix: 'Started', status: 'current' as const };
-  return { icon: Film, prefix: 'Watched', status: 'default' as const };
+function timelinePresentation(event: InsightTimelineEvent, tr: (english: string, chinese: string) => string) {
+  if (event.Kind === 'SeriesCompleted') return { icon: CheckCircle2, prefix: tr('Finished', '看完了'), status: 'success' as const };
+  if (event.Kind === 'SeriesStarted') return { icon: Tv, prefix: tr('Started', '开始看'), status: 'current' as const };
+  return { icon: Film, prefix: tr('Watched', '看了'), status: 'default' as const };
 }
 
-function formatTimelineDate(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+function formatTimelineDate(value: string, locale: string): string {
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
 function GenreRadar({ insights }: { insights?: UserInsights }) {
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
   const genres = insights?.Genres.slice(0, 6) ?? [];
   const maximum = Math.max(0, ...genres.map((genre) => genre.WatchedTicks));
-  if (!genres.length) return <p className="py-16 text-center text-sm text-muted">No genre activity in this period.</p>;
+  if (!genres.length) return <p className="py-16 text-center text-sm text-muted">{tr('No genre activity in this period.', '此时间范围内暂无类型数据。')}</p>;
   const scale = Math.max(1, maximum);
   const data = genres.map((genre) => ({
     genre: genre.Name,
     score: Math.round((genre.WatchedTicks / scale) * 100),
-    watched: formatTicks(genre.WatchedTicks),
+    watched: formatTicks(genre.WatchedTicks, locale),
   }));
   return (
-    <figure aria-label="Genre watch time radar chart" className="min-w-0" role="img">
+    <figure aria-label={tr('Genre watch time radar chart', '类型观看时长雷达图')} className="min-w-0" role="img">
       <div aria-hidden="true" className="h-64 min-w-0">
         <ResponsiveContainer height="100%" minHeight={256} minWidth={240} width="100%">
           <RadarChart data={data} margin={{ bottom: 12, left: 24, right: 24, top: 12 }}>
             <PolarGrid stroke="var(--color-border)" />
             <PolarAngleAxis dataKey="genre" tick={{ fill: 'var(--color-muted)', fontSize: 12 }} />
             <PolarRadiusAxis angle={90} domain={[0, 100]} tick={false} />
-            <Radar dataKey="score" dot={{ fill: 'var(--color-accent)', r: 3 }} fill="var(--color-accent)" fillOpacity={0.22} name="Relative watch time" stroke="var(--color-accent)" strokeWidth={2} />
-            <ChartTooltip formatter={(value) => [`${String(value)}%`, 'Relative watch time']} />
+            <Radar dataKey="score" dot={{ fill: 'var(--color-accent)', r: 3 }} fill="var(--color-accent)" fillOpacity={0.22} name={tr('Relative watch time', '相对观看时长')} stroke="var(--color-accent)" strokeWidth={2} />
+            <ChartTooltip formatter={(value) => [`${String(value)}%`, tr('Relative watch time', '相对观看时长')]} />
           </RadarChart>
         </ResponsiveContainer>
       </div>
@@ -198,6 +207,7 @@ function GenreRadar({ insights }: { insights?: UserInsights }) {
 }
 
 function ProfileDialog({ profile, onClose, onSaved, onSessionInvalidated }: { profile: UserProfile; onClose: () => void; onSaved: (profile: UserProfile) => void; onSessionInvalidated: () => Promise<void> }) {
+  const tr = useTranslate();
   const [username, setUsername] = useState(profile.Username);
   const [bio, setBio] = useState(profile.Bio);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -222,13 +232,14 @@ function ProfileDialog({ profile, onClose, onSaved, onSessionInvalidated }: { pr
       onClose();
       if (newPassword || username.trim() !== profile.Username) await onSessionInvalidated();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Unable to update this account.');
+      setError(reason instanceof Error ? reason.message : tr('Unable to update this account.', '无法更新此账户。'));
     } finally { setPending(false); }
   };
-  return <Modal isOpen onOpenChange={(open) => { if (!open) onClose(); }}><Modal.Backdrop isDismissable={!pending}><Modal.Container placement="center" size="md"><Modal.Dialog><Modal.CloseTrigger aria-label="Close" isDisabled={pending} /><Modal.Header><Modal.Heading>Edit account</Modal.Heading></Modal.Header><Modal.Body><form className="space-y-5" id="profile-form" onSubmit={(event) => { void submit(event); }}><TextField fullWidth isRequired><Label>Username</Label><Input autoComplete="username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>Biography</Label><TextArea maxLength={500} value={bio} onChange={(event) => { setBio(event.currentTarget.value); }} /></TextField><div className="border-t border-border pt-5"><p className="mb-4 text-sm font-medium">Security confirmation</p><div className="space-y-4"><TextField fullWidth isRequired><Label>Current password</Label><Input autoComplete="current-password" type="password" value={currentPassword} onChange={(event) => { setCurrentPassword(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>New password</Label><Input autoComplete="new-password" type="password" value={newPassword} onChange={(event) => { setNewPassword(event.currentTarget.value); }} /></TextField><TextField fullWidth isInvalid={Boolean(confirmPassword && confirmPassword !== newPassword)}><Label>Confirm new password</Label><Input autoComplete="new-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.currentTarget.value); }} /></TextField></div></div>{error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}</form></Modal.Body><Modal.Footer><Button onPress={onClose} variant="tertiary">Cancel</Button><Button form="profile-form" isPending={pending} type="submit">Save changes</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop></Modal>;
+  return <Modal isOpen onOpenChange={(open) => { if (!open) onClose(); }}><Modal.Backdrop isDismissable={!pending}><Modal.Container placement="center" size="md"><Modal.Dialog><Modal.CloseTrigger aria-label={tr('Close', '关闭')} isDisabled={pending} /><Modal.Header><Modal.Heading>{tr('Edit account', '编辑账户')}</Modal.Heading></Modal.Header><Modal.Body><form className="space-y-5" id="profile-form" onSubmit={(event) => { void submit(event); }}><TextField fullWidth isRequired><Label>{tr('Username', '用户名')}</Label><Input autoComplete="username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>{tr('Biography', '个人简介')}</Label><TextArea maxLength={500} value={bio} onChange={(event) => { setBio(event.currentTarget.value); }} /></TextField><div className="border-t border-border pt-5"><p className="mb-4 text-sm font-medium">{tr('Security confirmation', '安全确认')}</p><div className="space-y-4"><TextField fullWidth isRequired><Label>{tr('Current password', '当前密码')}</Label><Input autoComplete="current-password" type="password" value={currentPassword} onChange={(event) => { setCurrentPassword(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>{tr('New password', '新密码')}</Label><Input autoComplete="new-password" type="password" value={newPassword} onChange={(event) => { setNewPassword(event.currentTarget.value); }} /></TextField><TextField fullWidth isInvalid={Boolean(confirmPassword && confirmPassword !== newPassword)}><Label>{tr('Confirm new password', '确认新密码')}</Label><Input autoComplete="new-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.currentTarget.value); }} /></TextField></div></div>{error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}</form></Modal.Body><Modal.Footer><Button onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button><Button form="profile-form" isPending={pending} type="submit">{tr('Save changes', '保存更改')}</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop></Modal>;
 }
 
-function formatTicks(value = 0): string {
+function formatTicks(value = 0, locale = 'en-US'): string {
   const minutes = Math.round(value / 600_000_000);
+  if (locale === 'zh-CN') return minutes >= 60 ? `${String(Math.floor(minutes / 60))} 小时 ${String(minutes % 60)} 分钟` : `${String(minutes)} 分钟`;
   return minutes >= 60 ? `${String(Math.floor(minutes / 60))}h ${String(minutes % 60)}m` : `${String(minutes)}m`;
 }

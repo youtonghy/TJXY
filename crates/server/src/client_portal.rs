@@ -13,7 +13,7 @@ use sea_orm::{
 };
 use serde::Serialize;
 use tjxy_db::{DashboardRepository, DashboardTopItem};
-use tjxy_metadata::TmdbPopularItem;
+use tjxy_metadata::{MetadataProviderError, TmdbCatalogClient, TmdbPopularItem};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -21,7 +21,7 @@ use crate::{AppState, auth, metadata_settings_admin::MetadataSettingsAdminServic
 
 pub(crate) struct ClientPortalService {
     database: DatabaseConnection,
-    tmdb_cache: RwLock<Option<TmdbPopularCache>>,
+    tmdb_cache: RwLock<Option<TmdbRankingCache>>,
 }
 
 impl ClientPortalService {
@@ -30,6 +30,17 @@ impl ClientPortalService {
             database,
             tmdb_cache: RwLock::new(None),
         }
+    }
+
+    pub(crate) async fn agent_insights(
+        &self,
+        user_id: Uuid,
+    ) -> Result<serde_json::Value, ClientPortalError> {
+        let insights = self
+            .user_insights(user_id, InsightRange::ThirtyDays)
+            .await?;
+        Ok(serde_json::to_value(insights)
+            .expect("the fixed user insights response is JSON serializable"))
     }
 
     async fn user_insights(
@@ -443,6 +454,7 @@ impl ClientPortalService {
                 Alias::new("name"),
                 Alias::new("item_type"),
                 Alias::new("production_year"),
+                Alias::new("overview"),
             ])
             .from(Alias::new("catalog_items"))
             .and_where(Expr::col(Alias::new("is_present")).eq(true))
@@ -462,6 +474,8 @@ impl ClientPortalService {
                     name: row.try_get("", "name")?,
                     item_type: row.try_get("", "item_type")?,
                     production_year: row.try_get("", "production_year")?,
+                    overview: row.try_get("", "overview")?,
+                    primary_image_tag: None,
                     play_count: 0,
                     unique_viewers: 0,
                 })
@@ -469,7 +483,7 @@ impl ClientPortalService {
             .collect()
     }
 
-    async fn tmdb_popular(
+    async fn tmdb_rankings(
         &self,
         metadata_settings: &MetadataSettingsAdminService,
         media_type: TmdbMediaType,
@@ -479,15 +493,15 @@ impl ClientPortalService {
             return Ok(items);
         }
         let client = metadata_settings.tmdb_catalog_client().await?;
-        let movies = client.popular_movies(1).await;
-        let series = client.popular_series(1).await;
+        let movies = TmdbMediaType::Movie.ranking_items(&client).await;
+        let series = TmdbMediaType::Series.ranking_items(&client).await;
         match (movies, series) {
             (Ok(movies), Ok(series)) => {
                 let selected = match media_type {
                     TmdbMediaType::Movie => movies.clone(),
                     TmdbMediaType::Series => series.clone(),
                 };
-                *self.tmdb_cache.write().await = Some(TmdbPopularCache {
+                *self.tmdb_cache.write().await = Some(TmdbRankingCache {
                     refreshed_on: today,
                     movies,
                     series,
@@ -506,6 +520,97 @@ impl ClientPortalService {
                 )))
             }
         }
+    }
+
+    async fn tmdb_ranking_page(
+        &self,
+        metadata_settings: &MetadataSettingsAdminService,
+        media_type: TmdbMediaType,
+    ) -> Result<TmdbPageDto, ClientPortalError> {
+        let items = self.tmdb_rankings(metadata_settings, media_type).await?;
+        let tmdb_ids = items.iter().map(TmdbPopularItem::id).collect::<Vec<_>>();
+        let local_item_ids = self.local_tmdb_item_ids(media_type, &tmdb_ids).await?;
+        Ok(TmdbPageDto::new(&items, &local_item_ids))
+    }
+
+    async fn local_tmdb_item_ids(
+        &self,
+        media_type: TmdbMediaType,
+        tmdb_ids: &[u64],
+    ) -> Result<HashMap<u64, Uuid>, DbErr> {
+        if tmdb_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let provider = Alias::new("ranking_provider_id");
+        let item = Alias::new("ranking_item");
+        let source = Alias::new("ranking_media_source");
+        let source_item = Alias::new("ranking_source_item");
+        let source_exists = Query::select()
+            .expr(Expr::val(1))
+            .from_as(Alias::new("media_sources"), source.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                source_item.clone(),
+                Expr::col((source.clone(), Alias::new("catalog_item_id")))
+                    .equals((source_item.clone(), Alias::new("id"))),
+            )
+            .cond_where(
+                Condition::any()
+                    .add(
+                        Expr::col((source, Alias::new("catalog_item_id")))
+                            .equals((item.clone(), Alias::new("id"))),
+                    )
+                    .add(
+                        Expr::col((source_item, Alias::new("structure_owner_item_id")))
+                            .equals((item.clone(), Alias::new("id"))),
+                    ),
+            )
+            .to_owned();
+        let query = Query::select()
+            .columns([
+                (provider.clone(), Alias::new("provider_item_id")),
+                (provider.clone(), Alias::new("catalog_item_id")),
+            ])
+            .from_as(Alias::new("provider_ids"), provider.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                item.clone(),
+                Expr::col((provider.clone(), Alias::new("catalog_item_id")))
+                    .equals((item.clone(), Alias::new("id"))),
+            )
+            .and_where(Expr::col((provider.clone(), Alias::new("provider"))).eq("tmdb"))
+            .and_where(
+                Expr::col((provider.clone(), Alias::new("provider_item_id")))
+                    .is_in(tmdb_ids.iter().map(u64::to_string)),
+            )
+            .and_where(
+                Expr::col((item.clone(), Alias::new("item_type"))).eq(media_type.item_type()),
+            )
+            .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
+            .and_where(Expr::exists(source_exists))
+            .to_owned();
+        let mut matches = HashMap::<u64, Option<Uuid>>::new();
+        for row in self
+            .database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+        {
+            let provider_item_id = row
+                .try_get::<String>("", "provider_item_id")?
+                .parse::<u64>()
+                .map_err(|_| DbErr::Custom("invalid TMDB provider item ID".to_owned()))?;
+            let item_id = row.try_get::<Uuid>("", "catalog_item_id")?;
+            matches
+                .entry(provider_item_id)
+                .and_modify(|existing| *existing = None)
+                .or_insert(Some(item_id));
+        }
+        Ok(matches
+            .into_iter()
+            .filter_map(|(tmdb_id, item_id)| item_id.map(|item_id| (tmdb_id, item_id)))
+            .collect())
     }
 
     async fn cached_tmdb(
@@ -613,8 +718,11 @@ pub(crate) async fn tmdb_top(
     let Some(metadata_settings) = state.metadata_settings_admin.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match service.tmdb_popular(metadata_settings, media_type).await {
-        Ok(items) => Json(TmdbPageDto::from(items)).into_response(),
+    match service
+        .tmdb_ranking_page(metadata_settings, media_type)
+        .await
+    {
+        Ok(page) => Json(page).into_response(),
         Err(error) => service_error("TMDB ranking", &error),
     }
 }
@@ -704,7 +812,26 @@ enum TmdbMediaType {
     Series,
 }
 
-struct TmdbPopularCache {
+impl TmdbMediaType {
+    const fn item_type(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie",
+            Self::Series => "Series",
+        }
+    }
+
+    async fn ranking_items(
+        self,
+        client: &TmdbCatalogClient,
+    ) -> Result<Vec<TmdbPopularItem>, MetadataProviderError> {
+        match self {
+            Self::Movie => client.top_rated_movies(1).await,
+            Self::Series => client.popular_series(1).await,
+        }
+    }
+}
+
+struct TmdbRankingCache {
     refreshed_on: NaiveDate,
     movies: Vec<TmdbPopularItem>,
     series: Vec<TmdbPopularItem>,
@@ -837,14 +964,23 @@ impl From<Vec<DashboardTopItem>> for ServerTopPageDto {
             items: items
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| ServerTopItemDto {
-                    rank: index as u64 + 1,
-                    id: item.item_id,
-                    name: item.name,
-                    item_type: item.item_type,
-                    production_year: item.production_year,
-                    play_count: item.play_count,
-                    unique_viewers: item.unique_viewers,
+                .map(|(index, item)| {
+                    let poster_url = item
+                        .primary_image_tag
+                        .as_ref()
+                        .map(|tag| format!("/Items/{}/Images/Primary?tag={tag}", item.item_id));
+                    ServerTopItemDto {
+                        rank: index as u64 + 1,
+                        id: item.item_id,
+                        name: item.name,
+                        item_type: item.item_type,
+                        production_year: item.production_year,
+                        overview: item.overview,
+                        primary_image_tag: item.primary_image_tag,
+                        poster_url,
+                        play_count: item.play_count,
+                        unique_viewers: item.unique_viewers,
+                    }
                 })
                 .collect(),
         }
@@ -859,6 +995,9 @@ struct ServerTopItemDto {
     name: String,
     item_type: String,
     production_year: Option<i32>,
+    overview: Option<String>,
+    primary_image_tag: Option<String>,
+    poster_url: Option<String>,
     play_count: u64,
     unique_viewers: u64,
 }
@@ -869,8 +1008,8 @@ struct TmdbPageDto {
     items: Vec<TmdbItemDto>,
 }
 
-impl From<Vec<TmdbPopularItem>> for TmdbPageDto {
-    fn from(items: Vec<TmdbPopularItem>) -> Self {
+impl TmdbPageDto {
+    fn new(items: &[TmdbPopularItem], local_item_ids: &HashMap<u64, Uuid>) -> Self {
         Self {
             items: items
                 .iter()
@@ -883,6 +1022,7 @@ impl From<Vec<TmdbPopularItem>> for TmdbPageDto {
                     production_year: item.year(),
                     rating: item.rating(),
                     poster_url: item.poster_url().map(str::to_owned),
+                    local_item_id: local_item_ids.get(&item.id()).copied(),
                 })
                 .collect(),
         }
@@ -899,14 +1039,264 @@ struct TmdbItemDto {
     production_year: Option<i32>,
     rating: Option<f64>,
     poster_url: Option<String>,
+    local_item_id: Option<Uuid>,
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ClientPortalError {
+pub(crate) enum ClientPortalError {
     #[error("database query failed: {0}")]
     Database(#[from] DbErr),
     #[error("metadata settings unavailable: {0}")]
     MetadataSettings(#[from] crate::metadata_settings_admin::MetadataSettingsAdminError),
     #[error("TMDB request failed: {0}")]
     Tmdb(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use sea_orm_migration::MigratorTrait;
+    use serde_json::json;
+    use tjxy_metadata::{MetadataProviderError, TmdbCatalogClient, TmdbCatalogTransport};
+    use tjxy_test_support::test_database;
+
+    use super::*;
+
+    struct RankingTransport {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TmdbCatalogTransport for RankingTransport {
+        async fn get(
+            &self,
+            path: &str,
+            _query: &[(String, String)],
+        ) -> Result<Vec<u8>, MetadataProviderError> {
+            self.calls.lock().unwrap().push(path.to_owned());
+            let item = if path == "/movie/top_rated" {
+                json!({"id": 238, "title": "The Godfather", "vote_average": 8.7})
+            } else if path == "/tv/popular" {
+                json!({"id": 1396, "name": "Breaking Bad", "vote_average": 8.9})
+            } else {
+                return Err(MetadataProviderError::Rejected);
+            };
+            Ok(serde_json::to_vec(&json!({
+                "page": 1,
+                "total_pages": 1,
+                "results": [item]
+            }))
+            .unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn movie_rankings_are_top_rated_while_series_remain_popular() {
+        let transport = Arc::new(RankingTransport {
+            calls: Mutex::new(Vec::new()),
+        });
+        let client = TmdbCatalogClient::with_transport("zh-CN", transport.clone()).unwrap();
+
+        TmdbMediaType::Movie.ranking_items(&client).await.unwrap();
+        TmdbMediaType::Series.ranking_items(&client).await.unwrap();
+
+        assert_eq!(
+            transport.calls.lock().unwrap().as_slice(),
+            ["/movie/top_rated", "/tv/popular"]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_tmdb_links_require_matching_media_type_and_media_source() {
+        let database = test_database().await.unwrap();
+        tjxy_db::Migrator::up(&database, None).await.unwrap();
+        let movie = seed_tmdb_item(&database, "Movie", "The Godfather", 238, true).await;
+        let series = seed_tmdb_item(&database, "Series", "A TV Series", 238, false).await;
+        seed_series_episode_source(&database, series).await;
+        seed_tmdb_item(&database, "Movie", "Catalog only", 999, false).await;
+        seed_tmdb_item(&database, "Movie", "Duplicate A", 777, true).await;
+        seed_tmdb_item(&database, "Movie", "Duplicate B", 777, true).await;
+        let service = ClientPortalService::new(database);
+
+        assert_eq!(
+            service
+                .local_tmdb_item_ids(TmdbMediaType::Movie, &[238, 777, 999])
+                .await
+                .unwrap(),
+            HashMap::from([(238, movie)])
+        );
+        assert_eq!(
+            service
+                .local_tmdb_item_ids(TmdbMediaType::Series, &[238])
+                .await
+                .unwrap(),
+            HashMap::from([(238, series)])
+        );
+    }
+
+    async fn seed_tmdb_item(
+        database: &DatabaseConnection,
+        item_type: &str,
+        name: &str,
+        tmdb_id: u64,
+        with_source: bool,
+    ) -> Uuid {
+        let item_id = Uuid::new_v4();
+        let backend = database.get_database_backend();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("catalog_items"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("item_type"),
+                            Alias::new("name"),
+                            Alias::new("sort_name"),
+                            Alias::new("sort_key"),
+                            Alias::new("classification_state"),
+                            Alias::new("metadata_state"),
+                            Alias::new("structure_state"),
+                            Alias::new("source_state"),
+                            Alias::new("structure_expansion_revision"),
+                            Alias::new("source_index_revision"),
+                            Alias::new("is_present"),
+                        ])
+                        .values_panic([
+                            item_id.into(),
+                            item_type.into(),
+                            name.into(),
+                            name.to_lowercase().into(),
+                            name.as_bytes().to_vec().into(),
+                            "Matched".into(),
+                            "Ready".into(),
+                            "NotApplicable".into(),
+                            "Indexed".into(),
+                            0_i64.into(),
+                            0_i64.into(),
+                            true.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("provider_ids"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("provider"),
+                            Alias::new("provider_item_id"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.into(),
+                            "tmdb".into(),
+                            tmdb_id.to_string().into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        if with_source {
+            database
+                .execute(
+                    backend.build(
+                        Query::insert()
+                            .into_table(Alias::new("media_sources"))
+                            .columns([
+                                Alias::new("id"),
+                                Alias::new("catalog_item_id"),
+                                Alias::new("presentation_key"),
+                                Alias::new("probe_state"),
+                                Alias::new("probe_revision"),
+                            ])
+                            .values_panic([
+                                Uuid::new_v4().into(),
+                                item_id.into(),
+                                Uuid::new_v4().into(),
+                                "NotProbed".into(),
+                                0_i64.into(),
+                            ]),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        item_id
+    }
+
+    async fn seed_series_episode_source(database: &DatabaseConnection, series_id: Uuid) {
+        let episode_id = Uuid::new_v4();
+        let backend = database.get_database_backend();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("catalog_items"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("parent_id"),
+                            Alias::new("structure_owner_item_id"),
+                            Alias::new("item_type"),
+                            Alias::new("name"),
+                            Alias::new("sort_name"),
+                            Alias::new("sort_key"),
+                            Alias::new("classification_state"),
+                            Alias::new("metadata_state"),
+                            Alias::new("structure_state"),
+                            Alias::new("source_state"),
+                            Alias::new("structure_expansion_revision"),
+                            Alias::new("source_index_revision"),
+                            Alias::new("is_present"),
+                        ])
+                        .values_panic([
+                            episode_id.into(),
+                            series_id.into(),
+                            series_id.into(),
+                            "Episode".into(),
+                            "Episode 1".into(),
+                            "episode 1".into(),
+                            b"episode 1".to_vec().into(),
+                            "Matched".into(),
+                            "Ready".into(),
+                            "NotApplicable".into(),
+                            "Indexed".into(),
+                            0_i64.into(),
+                            0_i64.into(),
+                            true.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("media_sources"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("presentation_key"),
+                            Alias::new("probe_state"),
+                            Alias::new("probe_revision"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            episode_id.into(),
+                            Uuid::new_v4().into(),
+                            "NotProbed".into(),
+                            0_i64.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
 }

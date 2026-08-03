@@ -42,6 +42,12 @@ mod m20260731_000041_provider_id_scope;
 mod m20260731_000042_dashboard_indexes;
 mod m20260731_000043_user_profile_and_watch_time;
 mod m20260801_000044_metadata_source_mode;
+mod m20260802_000045_system_settings;
+mod m20260802_000046_expand_system_settings;
+mod m20260802_000047_ai_assistant;
+mod m20260802_000048_system_media_browser_roots;
+mod m20260803_000049_ai_model_reasoning_effort;
+mod m20260803_000050_ai_usage_analytics;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -106,6 +112,12 @@ impl MigratorTrait for Migrator {
             Box::new(m20260731_000042_dashboard_indexes::Migration),
             Box::new(m20260731_000043_user_profile_and_watch_time::Migration),
             Box::new(m20260801_000044_metadata_source_mode::Migration),
+            Box::new(m20260802_000045_system_settings::Migration),
+            Box::new(m20260802_000046_expand_system_settings::Migration),
+            Box::new(m20260802_000047_ai_assistant::Migration),
+            Box::new(m20260802_000048_system_media_browser_roots::Migration),
+            Box::new(m20260803_000049_ai_model_reasoning_effort::Migration),
+            Box::new(m20260803_000050_ai_usage_analytics::Migration),
         ]
     }
 }

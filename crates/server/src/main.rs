@@ -1,8 +1,10 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, process::Command, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tjxy_cache::{CacheConfigurationError, RedisCacheConfig, RedisMode};
-use tjxy_metadata::{ReloadableMetadataProvider, TmdbProvider};
+use tjxy_metadata::{
+    MusicBrainzProvider, ReloadableMetadataProvider, TheAudioDbProvider, TmdbProvider,
+};
 use tjxy_server::{
     AdminAssetsError, BootstrapAdmin, GoogleDriveOAuthConfiguration, InitializationError,
     MicrosoftOneDriveOAuthConfiguration, ServerIdentity, StartupOptions,
@@ -19,6 +21,12 @@ enum StartupError {
     InvalidServerId(#[source] uuid::Error),
     #[error("TJXY_BIND is not a valid socket address: {0}")]
     InvalidBindAddress(#[source] std::net::AddrParseError),
+    #[error("system settings could not be read: {0}")]
+    SystemSettings(#[from] tjxy_db::SystemSettingsRepositoryError),
+    #[error("the current TJXY executable could not be resolved: {0}")]
+    CurrentExecutable(#[source] std::io::Error),
+    #[error("TJXY could not restart itself: {0}")]
+    Restart(#[source] std::io::Error),
     #[error("TJXY_BOOTSTRAP_ADMIN_USERNAME and TJXY_BOOTSTRAP_ADMIN_PASSWORD must be set together")]
     IncompleteBootstrapAdmin,
     #[error("TJXY_LEGACY_AUTH must be true or false")]
@@ -27,6 +35,8 @@ enum StartupError {
     InvalidRemoteProviders,
     #[error("TMDb provider configuration is invalid")]
     InvalidTmdbConfiguration,
+    #[error("music metadata provider configuration is invalid")]
+    InvalidMusicMetadataConfiguration,
     #[error("TJXY_LAZY_WAIT_MS must be an integer from 0 through 30000")]
     InvalidLazyWait,
     #[error("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS must be an integer from 0 through 2592000")]
@@ -70,10 +80,6 @@ async fn main() -> Result<(), StartupError> {
         .map_err(|_| StartupError::MissingServerId)
         .and_then(|value| Uuid::parse_str(&value).map_err(StartupError::InvalidServerId))?;
     let server_name = env::var("TJXY_SERVER_NAME").unwrap_or_else(|_| "TJXY".to_owned());
-    let bind_address = env::var("TJXY_BIND").unwrap_or_else(|_| "127.0.0.1:8096".to_owned());
-    let bind_address = bind_address
-        .parse::<SocketAddr>()
-        .map_err(StartupError::InvalidBindAddress)?;
     let mut identity = ServerIdentity::new(server_id, server_name, env::consts::OS);
     if let Ok(local_address) = env::var("TJXY_PUBLIC_ADDRESS") {
         identity = identity.with_local_address(local_address);
@@ -81,8 +87,31 @@ async fn main() -> Result<(), StartupError> {
     let database_url =
         env::var("TJXY_DATABASE_URL").unwrap_or_else(|_| "sqlite://tjxy.db?mode=rwc".to_owned());
     let tmdb = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
-    let mut startup =
-        StartupOptions::new(database_url, identity).with_tmdb_provider(Arc::clone(&tmdb));
+    let the_audio_db = Arc::new(ReloadableMetadataProvider::new("TheAudioDB"));
+    let musicbrainz = Arc::new(ReloadableMetadataProvider::new("MusicBrainz"));
+    let mut startup = StartupOptions::new(database_url, identity)
+        .with_tmdb_provider(Arc::clone(&tmdb))
+        .with_theaudiodb_provider(Arc::clone(&the_audio_db))
+        .with_musicbrainz_provider(Arc::clone(&musicbrainz));
+    let audio_db_key = env::var("TJXY_THEAUDIODB_API_KEY").unwrap_or_else(|_| "2".to_owned());
+    let musicbrainz_user_agent = env::var("TJXY_MUSICBRAINZ_USER_AGENT").unwrap_or_else(|_| {
+        format!(
+            "TJXY/{} (https://github.com/youtonghy/TJXY)",
+            env!("CARGO_PKG_VERSION")
+        )
+    });
+    startup = startup
+        .with_theaudiodb_environment_fallback(Arc::new(
+            TheAudioDbProvider::new(audio_db_key)
+                .map_err(|_| StartupError::InvalidMusicMetadataConfiguration)?,
+        ))
+        .with_musicbrainz_environment_fallback(
+            Arc::new(
+                MusicBrainzProvider::new(musicbrainz_user_agent.clone())
+                    .map_err(|_| StartupError::InvalidMusicMetadataConfiguration)?,
+            ),
+            musicbrainz_user_agent,
+        );
     if let Ok(encoded) = env::var("TJXY_CREDENTIAL_KEYRING") {
         let encoded = Zeroizing::new(encoded);
         startup = startup.with_credential_cipher(Arc::new(
@@ -184,6 +213,18 @@ async fn main() -> Result<(), StartupError> {
         _ => return Err(StartupError::IncompleteBootstrapAdmin),
     }
     let state = initialize(startup).await?;
+    let bind_address = match env::var("TJXY_BIND") {
+        Ok(value) => value
+            .parse::<SocketAddr>()
+            .map_err(StartupError::InvalidBindAddress)?,
+        Err(_) => state.persisted_bind_address().await?.unwrap_or_else(|| {
+            "127.0.0.1:8096"
+                .parse()
+                .expect("default bind address is valid")
+        }),
+    };
+    let restart = state.restart_controller();
+    let shutdown = restart.clone();
     let admin_dist = admin_dist_dir(|| env::var("TJXY_ADMIN_DIST_DIR"));
     let router = build_router_with_admin_dist(state, admin_dist)?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
@@ -191,7 +232,15 @@ async fn main() -> Result<(), StartupError> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move { shutdown.requested().await })
     .await?;
+    if restart.is_requested() {
+        let executable = env::current_exe().map_err(StartupError::CurrentExecutable)?;
+        Command::new(executable)
+            .args(env::args_os().skip(1))
+            .spawn()
+            .map_err(StartupError::Restart)?;
+    }
     Ok(())
 }
 

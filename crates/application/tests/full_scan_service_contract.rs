@@ -469,8 +469,27 @@ async fn seed_indexed_movie_with_source(
 }
 
 async fn seed_unindexed_movie(database: &DatabaseConnection, library: Uuid) -> CatalogItemId {
+    seed_unindexed_item(database, library, "Movie", "Arrival").await
+}
+
+async fn seed_unindexed_audio(database: &DatabaseConnection, library: Uuid) -> CatalogItemId {
+    seed_unindexed_item(database, library, "Audio", "First Light").await
+}
+
+async fn seed_unindexed_item(
+    database: &DatabaseConnection,
+    library: Uuid,
+    item_type: &str,
+    name: &str,
+) -> CatalogItemId {
     let item = CatalogItemId::new();
     let sql = database.get_database_backend();
+    let metadata_state = if item_type == "Audio" {
+        "Partial"
+    } else {
+        "Ready"
+    };
+    let metadata_requirement = (item_type != "Audio").then_some(MetadataRequirement::Full.as_i32());
     database
         .execute(
             sql.build(
@@ -494,14 +513,14 @@ async fn seed_unindexed_movie(database: &DatabaseConnection, library: Uuid) -> C
                     ])
                     .values_panic([
                         item.as_uuid().into(),
-                        "Movie".into(),
-                        "Arrival".into(),
-                        "arrival".into(),
-                        SortKey::from_text("Arrival").into_bytes().into(),
+                        item_type.into(),
+                        name.into(),
+                        name.to_lowercase().into(),
+                        SortKey::from_text(name).into_bytes().into(),
                         "Matched".into(),
-                        "Ready".into(),
+                        metadata_state.into(),
                         0_i64.into(),
-                        MetadataRequirement::Full.as_i32().into(),
+                        metadata_requirement.into(),
                         "NotApplicable".into(),
                         "NotIndexed".into(),
                         0_i64.into(),
@@ -1958,6 +1977,78 @@ async fn non_eager_expansion_policies_do_not_index_existing_movies() {
             "expansion policy: {expansion}"
         );
     }
+}
+
+#[tokio::test]
+async fn eager_expansion_resolves_music_metadata_before_indexing_tracks() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "basic",
+        "eager",
+        "on_playback",
+    )
+    .await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("collection_type"), "music")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    let (_, storage_object) = seed_root(&database, library).await;
+    advance_library_discovery_watermark(&database, library, 1).await;
+    let item = seed_unindexed_audio(&database, library).await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        storage_object.as_uuid().into(),
+                        item.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let claimed = claimed_full_scan(&database, library).await;
+
+    let result = FullScanService::new(database.clone())
+        .execute(&claimed)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(result, FullScanError::ChildrenPending { .. }));
+    assert!(
+        WorkJobRepository::new(&database)
+            .claim_next(
+                &[WorkTaskKind::ResolveMetadata],
+                "music-metadata",
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

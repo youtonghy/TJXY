@@ -49,6 +49,26 @@ it('submits the approved defaults and resets the draft after success', async () 
   expect(screen.getByRole('textbox', { name: 'Library name' })).toHaveValue('');
 });
 
+it('creates a music library from the content type selector', async () => {
+  const onCreate = vi.fn().mockResolvedValue(true);
+  const user = userEvent.setup();
+  render(
+    <LibraryCreateDialog isOpen isPending={false} onClose={vi.fn()} onCreate={onCreate} />,
+  );
+
+  await user.type(screen.getByRole('textbox', { name: 'Library name' }), 'Music');
+  await user.click(screen.getByRole('button', { name: /Content type/u }));
+  await user.click(await screen.findByRole('option', { name: 'Music' }));
+  await user.click(screen.getByRole('button', { name: 'Browse' }));
+  expect(await screen.findByText('Media / Shows')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Create library' }));
+
+  expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+    collectionType: 'music',
+    name: 'Music',
+  }));
+});
+
 it('preserves all input after failure and exposes HeroUI pending semantics', async () => {
   const onCreate = vi.fn().mockResolvedValue(false);
   const onClose = vi.fn();

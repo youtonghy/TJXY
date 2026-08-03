@@ -123,7 +123,11 @@ async fn main() -> Result<(), ImportError> {
 
     // Fetch movies from both lists
     for list in [TmdbList::Popular, TmdbList::TopRated] {
-        println!("Fetching {} movie IDs from {}...", PAGES_PER_LIST, list.name());
+        println!(
+            "Fetching {} movie IDs from {}...",
+            PAGES_PER_LIST,
+            list.name()
+        );
         let mut ids = Vec::with_capacity(MOVIES_PER_LIST);
         for page in 1..=PAGES_PER_LIST {
             let page_result = match list {
@@ -143,7 +147,12 @@ async fn main() -> Result<(), ImportError> {
             }
             ids.extend(page_ids);
             if page % 10 == 0 {
-                println!("  Page {}/{} ({} IDs so far)", page, PAGES_PER_LIST, ids.len());
+                println!(
+                    "  Page {}/{} ({} IDs so far)",
+                    page,
+                    PAGES_PER_LIST,
+                    ids.len()
+                );
             }
         }
         ids.sort_unstable();
@@ -162,7 +171,11 @@ async fn main() -> Result<(), ImportError> {
 
     // Fetch series from both lists
     for list in [TmdbList::Popular, TmdbList::TopRated] {
-        println!("Fetching {} series IDs from {}...", PAGES_PER_LIST, list.name());
+        println!(
+            "Fetching {} series IDs from {}...",
+            PAGES_PER_LIST,
+            list.name()
+        );
         let mut ids = Vec::with_capacity(MOVIES_PER_LIST);
         for page in 1..=PAGES_PER_LIST {
             let page_result = match list {
@@ -182,7 +195,12 @@ async fn main() -> Result<(), ImportError> {
             }
             ids.extend(page_ids);
             if page % 10 == 0 {
-                println!("  Page {}/{} ({} IDs so far)", page, PAGES_PER_LIST, ids.len());
+                println!(
+                    "  Page {}/{} ({} IDs so far)",
+                    page,
+                    PAGES_PER_LIST,
+                    ids.len()
+                );
             }
         }
         ids.sort_unstable();
@@ -207,18 +225,31 @@ async fn main() -> Result<(), ImportError> {
     // Import movies for each list, batched to stay within the per-publication limit
     for (list, content_type, ids) in &all_ids {
         if ids.is_empty() {
-            println!("Skipping {} {:?}: no items to import", list.name(), content_type);
+            println!(
+                "Skipping {} {:?}: no items to import",
+                list.name(),
+                content_type
+            );
             continue;
         }
-        println!("\nImporting {} {:?} into {}...", ids.len(), content_type, list.library_name(*content_type));
+        println!(
+            "\nImporting {} {:?} into {}...",
+            ids.len(),
+            content_type,
+            list.library_name(*content_type)
+        );
 
         // Fetch and publish in batches
         let mut total_imported = 0;
         let mut total_warnings = 0;
 
         for (batch_idx, batch_ids) in ids.chunks(BATCH_SIZE).enumerate() {
-            println!("  Fetching batch {}/{} ({} items)...",
-                batch_idx + 1, (ids.len() + BATCH_SIZE - 1) / BATCH_SIZE, batch_ids.len());
+            println!(
+                "  Fetching batch {}/{} ({} items)...",
+                batch_idx + 1,
+                (ids.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                batch_ids.len()
+            );
 
             let (batch_movies, batch_series) = match content_type {
                 ContentType::Movie => {
@@ -275,9 +306,13 @@ async fn main() -> Result<(), ImportError> {
             };
             total_warnings += batch_warnings;
 
-            let publication =
-                DemoCatalogPublication::new(batch_movies, batch_series, language.clone(), Utc::now())?
-                    .with_assets(batch_assets)?;
+            let publication = DemoCatalogPublication::new(
+                batch_movies,
+                batch_series,
+                language.clone(),
+                Utc::now(),
+            )?
+            .with_assets(batch_assets)?;
             let report = DemoCatalogRepository::new(&database)
                 .publish(&publication)
                 .await?;
@@ -286,7 +321,9 @@ async fn main() -> Result<(), ImportError> {
 
         println!(
             "  Imported {} total items into {}; {} image warnings.",
-            total_imported, list.library_name(*content_type), total_warnings,
+            total_imported,
+            list.library_name(*content_type),
+            total_warnings,
         );
     }
 
@@ -352,21 +389,23 @@ async fn prepare_series_assets(
     println!("  Preparing artwork for {} series...", series.len());
     let mut publications = Vec::new();
     let mut warnings = 0;
-    
+
     for s in series {
         // Prepare assets for the series itself
-        let (mut series_pubs, series_warnings) = prepare_item_assets(writer, fetcher, s.item()).await?;
+        let (mut series_pubs, series_warnings) =
+            prepare_item_assets(writer, fetcher, s.item()).await?;
         publications.append(&mut series_pubs);
         warnings += series_warnings;
-        
+
         // Prepare assets for seasons
         for season in s.seasons() {
-            let (mut season_pubs, season_warnings) = prepare_item_assets(writer, fetcher, season.item()).await?;
+            let (mut season_pubs, season_warnings) =
+                prepare_item_assets(writer, fetcher, season.item()).await?;
             publications.append(&mut season_pubs);
             warnings += season_warnings;
         }
     }
-    
+
     println!(
         "  Artwork complete: {} assets, {} warnings.",
         publications.len(),

@@ -1,7 +1,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 import { Alert, Button, Label, ListBox, Select, Skeleton } from '@heroui/react';
 import { ArrowLeft, Captions, CircleAlert, Film, RotateCcw, SlidersHorizontal } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { getItem, togglePlayed, type MediaItem } from '../api/catalogApi';
 import {
@@ -19,6 +19,7 @@ import {
 } from '../api/playbackApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { browserSources, selectBrowserSource, sourceLabel } from './sourceSelection';
+import { useTranslate } from '../../settings/i18n';
 
 type LoadState = 'loading' | 'ready' | 'no-source' | 'unsupported' | 'error';
 interface SubtitleTrack {
@@ -31,6 +32,7 @@ const TICKS_PER_SECOND = 10_000_000;
 const PROGRESS_INTERVAL_TICKS = 15 * TICKS_PER_SECOND;
 
 export function PlayerPage() {
+  const tr = useTranslate();
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useClientAuth();
@@ -203,12 +205,12 @@ export function PlayerPage() {
     }
   }, [selectedSubtitle, subtitleTracks]);
 
-  if (!id) return <p className="text-muted">This title could not be found.</p>;
+  if (!id) return <p className="text-muted">{tr('This title could not be found.', '找不到此影片。')}</p>;
   if (state === 'loading') return <Skeleton className="aspect-video w-full rounded-lg" />;
   if (state === 'error') {
     return (
-      <PlaybackAlert id={id} status="danger" title="Playback unavailable">
-        We could not prepare this title right now.
+      <PlaybackAlert id={id} status="danger" title={tr('Playback unavailable', '无法播放')}>
+        {tr('We could not prepare this title right now.', '目前无法准备此影片进行播放。')}
       </PlaybackAlert>
     );
   }
@@ -219,9 +221,9 @@ export function PlayerPage() {
         <Alert status="warning">
           <Alert.Indicator><Film className="size-4" /></Alert.Indicator>
           <Alert.Content>
-            <Alert.Title>No video source available</Alert.Title>
+            <Alert.Title>{tr('No video source available', '没有可用的视频源')}</Alert.Title>
             <Alert.Description>
-              Add a media file to this title before starting playback.
+              {tr('Add a media file to this title before starting playback.', '开始播放前，请先为此影片添加媒体文件。')}
             </Alert.Description>
           </Alert.Content>
         </Alert>
@@ -230,8 +232,8 @@ export function PlayerPage() {
   }
   if (state === 'unsupported') {
     return (
-      <PlaybackAlert id={id} status="warning" title="No browser-compatible source">
-        Choose an MP4, WebM, MP3, M4A, or Ogg source for browser playback.
+      <PlaybackAlert id={id} status="warning" title={tr('No browser-compatible source', '没有浏览器兼容的视频源')}>
+        {tr('Choose an MP4, WebM, MP3, M4A, or Ogg source for browser playback.', '请选择 MP4、WebM、MP3、M4A 或 Ogg 格式以在浏览器中播放。')}
       </PlaybackAlert>
     );
   }
@@ -275,13 +277,13 @@ export function PlayerPage() {
             void navigate(`/app/items/${id}`);
           }}
         >
-          Exit
+          {tr('Exit', '退出播放')}
         </Button>
       </div>
 
       <div className="overflow-hidden rounded-lg bg-black shadow-sm">
         <video
-          aria-label={`Playing ${item.Name}`}
+          aria-label={tr(`Playing ${item.Name}`, `正在播放 ${item.Name}`)}
           className="aspect-video w-full"
           controls
           onEnded={() => {
@@ -327,7 +329,7 @@ export function PlayerPage() {
               default={track.key === selectedSubtitle}
               key={track.key}
               kind="subtitles"
-              label={languageLabel(track.stream.Language)}
+              label={languageLabel(track.stream.Language, tr)}
               src={track.url}
               srcLang={track.stream.Language ?? 'und'}
             />
@@ -339,8 +341,8 @@ export function PlayerPage() {
         <Alert status="danger">
           <Alert.Indicator><CircleAlert className="size-4" /></Alert.Indicator>
           <Alert.Content>
-            <Alert.Title>Source error</Alert.Title>
-            <Alert.Description>{playbackError}</Alert.Description>
+            <Alert.Title>{tr('Source error', '视频源错误')}</Alert.Title>
+            <Alert.Description>{translatePlaybackError(playbackError, tr)}</Alert.Description>
           </Alert.Content>
           {sources.length > 1 && nextSource && (
             <Button
@@ -353,7 +355,7 @@ export function PlayerPage() {
               }}
             >
               <RotateCcw className="size-4" />
-              Try next source
+              {tr('Try next source', '尝试下一个视频源')}
             </Button>
           )}
         </Alert>
@@ -361,7 +363,7 @@ export function PlayerPage() {
 
       <div className="grid gap-4 border-b border-separator pb-5 sm:grid-cols-2">
         <Select
-          aria-label="Video source"
+          aria-label={tr('Video source', '视频源')}
           value={selectedSource.Id}
           variant="secondary"
           onChange={(key) => {
@@ -370,7 +372,7 @@ export function PlayerPage() {
         >
           <Label className="flex items-center gap-2 text-sm">
             <SlidersHorizontal className="size-4" />
-            Video source
+            {tr('Video source', '视频源')}
           </Label>
           <Select.Trigger>
             <Select.Value />
@@ -389,7 +391,7 @@ export function PlayerPage() {
         </Select>
 
         <Select
-          aria-label="Subtitles"
+          aria-label={tr('Subtitles', '字幕')}
           isDisabled={!subtitleTracks.length}
           value={selectedSubtitle}
           variant="secondary"
@@ -399,7 +401,7 @@ export function PlayerPage() {
         >
           <Label className="flex items-center gap-2 text-sm">
             <Captions className="size-4" />
-            Subtitles
+            {tr('Subtitles', '字幕')}
           </Label>
           <Select.Trigger>
             <Select.Value />
@@ -407,17 +409,17 @@ export function PlayerPage() {
           </Select.Trigger>
           <Select.Popover>
             <ListBox>
-              <ListBox.Item id="off" textValue="Off">
-                Off
+              <ListBox.Item id="off" textValue={tr('Off', '关闭')}>
+                {tr('Off', '关闭')}
                 <ListBox.ItemIndicator />
               </ListBox.Item>
               {subtitleTracks.map((track) => (
                 <ListBox.Item
                   id={track.key}
                   key={track.key}
-                  textValue={languageLabel(track.stream.Language)}
+                  textValue={languageLabel(track.stream.Language, tr)}
                 >
-                  {languageLabel(track.stream.Language)}
+                  {languageLabel(track.stream.Language, tr)}
                   <ListBox.ItemIndicator />
                 </ListBox.Item>
               ))}
@@ -439,22 +441,23 @@ function currentPositionTicks(video: HTMLVideoElement | null): number {
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * TICKS_PER_SECOND) : 0;
 }
 
-function languageLabel(language?: string): string {
-  if (!language) return 'Unknown';
+function languageLabel(language: string | undefined, tr: (english: string, chinese: string) => string): string {
+  if (!language) return tr('Unknown', '未知');
   const normalized = language.toLowerCase();
-  if (normalized === 'zh-cn' || normalized === 'zho' || normalized === 'chi') return 'Chinese (Simplified)';
-  if (normalized === 'en' || normalized === 'eng') return 'English';
+  if (normalized === 'zh-cn' || normalized === 'zho' || normalized === 'chi') return tr('Chinese (Simplified)', '简体中文');
+  if (normalized === 'en' || normalized === 'eng') return tr('English', '英语');
   return language;
 }
 
 function BackLink({ id }: { id: string }) {
+  const tr = useTranslate();
   return (
     <Link
       className="inline-flex items-center gap-2 text-sm text-muted hover:text-foreground"
       to={`/app/items/${id}`}
     >
       <ArrowLeft className="size-4" />
-      Back to details
+      {tr('Back to details', '返回详细信息')}
     </Link>
   );
 }
@@ -468,7 +471,7 @@ function PlaybackAlert({
   id: string;
   status: 'danger' | 'warning';
   title: string;
-  children: string;
+  children: ReactNode;
 }) {
   return (
     <div className="space-y-5">
@@ -482,4 +485,10 @@ function PlaybackAlert({
       </Alert>
     </div>
   );
+}
+
+function translatePlaybackError(message: string, tr: (english: string, chinese: string) => string) {
+  if (message === 'Subtitles could not be loaded.') return tr(message, '无法加载字幕。');
+  if (message === 'This source could not be played. Choose another source.') return tr(message, '无法播放此视频源，请选择其他视频源。');
+  return message;
 }

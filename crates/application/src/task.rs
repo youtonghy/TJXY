@@ -268,7 +268,7 @@ impl TaskService {
             (WorkTaskKind::ExpandItem, CatalogItemType::Series) => target.structure_revision(),
             (
                 WorkTaskKind::IndexMediaSources,
-                CatalogItemType::Movie | CatalogItemType::Episode,
+                CatalogItemType::Movie | CatalogItemType::Episode | CatalogItemType::Audio,
             ) => target.source_revision(),
             _ => return Err(TaskServiceError::InvalidManualMediaItemType),
         };
@@ -276,14 +276,20 @@ impl TaskService {
             .storage_scope()
             .ok_or(TaskServiceError::ManualMediaItemUnavailable)?;
         let jobs = WorkJobRepository::new(&self.database);
-        let spec = if scope.is_ready() {
+        let direct_audio = task_kind == WorkTaskKind::IndexMediaSources
+            && target.item_type() == CatalogItemType::Audio;
+        let spec = if scope.is_ready() || (direct_audio && scope.is_ready_for_direct_source()) {
             WorkJobSpec::new(
                 task_kind,
                 WorkScope::CatalogItem(item_id),
                 revision,
                 MANUAL_MEDIA_PRIORITY,
             )?
-            .with_input_sync_revision(scope.children_revision())?
+            .with_input_sync_revision(if direct_audio {
+                scope.metadata_input_revision()
+            } else {
+                scope.children_revision()
+            })?
         } else {
             let sync = jobs
                 .enqueue_or_join(

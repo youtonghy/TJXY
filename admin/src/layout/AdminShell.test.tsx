@@ -24,7 +24,7 @@ describe('AdminShell', () => {
     });
 
     const navigation = screen.getByRole('navigation', { name: 'Primary' });
-    expect(within(navigation).getAllByText(/Manage|Operations|Storage|System/u)).toHaveLength(4);
+    expect(within(navigation).getAllByText(/Manage|Operations|Storage|System/u)).toHaveLength(5);
     expect(within(navigation).getAllByRole('link').map((link) => link.textContent.trim())).toEqual([
       'Dashboard',
       'Users',
@@ -34,10 +34,15 @@ describe('AdminShell', () => {
       'Google Drive',
       'OneDrive',
       'Metadata',
+      'AI assistant',
+      'System settings',
     ]);
     expect(within(navigation).getByRole('link', { name: 'Tasks' })).toHaveAttribute(
       'aria-current',
       'page',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute(
+      'aria-current',
     );
     expect(screen.getByRole('main')).toHaveAttribute('id', 'main-content');
     const brandLinks = screen.getAllByRole('link', { name: 'TJXY Admin home' });

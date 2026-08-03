@@ -27,6 +27,7 @@ export default defineConfig(({ mode }) => {
       server: {
       proxy: {
         '/Admin': target,
+        '/Ai': target,
         '/Auth': target,
         '/Devices': target,
         '/Library': target,

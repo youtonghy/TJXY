@@ -50,6 +50,7 @@ pub struct SourceIndexSnapshot {
     owner: CatalogItemId,
     objects: Vec<SourceIndexObject>,
     restrict_to_stable_sources: bool,
+    is_audio: bool,
 }
 
 impl SourceIndexSnapshot {
@@ -65,6 +66,11 @@ impl SourceIndexSnapshot {
     #[must_use]
     pub const fn restrict_to_stable_sources(&self) -> bool {
         self.restrict_to_stable_sources
+    }
+
+    #[must_use]
+    pub const fn is_audio(&self) -> bool {
+        self.is_audio
     }
 }
 
@@ -97,6 +103,7 @@ impl<'connection> SourceIndexRepository<'connection> {
             .job()
             .input_sync_revision()
             .ok_or(SourceIndexRepositoryError::MissingSyncRevision)?;
+        let is_audio = owner_is_audio(self.database, owner).await?;
         let scope = crate::catalog_storage_scope::resolve_catalog_storage_scope(
             self.database,
             owner,
@@ -112,12 +119,12 @@ impl<'connection> SourceIndexRepository<'connection> {
             }
         })?
         .ok_or(SourceIndexRepositoryError::MissingScope)?;
-        if !scope.children_indexed()
+        if (!is_audio && !scope.children_indexed())
             || !scope.accepts_metadata_input(revision)
             || !crate::catalog_storage_scope::storage_scope_is_reconciled(
                 self.database,
                 scope,
-                true,
+                !is_audio,
             )
             .await?
         {
@@ -125,11 +132,11 @@ impl<'connection> SourceIndexRepository<'connection> {
         }
         let mut rows = self
             .database
-            .query_all(self.database.get_database_backend().build(&candidate_query(
-                owner,
-                revision,
-                claimed.job().storage_root_affinity(),
-            )))
+            .query_all(self.database.get_database_backend().build(&if is_audio {
+                direct_audio_candidate_query(owner, revision, claimed.job().storage_root_affinity())
+            } else {
+                candidate_query(owner, revision, claimed.job().storage_root_affinity())
+            }))
             .await?;
         let mut restrict_to_stable_sources = false;
         if rows.is_empty()
@@ -179,8 +186,128 @@ impl<'connection> SourceIndexRepository<'connection> {
             owner,
             objects,
             restrict_to_stable_sources,
+            is_audio,
         })
     }
+}
+
+async fn owner_is_audio(
+    database: &DatabaseConnection,
+    owner: CatalogItemId,
+) -> Result<bool, DbErr> {
+    let Some(row) = database
+        .query_one(
+            database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("item_type"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(owner.as_uuid()))
+                    .limit(1),
+            ),
+        )
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(row.try_get::<String>("", "item_type")? == "Audio")
+}
+
+fn direct_audio_candidate_query(
+    owner: CatalogItemId,
+    revision: i64,
+    storage_root: Option<StorageRootId>,
+) -> sea_orm::sea_query::SelectStatement {
+    let identity = Alias::new("audio_source_identity");
+    let relation = Alias::new("audio_source_relation");
+    let object = Alias::new("audio_source_object");
+    let root = Alias::new("audio_source_root");
+    let library_root = Alias::new("audio_source_library_root");
+    let membership = Alias::new("audio_source_membership");
+    let library = Alias::new("audio_source_library");
+    Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("id"))),
+            Alias::new("storage_object_id"),
+        )
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("name"))),
+            Alias::new("name"),
+        )
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("checksum"))),
+            Alias::new("checksum"),
+        )
+        .from_as(Alias::new("identity_matches"), identity.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_root_objects"),
+            relation.clone(),
+            Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                .equals((identity.clone(), Alias::new("storage_object_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_objects"),
+            object.clone(),
+            Expr::col((object.clone(), Alias::new("id")))
+                .equals((relation.clone(), Alias::new("storage_object_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_roots"),
+            root.clone(),
+            Expr::col((root.clone(), Alias::new("id")))
+                .equals((relation.clone(), Alias::new("storage_root_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            library_root.clone(),
+            Expr::col((library_root.clone(), Alias::new("storage_root_id")))
+                .equals((root.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Cond::all()
+                .add(
+                    Expr::col((membership.clone(), Alias::new("library_id")))
+                        .equals((library_root, Alias::new("library_id"))),
+                )
+                .add(
+                    Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                        .eq(owner.as_uuid()),
+                ),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership, Alias::new("library_id"))),
+        )
+        .and_where(
+            Expr::col((identity.clone(), Alias::new("candidate_catalog_item_id")))
+                .eq(owner.as_uuid()),
+        )
+        .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
+        .cond_where(storage_root.map_or_else(Cond::all, |storage_root| {
+            Cond::all().add(
+                Expr::col((relation.clone(), Alias::new("storage_root_id")))
+                    .eq(storage_root.as_uuid()),
+            )
+        }))
+        .and_where(Expr::col((relation.clone(), Alias::new("presence_state"))).eq("Present"))
+        .and_where(Expr::col((relation, Alias::new("observed_sync_revision"))).lte(revision))
+        .and_where(Expr::col((object.clone(), Alias::new("object_type"))).eq("File"))
+        .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
+        .and_where(Expr::col((object, Alias::new("observed_sync_revision"))).lte(revision))
+        .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(revision))
+        .and_where(Expr::col((library.clone(), Alias::new("collection_type"))).eq("music"))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .to_owned()
 }
 
 #[derive(Debug, Error)]

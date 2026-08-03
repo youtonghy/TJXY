@@ -1258,6 +1258,7 @@ async fn delete_user_in_transaction(
     for table in [
         "playback_sessions",
         "auth_sessions",
+        "ai_conversations",
         "user_data",
         "user_catalog_state",
     ] {

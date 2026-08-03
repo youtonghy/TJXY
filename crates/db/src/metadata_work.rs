@@ -908,7 +908,7 @@ fn select_sidecar(
         MetadataItemKind::Movie => Some("movie.nfo"),
         MetadataItemKind::Series => Some("tvshow.nfo"),
         MetadataItemKind::Season => Some("season.nfo"),
-        MetadataItemKind::Episode => None,
+        MetadataItemKind::Audio | MetadataItemKind::Episode => None,
     };
     let selected = if let Some(conventional) = conventional {
         let matches = candidates
@@ -940,6 +940,7 @@ fn select_sidecar(
 
 fn parse_kind(value: &str) -> Result<MetadataItemKind, MetadataWorkError> {
     match value {
+        "Audio" => Ok(MetadataItemKind::Audio),
         "Movie" => Ok(MetadataItemKind::Movie),
         "Series" => Ok(MetadataItemKind::Series),
         "Season" => Ok(MetadataItemKind::Season),

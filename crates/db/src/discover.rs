@@ -171,6 +171,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
     /// # Errors
     ///
     /// Returns [`DiscoverTitlesError`] for invalid claims, classifications, names, or SQL failures.
+    #[allow(clippy::too_many_lines)] // Keeps title classification and storage fencing in one snapshot boundary.
     pub async fn snapshot(
         &self,
         claimed: &ClaimedWorkJob,
@@ -225,28 +226,28 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 &library_ids,
             )))
             .await?;
-        if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_TITLES {
-            return Err(DiscoverTitlesError::TitleLimit);
-        }
-        let mut storage_objects = Vec::with_capacity(rows.len() + 1);
-        storage_objects.push(root_object);
-        for row in &rows {
-            storage_objects.push(StorageObjectRecordId::from_uuid(
-                row.try_get("", "storage_object_id")?,
-            ));
-        }
-        ensure_discovery_storage_facts(self.database, root, &storage_objects).await?;
         let mut titles = Vec::with_capacity(rows.len());
         for row in rows {
             let object = StorageObjectRecordId::from_uuid(row.try_get("", "storage_object_id")?);
             let collection: String = row.try_get("", "collection_type")?;
-            let item_type = match collection.as_str() {
-                "movies" => "Movie",
-                "tvshows" | "shows" | "mixed" => "Series",
+            let raw_name: String = row.try_get("", "name")?;
+            let (item_type, name, production_year) = match collection.as_str() {
+                "movies" => {
+                    let (name, year) = parse_title(&raw_name)?;
+                    ("Movie", name, year)
+                }
+                "tvshows" | "shows" | "mixed" => {
+                    let (name, year) = parse_title(&raw_name)?;
+                    ("Series", name, year)
+                }
+                "music" => {
+                    let Some(name) = parse_audio_title(&raw_name) else {
+                        continue;
+                    };
+                    ("Audio", name, None)
+                }
                 _ => return Err(DiscoverTitlesError::UnsupportedCollection),
             };
-            let raw_name: String = row.try_get("", "name")?;
-            let (name, production_year) = parse_title(&raw_name)?;
             let metadata_requirement = match row.try_get::<String>("", "metadata_policy")?.as_str()
             {
                 "full" => Some(MetadataRequirement::Full),
@@ -271,6 +272,13 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 children_revision: row.try_get("", "children_index_revision")?,
             });
         }
+        if u64::try_from(titles.len()).unwrap_or(u64::MAX) > MAX_TITLES {
+            return Err(DiscoverTitlesError::TitleLimit);
+        }
+        let mut storage_objects = Vec::with_capacity(titles.len() + 1);
+        storage_objects.push(root_object);
+        storage_objects.extend(titles.iter().map(|title| title.storage_object_id));
+        ensure_discovery_storage_facts(self.database, root, &storage_objects).await?;
         Ok(DiscoverTitlesSnapshot {
             scope: claimed.job().scope(),
             root_id: root,
@@ -861,7 +869,7 @@ async fn upsert_title(
     } else {
         "NotApplicable"
     };
-    let source_state = if title.item_type == "Movie" {
+    let source_state = if matches!(title.item_type.as_str(), "Movie" | "Audio") {
         "NotIndexed"
     } else {
         "Unknown"
@@ -975,6 +983,7 @@ fn idempotent_conflict(backend: sea_orm::DbBackend, column: &'static str) -> OnC
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps cross-backend music and video discovery in one fenced query.
 fn candidate_query(
     root_id: StorageRootId,
     revision: i64,
@@ -1039,15 +1048,8 @@ fn candidate_query(
             JoinType::InnerJoin,
             Alias::new("storage_root_objects"),
             child.clone(),
-            Cond::all()
-                .add(
-                    Expr::col((child.clone(), Alias::new("storage_root_id")))
-                        .equals((root.clone(), Alias::new("id"))),
-                )
-                .add(
-                    Expr::col((child.clone(), Alias::new("parent_storage_object_id")))
-                        .equals((root_object.clone(), Alias::new("storage_object_id"))),
-                ),
+            Expr::col((child.clone(), Alias::new("storage_root_id")))
+                .equals((root.clone(), Alias::new("id"))),
         )
         .join_as(
             JoinType::InnerJoin,
@@ -1074,14 +1076,47 @@ fn candidate_query(
         .and_where(Expr::col((root.clone(), Alias::new("reconciled_sync_revision"))).eq(revision))
         .and_where(Expr::col((binding, Alias::new("discovered_sync_revision"))).lt(revision))
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
-        .and_where(Expr::col((library, Alias::new("id"))).is_in(library_ids.iter().copied()))
+        .and_where(
+            Expr::col((library.clone(), Alias::new("id"))).is_in(library_ids.iter().copied()),
+        )
+        .cond_where(
+            Cond::any()
+                .add(
+                    Cond::all()
+                        .add(
+                            Expr::col((library.clone(), Alias::new("collection_type"))).eq("music"),
+                        )
+                        .add(Expr::col((object.clone(), Alias::new("object_type"))).eq("File"))
+                        .add(supported_audio_name_condition(&object)),
+                )
+                .add(
+                    Cond::all()
+                        .add(Expr::col((library, Alias::new("collection_type"))).ne("music"))
+                        .add(
+                            Expr::col((child.clone(), Alias::new("parent_storage_object_id")))
+                                .equals((root_object, Alias::new("storage_object_id"))),
+                        ),
+                ),
+        )
         .and_where(Expr::col((child.clone(), Alias::new("presence_state"))).eq("Present"))
         .and_where(Expr::col((child, Alias::new("observed_sync_revision"))).lte(revision))
         .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
-        .and_where(Expr::col((object.clone(), Alias::new("object_type"))).eq("Directory"))
         .and_where(Expr::col((object, Alias::new("observed_sync_revision"))).lte(revision))
         .limit(MAX_TITLES + 1)
         .to_owned()
+}
+
+fn supported_audio_name_condition(object: &Alias) -> sea_orm::sea_query::Condition {
+    [
+        "aac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "wave", "webm",
+    ]
+    .into_iter()
+    .fold(Cond::any(), |condition, extension| {
+        condition.add(
+            Expr::col((object.clone(), Alias::new("normalized_name")))
+                .like(format!("%.{extension}")),
+        )
+    })
 }
 
 fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError> {
@@ -1099,6 +1134,19 @@ fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError
         return Ok((name.trim().to_owned(), Some(year)));
     }
     Ok((trimmed.to_owned(), None))
+}
+
+fn parse_audio_title(value: &str) -> Option<String> {
+    let path = std::path::Path::new(value);
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "aac" | "flac" | "m4a" | "mp3" | "oga" | "ogg" | "opus" | "wav" | "wave" | "webm"
+    ) {
+        return None;
+    }
+    let title = path.file_stem()?.to_str()?.trim();
+    (!title.is_empty()).then(|| title.to_owned())
 }
 
 fn derived_item(object: StorageObjectRecordId) -> CatalogItemId {

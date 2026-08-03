@@ -1,22 +1,25 @@
 import { ProgressCircle } from '@heroui/react';
 import { Check, Heart, Star } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useTranslate } from '../../settings/i18n';
 import type { MediaItem } from '../api/catalogApi';
 import { MediaImage } from './MediaImage';
 
 export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
+  const tr = useTranslate();
   const tag = item.ImageTags?.Primary ?? item.PrimaryImageTag;
   const episodeCode = item.Type === 'Episode' && item.IndexNumber !== undefined ? `E${String(item.IndexNumber)}` : undefined;
   const facts = [episodeCode, item.ProductionYear ? String(item.ProductionYear) : undefined].filter(Boolean);
   const progress = watchedProgress(item);
+  const artworkRatio = item.Type === 'Audio' ? 'aspect-square' : 'aspect-[2/3]';
   return (
     <Link className="group block min-w-0" to={to ?? `/app/items/${item.Id}`}>
-      <div className="relative aspect-[2/3] overflow-hidden rounded-xl bg-default shadow-sm transition-transform group-hover:scale-[1.02]">
-        <MediaImage alt={`Poster for ${item.Name}`} className="h-full w-full object-cover" itemId={item.Id} tag={tag} />
+      <div className={`relative ${artworkRatio} overflow-hidden rounded-xl bg-default shadow-sm transition-transform group-hover:scale-[1.02]`}>
+        <MediaImage alt={tr(`Poster for ${item.Name}`, `${item.Name} 的海报`)} className="h-full w-full object-cover" itemId={item.Id} tag={tag} />
         <div className="absolute right-2 top-2 flex items-center gap-1.5">
           {item.UserData?.IsFavorite && (
             <span
-              aria-label="Favorite"
+              aria-label={tr('Favorite', '已收藏')}
               className="grid size-7 place-items-center rounded-full bg-background/90 shadow-sm"
             >
               <Heart aria-hidden="true" className="size-4 fill-pink-500 text-pink-500" />
@@ -25,7 +28,7 @@ export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
           {item.UserData?.Played
             ? (
                 <span
-                  aria-label="Watched"
+                  aria-label={tr('Watched', '已看完')}
                   className="grid size-7 place-items-center rounded-full bg-success text-success-foreground shadow-sm"
                 >
                   <Check aria-hidden="true" className="size-4" strokeWidth={3} />
@@ -35,7 +38,7 @@ export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
               ? (
                   <span className="grid size-7 place-items-center rounded-full bg-background/90 shadow-sm">
                     <ProgressCircle
-                      aria-label={`${String(progress)}% watched`}
+                      aria-label={tr(`${String(progress)}% watched`, `已观看 ${String(progress)}%`)}
                       color="success"
                       size="sm"
                       value={progress}

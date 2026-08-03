@@ -4,6 +4,8 @@ import { Rating } from '@heroui-pro/react/rating';
 import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useSystemLocale } from '../../settings/SystemLocaleProvider';
+import { useTranslate } from '../../settings/i18n';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getChildren, getItem, getLibraries, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
 import { MediaImage } from '../ui/MediaImage';
@@ -18,6 +20,7 @@ export function ItemPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useClientAuth();
+  const tr = useTranslate();
   const [item, setItem] = useState<MediaItem>();
   const [children, setChildren] = useState<MediaItem[]>([]);
   const [breadcrumbContext, setBreadcrumbContext] = useState<ItemBreadcrumbContext>({ ancestors: [] });
@@ -66,8 +69,8 @@ export function ItemPage() {
       <Alert status="danger" role="alert">
         <Alert.Indicator />
         <Alert.Content>
-          <Alert.Title>Unable to load this title</Alert.Title>
-          <Alert.Description>Try again from the library.</Alert.Description>
+          <Alert.Title>{tr('Unable to load this title', '无法加载此影片')}</Alert.Title>
+          <Alert.Description>{tr('Try again from the library.', '请返回媒体库后重试。')}</Alert.Description>
         </Alert.Content>
       </Alert>
     );
@@ -79,15 +82,16 @@ export function ItemPage() {
   const seasons = children.filter((child) => child.Type === 'Season').sort(sortByIndex);
   const episodes = children.filter((child) => child.Type === 'Episode').sort(sortByIndex);
   const hasPlayableAction = item.Type !== 'Series' && item.Type !== 'Season';
+  const artworkRatio = item.Type === 'Audio' ? 'aspect-square' : 'aspect-[2/3]';
 
   return (
     <article className="space-y-8">
       <ItemBreadcrumb context={breadcrumbContext} item={item} onNavigate={navigate} />
 
       <div className="grid gap-8 lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <div className="mx-auto aspect-[2/3] w-full max-w-[15rem] overflow-hidden rounded-2xl bg-default shadow-sm lg:mx-0">
+        <div className={`mx-auto ${artworkRatio} w-full max-w-[15rem] overflow-hidden rounded-2xl bg-default shadow-sm lg:mx-0`}>
           <MediaImage
-            alt={`Poster for ${item.Name}`}
+            alt={tr(`Poster for ${item.Name}`, `${item.Name} 的海报`)}
             className="h-full w-full object-cover"
             itemId={id}
             tag={item.ImageTags?.Primary}
@@ -97,7 +101,7 @@ export function ItemPage() {
         <div className="min-w-0 self-center">
           <div className="flex flex-wrap items-center gap-2">
             <Chip color="accent" variant="soft">
-              {item.Type ?? 'Media'}
+              {translateItemType(item.Type, tr)}
             </Chip>
             {item.ProductionYear && <Chip variant="secondary">{item.ProductionYear}</Chip>}
             {item.Status && <Chip color="success" variant="soft">{item.Status}</Chip>}
@@ -114,7 +118,7 @@ export function ItemPage() {
             {hasPlayableAction && (
               <Button onPress={() => navigate(`/app/play/${id}`)}>
                 <Play className="size-4" />
-                Play
+                {tr('Play', '播放')}
               </Button>
             )}
             <Button
@@ -128,7 +132,7 @@ export function ItemPage() {
               }}
             >
               <Heart className="size-4" />
-              {favorite ? 'Unfavorite' : 'Favorite'}
+              {favorite ? tr('Unfavorite', '取消收藏') : tr('Favorite', '收藏')}
             </Button>
             <Button
               variant="tertiary"
@@ -141,7 +145,7 @@ export function ItemPage() {
               }}
             >
               <Check className="size-4" />
-              {played ? 'Mark unplayed' : 'Mark played'}
+              {played ? tr('Mark unplayed', '标记为未看') : tr('Mark played', '标记为已看')}
             </Button>
           </div>
         </div>
@@ -151,16 +155,16 @@ export function ItemPage() {
         <Alert status="warning">
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>No video source available</Alert.Title>
+            <Alert.Title>{tr('No video source available', '没有可用的视频源')}</Alert.Title>
             <Alert.Description>
-              Add a media file to this title before starting playback.
+              {tr('Add a media file to this title before starting playback.', '开始播放前，请先为此影片添加媒体文件。')}
             </Alert.Description>
           </Alert.Content>
         </Alert>
       )}
 
       {seasons.length ? <SeasonBrowser seasons={seasons} /> : null}
-      {episodes.length ? <EpisodeRail episodes={episodes} label="Episodes" /> : null}
+      {episodes.length ? <EpisodeRail episodes={episodes} label={tr('Episodes', '剧集')} /> : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <MetadataCard item={item} />
@@ -181,9 +185,10 @@ function ItemBreadcrumb({
   item: MediaItem;
   onNavigate: (to: string) => void;
 }) {
+  const tr = useTranslate();
   const entries = [
-    { id: 'home', label: 'Home', to: '/app/' },
-    { id: 'libraries', label: 'Libraries', to: '/app/libraries' },
+    { id: 'home', label: tr('Home', '首页'), to: '/app/' },
+    { id: 'libraries', label: tr('Libraries', '媒体库'), to: '/app/libraries' },
     ...(context.itemId === item.Id && context.library
       ? [{ id: `library-${context.library.Id}`, label: context.library.Name, to: `/app/libraries/${context.library.Id}` }]
       : []),
@@ -196,8 +201,8 @@ function ItemBreadcrumb({
   ];
 
   return (
-    <nav aria-label="Item breadcrumb" className="max-w-full overflow-x-auto pb-1">
-      <Breadcrumbs aria-label="Item breadcrumb" className="min-w-max flex-nowrap">
+    <nav aria-label={tr('Item breadcrumb', '影片路径')} className="max-w-full overflow-x-auto pb-1">
+      <Breadcrumbs aria-label={tr('Item breadcrumb', '影片路径')} className="min-w-max flex-nowrap">
         {entries.map((entry, index) => {
           const isCurrent = index === entries.length - 1;
           return (
@@ -216,35 +221,37 @@ function ItemBreadcrumb({
 }
 
 function MetadataCard({ item }: { item: MediaItem }) {
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
   const facts = [
-    item.RunTimeTicks ? { icon: Clock3, label: 'Runtime', value: formatRuntime(item.RunTimeTicks) } : undefined,
-    item.PremiereDate ? { icon: CalendarDays, label: 'Premiere', value: formatDate(item.PremiereDate) } : undefined,
-    item.EndDate ? { icon: CalendarDays, label: 'Ended', value: formatDate(item.EndDate) } : undefined,
-    item.OriginalLanguage ? { icon: Info, label: 'Original language', value: item.OriginalLanguage.toUpperCase() } : undefined,
+    item.RunTimeTicks ? { icon: Clock3, label: tr('Runtime', '片长'), value: formatRuntime(item.RunTimeTicks, locale) } : undefined,
+    item.PremiereDate ? { icon: CalendarDays, label: tr('Premiere', '首映'), value: formatDate(item.PremiereDate, locale) } : undefined,
+    item.EndDate ? { icon: CalendarDays, label: tr('Ended', '完结'), value: formatDate(item.EndDate, locale) } : undefined,
+    item.OriginalLanguage ? { icon: Info, label: tr('Original language', '原始语言'), value: item.OriginalLanguage.toUpperCase() } : undefined,
   ].filter((fact): fact is { icon: typeof Clock3; label: string; value: string } => Boolean(fact));
   const rating = item.CommunityRating;
 
   return (
     <Card>
       <Card.Header>
-        <Card.Title>Details</Card.Title>
-        <Card.Description>Key information from the catalog record.</Card.Description>
+        <Card.Title>{tr('Details', '详细信息')}</Card.Title>
+        <Card.Description>{tr('Key information from the catalog record.', '媒体目录记录中的主要信息。')}</Card.Description>
       </Card.Header>
       <Card.Content className="grid gap-4 sm:grid-cols-2">
         {rating !== undefined ? (
           <div className="min-w-0">
-            <p className="text-xs text-muted">Rating</p>
+            <p className="text-xs text-muted">{tr('Rating', '评分')}</p>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <Rating
                 isReadOnly
-                aria-label={`${rating.toFixed(1)} out of 10${item.VoteCount ? ` from ${item.VoteCount.toLocaleString()} votes` : ''}`}
+                aria-label={tr(`${rating.toFixed(1)} out of 10${item.VoteCount ? ` from ${item.VoteCount.toLocaleString(locale)} votes` : ''}`, `评分 ${rating.toFixed(1)}，满分 10 分${item.VoteCount ? `，共 ${item.VoteCount.toLocaleString(locale)} 票` : ''}`)}
                 size="sm"
                 value={rating / 2}
               >
                 {[1, 2, 3, 4, 5].map((value) => <Rating.Item key={value} value={value} />)}
               </Rating>
               <span className="text-sm font-medium tabular-nums">{rating.toFixed(1)}</span>
-              {item.VoteCount ? <span className="text-xs text-muted">{item.VoteCount.toLocaleString()} votes</span> : null}
+              {item.VoteCount ? <span className="text-xs text-muted">{tr(`${item.VoteCount.toLocaleString(locale)} votes`, `${item.VoteCount.toLocaleString(locale)} 票`)}</span> : null}
             </div>
           </div>
         ) : null}
@@ -257,25 +264,26 @@ function MetadataCard({ item }: { item: MediaItem }) {
             </div>
           </div>
         ))}
-        {rating === undefined && !facts.length && <p className="text-sm text-muted">No additional details are available.</p>}
+        {rating === undefined && !facts.length && <p className="text-sm text-muted">{tr('No additional details are available.', '暂无更多详细信息。')}</p>}
       </Card.Content>
     </Card>
   );
 }
 
 function TaxonomyCard({ item }: { item: MediaItem }) {
+  const tr = useTranslate();
   const values = [
-    ['Genres', item.Genres],
-    ['Studios', item.Studios],
-    ['Countries', item.Countries?.map((value) => value.Name)],
-    ['Languages', item.Languages?.map((value) => value.Name)],
+    [tr('Genres', '类型'), item.Genres],
+    [tr('Studios', '制作公司'), item.Studios],
+    [tr('Countries', '国家与地区'), item.Countries?.map((value) => value.Name)],
+    [tr('Languages', '语言'), item.Languages?.map((value) => value.Name)],
   ] as const;
   const visible = values.filter(([, entries]) => entries?.length);
   return (
     <Card>
       <Card.Header>
-        <Card.Title>Classification</Card.Title>
-        <Card.Description>Genres, production, and language metadata.</Card.Description>
+        <Card.Title>{tr('Classification', '分类信息')}</Card.Title>
+        <Card.Description>{tr('Genres, production, and language metadata.', '类型、制作与语言元数据。')}</Card.Description>
       </Card.Header>
       <Card.Content className="space-y-4">
         {visible.length ? visible.map(([label, entries]) => (
@@ -285,21 +293,22 @@ function TaxonomyCard({ item }: { item: MediaItem }) {
               {entries?.map((entry) => <Chip key={entry} size="sm" variant="secondary">{entry}</Chip>)}
             </div>
           </div>
-        )) : <p className="text-sm text-muted">No classification metadata is available.</p>}
+        )) : <p className="text-sm text-muted">{tr('No classification metadata is available.', '暂无分类元数据。')}</p>}
       </Card.Content>
     </Card>
   );
 }
 
 function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
+  const tr = useTranslate();
   const previewCount = useCreditPreviewCount();
   const [expanded, setExpanded] = useState(false);
   const visiblePeople = expanded ? people : people.slice(0, previewCount);
   return (
     <Card>
       <Card.Header>
-        <Card.Title>Cast and crew</Card.Title>
-        <Card.Description>People credited on this title.</Card.Description>
+        <Card.Title>{tr('Cast and crew', '演职人员')}</Card.Title>
+        <Card.Description>{tr('People credited on this title.', '参与此影片的演职人员。')}</Card.Description>
       </Card.Header>
       <Card.Content className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {visiblePeople.map((person) => (
@@ -309,7 +318,7 @@ function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
             </Avatar>
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{person.Name}</p>
-              <p className="truncate text-xs text-muted">{[person.Role, person.Type].filter(Boolean).join(' · ')}</p>
+              <p className="truncate text-xs text-muted">{[person.Role, translatePersonType(person.Type, tr)].filter(Boolean).join(' · ')}</p>
             </div>
           </div>
         ))}
@@ -326,7 +335,7 @@ function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
             {expanded
               ? <ChevronUp aria-hidden="true" className="size-4" />
               : <ChevronDown aria-hidden="true" className="size-4" />}
-            {expanded ? 'Show fewer credits' : `View all ${String(people.length)} credits`}
+            {expanded ? tr('Show fewer credits', '收起演职人员') : tr(`View all ${String(people.length)} credits`, `查看全部 ${String(people.length)} 位演职人员`)}
           </Button>
         </Card.Footer>
       )}
@@ -335,6 +344,7 @@ function PeopleCard({ people }: { people: NonNullable<MediaItem['People']> }) {
 }
 
 function SeasonBrowser({ seasons }: { seasons: MediaItem[] }) {
+  const tr = useTranslate();
   const orderedSeasons = [...seasons].sort(sortByIndex);
   const [selected, setSelected] = useState(orderedSeasons[0]?.Id ?? '');
   const selectedSeason = orderedSeasons.find((season) => season.Id === selected) ?? orderedSeasons[0];
@@ -348,14 +358,14 @@ function SeasonBrowser({ seasons }: { seasons: MediaItem[] }) {
   return (
     <Card>
       <Card.Header>
-        <Card.Title>Seasons</Card.Title>
-        <Card.Description>Browse the episodes in each season.</Card.Description>
+        <Card.Title>{tr('Seasons', '季')}</Card.Title>
+        <Card.Description>{tr('Browse the episodes in each season.', '浏览每一季的剧集。')}</Card.Description>
       </Card.Header>
       <Card.Content>
         <div className="space-y-5">
           <div className="overflow-x-auto pb-1">
             <ToggleButtonGroup
-              aria-label="Seasons"
+              aria-label={tr('Seasons', '季')}
               className="min-w-max"
               disallowEmptySelection
               onSelectionChange={(keys) => {
@@ -378,8 +388,8 @@ function SeasonBrowser({ seasons }: { seasons: MediaItem[] }) {
               <SeasonSummary season={selectedSeason} />
               {episodes
                 ? episodes.length
-                  ? <EpisodeRail episodes={episodes} label={`Episodes in ${selectedSeason.Name}`} />
-                  : <p className="py-6 text-sm text-muted">No episodes are available for this season.</p>
+                  ? <EpisodeRail episodes={episodes} label={tr(`Episodes in ${selectedSeason.Name}`, `${selectedSeason.Name} 中的剧集`)} />
+                  : <p className="py-6 text-sm text-muted">{tr('No episodes are available for this season.', '本季暂无可用剧集。')}</p>
                 : <EpisodeListSkeleton />}
             </div>
           )}
@@ -400,6 +410,8 @@ function SeasonSummary({ season }: { season: MediaItem }) {
 }
 
 function EpisodeRail({ episodes, label }: { episodes: MediaItem[]; label: string }) {
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
   return (
     <ul
       aria-label={label}
@@ -413,7 +425,7 @@ function EpisodeRail({ episodes, label }: { episodes: MediaItem[]; label: string
           >
             <div className="aspect-video overflow-hidden bg-default">
               <MediaImage
-                alt={`Still for episode ${String(episode.IndexNumber ?? 'unknown')}: ${episode.Name}`}
+                alt={tr(`Still for episode ${String(episode.IndexNumber ?? 'unknown')}: ${episode.Name}`, `第 ${String(episode.IndexNumber ?? '未知')} 集 ${episode.Name} 的剧照`)}
                 className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                 itemId={episode.Id}
                 tag={episode.ImageTags?.Primary}
@@ -423,10 +435,10 @@ function EpisodeRail({ episodes, label }: { episodes: MediaItem[]; label: string
               <div className="flex items-center gap-2 text-xs text-muted">
                 <span className="font-semibold text-accent">E{episode.IndexNumber ?? '—'}</span>
                 {episode.ProductionYear && <span>{episode.ProductionYear}</span>}
-                {episode.RunTimeTicks && <span>{formatRuntime(episode.RunTimeTicks)}</span>}
+                {episode.RunTimeTicks && <span>{formatRuntime(episode.RunTimeTicks, locale)}</span>}
               </div>
               <p className="truncate text-sm font-semibold text-foreground">{episode.Name}</p>
-              <p className="line-clamp-2 text-xs leading-5 text-muted">{episode.Overview ?? 'No episode synopsis.'}</p>
+              <p className="line-clamp-2 text-xs leading-5 text-muted">{episode.Overview ?? tr('No episode synopsis.', '暂无单集简介。')}</p>
             </div>
           </Link>
         </li>
@@ -462,7 +474,8 @@ function ItemSkeleton() {
 }
 
 function NotFound() {
-  return <p className="text-muted">This title could not be found.</p>;
+  const tr = useTranslate();
+  return <p className="text-muted">{tr('This title could not be found.', '找不到此影片。')}</p>;
 }
 
 async function loadItemBreadcrumbContext(
@@ -527,16 +540,31 @@ function useCreditPreviewCount() {
   return count;
 }
 
-function formatRuntime(ticks: number) {
+function formatRuntime(ticks: number, locale = 'en-US') {
   const minutes = Math.round(ticks / 10_000_000 / 60);
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
+  if (locale === 'zh-CN') return hours ? `${String(hours)} 小时 ${String(remainder)} 分钟` : `${String(remainder)} 分钟`;
   return hours ? `${String(hours)}h ${String(remainder)}m` : `${String(remainder)}m`;
 }
 
-function formatDate(value: string) {
+function formatDate(value: string, locale = 'en-US') {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date);
+  return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(date);
+}
+
+function translateItemType(type: string | undefined, tr: (english: string, chinese: string) => string) {
+  if (type === 'Movie') return tr('Movie', '电影');
+  if (type === 'Series') return tr('Series', '剧集');
+  if (type === 'Season') return tr('Season', '季');
+  if (type === 'Episode') return tr('Episode', '单集');
+  return type ?? tr('Media', '媒体');
+}
+
+function translatePersonType(type: string | undefined, tr: (english: string, chinese: string) => string) {
+  if (type === 'Crew') return tr('Crew', '幕后');
+  if (type === 'Actor') return tr('Actor', '演员');
+  return type;
 }
 
 function initials(name: string) {

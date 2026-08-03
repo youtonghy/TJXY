@@ -5,14 +5,16 @@ import {
   ListTodo,
   LayoutDashboard,
   ShieldCheck,
+  Settings2,
+  Sparkles,
   UsersRound,
 } from 'lucide-react';
 import type { ComponentType } from 'react';
 
 export interface AdminNavigationGroup {
-  label: 'Manage' | 'Operations' | 'Storage' | 'System';
+  labelKey: string;
   items: readonly {
-    label: string;
+    labelKey: string;
     to: string;
     icon: ComponentType<{ size?: number; 'aria-hidden'?: boolean }>;
   }[];
@@ -20,31 +22,33 @@ export interface AdminNavigationGroup {
 
 export const adminNavigation: readonly AdminNavigationGroup[] = [
   {
-    label: 'Manage',
+    labelKey: 'admin.navigation.manage',
     items: [
-      { label: 'Dashboard', to: '/admin', icon: LayoutDashboard },
-      { label: 'Users', to: '/admin/users', icon: UsersRound },
-      { label: 'Access', to: '/admin/access', icon: ShieldCheck },
-      { label: 'Libraries', to: '/admin/libraries', icon: FolderKanban },
+      { labelKey: 'admin.navigation.dashboard', to: '/admin', icon: LayoutDashboard },
+      { labelKey: 'admin.navigation.users', to: '/admin/users', icon: UsersRound },
+      { labelKey: 'admin.navigation.access', to: '/admin/access', icon: ShieldCheck },
+      { labelKey: 'admin.navigation.libraries', to: '/admin/libraries', icon: FolderKanban },
     ],
   },
   {
-    label: 'Operations',
+    labelKey: 'admin.navigation.operations',
     items: [
-      { label: 'Tasks', to: '/admin/tasks', icon: ListTodo },
+      { labelKey: 'admin.navigation.tasks', to: '/admin/tasks', icon: ListTodo },
     ],
   },
   {
-    label: 'Storage',
+    labelKey: 'admin.navigation.storage',
     items: [
-      { label: 'Google Drive', to: '/admin/storage/google-drive', icon: Cloud },
-      { label: 'OneDrive', to: '/admin/storage/onedrive', icon: Cloud },
+      { labelKey: 'admin.navigation.googleDrive', to: '/admin/storage/google-drive', icon: Cloud },
+      { labelKey: 'admin.navigation.oneDrive', to: '/admin/storage/onedrive', icon: Cloud },
     ],
   },
   {
-    label: 'System',
+    labelKey: 'admin.navigation.system',
     items: [
-      { label: 'Metadata', to: '/admin/settings/metadata', icon: DatabaseZap },
+      { labelKey: 'admin.navigation.metadata', to: '/admin/settings/metadata', icon: DatabaseZap },
+      { labelKey: 'admin.navigation.ai', to: '/admin/settings/ai', icon: Sparkles },
+      { labelKey: 'admin.navigation.systemSettings', to: '/admin/settings/system', icon: Settings2 },
     ],
   },
 ];

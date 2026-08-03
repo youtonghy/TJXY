@@ -19,6 +19,7 @@ tjxy-domain = { path = "../domain" }
 tjxy-metadata = { path = "../metadata" }
 tjxy-storage = { path = "../storage" }
 uuid.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

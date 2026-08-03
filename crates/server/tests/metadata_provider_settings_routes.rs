@@ -15,8 +15,8 @@ use tjxy_application::{AuthService, SystemClock};
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::MetadataProviderSettingsRepository;
 use tjxy_metadata::{
-    MetadataItemKind, MetadataLookup, MetadataProvider, MetadataProviderError,
-    ReloadableMetadataProvider, TmdbProvider, TmdbSearchItem, TmdbTransport,
+    MetadataCandidate, MetadataItemKind, MetadataLookup, MetadataProvider, MetadataProviderError,
+    MetadataSource, ReloadableMetadataProvider, TmdbProvider, TmdbSearchItem, TmdbTransport,
 };
 use tjxy_server::{ServerIdentity, StartupOptions, build_router, initialize};
 use tjxy_test_support::{ReconnectableTestDatabase, reconnectable_test_database};
@@ -32,6 +32,32 @@ struct FixtureTransport {
     label: String,
     language: String,
     validation_calls: Arc<Mutex<Vec<ValidationCall>>>,
+}
+
+struct FixtureMusicProvider {
+    name: &'static str,
+    title: String,
+}
+
+#[async_trait]
+impl MetadataProvider for FixtureMusicProvider {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    async fn resolve(
+        &self,
+        lookup: &MetadataLookup,
+    ) -> Result<Option<MetadataCandidate>, MetadataProviderError> {
+        if lookup.kind() != MetadataItemKind::Audio {
+            return Ok(None);
+        }
+        let source = MetadataSource::new(self.name, None::<String>, 8_000)
+            .map_err(|_| MetadataProviderError::InvalidResponse)?;
+        Ok(Some(
+            MetadataCandidate::new(source).with_title(self.title.clone()),
+        ))
+    }
 }
 
 #[async_trait]
@@ -69,6 +95,8 @@ struct Fixture {
     _assets: TempDir,
     cipher: Option<Arc<CredentialCipher>>,
     tmdb: Arc<ReloadableMetadataProvider>,
+    the_audio_db: Arc<ReloadableMetadataProvider>,
+    musicbrainz: Arc<ReloadableMetadataProvider>,
     validation_calls: Arc<Mutex<Vec<ValidationCall>>>,
     admin_token: String,
     viewer_token: String,
@@ -81,6 +109,8 @@ async fn fixture(with_cipher: bool, with_environment_fallback: bool) -> Fixture 
     seed_users(&database).await;
     let cipher = with_cipher.then(test_cipher);
     let tmdb = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
+    let the_audio_db = Arc::new(ReloadableMetadataProvider::new("TheAudioDB"));
+    let musicbrainz = Arc::new(ReloadableMetadataProvider::new("MusicBrainz"));
     let validation_calls = Arc::new(Mutex::new(Vec::new()));
     let calls = Arc::clone(&validation_calls);
     let mut options = StartupOptions::new(
@@ -90,6 +120,20 @@ async fn fixture(with_cipher: bool, with_environment_fallback: bool) -> Fixture 
     .with_tmdb_provider(Arc::clone(&tmdb))
     .with_tmdb_provider_factory(move |access_token, language| {
         fixture_provider(access_token, language, Arc::clone(&calls))
+    })
+    .with_theaudiodb_provider(Arc::clone(&the_audio_db))
+    .with_theaudiodb_provider_factory(|api_key| {
+        Ok(Arc::new(FixtureMusicProvider {
+            name: "TheAudioDB",
+            title: format!("audio:{api_key}"),
+        }) as Arc<dyn MetadataProvider>)
+    })
+    .with_musicbrainz_provider(Arc::clone(&musicbrainz))
+    .with_musicbrainz_provider_factory(|user_agent| {
+        Ok(Arc::new(FixtureMusicProvider {
+            name: "MusicBrainz",
+            title: format!("brainz:{user_agent}"),
+        }) as Arc<dyn MetadataProvider>)
     });
     let assets = TempDir::new().unwrap();
     options = options.with_assets_dir(assets.path());
@@ -102,6 +146,18 @@ async fn fixture(with_cipher: bool, with_environment_fallback: bool) -> Fixture 
         );
         tmdb.replace(Some(provider.clone()));
         options = options.with_tmdb_environment_fallback(provider, "zh-CN");
+        options = options
+            .with_theaudiodb_environment_fallback(Arc::new(FixtureMusicProvider {
+                name: "TheAudioDB",
+                title: "audio:environment".to_owned(),
+            }))
+            .with_musicbrainz_environment_fallback(
+                Arc::new(FixtureMusicProvider {
+                    name: "MusicBrainz",
+                    title: "brainz:environment".to_owned(),
+                }),
+                "TJXY-Environment/1.0 (admin@example.invalid)",
+            );
     }
     let app = build_router(initialize(options).await.unwrap());
     let admin_token = login_token(&app, "Admin", ADMIN_PASSWORD, "admin-device").await;
@@ -113,6 +169,8 @@ async fn fixture(with_cipher: bool, with_environment_fallback: bool) -> Fixture 
         _assets: assets,
         cipher,
         tmdb,
+        the_audio_db,
+        musicbrainz,
         validation_calls,
         admin_token,
         viewer_token,
@@ -229,6 +287,26 @@ async fn json_response(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn provider_request(
+    app: axum::Router,
+    provider: &str,
+    method: Method,
+    token: &str,
+    body: Value,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method(method)
+            .uri(format!("/Admin/Metadata/Providers/{provider}"))
+            .header(header::AUTHORIZATION, token_header(token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 fn assert_no_store(response: &axum::response::Response) {
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 }
@@ -238,6 +316,176 @@ async fn active_title(provider: &ReloadableMetadataProvider) -> Option<String> {
     let candidate = provider.resolve(&lookup).await.unwrap()?;
     let resolution = tjxy_metadata::MetadataResolution::from_candidate(&lookup, candidate).unwrap();
     Some(resolution.title().to_owned())
+}
+
+async fn active_audio_title(provider: &ReloadableMetadataProvider) -> Option<String> {
+    let lookup = MetadataLookup::new(MetadataItemKind::Audio, "Artist - Track", None).unwrap();
+    let candidate = provider.resolve(&lookup).await.unwrap()?;
+    let resolution = tjxy_metadata::MetadataResolution::from_candidate(&lookup, candidate).unwrap();
+    Some(resolution.title().to_owned())
+}
+
+#[tokio::test]
+async fn music_provider_settings_are_encrypted_and_replace_runtime_providers() {
+    let fixture = fixture(true, false).await;
+
+    let audio = provider_request(
+        fixture.app.clone(),
+        "TheAudioDB",
+        Method::PUT,
+        &fixture.admin_token,
+        json!({"Enabled": true, "ApiKey": "private-audio-key"}),
+    )
+    .await;
+    assert_eq!(audio.status(), StatusCode::OK);
+    let audio = json_response(audio).await;
+    assert_eq!(audio["Provider"], "TheAudioDB");
+    assert_eq!(audio["Source"], "Database");
+    assert!(audio.get("ApiKey").is_none());
+    assert_eq!(
+        active_audio_title(&fixture.the_audio_db).await.as_deref(),
+        Some("audio:private-audio-key")
+    );
+
+    let brainz = provider_request(
+        fixture.app.clone(),
+        "MusicBrainz",
+        Method::PUT,
+        &fixture.admin_token,
+        json!({
+            "Enabled": true,
+            "UserAgent": "TJXY-Test/1.0 (admin@example.invalid)"
+        }),
+    )
+    .await;
+    assert_eq!(brainz.status(), StatusCode::OK);
+    let brainz = json_response(brainz).await;
+    assert_eq!(brainz["Provider"], "MusicBrainz");
+    assert_eq!(brainz["UserAgent"], "TJXY-Test/1.0 (admin@example.invalid)");
+    assert_eq!(brainz["Source"], "Database");
+    assert_eq!(
+        active_audio_title(&fixture.musicbrainz).await.as_deref(),
+        Some("brainz:TJXY-Test/1.0 (admin@example.invalid)")
+    );
+
+    let repository = MetadataProviderSettingsRepository::new(&fixture.database);
+    let stored = repository.get("theaudiodb").await.unwrap().unwrap();
+    let plaintext = fixture
+        .cipher
+        .as_ref()
+        .unwrap()
+        .open(stored.credential_id(), stored.provider(), stored.envelope())
+        .unwrap();
+    assert_eq!(plaintext.as_slice(), b"private-audio-key");
+}
+
+#[tokio::test]
+async fn music_provider_routes_authenticate_before_parsing_and_restore_environment_fallbacks() {
+    let fixture = fixture(true, true).await;
+
+    let unauthorized = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/Admin/Metadata/Providers/TheAudioDB")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_no_store(&unauthorized);
+
+    let strict = provider_request(
+        fixture.app.clone(),
+        "MusicBrainz",
+        Method::PUT,
+        &fixture.admin_token,
+        json!({
+            "Enabled": true,
+            "UserAgent": "TJXY-Test/1.0 (admin@example.invalid)",
+            "Unexpected": true
+        }),
+    )
+    .await;
+    assert_eq!(strict.status(), StatusCode::BAD_REQUEST);
+    assert_no_store(&strict);
+
+    let audio_environment = provider_request(
+        fixture.app.clone(),
+        "TheAudioDB",
+        Method::GET,
+        &fixture.admin_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(audio_environment.status(), StatusCode::OK);
+    let audio_environment = json_response(audio_environment).await;
+    assert_eq!(audio_environment["Source"], "Environment");
+    assert!(audio_environment.get("ApiKey").is_none());
+
+    let saved = provider_request(
+        fixture.app.clone(),
+        "TheAudioDB",
+        Method::PUT,
+        &fixture.admin_token,
+        json!({"Enabled": true, "ApiKey": "database-key"}),
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(
+        active_audio_title(&fixture.the_audio_db).await.as_deref(),
+        Some("audio:database-key")
+    );
+
+    let test = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/Admin/Metadata/Providers/TheAudioDB/Test")
+                .header(header::AUTHORIZATION, token_header(&fixture.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(test.status(), StatusCode::OK);
+    assert_eq!(json_response(test).await, json!({"Status": "Success"}));
+
+    let deleted = provider_request(
+        fixture.app.clone(),
+        "TheAudioDB",
+        Method::DELETE,
+        &fixture.admin_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        active_audio_title(&fixture.the_audio_db).await.as_deref(),
+        Some("audio:environment")
+    );
+
+    let brainz = provider_request(
+        fixture.app,
+        "MusicBrainz",
+        Method::GET,
+        &fixture.admin_token,
+        json!({}),
+    )
+    .await;
+    let brainz = json_response(brainz).await;
+    assert_eq!(brainz["Source"], "Environment");
+    assert_eq!(
+        brainz["UserAgent"],
+        "TJXY-Environment/1.0 (admin@example.invalid)"
+    );
 }
 
 #[tokio::test]

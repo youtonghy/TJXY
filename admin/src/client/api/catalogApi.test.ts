@@ -1,4 +1,4 @@
-import { getItems, getLatest, getLibraryFilterFacets, getPopular, getResumeItems, searchHints } from './catalogApi';
+import { getItems, getLatest, getLibraryFilterFacets, getPopular, getResumeItems, latestTypesForLibrary, searchHints } from './catalogApi';
 
 const client = vi.hoisted(() => ({ clientRequest: vi.fn() }));
 vi.mock('./clientApi', () => client);
@@ -54,4 +54,8 @@ it('hydrates popular summaries with full catalog records for poster metadata', a
   ]);
   expect(client.clientRequest).toHaveBeenNthCalledWith(1, '/Discover/Popular?limit=12');
   expect(client.clientRequest).toHaveBeenNthCalledWith(2, '/Items/movie-1');
+});
+
+it('requests audio items for a music library', () => {
+  expect(latestTypesForLibrary({ Id: 'music', Name: 'Music', CollectionType: 'music' })).toBe('Audio');
 });

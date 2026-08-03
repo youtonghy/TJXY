@@ -17,7 +17,7 @@ beforeEach(() => {
   });
 });
 
-it('uses controlled NativeSelect filters and sends them to the paged server query', async () => {
+it('keeps CellSelect filters collapsed by default and sends expanded selections to the paged server query', async () => {
   const user = userEvent.setup();
   render(
     <MemoryRouter initialEntries={['/app/libraries/library-1']}>
@@ -26,12 +26,16 @@ it('uses controlled NativeSelect filters and sends them to the paged server quer
   );
 
   expect(await screen.findByText('Arrival')).toBeVisible();
-  expect(await screen.findByRole('option', { name: 'Science Fiction' })).toBeVisible();
-  expect(await screen.findByRole('option', { name: '2021' })).toBeVisible();
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Media type' }), 'Movie');
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Genre' }), 'Drama');
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Year' }), '2016');
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Sort by' }), 'ProductionYear:Descending');
+  expect(screen.queryByRole('button', { name: /Media type/ })).not.toBeInTheDocument();
+  const filterRegion = screen.getByRole('region', { name: 'Library filters' });
+  const filters = filterRegion.querySelector('[data-slot="disclosure-group"]');
+  expect(filters).toHaveClass('rounded-lg');
+
+  await user.click(screen.getByRole('button', { name: 'Filter titles' }));
+  await chooseCellOption(user, /Media type/, 'Movies');
+  await chooseCellOption(user, /Genre/, 'Drama');
+  await chooseCellOption(user, /Year/, '2016');
+  await chooseCellOption(user, /Sort by/, 'Newest release');
 
   await waitFor(() => {
     expect(api.getItems).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -47,7 +51,13 @@ it('uses controlled NativeSelect filters and sends them to the paged server quer
   expect(screen.getByTestId('location')).toHaveTextContent('type=Movie');
   expect(screen.getByTestId('location')).toHaveTextContent('genre=Drama');
   expect(screen.getByTestId('location')).toHaveTextContent('year=2016');
+  expect(screen.getByRole('button', { name: 'Movies Media type' })).toBeVisible();
 });
+
+async function chooseCellOption(user: ReturnType<typeof userEvent.setup>, triggerName: RegExp, optionName: string) {
+  await user.click(screen.getByRole('button', { name: triggerName }));
+  await user.click(await screen.findByRole('option', { name: optionName }));
+}
 
 function LocationProbe() {
   const location = useLocation();

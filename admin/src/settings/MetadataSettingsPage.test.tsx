@@ -6,10 +6,20 @@ import { renderWithAdmin } from '../test/renderWithAdmin';
 import { AdminNotifications } from '../ui/AdminNotifications';
 import { MetadataSettingsPage } from './MetadataSettingsPage';
 import {
+  deleteMusicBrainzSettings,
+  deleteTheAudioDbSettings,
   deleteTmdbSettings,
+  getMusicBrainzSettings,
+  getTheAudioDbSettings,
   getTmdbSettings,
+  saveMusicBrainzSettings,
+  saveTheAudioDbSettings,
   saveTmdbSettings,
+  testMusicBrainzConnection,
+  testTheAudioDbConnection,
   testTmdbConnection,
+  type MusicBrainzSettings,
+  type TheAudioDbSettings,
   type TmdbSettings,
 } from './metadataSettingsApi';
 
@@ -17,9 +27,17 @@ vi.mock('./metadataSettingsApi', async (importOriginal) => {
   const original = await importOriginal<typeof import('./metadataSettingsApi')>();
   return {
     ...original,
+    deleteMusicBrainzSettings: vi.fn(),
+    deleteTheAudioDbSettings: vi.fn(),
     deleteTmdbSettings: vi.fn(),
+    getMusicBrainzSettings: vi.fn(),
+    getTheAudioDbSettings: vi.fn(),
     getTmdbSettings: vi.fn(),
+    saveMusicBrainzSettings: vi.fn(),
+    saveTheAudioDbSettings: vi.fn(),
     saveTmdbSettings: vi.fn(),
+    testMusicBrainzConnection: vi.fn(),
+    testTheAudioDbConnection: vi.fn(),
     testTmdbConnection: vi.fn(),
   };
 });
@@ -28,6 +46,14 @@ const getMock = vi.mocked(getTmdbSettings);
 const saveMock = vi.mocked(saveTmdbSettings);
 const testMock = vi.mocked(testTmdbConnection);
 const deleteMock = vi.mocked(deleteTmdbSettings);
+const getTheAudioDbMock = vi.mocked(getTheAudioDbSettings);
+const saveTheAudioDbMock = vi.mocked(saveTheAudioDbSettings);
+const testTheAudioDbMock = vi.mocked(testTheAudioDbConnection);
+const deleteTheAudioDbMock = vi.mocked(deleteTheAudioDbSettings);
+const getMusicBrainzMock = vi.mocked(getMusicBrainzSettings);
+const saveMusicBrainzMock = vi.mocked(saveMusicBrainzSettings);
+const testMusicBrainzMock = vi.mocked(testMusicBrainzConnection);
+const deleteMusicBrainzMock = vi.mocked(deleteMusicBrainzSettings);
 
 const databaseSettings: TmdbSettings = {
   provider: 'Tmdb',
@@ -36,6 +62,25 @@ const databaseSettings: TmdbSettings = {
   language: 'zh-CN',
   revision: 2,
   source: 'Database',
+  encryptionAvailable: true,
+};
+
+const theAudioDbSettings: TheAudioDbSettings = {
+  provider: 'TheAudioDB',
+  configured: true,
+  enabled: true,
+  revision: 4,
+  source: 'Environment',
+  encryptionAvailable: true,
+};
+
+const musicBrainzSettings: MusicBrainzSettings = {
+  provider: 'MusicBrainz',
+  configured: false,
+  enabled: false,
+  userAgent: '',
+  revision: null,
+  source: 'None',
   encryptionAvailable: true,
 };
 
@@ -54,10 +99,37 @@ beforeEach(() => {
   saveMock.mockReset();
   testMock.mockReset();
   deleteMock.mockReset();
+  getTheAudioDbMock.mockReset();
+  saveTheAudioDbMock.mockReset();
+  testTheAudioDbMock.mockReset();
+  deleteTheAudioDbMock.mockReset();
+  getMusicBrainzMock.mockReset();
+  saveMusicBrainzMock.mockReset();
+  testMusicBrainzMock.mockReset();
+  deleteMusicBrainzMock.mockReset();
   getMock.mockResolvedValue(databaseSettings);
   saveMock.mockResolvedValue({ ...databaseSettings, revision: 3 });
   testMock.mockResolvedValue(undefined);
   deleteMock.mockResolvedValue(undefined);
+  getTheAudioDbMock.mockResolvedValue(theAudioDbSettings);
+  saveTheAudioDbMock.mockResolvedValue({
+    ...theAudioDbSettings,
+    source: 'Database',
+    revision: 5,
+  });
+  testTheAudioDbMock.mockResolvedValue(undefined);
+  deleteTheAudioDbMock.mockResolvedValue(undefined);
+  getMusicBrainzMock.mockResolvedValue(musicBrainzSettings);
+  saveMusicBrainzMock.mockResolvedValue({
+    ...musicBrainzSettings,
+    configured: true,
+    enabled: true,
+    userAgent: 'TJXY/1.0 (admin@example.invalid)',
+    source: 'Database',
+    revision: 1,
+  });
+  testMusicBrainzMock.mockResolvedValue(undefined);
+  deleteMusicBrainzMock.mockResolvedValue(undefined);
 });
 
 it('loads a redacted configured state and never fills the token input', async () => {
@@ -65,7 +137,7 @@ it('loads a redacted configured state and never fills the token input', async ()
 
   expect(await screen.findByRole('heading', { name: 'Metadata' })).toBeVisible();
   expect(screen.getByText('Database override')).toBeVisible();
-  expect(screen.getByText('Enabled')).toBeVisible();
+  expect(screen.getAllByText('Enabled')).not.toHaveLength(0);
   const token = screen.getByLabelText('TMDB API Read Access Token');
   expect(token).toHaveValue('');
   expect(token).toHaveAttribute('type', 'password');
@@ -160,5 +232,45 @@ it('removes only the database override after confirmation', async () => {
   await user.click(within(dialog).getByRole('button', { name: 'Remove override' }));
 
   await waitFor(() => { expect(deleteMock).toHaveBeenCalledOnce(); });
-  expect(await screen.findByText('Environment fallback')).toBeVisible();
+  const tmdbCard = (await screen.findByRole('heading', { name: 'TMDB' }))
+    .closest('[data-slot="card"]');
+  expect(tmdbCard).not.toBeNull();
+  expect(within(tmdbCard as HTMLElement).getByText('Environment fallback')).toBeVisible();
+});
+
+it('loads both music providers and saves their provider-specific configuration', async () => {
+  renderPage();
+  const user = userEvent.setup();
+
+  expect(await screen.findByRole('heading', { name: 'TheAudioDB' })).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'MusicBrainz' })).toBeVisible();
+
+  const apiKey = screen.getByLabelText('TheAudioDB API key');
+  await user.type(apiKey, 'private-audio-key');
+  await user.click(screen.getByRole('button', { name: 'Test TheAudioDB connection' }));
+  expect(testTheAudioDbMock).toHaveBeenCalledWith({ apiKey: 'private-audio-key' });
+  await user.click(screen.getByRole('button', { name: 'Save TheAudioDB settings' }));
+  await waitFor(() => {
+    expect(saveTheAudioDbMock).toHaveBeenCalledWith({
+      enabled: true,
+      apiKey: 'private-audio-key',
+      revision: 4,
+    });
+  });
+  expect(apiKey).toHaveValue('');
+
+  const userAgent = screen.getByLabelText('MusicBrainz User-Agent');
+  await user.type(userAgent, 'TJXY/1.0 (admin@example.invalid)');
+  await user.click(screen.getByRole('button', { name: 'Test MusicBrainz connection' }));
+  expect(testMusicBrainzMock).toHaveBeenCalledWith({
+    userAgent: 'TJXY/1.0 (admin@example.invalid)',
+  });
+  await user.click(screen.getByRole('button', { name: 'Save MusicBrainz settings' }));
+  await waitFor(() => {
+    expect(saveMusicBrainzMock).toHaveBeenCalledWith({
+      enabled: false,
+      userAgent: 'TJXY/1.0 (admin@example.invalid)',
+      revision: null,
+    });
+  });
 });

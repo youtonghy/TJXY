@@ -15,8 +15,8 @@ use tjxy_db::{
     MetadataProviderSettingsRepositoryError,
 };
 use tjxy_metadata::{
-    MetadataError, MetadataProviderError, ReloadableMetadataProvider, TmdbCatalogClient,
-    TmdbProvider,
+    MetadataError, MetadataItemKind, MetadataLookup, MetadataProvider, MetadataProviderError,
+    ReloadableMetadataProvider, TmdbCatalogClient, TmdbProvider,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -24,10 +24,15 @@ use zeroize::Zeroizing;
 use crate::{AppState, auth};
 
 pub(crate) const TMDB_PROVIDER_KEY: &str = "tmdb";
+pub(crate) const THEAUDIODB_PROVIDER_KEY: &str = "theaudiodb";
+pub(crate) const MUSICBRAINZ_PROVIDER_KEY: &str = "musicbrainz";
 pub(crate) const DEFAULT_TMDB_LANGUAGE: &str = "zh-CN";
+const DEFAULT_MUSIC_LANGUAGE: &str = "und";
 
 pub(crate) type TmdbProviderFactory =
     dyn Fn(&str, &str) -> Result<TmdbProvider, MetadataError> + Send + Sync;
+pub(crate) type MusicProviderFactory =
+    dyn Fn(&str) -> Result<Arc<dyn MetadataProvider>, MetadataError> + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct TmdbEnvironmentFallback {
@@ -41,12 +46,38 @@ impl TmdbEnvironmentFallback {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct MusicProviderEnvironmentFallback {
+    provider: Arc<dyn MetadataProvider>,
+    display_value: Option<String>,
+}
+
+impl MusicProviderEnvironmentFallback {
+    pub(crate) fn new(provider: Arc<dyn MetadataProvider>, display_value: Option<String>) -> Self {
+        Self {
+            provider,
+            display_value,
+        }
+    }
+}
+
+struct MusicProviderAdmin {
+    key: &'static str,
+    name: &'static str,
+    runtime: Arc<ReloadableMetadataProvider>,
+    environment_fallback: Option<MusicProviderEnvironmentFallback>,
+    provider_factory: Arc<MusicProviderFactory>,
+    exposes_value: bool,
+}
+
 pub(crate) struct MetadataSettingsAdminService {
     database: sea_orm::DatabaseConnection,
     cipher: Option<Arc<CredentialCipher>>,
     runtime: Arc<ReloadableMetadataProvider>,
     environment_fallback: Option<TmdbEnvironmentFallback>,
     provider_factory: Arc<TmdbProviderFactory>,
+    the_audio_db: MusicProviderAdmin,
+    musicbrainz: MusicProviderAdmin,
 }
 
 impl MetadataSettingsAdminService {
@@ -56,6 +87,12 @@ impl MetadataSettingsAdminService {
         runtime: Arc<ReloadableMetadataProvider>,
         environment_fallback: Option<TmdbEnvironmentFallback>,
         provider_factory: Arc<TmdbProviderFactory>,
+        the_audio_db_runtime: Arc<ReloadableMetadataProvider>,
+        the_audio_db_environment_fallback: Option<MusicProviderEnvironmentFallback>,
+        the_audio_db_provider_factory: Arc<MusicProviderFactory>,
+        musicbrainz_runtime: Arc<ReloadableMetadataProvider>,
+        musicbrainz_environment_fallback: Option<MusicProviderEnvironmentFallback>,
+        musicbrainz_provider_factory: Arc<MusicProviderFactory>,
     ) -> Self {
         Self {
             database,
@@ -63,6 +100,22 @@ impl MetadataSettingsAdminService {
             runtime,
             environment_fallback,
             provider_factory,
+            the_audio_db: MusicProviderAdmin {
+                key: THEAUDIODB_PROVIDER_KEY,
+                name: "TheAudioDB",
+                runtime: the_audio_db_runtime,
+                environment_fallback: the_audio_db_environment_fallback,
+                provider_factory: the_audio_db_provider_factory,
+                exposes_value: false,
+            },
+            musicbrainz: MusicProviderAdmin {
+                key: MUSICBRAINZ_PROVIDER_KEY,
+                name: "MusicBrainz",
+                runtime: musicbrainz_runtime,
+                environment_fallback: musicbrainz_environment_fallback,
+                provider_factory: musicbrainz_provider_factory,
+                exposes_value: true,
+            },
         }
     }
 
@@ -91,6 +144,194 @@ impl MetadataSettingsAdminService {
             .get(TMDB_PROVIDER_KEY)
             .await?;
         Ok(self.settings_dto(stored.as_ref()))
+    }
+
+    async fn music_settings(
+        &self,
+        provider: &str,
+    ) -> Result<ProviderSettingsDto, MetadataSettingsAdminError> {
+        let admin = self.music_provider(provider)?;
+        let stored = MetadataProviderSettingsRepository::new(&self.database)
+            .get(admin.key)
+            .await?;
+        self.music_settings_dto(admin, stored.as_ref()).await
+    }
+
+    async fn put_music(
+        &self,
+        provider: &str,
+        request: MusicPutSettingsRequest,
+    ) -> Result<ProviderSettingsDto, MetadataSettingsAdminError> {
+        let admin = self.music_provider(provider)?;
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or(MetadataSettingsAdminError::CipherUnavailable)?;
+        let repository = MetadataProviderSettingsRepository::new(&self.database);
+        let current = repository.get(admin.key).await?;
+        let credential_id = current
+            .as_ref()
+            .map_or_else(Uuid::new_v4, MetadataProviderSettingRecord::credential_id);
+        let plaintext = if let Some(value) = request.value {
+            value
+        } else {
+            let current = current
+                .as_ref()
+                .ok_or(MetadataSettingsAdminError::CredentialUnavailable)?;
+            cipher.open(
+                current.credential_id(),
+                current.provider(),
+                current.envelope(),
+            )?
+        };
+        let value = str::from_utf8(&plaintext)
+            .map_err(|_| MetadataSettingsAdminError::InvalidCredential)?;
+        validate_music_value(admin.key, value)?;
+        let provider = (admin.provider_factory)(value)
+            .map_err(|_| MetadataSettingsAdminError::InvalidConfiguration)?;
+        let sealed = cipher.seal_bound(credential_id, admin.key, &plaintext)?;
+        let stored = repository
+            .put(
+                &sealed,
+                request.enabled,
+                if admin.key == MUSICBRAINZ_PROVIDER_KEY {
+                    DEFAULT_MUSIC_LANGUAGE
+                } else {
+                    "en-US"
+                },
+                request.revision,
+            )
+            .await?;
+        admin.runtime.replace(request.enabled.then_some(provider));
+        self.music_settings_dto(admin, Some(&stored)).await
+    }
+
+    async fn delete_music(&self, provider: &str) -> Result<(), MetadataSettingsAdminError> {
+        let admin = self.music_provider(provider)?;
+        self.cipher
+            .as_ref()
+            .ok_or(MetadataSettingsAdminError::CipherUnavailable)?;
+        MetadataProviderSettingsRepository::new(&self.database)
+            .delete(admin.key, None)
+            .await?;
+        admin.runtime.replace(
+            admin
+                .environment_fallback
+                .as_ref()
+                .map(|fallback| Arc::clone(&fallback.provider)),
+        );
+        Ok(())
+    }
+
+    async fn test_music(
+        &self,
+        provider: &str,
+        value: Option<Zeroizing<String>>,
+    ) -> Result<TestMetadataSettingsDto, MetadataSettingsAdminError> {
+        let admin = self.music_provider(provider)?;
+        let provider = if let Some(value) = value {
+            validate_music_value(admin.key, &value)?;
+            (admin.provider_factory)(&value)
+                .map_err(|_| MetadataSettingsAdminError::InvalidConfiguration)?
+        } else if let Some(stored) = MetadataProviderSettingsRepository::new(&self.database)
+            .get(admin.key)
+            .await?
+        {
+            let cipher = self
+                .cipher
+                .as_ref()
+                .ok_or(MetadataSettingsAdminError::CipherUnavailable)?;
+            let plaintext =
+                cipher.open(stored.credential_id(), stored.provider(), stored.envelope())?;
+            let value = str::from_utf8(&plaintext)
+                .map_err(|_| MetadataSettingsAdminError::InvalidCredential)?;
+            (admin.provider_factory)(value)
+                .map_err(|_| MetadataSettingsAdminError::InvalidConfiguration)?
+        } else {
+            Arc::clone(
+                &admin
+                    .environment_fallback
+                    .as_ref()
+                    .ok_or(MetadataSettingsAdminError::CredentialUnavailable)?
+                    .provider,
+            )
+        };
+        let lookup = MetadataLookup::new(MetadataItemKind::Audio, "Artist - Track", None)
+            .map_err(|_| MetadataSettingsAdminError::InvalidConfiguration)?;
+        provider.resolve(&lookup).await?;
+        Ok(TestMetadataSettingsDto { status: "Success" })
+    }
+
+    fn music_provider(
+        &self,
+        provider: &str,
+    ) -> Result<&MusicProviderAdmin, MetadataSettingsAdminError> {
+        match provider {
+            THEAUDIODB_PROVIDER_KEY => Ok(&self.the_audio_db),
+            MUSICBRAINZ_PROVIDER_KEY => Ok(&self.musicbrainz),
+            _ => Err(MetadataSettingsAdminError::InvalidConfiguration),
+        }
+    }
+
+    async fn music_settings_dto(
+        &self,
+        admin: &MusicProviderAdmin,
+        stored: Option<&MetadataProviderSettingRecord>,
+    ) -> Result<ProviderSettingsDto, MetadataSettingsAdminError> {
+        let (configured, enabled, revision, source, value) = if let Some(stored) = stored {
+            let value = if admin.exposes_value {
+                let cipher = self
+                    .cipher
+                    .as_ref()
+                    .ok_or(MetadataSettingsAdminError::CipherUnavailable)?;
+                let plaintext =
+                    cipher.open(stored.credential_id(), stored.provider(), stored.envelope())?;
+                Some(
+                    str::from_utf8(&plaintext)
+                        .map_err(|_| MetadataSettingsAdminError::InvalidCredential)?
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
+            (
+                true,
+                stored.enabled(),
+                Some(stored.revision()),
+                "Database",
+                value,
+            )
+        } else if let Some(fallback) = admin.environment_fallback.as_ref() {
+            (
+                true,
+                true,
+                None,
+                "Environment",
+                fallback.display_value.clone(),
+            )
+        } else {
+            (false, false, None, "None", None)
+        };
+        if admin.exposes_value {
+            Ok(ProviderSettingsDto::MusicBrainz(MusicBrainzSettingsDto {
+                provider: admin.name,
+                configured,
+                enabled,
+                user_agent: value.unwrap_or_default(),
+                revision,
+                source,
+                encryption_available: self.cipher.is_some(),
+            }))
+        } else {
+            Ok(ProviderSettingsDto::TheAudioDb(MusicSecretSettingsDto {
+                provider: admin.name,
+                configured,
+                enabled,
+                revision,
+                source,
+                encryption_available: self.cipher.is_some(),
+            }))
+        }
     }
 
     async fn put(
@@ -254,6 +495,40 @@ struct TestMetadataSettingsRequest {
     language: Option<String>,
 }
 
+struct MusicPutSettingsRequest {
+    enabled: bool,
+    value: Option<Zeroizing<Vec<u8>>>,
+    revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct PutAudioDbSettingsRequest {
+    enabled: bool,
+    api_key: Option<Zeroizing<String>>,
+    revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct PutMusicBrainzSettingsRequest {
+    enabled: bool,
+    user_agent: Option<Zeroizing<String>>,
+    revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct TestAudioDbSettingsRequest {
+    api_key: Option<Zeroizing<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct TestMusicBrainzSettingsRequest {
+    user_agent: Option<Zeroizing<String>>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct MetadataSettingsDto {
@@ -261,6 +536,36 @@ struct MetadataSettingsDto {
     configured: bool,
     enabled: bool,
     language: String,
+    revision: Option<i64>,
+    source: &'static str,
+    encryption_available: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProviderSettingsDto {
+    TheAudioDb(MusicSecretSettingsDto),
+    MusicBrainz(MusicBrainzSettingsDto),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MusicSecretSettingsDto {
+    provider: &'static str,
+    configured: bool,
+    enabled: bool,
+    revision: Option<i64>,
+    source: &'static str,
+    encryption_available: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MusicBrainzSettingsDto {
+    provider: &'static str,
+    configured: bool,
+    enabled: bool,
+    user_agent: String,
     revision: Option<i64>,
     source: &'static str,
     encryption_available: bool,
@@ -350,6 +655,188 @@ pub(crate) async fn test(
     }
 }
 
+pub(crate) async fn get_the_audio_db(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    get_music(state, headers, raw_query, THEAUDIODB_PROVIDER_KEY).await
+}
+
+pub(crate) async fn get_musicbrainz(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    get_music(state, headers, raw_query, MUSICBRAINZ_PROVIDER_KEY).await
+}
+
+async fn get_music(
+    state: AppState,
+    headers: HeaderMap,
+    raw_query: Option<String>,
+    provider: &'static str,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let Some(service) = state.metadata_settings_admin.as_ref() else {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    match service.music_settings(provider).await {
+        Ok(settings) => no_store(Json(settings).into_response()),
+        Err(error) => no_store(error_response(&error)),
+    }
+}
+
+pub(crate) async fn put_the_audio_db(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let request = match json_request::<PutAudioDbSettingsRequest>(&headers, &body) {
+        Ok(request) => request,
+        Err(response) => return no_store(response),
+    };
+    put_music_route(
+        state,
+        THEAUDIODB_PROVIDER_KEY,
+        MusicPutSettingsRequest {
+            enabled: request.enabled,
+            value: request
+                .api_key
+                .map(|value| Zeroizing::new(value.as_bytes().to_vec())),
+            revision: request.revision,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn put_musicbrainz(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let request = match json_request::<PutMusicBrainzSettingsRequest>(&headers, &body) {
+        Ok(request) => request,
+        Err(response) => return no_store(response),
+    };
+    put_music_route(
+        state,
+        MUSICBRAINZ_PROVIDER_KEY,
+        MusicPutSettingsRequest {
+            enabled: request.enabled,
+            value: request
+                .user_agent
+                .map(|value| Zeroizing::new(value.as_bytes().to_vec())),
+            revision: request.revision,
+        },
+    )
+    .await
+}
+
+async fn put_music_route(
+    state: AppState,
+    provider: &'static str,
+    request: MusicPutSettingsRequest,
+) -> Response {
+    let Some(service) = state.metadata_settings_admin.as_ref() else {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    match service.put_music(provider, request).await {
+        Ok(settings) => no_store(Json(settings).into_response()),
+        Err(error) => no_store(error_response(&error)),
+    }
+}
+
+pub(crate) async fn delete_the_audio_db(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    delete_music_route(state, headers, raw_query, THEAUDIODB_PROVIDER_KEY).await
+}
+
+pub(crate) async fn delete_musicbrainz(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    delete_music_route(state, headers, raw_query, MUSICBRAINZ_PROVIDER_KEY).await
+}
+
+async fn delete_music_route(
+    state: AppState,
+    headers: HeaderMap,
+    raw_query: Option<String>,
+    provider: &'static str,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let Some(service) = state.metadata_settings_admin.as_ref() else {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    match service.delete_music(provider).await {
+        Ok(()) => no_store(StatusCode::NO_CONTENT.into_response()),
+        Err(error) => no_store(error_response(&error)),
+    }
+}
+
+pub(crate) async fn test_the_audio_db(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let request = match json_request::<TestAudioDbSettingsRequest>(&headers, &body) {
+        Ok(request) => request,
+        Err(response) => return no_store(response),
+    };
+    test_music_route(state, THEAUDIODB_PROVIDER_KEY, request.api_key).await
+}
+
+pub(crate) async fn test_musicbrainz(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = administrator(&state, &headers, raw_query.as_deref()).await {
+        return no_store(response);
+    }
+    let request = match json_request::<TestMusicBrainzSettingsRequest>(&headers, &body) {
+        Ok(request) => request,
+        Err(response) => return no_store(response),
+    };
+    test_music_route(state, MUSICBRAINZ_PROVIDER_KEY, request.user_agent).await
+}
+
+async fn test_music_route(
+    state: AppState,
+    provider: &'static str,
+    value: Option<Zeroizing<String>>,
+) -> Response {
+    let Some(service) = state.metadata_settings_admin.as_ref() else {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    match service.test_music(provider, value).await {
+        Ok(status) => no_store(Json(status).into_response()),
+        Err(error) => no_store(error_response(&error)),
+    }
+}
+
 async fn administrator(
     state: &AppState,
     headers: &HeaderMap,
@@ -370,6 +857,30 @@ fn auth_only_query(raw_query: Option<&str>) -> bool {
     query.remove("ApiKey");
     query.remove("api_key");
     query.is_empty()
+}
+
+fn validate_music_value(provider: &str, value: &str) -> Result<(), MetadataSettingsAdminError> {
+    let valid = match provider {
+        THEAUDIODB_PROVIDER_KEY => {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                })
+        }
+        MUSICBRAINZ_PROVIDER_KEY => {
+            value.trim() == value
+                && !value.is_empty()
+                && value.len() <= 512
+                && !value.chars().any(char::is_control)
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(MetadataSettingsAdminError::InvalidConfiguration)
+    }
 }
 
 #[allow(clippy::result_large_err)] // Route parsing returns the ready-to-send Axum response.

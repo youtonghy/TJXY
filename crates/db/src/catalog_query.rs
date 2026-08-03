@@ -740,6 +740,11 @@ impl LazyStorageScope {
             && self.reconciled_revision >= self.children_revision
             && self.facts_reconciled
     }
+
+    #[must_use]
+    pub const fn is_ready_for_direct_source(self) -> bool {
+        self.reconciled_revision >= self.metadata_input_revision() && self.facts_reconciled
+    }
 }
 
 impl LazyCatalogWorkTarget {
@@ -1554,7 +1559,13 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let Some(mut target) = target else {
             return Ok(None);
         };
-        target.storage_scope = self.lazy_storage_scope(item_id, storage_root).await?;
+        target.storage_scope = self
+            .lazy_storage_scope(
+                item_id,
+                storage_root,
+                target.item_type != CatalogItemType::Audio,
+            )
+            .await?;
         Ok(Some(target))
     }
 
@@ -1562,6 +1573,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         &self,
         item_id: CatalogItemId,
         storage_root: Option<StorageRootId>,
+        include_direct_children: bool,
     ) -> Result<Option<LazyStorageScope>, CatalogQueryError> {
         let scope = crate::catalog_storage_scope::resolve_catalog_storage_scope(
             self.database,
@@ -1582,7 +1594,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
                 crate::catalog_storage_scope::storage_scope_is_reconciled(
                     self.database,
                     scope,
-                    true,
+                    include_direct_children,
                 )
                 .await?
             }

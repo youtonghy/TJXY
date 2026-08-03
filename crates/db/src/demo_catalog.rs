@@ -449,7 +449,9 @@ fn catalog_item_values(
         .map_err(|_| DemoCatalogPublicationError::InvalidPublication)?;
     let structure_state = match item.kind() {
         MetadataItemKind::Series | MetadataItemKind::Season => "Expanded",
-        MetadataItemKind::Movie | MetadataItemKind::Episode => "NotApplicable",
+        MetadataItemKind::Audio | MetadataItemKind::Movie | MetadataItemKind::Episode => {
+            "NotApplicable"
+        }
     };
     Ok([
         item_id.into(),
@@ -923,6 +925,7 @@ fn validate_item(
 
 fn item_kind(kind: MetadataItemKind) -> &'static str {
     match kind {
+        MetadataItemKind::Audio => "Audio",
         MetadataItemKind::Movie => "Movie",
         MetadataItemKind::Series => "Series",
         MetadataItemKind::Season => "Season",

@@ -81,6 +81,7 @@ export function TasksPage() {
   const [hasLoaded, setHasLoaded] = useState(false);
   const [loadError, setLoadError] = useState<NonNullable<unknown> | null>(null);
   const [authRedirecting, setAuthRedirecting] = useState(false);
+  const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const [selectedRoot, setSelectedRoot] = useState('');
   const [itemId, setItemId] = useState('');
   const [busyOperations, setBusyOperations] = useState<ReadonlySet<string>>(() => new Set());
@@ -114,6 +115,16 @@ export function TasksPage() {
     refreshWhenIdle,
     reload,
   } = useAuthoritativeLoad(fetchTaskSnapshot, prepareLoadResult);
+
+  const reloadManually = useCallback(async () => {
+    if (!isMounted()) return;
+    setManualRefreshPending(true);
+    try {
+      await reload();
+    } finally {
+      if (isMounted()) setManualRefreshPending(false);
+    }
+  }, [isMounted, reload]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -162,6 +173,7 @@ export function TasksPage() {
   if (authRedirecting) return null;
 
   const selectedRootOption = snapshot.roots.find((root) => root.key === selectedRoot);
+  const reloadButtonPending = hasLoaded ? manualRefreshPending : loading;
   return (
     <div className="space-y-7">
       <PageHeader
@@ -170,12 +182,12 @@ export function TasksPage() {
             <Button
               aria-label="Reload tasks"
               isIconOnly
-              isPending={loading}
-              onPress={() => { void reload(); }}
+              isPending={reloadButtonPending}
+              onPress={() => { void reloadManually(); }}
               size="sm"
               variant="ghost"
             >
-              <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
+              <RefreshCw aria-hidden="true" className={`size-4${reloadButtonPending ? ' animate-spin' : ''}`} />
             </Button>
             <Tooltip.Content>Reload tasks</Tooltip.Content>
           </Tooltip>
@@ -184,8 +196,8 @@ export function TasksPage() {
         title="Tasks"
       />
 
-      {loading && hasLoaded && (
-        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing tasks...</p>
+      {manualRefreshPending && (
+        <p aria-live="polite" className="sr-only" role="status">Refreshing tasks...</p>
       )}
 
       <AsyncContent
@@ -195,7 +207,7 @@ export function TasksPage() {
         isEmpty={false}
         isPending={loading}
         loading={<TasksSkeleton />}
-        onRetry={() => { void reload(); }}
+        onRetry={() => { void reloadManually(); }}
       >
         <div className="space-y-10">
           <ScheduledTasks

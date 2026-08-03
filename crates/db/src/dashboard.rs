@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
@@ -32,6 +34,8 @@ pub struct DashboardTopItem {
     pub name: String,
     pub item_type: String,
     pub production_year: Option<i32>,
+    pub overview: Option<String>,
+    pub primary_image_tag: Option<String>,
     pub play_count: u64,
     pub unique_viewers: u64,
 }
@@ -473,14 +477,16 @@ impl<'a> DashboardRepository<'a> {
             .order_by(Alias::new("play_count"), Order::Desc)
             .order_by((items.clone(), Alias::new("name")), Order::Asc)
             .limit(limit);
-        for column in ["id", "name", "item_type", "production_year"] {
+        for column in ["id", "name", "item_type", "production_year", "overview"] {
             query.group_by_col((items.clone(), Alias::new(column)));
         }
         select_column(&mut query, &items, "id", "item_id");
         select_column(&mut query, &items, "name", "item_name");
         select_column(&mut query, &items, "item_type", "item_type");
         select_column(&mut query, &items, "production_year", "production_year");
-        self.database
+        select_column(&mut query, &items, "overview", "overview");
+        let mut top_items = self
+            .database
             .query_all(self.database.get_database_backend().build(&query))
             .await?
             .iter()
@@ -490,12 +496,60 @@ impl<'a> DashboardRepository<'a> {
                     name: row.try_get("", "item_name")?,
                     item_type: row.try_get("", "item_type")?,
                     production_year: row.try_get("", "production_year")?,
+                    overview: row.try_get("", "overview")?,
+                    primary_image_tag: None,
                     play_count: count_from_row(row, "play_count")?,
                     unique_viewers: count_from_row(row, "unique_viewers")?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, DbErr>>()?;
+        attach_primary_image_tags(self.database, &mut top_items).await?;
+        Ok(top_items)
     }
+}
+
+async fn attach_primary_image_tags(
+    database: &DatabaseConnection,
+    items: &mut [DashboardTopItem],
+) -> Result<(), DbErr> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let asset = Alias::new("asset");
+    let blob = Alias::new("blob");
+    let query = Query::select()
+        .from_as(Alias::new("item_assets"), asset.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("asset_blobs"),
+            blob.clone(),
+            Expr::col((blob.clone(), Alias::new("id")))
+                .equals((asset.clone(), Alias::new("asset_blob_id"))),
+        )
+        .expr_as(
+            Expr::col((asset.clone(), Alias::new("item_id"))),
+            Alias::new("item_id"),
+        )
+        .expr_as(
+            Expr::col((blob, Alias::new("sha256"))),
+            Alias::new("sha256"),
+        )
+        .and_where(Expr::col((asset.clone(), Alias::new("image_type"))).eq("Primary"))
+        .and_where(Expr::col((asset.clone(), Alias::new("priority"))).eq(0_i32))
+        .and_where(
+            Expr::col((asset, Alias::new("item_id"))).is_in(items.iter().map(|item| item.item_id)),
+        )
+        .to_owned();
+    let tags = database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| Ok((row.try_get("", "item_id")?, row.try_get("", "sha256")?)))
+        .collect::<Result<HashMap<Uuid, String>, DbErr>>()?;
+    for item in items {
+        item.primary_image_tag = tags.get(&item.item_id).cloned();
+    }
+    Ok(())
 }
 
 fn select_column(

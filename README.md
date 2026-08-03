@@ -76,8 +76,9 @@ the server-side token.
 
 The `/app/` client has an independent `tjxy.web.*` browser session and HeroUI shell
 for user sign-in, expanded home/library browsing, popular search suggestions, item details,
-favorites/played state, direct-play preparation, TMDB/server rankings, and a self-service
-profile with range-based viewing statistics. Profile edits are confirmed with the current
+favorites/played state, direct-play preparation, TMDB/server rankings, a self-service
+profile with range-based viewing statistics, and a grounded AI media assistant at `/app/ai`.
+Profile edits are confirmed with the current
 password; username or password changes revoke the browser session and require a fresh login.
 Playback progress accumulates bounded watched time so seeks are not counted as viewing time.
 Browser media uses a short-lived, session-scoped playback ticket rather than placing the login
@@ -101,6 +102,77 @@ TJXY_BOOTSTRAP_ADMIN_PASSWORD='replace-me' \
 cargo run -p tjxy-server
 ```
 
+## Configure the AI assistant
+
+Administrators configure the assistant at `/admin/settings/ai`. TJXY accepts an
+OpenAI-compatible provider whose chat endpoint is
+`POST {base_url}/chat/completions`; the administrator controls the upstream model
+IDs, user-facing model names, visibility, default selection, per-model reasoning
+effort (`off`, `low`, `medium`, `high`, `xhigh`, or `max`), and an additional
+system prompt. `off` omits `reasoning_effort` from upstream Chat Completions
+requests. Persistent AI settings require `TJXY_CREDENTIAL_KEYRING`. The API
+key is write-only in the browser, encrypted before it enters SQL, and never
+returned by the settings API.
+
+Reusing the stored key is allowed only while the provider origin is unchanged;
+changing the scheme, host, or port requires entering a new key. Provider URLs
+using non-loopback plain HTTP or private literal IP addresses are rejected.
+Loopback HTTP remains available for local development providers. DNS names still
+require deployment-level outbound allowlisting because their resolved addresses
+can change after configuration validation.
+
+Authenticated administrators use `GET`, `PUT`, and `DELETE /Admin/Ai/Settings`,
+`POST /Admin/Ai/Settings/Test`, and `POST /Admin/Ai/Settings/Models`. The model
+discovery endpoint calls the provider's `GET {base_url}/models` route on the
+server and returns a bounded, sorted list of model IDs without exposing the API
+key to the browser. Ordinary users receive only enabled,
+administrator-visible aliases from `GET /Ai/Models`, and use the owner-scoped
+`/Ai/Conversations` routes plus `POST /Ai/Chat`. Chat responses use a bounded SSE
+contract and are persisted only after a complete assistant response. New chat
+requests include a client-generated conversation UUID so an interrupted stream
+can be reconciled with an atomically committed first exchange. Pending IDs are
+kept in tab-scoped session storage and checked again after reload or reconnect.
+Conversation detail is bounded to the latest 200 messages, returned in chronological order;
+older messages remain stored but are not currently exposed through pagination.
+
+The server applies a non-overridable media-only policy and gives the Agent a
+bounded, read-only MCP-style tool registry for catalog search, media details,
+recent viewing history, aggregate preferences, favorites, resume items, and
+recommendation candidates. Every user-context lookup derives identity from the
+authenticated session; the browser never supplies an arbitrary user ID and never
+receives provider credentials, upstream model IDs, tool arguments, raw metadata,
+or internal reasoning. This registry is an internal Agent boundary, not a public
+MCP transport.
+
+Retrieval currently uses structured SQL queries over TJXY catalog and user data.
+It does not yet provide embeddings, a vector index, or semantic similarity search.
+Deployments should restrict outbound network access so the configured provider
+URL can reach only approved AI endpoints.
+
+## Run the management TUI
+
+The repository includes a Rust terminal console for local service management and
+status checks:
+
+```bash
+cargo run -p tjxy-tui
+```
+
+It discovers TJXY server processes from this workspace even when they were
+started outside the TUI, and shows their PID/port state, build artifacts,
+database backend, masked `TJXY_*` configuration, and recent server logs. Actions
+include starting or stopping a server process launched by the TUI, building the
+server or Admin application, and running focused checks.
+
+The database view follows `TJXY_DATABASE_URL` when it is available. Otherwise,
+it infers PostgreSQL on its default port from a running server's live database
+connections and falls back to the server's default SQLite configuration. SQLite
+maintenance actions
+require the `sqlite3` CLI and are hidden for PostgreSQL and in-memory databases.
+The TUI only stops a server that it started and recorded in
+`target/tjxy-server.pid`. Process inspection and signalling currently target
+local macOS and Linux environments and require `ps` and `lsof`.
+
 The default bind address is `127.0.0.1:8096`; override it with `TJXY_BIND`.
 The default database is `sqlite://tjxy.db?mode=rwc`; override it with
 `TJXY_DATABASE_URL`. Original image assets default to `./data/assets`; override
@@ -121,9 +193,12 @@ and reloads every active Filesystem root after restart. The legacy
 `TJXY_FILESYSTEM_ACCOUNT_ID` plus `TJXY_FILESYSTEM_ROOT` pair remains an explicit
 runtime override; both variables are required together. Each configured root
 starts an account-scoped inventory worker and shares the serial Probe worker. A
-server-side folder picker is enabled by setting `TJXY_MEDIA_BROWSER_ROOTS` to a
-platform path-list of allowed parent directories (colon-separated on Unix and
-semicolon-separated on Windows). The Admin API exposes opaque root IDs and
+server-side folder picker can be enabled by saving one or more media browser
+roots in **Admin > System settings**, or by setting `TJXY_MEDIA_BROWSER_ROOTS`
+to a platform path-list of allowed parent directories (colon-separated on Unix
+and semicolon-separated on Windows). An explicitly present environment variable,
+including an empty value, takes precedence over the database setting; database
+changes apply after TJXY restarts. The Admin API exposes opaque root IDs and
 relative paths only; every selection is canonicalized again before it can be
 attached to a Library, and symlinks cannot escape an allowed root.
 
@@ -161,6 +236,24 @@ downloaded only from the fixed TMDb image host with redirects disabled and
 bounded time/bytes, validated by the asset store, and published as local Primary
 images. Image failures are recorded as work warnings without discarding usable
 text metadata.
+
+Music Libraries resolve discovered Audio items through TheAudioDB followed by
+MusicBrainz when their metadata mode is `automatic_scrape`. Common names such as
+`Artist - Track` and `01 - Artist - Track` are split into artist and recording
+evidence; MusicBrainz title search remains available when the artist is absent.
+The providers publish recording, artist, and release-group identities, year,
+description, genre, artist credit, and a square Primary image when available.
+MusicBrainz requests use an identifying User-Agent and are serialized to at most
+one request per second; override it with `TJXY_MUSICBRAINZ_USER_AGENT`.
+TheAudioDB uses its public development key `2` by default; production installs
+should set `TJXY_THEAUDIODB_API_KEY` to their own key. Remote artwork is accepted
+only from pinned HTTPS TheAudioDB hosts and passes through bounded asset
+validation. Authenticated administrators can also manage both values from
+**Admin > Metadata**. Database overrides are encrypted with
+`TJXY_CREDENTIAL_KEYRING`, hot-applied without a restart, and take precedence
+over the environment fallback. Deleting an override restores the environment
+configuration. TheAudioDB keys are write-only in the Admin API; MusicBrainz has
+no API token and instead exposes its non-secret identifying User-Agent.
 
 For local UI development, a one-off importer can populate the current database
 with fixed manifests of 100 Movies and 100 Series. It reads only the enabled,
@@ -268,6 +361,16 @@ discovery response should advertise an address. Readiness becomes true only
 after the database connection, migrations, and authentication service succeed,
 and each readiness request probes the database connection.
 Available compatibility routes now include `GET /System/Info/Public`,
+`GET /System/Language`, setup-time `PUT /System/Language` before the first user,
+and administrator-only `GET/PUT /Admin/System/Language` for the persisted interface locale,
+the public branding document `GET /System/Settings`, administrator `GET/PUT /Admin/System/Settings`,
+administrator image uploads at `PUT /Admin/System/Branding/{logo|icon}`, and
+administrator self-restart at `POST /Admin/System/Restart`.
+System settings keep the PostgreSQL database as the source of truth; listen
+address, port, and media browser root changes are applied on the next
+self-restart, while explicit `TJXY_BIND`, `TJXY_SERVER_NAME`,
+`TJXY_PUBLIC_ADDRESS`, and `TJXY_MEDIA_BROWSER_ROOTS` environment variables take
+precedence.
 authenticated `GET /System/Endpoint`,
 `GET /Branding/Configuration`,
 `GET /System/Ping`, `POST /Users/AuthenticateByName`, and `GET /Users/Me`, plus
@@ -322,6 +425,13 @@ cloud roots through the storage-account binding routes. Supplying one existing
 directory creates a root-confined Filesystem-backed library. Deleting a virtual
 folder detaches its CatalogItem memberships and StorageRoot mappings but preserves
 those shared entities; active Emby import references block deletion with `409`.
+
+Music virtual folders recursively discover `aac`, `flac`, `m4a`, `mp3`, `oga`,
+`ogg`, `opus`, `wav`, `wave`, and `webm` audio files and publish each file as an
+`Audio` catalog item with a directly playable source. Music artwork is presented
+with a square aspect ratio in the client. Movie/series metadata resolution remains
+unchanged; embedded audio-tag enrichment and the `MusicAlbum` hierarchy are not
+yet implemented.
 
 The current browse slice remains SQL-authoritative. Every authenticated enabled
 user sees every enabled library because per-library grants are not yet modeled.

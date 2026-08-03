@@ -1,6 +1,8 @@
 //! Axum composition root, system discovery, and Jellyfin-compatible authentication.
 
 mod admin_assets;
+mod ai;
+mod ai_settings;
 mod api_key;
 mod auth;
 mod browse;
@@ -29,6 +31,7 @@ mod storage_admin;
 mod storage_admin_cursor;
 mod stream;
 mod subtitle;
+mod system_settings;
 mod task;
 mod user_data;
 mod worker;
@@ -65,6 +68,7 @@ pub use startup::{
     StartupOptions, initialize,
 };
 pub use storage_admin::{GoogleDriveOAuthConfiguration, MicrosoftOneDriveOAuthConfiguration};
+pub use system_settings::RestartController;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerIdentity {
@@ -121,6 +125,8 @@ pub struct AppState {
     identity: Arc<ServerIdentity>,
     ready: Arc<AtomicBool>,
     auth: Option<Arc<AuthService<SystemClock>>>,
+    ai: Option<Arc<ai::AiService>>,
+    ai_encryption_available: bool,
     catalog: Option<Arc<CatalogQueryService>>,
     display_preferences: Option<Arc<DisplayPreferencesService>>,
     dashboard_admin: Option<Arc<dashboard_admin::DashboardAdminService>>,
@@ -138,6 +144,8 @@ pub struct AppState {
     import_admin: Option<Arc<import_admin::ImportAdminService>>,
     metadata_import: Option<Arc<MetadataImportService>>,
     metadata_settings_admin: Option<Arc<metadata_settings_admin::MetadataSettingsAdminService>>,
+    system_settings: Option<Arc<system_settings::SystemSettingsService>>,
+    restart: RestartController,
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
     storage_runtime: Option<Arc<runtime_storage::RuntimeStorageManager>>,
     realtime_events: Arc<socket::RealtimeEvents>,
@@ -151,6 +159,8 @@ impl AppState {
             identity: Arc::new(identity),
             ready: Arc::new(AtomicBool::new(false)),
             auth: None,
+            ai: None,
+            ai_encryption_available: false,
             catalog: None,
             display_preferences: None,
             dashboard_admin: None,
@@ -168,6 +178,8 @@ impl AppState {
             import_admin: None,
             metadata_import: None,
             metadata_settings_admin: None,
+            system_settings: None,
+            restart: RestartController::default(),
             relink_admin: None,
             storage_runtime: None,
             realtime_events: Arc::new(socket::RealtimeEvents::new()),
@@ -184,6 +196,17 @@ impl AppState {
     #[must_use]
     pub fn with_auth(mut self, auth: Arc<AuthService<SystemClock>>) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ai(
+        mut self,
+        database: sea_orm::DatabaseConnection,
+        cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
+    ) -> Self {
+        self.ai_encryption_available = cipher.is_some();
+        self.ai = Some(Arc::new(ai::AiService::new(database, cipher)));
         self
     }
 
@@ -321,6 +344,41 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn with_system_settings(mut self, database: sea_orm::DatabaseConnection) -> Self {
+        self.system_settings = Some(Arc::new(system_settings::SystemSettingsService::new(
+            database,
+            std::path::PathBuf::from("./data/assets/branding"),
+        )));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_system_settings_assets(
+        mut self,
+        database: sea_orm::DatabaseConnection,
+        asset_dir: std::path::PathBuf,
+    ) -> Self {
+        self.system_settings = Some(Arc::new(system_settings::SystemSettingsService::new(
+            database, asset_dir,
+        )));
+        self
+    }
+
+    #[must_use]
+    pub fn restart_controller(&self) -> RestartController {
+        self.restart.clone()
+    }
+
+    pub async fn persisted_bind_address(
+        &self,
+    ) -> Result<Option<SocketAddr>, tjxy_db::SystemSettingsRepositoryError> {
+        let Some(service) = self.system_settings.as_ref() else {
+            return Ok(None);
+        };
+        system_settings::persisted_bind_address(service).await
+    }
+
+    #[must_use]
     pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
         self.legacy_auth_enabled = enabled;
         self
@@ -347,12 +405,28 @@ pub fn build_router(state: AppState) -> Router {
         .route("/System/Info/Public", get(public_system_info))
         .route("/System/Endpoint", get(endpoint_info))
         .route("/System/Ping", get(system_ping))
+        .route(
+            "/System/Language",
+            get(system_settings::get_public_language).put(system_settings::put_setup),
+        )
+        .route(
+            "/System/Settings",
+            get(system_settings::get_public_settings),
+        )
         .route("/Branding/Configuration", get(branding_configuration))
+        .route("/Branding/Assets/{file}", get(system_settings::get_asset))
         .route(
             "/Users/AuthenticateByName",
             post(auth::authenticate_by_name),
         )
         .route("/Users/Me", get(auth::current_user))
+        .route("/Ai/Models", get(ai_settings::models))
+        .route("/Ai/Conversations", get(ai::list_conversations))
+        .route(
+            "/Ai/Conversations/{conversation_id}",
+            get(ai::get_conversation).delete(ai::delete_conversation),
+        )
+        .route("/Ai/Chat", post(ai::chat))
         .route("/Users/Me/Insights", get(client_portal::insights))
         .route(
             "/Users/Me/Profile",
@@ -497,6 +571,51 @@ pub fn build_router(state: AppState) -> Router {
             "/Admin/Metadata/Providers/Tmdb/Test",
             post(metadata_settings_admin::test),
         )
+        .route(
+            "/Admin/Metadata/Providers/TheAudioDB",
+            get(metadata_settings_admin::get_the_audio_db)
+                .put(metadata_settings_admin::put_the_audio_db)
+                .delete(metadata_settings_admin::delete_the_audio_db),
+        )
+        .route(
+            "/Admin/Metadata/Providers/TheAudioDB/Test",
+            post(metadata_settings_admin::test_the_audio_db),
+        )
+        .route(
+            "/Admin/Metadata/Providers/MusicBrainz",
+            get(metadata_settings_admin::get_musicbrainz)
+                .put(metadata_settings_admin::put_musicbrainz)
+                .delete(metadata_settings_admin::delete_musicbrainz),
+        )
+        .route(
+            "/Admin/Metadata/Providers/MusicBrainz/Test",
+            post(metadata_settings_admin::test_musicbrainz),
+        )
+        .route(
+            "/Admin/Ai/Settings",
+            get(ai_settings::get)
+                .put(ai_settings::put)
+                .delete(ai_settings::delete),
+        )
+        .route("/Admin/Ai/Settings/Test", post(ai_settings::test))
+        .route("/Admin/Ai/Analytics", get(ai_settings::analytics))
+        .route(
+            "/Admin/Ai/Settings/Models",
+            post(ai_settings::discover_models),
+        )
+        .route(
+            "/Admin/System/Language",
+            get(system_settings::get_admin).put(system_settings::put_admin_language),
+        )
+        .route(
+            "/Admin/System/Settings",
+            get(system_settings::get_admin).put(system_settings::put_admin),
+        )
+        .route(
+            "/Admin/System/Branding/{kind}",
+            put(system_settings::upload_asset),
+        )
+        .route("/Admin/System/Restart", post(system_settings::restart))
         .route(
             "/Admin/Imports/{job_id}/Publish",
             post(import_admin::publish),
@@ -707,7 +826,16 @@ fn admin_storage_routes() -> Router<AppState> {
 }
 
 async fn public_system_info(State(state): State<AppState>) -> Json<PublicSystemInfo> {
-    Json(state.identity.public_info())
+    let mut info = state.identity.public_info();
+    if let Some(service) = state.system_settings.as_ref()
+        && let Ok(Some(settings)) = service.get().await
+    {
+        info.server_name = settings.site_title().to_owned();
+        if let Some(public_url) = settings.public_url() {
+            info.local_address = Some(public_url.to_owned());
+        }
+    }
+    Json(info)
 }
 
 async fn endpoint_info(

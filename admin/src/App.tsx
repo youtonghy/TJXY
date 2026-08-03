@@ -10,6 +10,9 @@ import { AdminLayout } from './layout/AdminLayout';
 import { LibraryEditPage } from './libraries/LibraryEditPage';
 import { LibrariesPage } from './libraries/LibrariesPage';
 import { MetadataSettingsPage } from './settings/MetadataSettingsPage';
+import { AiSettingsPage } from './settings/AiSettingsPage';
+import { SystemLocaleProvider } from './settings/SystemLocaleProvider';
+import { SystemSettingsPage } from './settings/SystemSettingsPage';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
 import { TasksPage } from './tasks/TasksPage';
@@ -33,7 +36,7 @@ const DashboardPage = lazy(async () => {
 
 export function App() {
   return (
-    <BrowserRouter>
+    <SystemLocaleProvider><BrowserRouter>
       <Routes>
         <Route element={<ClientApp />} path="/app/*" />
         <Route
@@ -70,6 +73,8 @@ export function App() {
                 <Route element={<LibrariesPage />} path="/libraries" />
                 <Route element={<LibraryEditPage />} path="/libraries/:id" />
                 <Route element={<MetadataSettingsPage />} path="/settings/metadata" />
+                <Route element={<AiSettingsPage />} path="/settings/ai" />
+                <Route element={<SystemSettingsPage />} path="/settings/system" />
                 <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
                 <Route element={<OneDrivePage />} path="/storage/onedrive" />
               </CustomRoutes>
@@ -77,6 +82,6 @@ export function App() {
           )}
         />
       </Routes>
-    </BrowserRouter>
+    </BrowserRouter></SystemLocaleProvider>
   );
 }

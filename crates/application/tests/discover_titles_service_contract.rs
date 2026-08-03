@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tjxy_application::{
-    DiscoverTitlesService, MetadataResolveService, TaskService, TaskServiceError,
+    DiscoverTitlesService, MetadataResolveService, SourceIndexService, TaskService,
+    TaskServiceError,
 };
 use tjxy_common::{CatalogItemId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_db::{
-    DiscoverTitlesError, DiscoverTitlesRepository, MetadataRequirement, WorkJobRepository,
-    WorkJobState, WorkScope, WorkTaskKind,
+    CatalogPublicationRepository, DiscoverTitlesError, DiscoverTitlesRepository,
+    MetadataRequirement, WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
 use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{
@@ -121,13 +122,23 @@ async fn discovery_fixture(metadata_policy: &str) -> DiscoveryFixture {
         ],
     )
     .await;
-    insert_object(&database, account, root_object, "root", "Movies", true).await;
+    insert_object(
+        &database,
+        account,
+        root_object,
+        "root",
+        "Movies",
+        "Directory",
+        true,
+    )
+    .await;
     insert_object(
         &database,
         account,
         title_object,
         "arrival",
         "Arrival (2016)",
+        "Directory",
         false,
     )
     .await;
@@ -292,6 +303,166 @@ async fn discover_titles_publishes_root_children_without_reading_a_backend() {
             DiscoverTitlesError::AlreadyCurrent
         ))
     ));
+}
+
+#[tokio::test]
+async fn discover_titles_recursively_publishes_music_files_as_audio_items() {
+    let fixture = discovery_fixture("basic").await;
+    let sql = fixture.database.get_database_backend();
+    let track = StorageObjectRecordId::new();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("collection_type"), "music")
+                    .value(Alias::new("name"), "Music")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    for (table, id_column) in [
+        ("storage_objects", "id"),
+        ("storage_root_objects", "storage_object_id"),
+    ] {
+        fixture
+            .database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new(table))
+                        .value(Alias::new("children_indexed"), true)
+                        .value(Alias::new("children_index_revision"), 1_i64)
+                        .and_where(
+                            Expr::col(Alias::new(id_column)).eq(fixture.title_object.as_uuid()),
+                        ),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    insert_object(
+        &fixture.database,
+        account_id(&fixture.database).await,
+        track,
+        "track-01",
+        "01 - First Light.flac",
+        "File",
+        false,
+    )
+    .await;
+    insert_root_relation(
+        &fixture.database,
+        fixture.root,
+        track,
+        Some(fixture.title_object),
+    )
+    .await;
+
+    let report = DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(report.discovered(), 1);
+    let identity = Alias::new("music_identity");
+    let catalog = Alias::new("music_catalog");
+    let row = fixture
+        .database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .expr_as(
+                        Expr::col((catalog.clone(), Alias::new("id"))),
+                        Alias::new("item_id"),
+                    )
+                    .columns([
+                        (catalog.clone(), Alias::new("item_type")),
+                        (catalog.clone(), Alias::new("name")),
+                    ])
+                    .from_as(Alias::new("identity_matches"), identity.clone())
+                    .join_as(
+                        JoinType::InnerJoin,
+                        Alias::new("catalog_items"),
+                        catalog.clone(),
+                        Expr::col((catalog.clone(), Alias::new("id")))
+                            .equals((identity.clone(), Alias::new("candidate_catalog_item_id"))),
+                    )
+                    .and_where(
+                        Expr::col((identity, Alias::new("storage_object_id"))).eq(track.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "item_type").unwrap(), "Audio");
+    assert_eq!(
+        row.try_get::<String>("", "name").unwrap(),
+        "01 - First Light"
+    );
+    let item = CatalogItemId::from_uuid(row.try_get("", "item_id").unwrap());
+    let jobs = WorkJobRepository::new(&fixture.database);
+    let metadata = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "music-metadata",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        metadata.job().metadata_requirement(),
+        Some(MetadataRequirement::Basic)
+    );
+    assert_eq!(
+        metadata.job().metadata_source_mode(),
+        Some(MetadataSourceMode::AutomaticScrape)
+    );
+    let metadata_report = MetadataResolveService::new(fixture.database.clone())
+        .execute(&metadata)
+        .await
+        .unwrap();
+    assert!(metadata_report.changed());
+    assert!(!metadata_report.used_nfo());
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::IndexMediaSources,
+            WorkScope::CatalogItem(item),
+            0,
+            100,
+        )
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let source_job = jobs
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "music-source-index",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    SourceIndexService::new(fixture.database.clone())
+        .execute(&source_job)
+        .await
+        .unwrap();
+
+    let sources = CatalogPublicationRepository::new(&fixture.database)
+        .active_sources(item)
+        .await
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].container(), Some("flac"));
+    assert_eq!(sources[0].locations()[0].storage_object_id(), track);
 }
 
 #[tokio::test]
@@ -569,6 +740,7 @@ async fn insert_object(
     id: StorageObjectRecordId,
     provider_id: &str,
     name: &str,
+    object_type: &str,
     indexed: bool,
 ) {
     let sql = database.get_database_backend();
@@ -598,7 +770,7 @@ async fn insert_object(
                         provider_id.into(),
                         name.into(),
                         name.to_lowercase().into(),
-                        "Directory".into(),
+                        object_type.into(),
                         1_i64.into(),
                         indexed.into(),
                         1_i64.into(),
@@ -609,6 +781,23 @@ async fn insert_object(
         )
         .await
         .unwrap();
+}
+
+async fn account_id(database: &sea_orm::DatabaseConnection) -> Uuid {
+    database
+        .query_one(
+            database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("storage_accounts"))
+                    .limit(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap()
 }
 
 async fn insert_root_relation(

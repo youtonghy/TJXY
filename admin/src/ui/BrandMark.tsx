@@ -1,9 +1,12 @@
+import { useSystemLocale } from '../settings/SystemLocaleProvider';
+
 interface BrandMarkProps {
   className?: string;
   priority?: boolean;
 }
 
 export function BrandMark({ className = 'size-10', priority = false }: BrandMarkProps) {
+  const { logoUrl } = useSystemLocale();
   return (
     <img
       alt=""
@@ -12,7 +15,7 @@ export function BrandMark({ className = 'size-10', priority = false }: BrandMark
       decoding="async"
       height="512"
       loading={priority ? 'eager' : 'lazy'}
-      src="/brand/tjxy-mark.webp"
+      src={logoUrl}
       width="512"
     />
   );

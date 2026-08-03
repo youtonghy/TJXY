@@ -101,9 +101,21 @@ impl MetadataImageFetcher for ReqwestMetadataImageFetcher {
     ) -> Result<MetadataImageBytes, MetadataImageFetchError> {
         let url = reqwest::Url::parse(reference.url())
             .map_err(|_| MetadataImageFetchError::InvalidReference)?;
-        if reference.provider() != "Tmdb"
+        let allowed_host = match reference.provider() {
+            "Tmdb" => url.host_str() == Some("image.tmdb.org"),
+            "TheAudioDB" => matches!(
+                url.host_str(),
+                Some(
+                    "theaudiodb.com"
+                        | "www.theaudiodb.com"
+                        | "r2.theaudiodb.com"
+                        | "media.theaudiodb.com"
+                )
+            ),
+            _ => false,
+        };
+        if !allowed_host
             || url.scheme() != "https"
-            || url.host_str() != Some("image.tmdb.org")
             || url.port().is_some_and(|port| port != 443)
             || !url.username().is_empty()
             || url.password().is_some()

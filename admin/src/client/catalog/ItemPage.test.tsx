@@ -154,6 +154,15 @@ it('does not invent rich facts for a sparse movie response', async () => {
   expect(screen.queryByText('Demo metadata only')).not.toBeInTheDocument();
 });
 
+it('uses square primary artwork for an audio item', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'track-1', Name: 'First Light', Type: 'Audio', IsFolder: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  renderItem('track-1');
+
+  const artwork = await screen.findByRole('img', { name: 'Poster for First Light' });
+  expect(artwork.parentElement).toHaveClass('aspect-square');
+});
+
 function renderItem(id: string) {
   return render(
     <MemoryRouter initialEntries={[`/app/items/${id}`]}>

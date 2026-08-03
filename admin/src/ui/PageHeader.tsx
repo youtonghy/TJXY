@@ -1,6 +1,8 @@
 import { ChevronRight } from 'lucide-react';
 import { useEffect, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
+import { interpolate, useTranslate } from '../settings/i18n';
+import { useSystemLocale } from '../settings/SystemLocaleProvider';
 
 export interface BreadcrumbItem {
   label: string;
@@ -15,9 +17,13 @@ export interface PageHeaderProps {
 }
 
 export function PageHeader({ title, description, breadcrumbs = [], actions }: PageHeaderProps) {
+  const tr = useTranslate();
+  const { siteTitle } = useSystemLocale();
+  const localizedTitle = tr(title);
+  const localizedDescription = description === undefined ? undefined : tr(description);
   useEffect(() => {
-    document.title = `${title} | TJXY Admin`;
-  }, [title]);
+    document.title = `${localizedTitle} | ${interpolate(tr('admin.brand.title'), { title: siteTitle })}`;
+  }, [localizedTitle, siteTitle, tr]);
 
   return (
     <header className="flex flex-col gap-4 border-b border-default/20 pb-5">
@@ -34,11 +40,11 @@ export function PageHeader({ title, description, breadcrumbs = [], actions }: Pa
                   {index > 0 && <ChevronRight aria-hidden="true" className="size-3.5 shrink-0" />}
                   {item.to === undefined ? (
                     <span aria-current={isCurrent ? 'page' : undefined} className="truncate">
-                      {item.label}
+                      {tr(item.label)}
                     </span>
                   ) : (
                     <Link className="truncate text-accent hover:underline" to={item.to}>
-                      {item.label}
+                      {tr(item.label)}
                     </Link>
                   )}
                 </li>
@@ -50,9 +56,9 @@ export function PageHeader({ title, description, breadcrumbs = [], actions }: Pa
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0 max-w-3xl">
-          <h1 className="text-2xl font-semibold text-foreground">{title}</h1>
-          {description !== undefined && (
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">{description}</p>
+          <h1 className="text-2xl font-semibold text-foreground">{localizedTitle}</h1>
+          {localizedDescription !== undefined && (
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">{localizedDescription}</p>
           )}
         </div>
         <div

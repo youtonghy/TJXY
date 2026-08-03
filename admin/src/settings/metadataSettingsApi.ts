@@ -6,7 +6,9 @@ import {
   validText,
 } from '../api/responseValidation';
 
-const SETTINGS_PATH = '/Admin/Metadata/Providers/Tmdb';
+const TMDB_SETTINGS_PATH = '/Admin/Metadata/Providers/Tmdb';
+const THEAUDIODB_SETTINGS_PATH = '/Admin/Metadata/Providers/TheAudioDB';
+const MUSICBRAINZ_SETTINGS_PATH = '/Admin/Metadata/Providers/MusicBrainz';
 const SETTINGS_KEYS = [
   'Provider',
   'Configured',
@@ -18,6 +20,7 @@ const SETTINGS_KEYS = [
 ] as const;
 
 export type TmdbSettingsSource = 'None' | 'Environment' | 'Database';
+export type MetadataSettingsSource = TmdbSettingsSource;
 
 export interface TmdbSettings {
   provider: 'Tmdb';
@@ -41,9 +44,47 @@ export interface TestTmdbConnectionRequest {
   language?: string;
 }
 
+export interface MusicProviderSettings {
+  provider: 'TheAudioDB' | 'MusicBrainz';
+  configured: boolean;
+  enabled: boolean;
+  revision: number | null;
+  source: MetadataSettingsSource;
+  encryptionAvailable: boolean;
+}
+
+export interface TheAudioDbSettings extends MusicProviderSettings {
+  provider: 'TheAudioDB';
+}
+
+export interface MusicBrainzSettings extends MusicProviderSettings {
+  provider: 'MusicBrainz';
+  userAgent: string;
+}
+
+export interface SaveTheAudioDbSettingsRequest {
+  enabled: boolean;
+  apiKey: string;
+  revision: number | null;
+}
+
+export interface SaveMusicBrainzSettingsRequest {
+  enabled: boolean;
+  userAgent: string;
+  revision: number | null;
+}
+
+export interface TestTheAudioDbConnectionRequest {
+  apiKey?: string;
+}
+
+export interface TestMusicBrainzConnectionRequest {
+  userAgent?: string;
+}
+
 export async function getTmdbSettings(signal?: AbortSignal): Promise<TmdbSettings> {
   const value = await apiRequest<unknown>(
-    SETTINGS_PATH,
+    TMDB_SETTINGS_PATH,
     signal === undefined ? {} : { signal },
   );
   return toSettings(value);
@@ -60,7 +101,7 @@ export async function saveTmdbSettings(
   if (accessToken !== undefined) body.AccessToken = accessToken;
   if (request.revision !== null) body.Revision = requireRevision(request.revision);
 
-  const value = await apiRequest<unknown>(SETTINGS_PATH, {
+  const value = await apiRequest<unknown>(TMDB_SETTINGS_PATH, {
     method: 'PUT',
     body: JSON.stringify(body),
   });
@@ -75,7 +116,7 @@ export async function testTmdbConnection(
   if (accessToken !== undefined) body.AccessToken = accessToken;
   if (request.language !== undefined) body.Language = requireLanguage(request.language);
 
-  const value = await apiRequest<unknown>(`${SETTINGS_PATH}/Test`, {
+  const value = await apiRequest<unknown>(`${TMDB_SETTINGS_PATH}/Test`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
@@ -89,7 +130,81 @@ export async function testTmdbConnection(
 }
 
 export async function deleteTmdbSettings(): Promise<void> {
-  await apiRequest(SETTINGS_PATH, { method: 'DELETE' });
+  await apiRequest(TMDB_SETTINGS_PATH, { method: 'DELETE' });
+}
+
+export async function getTheAudioDbSettings(
+  signal?: AbortSignal,
+): Promise<TheAudioDbSettings> {
+  const value = await apiRequest<unknown>(
+    THEAUDIODB_SETTINGS_PATH,
+    signal === undefined ? {} : { signal },
+  );
+  return toTheAudioDbSettings(value);
+}
+
+export async function saveTheAudioDbSettings(
+  request: SaveTheAudioDbSettingsRequest,
+): Promise<TheAudioDbSettings> {
+  const body: Record<string, unknown> = { Enabled: request.enabled };
+  const apiKey = optionalApiKey(request.apiKey);
+  if (apiKey !== undefined) body.ApiKey = apiKey;
+  if (request.revision !== null) body.Revision = requireRevision(request.revision);
+  const value = await apiRequest<unknown>(THEAUDIODB_SETTINGS_PATH, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return toTheAudioDbSettings(value);
+}
+
+export async function testTheAudioDbConnection(
+  request: TestTheAudioDbConnectionRequest,
+): Promise<void> {
+  const body: Record<string, string> = {};
+  const apiKey = optionalApiKey(request.apiKey);
+  if (apiKey !== undefined) body.ApiKey = apiKey;
+  await testConnection(THEAUDIODB_SETTINGS_PATH, body, 'TheAudioDB');
+}
+
+export async function deleteTheAudioDbSettings(): Promise<void> {
+  await apiRequest(THEAUDIODB_SETTINGS_PATH, { method: 'DELETE' });
+}
+
+export async function getMusicBrainzSettings(
+  signal?: AbortSignal,
+): Promise<MusicBrainzSettings> {
+  const value = await apiRequest<unknown>(
+    MUSICBRAINZ_SETTINGS_PATH,
+    signal === undefined ? {} : { signal },
+  );
+  return toMusicBrainzSettings(value);
+}
+
+export async function saveMusicBrainzSettings(
+  request: SaveMusicBrainzSettingsRequest,
+): Promise<MusicBrainzSettings> {
+  const body: Record<string, unknown> = { Enabled: request.enabled };
+  const userAgent = optionalUserAgent(request.userAgent);
+  if (userAgent !== undefined) body.UserAgent = userAgent;
+  if (request.revision !== null) body.Revision = requireRevision(request.revision);
+  const value = await apiRequest<unknown>(MUSICBRAINZ_SETTINGS_PATH, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return toMusicBrainzSettings(value);
+}
+
+export async function testMusicBrainzConnection(
+  request: TestMusicBrainzConnectionRequest,
+): Promise<void> {
+  const body: Record<string, string> = {};
+  const userAgent = optionalUserAgent(request.userAgent);
+  if (userAgent !== undefined) body.UserAgent = userAgent;
+  await testConnection(MUSICBRAINZ_SETTINGS_PATH, body, 'MusicBrainz');
+}
+
+export async function deleteMusicBrainzSettings(): Promise<void> {
+  await apiRequest(MUSICBRAINZ_SETTINGS_PATH, { method: 'DELETE' });
 }
 
 function toSettings(value: unknown): TmdbSettings {
@@ -111,6 +226,60 @@ function toSettings(value: unknown): TmdbSettings {
     configured: value.Configured,
     enabled: value.Enabled,
     language: value.Language,
+    revision: value.Revision,
+    source: value.Source,
+    encryptionAvailable: value.EncryptionAvailable,
+  };
+}
+
+const MUSIC_SECRET_SETTINGS_KEYS = [
+  'Provider',
+  'Configured',
+  'Enabled',
+  'Revision',
+  'Source',
+  'EncryptionAvailable',
+] as const;
+
+function toTheAudioDbSettings(value: unknown): TheAudioDbSettings {
+  const common = toMusicProviderSettings(
+    value,
+    'TheAudioDB',
+    MUSIC_SECRET_SETTINGS_KEYS,
+  );
+  return { ...common, provider: 'TheAudioDB' };
+}
+
+function toMusicBrainzSettings(value: unknown): MusicBrainzSettings {
+  const keys = [...MUSIC_SECRET_SETTINGS_KEYS, 'UserAgent'] as const;
+  const common = toMusicProviderSettings(value, 'MusicBrainz', keys);
+  if (!isRecord(value) || typeof value.UserAgent !== 'string' || value.UserAgent.length > 512) {
+    throw invalidResponse('MusicBrainz metadata settings');
+  }
+  return { ...common, provider: 'MusicBrainz', userAgent: value.UserAgent };
+}
+
+function toMusicProviderSettings(
+  value: unknown,
+  provider: MusicProviderSettings['provider'],
+  keys: readonly string[],
+): MusicProviderSettings {
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, keys)
+    || value.Provider !== provider
+    || typeof value.Configured !== 'boolean'
+    || typeof value.Enabled !== 'boolean'
+    || (value.Revision !== null && !validRevision(value.Revision))
+    || !validSource(value.Source)
+    || typeof value.EncryptionAvailable !== 'boolean'
+  ) {
+    throw invalidResponse(`${provider} metadata settings`);
+  }
+  return {
+    provider,
+    configured: value.Configured,
+    enabled: value.Enabled,
     revision: value.Revision,
     source: value.Source,
     encryptionAvailable: value.EncryptionAvailable,
@@ -140,6 +309,44 @@ function optionalAccessToken(value: string | undefined): string | undefined {
     throw new ApiError(400, 'validation', 'A valid TMDB access token is required.');
   }
   return accessToken;
+}
+
+function optionalApiKey(value: string | undefined): string | undefined {
+  if (value === undefined || value.length === 0) return undefined;
+  const apiKey = value.trim();
+  if (
+    apiKey.length === 0
+    || apiKey.length > 256
+    || !/^[a-z0-9_-]+$/iu.test(apiKey)
+  ) {
+    throw new ApiError(400, 'validation', 'A valid TheAudioDB API key is required.');
+  }
+  return apiKey;
+}
+
+function optionalUserAgent(value: string | undefined): string | undefined {
+  if (value === undefined || value.length === 0) return undefined;
+  if (
+    value.trim() !== value
+    || !validText(value, 512)
+  ) {
+    throw new ApiError(400, 'validation', 'A valid MusicBrainz User-Agent is required.');
+  }
+  return value;
+}
+
+async function testConnection(
+  path: string,
+  body: Record<string, string>,
+  provider: string,
+): Promise<void> {
+  const value = await apiRequest<unknown>(`${path}/Test`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  if (!isRecord(value) || !hasExactKeys(value, ['Status']) || value.Status !== 'Success') {
+    throw invalidResponse(`${provider} connection-test result`);
+  }
 }
 
 function requireRevision(value: number): number {

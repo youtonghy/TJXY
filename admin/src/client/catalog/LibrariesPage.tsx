@@ -8,12 +8,14 @@ import {
   type MediaItem,
 } from '../api/catalogApi';
 import { MediaRow } from '../ui/MediaRow';
+import { useTranslate } from '../../settings/i18n';
 
 interface LibraryRow { library: Library; items: MediaItem[] }
 
 export function LibrariesPage() {
   const [rows, setRows] = useState<LibraryRow[]>();
   const [unavailable, setUnavailable] = useState(false);
+  const tr = useTranslate();
 
   useEffect(() => {
     let active = true;
@@ -36,16 +38,16 @@ export function LibrariesPage() {
   return (
     <div className="space-y-8">
       <div>
-        <p className="text-sm font-medium text-accent">Your collections</p>
-        <h1 className="mt-1 text-3xl font-semibold">Libraries</h1>
-        <p className="mt-1 text-muted">Browse every collection available to your account.</p>
+        <p className="text-sm font-medium text-accent">{tr('Your collections', '你的收藏')}</p>
+        <h1 className="mt-1 text-3xl font-semibold">{tr('Libraries', '媒体库')}</h1>
+        <p className="mt-1 text-muted">{tr('Browse every collection available to your account.', '浏览此账户可用的全部媒体库。')}</p>
       </div>
       {unavailable && (
         <Alert role="alert" status="warning">
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>Some libraries are unavailable</Alert.Title>
-            <Alert.Description>Refresh the page to try again.</Alert.Description>
+            <Alert.Title>{tr('Some libraries are unavailable', '部分媒体库暂时不可用')}</Alert.Title>
+            <Alert.Description>{tr('Refresh the page to try again.', '请刷新页面后重试。')}</Alert.Description>
           </Alert.Content>
         </Alert>
       )}
@@ -65,7 +67,7 @@ export function LibrariesPage() {
         />
       )) : (
         <p className="rounded-xl border border-dashed border-border p-10 text-center text-muted">
-          No libraries are available.
+          {tr('No libraries are available.', '暂无可用的媒体库。')}
         </p>
       )}
     </div>

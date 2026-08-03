@@ -1,6 +1,9 @@
 //! Metadata provider contracts and bounded offline metadata parsers.
 
+mod music;
 mod tmdb_catalog;
+
+pub use music::{MusicBrainzProvider, TheAudioDbProvider};
 
 pub use tmdb_catalog::{
     RichCatalogItem, RichCountry, RichCredit, RichEpisode, RichLanguage, RichRemoteImage,
@@ -27,6 +30,7 @@ const MAX_REFERENCE_CHARS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataItemKind {
+    Audio,
     Movie,
     Series,
     Season,
@@ -108,6 +112,27 @@ pub struct MetadataPerson {
 }
 
 impl MetadataPerson {
+    /// Defines one bounded credited person.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataError::InvalidAssociation`] for invalid text or order values.
+    pub fn new(
+        name: impl Into<String>,
+        role: Option<impl Into<String>>,
+        order: Option<u32>,
+    ) -> Result<Self, MetadataError> {
+        let name = name.into();
+        let role = role.map(Into::into);
+        if !valid_text(&name, 512)
+            || role.as_deref().is_some_and(|value| !valid_text(value, 512))
+            || order.is_some_and(|value| i32::try_from(value).is_err())
+        {
+            return Err(MetadataError::InvalidAssociation);
+        }
+        Ok(Self { name, role, order })
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -507,6 +532,36 @@ impl MetadataImageReference {
         })
     }
 
+    /// Builds a pinned HTTPS `TheAudioDB` image reference.
+    #[must_use]
+    pub fn the_audio_db(url: &str) -> Option<Self> {
+        let parsed = reqwest::Url::parse(url).ok()?;
+        if parsed.scheme() != "https"
+            || !matches!(
+                parsed.host_str(),
+                Some(
+                    "theaudiodb.com"
+                        | "www.theaudiodb.com"
+                        | "r2.theaudiodb.com"
+                        | "media.theaudiodb.com"
+                )
+            )
+            || parsed.port().is_some_and(|port| port != 443)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+            || parsed.query().is_some()
+            || !valid_text(parsed.path(), 2048)
+        {
+            return None;
+        }
+        Some(Self {
+            provider: "TheAudioDB".to_owned(),
+            reference: parsed.path().to_owned(),
+            url: parsed.into(),
+        })
+    }
+
     #[must_use]
     pub fn provider(&self) -> &str {
         &self.provider
@@ -581,6 +636,24 @@ impl MetadataCandidate {
         self
     }
 
+    #[must_use]
+    pub fn with_image_reference(mut self, image: MetadataImageReference) -> Self {
+        self.primary_image = Some(image);
+        self
+    }
+
+    #[must_use]
+    pub fn with_genres(mut self, genres: Vec<String>) -> Self {
+        self.genres = Some(genres);
+        self
+    }
+
+    #[must_use]
+    pub fn with_people(mut self, people: Vec<MetadataPerson>) -> Self {
+        self.people = Some(people);
+        self
+    }
+
     fn is_valid(&self) -> bool {
         self.title
             .as_deref()
@@ -601,8 +674,8 @@ impl MetadataCandidate {
                 valid_text(provider, 128) && valid_text(provider_id, 2048)
             })
             && self.primary_image.as_ref().is_none_or(|image| {
-                image.provider == "Tmdb"
-                    && valid_text(&image.reference, 512)
+                matches!(image.provider.as_str(), "Tmdb" | "TheAudioDB")
+                    && valid_text(&image.reference, 2048)
                     && valid_text(&image.url, 2048)
             })
             && self.genres.as_ref().is_none_or(|values| {

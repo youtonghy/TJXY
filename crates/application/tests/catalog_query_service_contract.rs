@@ -1289,7 +1289,7 @@ async fn lazy_service(
             )
             .await
             .unwrap();
-        seed_ready_lazy_scope(&database, library, item).await;
+        seed_ready_lazy_scope(&database, library, item, item_type == "Audio").await;
     }
     (
         CatalogQueryService::new(database.clone()),
@@ -1300,7 +1300,12 @@ async fn lazy_service(
 }
 
 #[allow(clippy::too_many_lines)] // Builds the complete reconciled title scope used by the coordinator.
-async fn seed_ready_lazy_scope(database: &DatabaseConnection, library: Uuid, item: CatalogItemId) {
+async fn seed_ready_lazy_scope(
+    database: &DatabaseConnection,
+    library: Uuid,
+    item: CatalogItemId,
+    direct_file: bool,
+) {
     let backend = database.get_database_backend();
     let account = Uuid::new_v4();
     let object = Uuid::new_v4();
@@ -1356,10 +1361,10 @@ async fn seed_ready_lazy_scope(database: &DatabaseConnection, library: Uuid, ite
                         format!("object-{object}").into(),
                         "Lazy item".into(),
                         "lazy item".into(),
-                        "Directory".into(),
+                        if direct_file { "File" } else { "Directory" }.into(),
                         4_i64.into(),
-                        true.into(),
-                        4_i64.into(),
+                        (!direct_file).into(),
+                        if direct_file { 0_i64 } else { 4_i64 }.into(),
                         "ProviderStable".into(),
                         "Present".into(),
                     ]),
@@ -1449,8 +1454,8 @@ async fn seed_ready_lazy_scope(database: &DatabaseConnection, library: Uuid, ite
                         root.into(),
                         object.into(),
                         4_i64.into(),
-                        true.into(),
-                        4_i64.into(),
+                        (!direct_file).into(),
+                        if direct_file { 0_i64 } else { 4_i64 }.into(),
                         "Present".into(),
                     ]),
             ),
@@ -1464,6 +1469,9 @@ async fn lazy_requests_join_one_durable_job_and_hidden_items_schedule_nothing() 
     let (movie_service, movie_db, movie, user) = lazy_service("Movie", true).await;
     movie_service.item(user, None, movie).await.unwrap();
     movie_service.item(user, None, movie).await.unwrap();
+    let (audio_service, audio_db, audio, user) = lazy_service("Audio", true).await;
+    audio_service.item(user, None, audio).await.unwrap();
+    audio_service.item(user, None, audio).await.unwrap();
     let (series_service, series_db, series, user) = lazy_service("Series", true).await;
     let page = CatalogPageRequest::new(0, 20).unwrap();
     series_service
@@ -1498,6 +1506,7 @@ async fn lazy_requests_join_one_durable_job_and_hidden_items_schedule_nothing() 
 
     for (database, kind, revision) in [
         (&movie_db, "IndexMediaSources", 9_i64),
+        (&audio_db, "IndexMediaSources", 9_i64),
         (&series_db, "ExpandItem", 7_i64),
     ] {
         let rows = database

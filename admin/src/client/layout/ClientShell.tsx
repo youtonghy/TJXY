@@ -1,18 +1,20 @@
 /* eslint-disable @typescript-eslint/no-unnecessary-condition */
 import { Avatar, Button, Dropdown, Tooltip } from '@heroui/react';
 import { Navbar } from '@heroui-pro/react/navbar';
-import { Home, Library, LogOut, Moon, Search, Sun, Trophy, UserRound } from 'lucide-react';
+import { Home, Library, LogOut, Moon, Search, Sparkles, Sun, Trophy, UserRound } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../ui/BrandMark';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { useClientTheme } from './clientTheme';
+import { useTranslate } from '../../settings/i18n';
 
 const links = [
   { to: '/app/', label: 'Home', icon: Home },
   { to: '/app/libraries', label: 'Libraries', icon: Library },
   { to: '/app/search', label: 'Search', icon: Search },
   { to: '/app/rankings', label: 'Rankings', icon: Trophy },
+  { to: '/app/ai', label: 'AI assistant', icon: Sparkles },
 ];
 
 export function ClientShell({ children }: { children: ReactNode }) {
@@ -21,10 +23,11 @@ export function ClientShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const { theme, toggleTheme } = useClientTheme();
   const [open, setOpen] = useState(false);
+  const tr = useTranslate();
   return (
     <div className="min-h-screen bg-background">
       <Navbar
-        aria-label="TJXY navigation"
+        aria-label={tr('TJXY navigation', 'TJXY 导航')}
         className="border-b border-border bg-surface/95 backdrop-blur"
         height="4rem"
         isMenuOpen={open}
@@ -34,10 +37,10 @@ export function ClientShell({ children }: { children: ReactNode }) {
         position="sticky"
       >
         <Navbar.Header className="max-w-[96rem] gap-2 px-4 sm:px-6 lg:gap-5 lg:px-8">
-          <Navbar.MenuToggle className="lg:hidden" srLabel="Open navigation" />
+          <Navbar.MenuToggle className="lg:hidden" srLabel={tr('Open navigation', '打开导航')} />
           <Navbar.Brand>
             <Link
-              aria-label="TJXY home"
+              aria-label={tr('TJXY home', 'TJXY 首页')}
               className="flex items-center gap-2 rounded-md px-1 text-base font-semibold text-foreground"
               to="/app/"
             >
@@ -53,7 +56,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
             <Tooltip>
               <Tooltip.Trigger>
                 <Button
-                  aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+                  aria-label={theme === 'dark' ? tr('Switch to light theme', '切换到浅色主题') : tr('Switch to dark theme', '切换到深色主题')}
                   isIconOnly
                   onPress={toggleTheme}
                   size="sm"
@@ -64,11 +67,11 @@ export function ClientShell({ children }: { children: ReactNode }) {
                     : <Moon aria-hidden="true" className="size-4" />}
                 </Button>
               </Tooltip.Trigger>
-              <Tooltip.Content>{theme === 'dark' ? 'Use light theme' : 'Use dark theme'}</Tooltip.Content>
+              <Tooltip.Content>{theme === 'dark' ? tr('Use light theme', '使用浅色主题') : tr('Use dark theme', '使用深色主题')}</Tooltip.Content>
             </Tooltip>
             <Dropdown>
               <Dropdown.Trigger
-                aria-label={`Open account menu for ${user?.Name ?? 'user'}`}
+                aria-label={tr(`Open account menu for ${user?.Name ?? 'user'}`, `打开 ${user?.Name ?? '用户'} 的账户菜单`)}
                 className="inline-flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-default"
               >
                 <Avatar size="sm"><Avatar.Fallback>{user?.Name?.slice(0, 1).toUpperCase()}</Avatar.Fallback></Avatar>
@@ -79,14 +82,14 @@ export function ClientShell({ children }: { children: ReactNode }) {
                   if (key === 'profile') void navigate('/app/profile');
                   if (key === 'logout') void signOut();
                 }}>
-                  <Dropdown.Item id="profile"><UserRound className="size-4" />Profile & stats</Dropdown.Item>
-                  <Dropdown.Item id="logout"><LogOut className="size-4" />Sign out</Dropdown.Item>
+                  <Dropdown.Item id="profile"><UserRound className="size-4" />{tr('Profile & stats', '个人资料与统计')}</Dropdown.Item>
+                  <Dropdown.Item id="logout"><LogOut className="size-4" />{tr('Sign out', '退出登录')}</Dropdown.Item>
                 </Dropdown.Menu>
               </Dropdown.Popover>
             </Dropdown>
           </Navbar.Content>
         </Navbar.Header>
-        <Navbar.Menu aria-label="Mobile navigation" role="navigation">
+        <Navbar.Menu aria-label={tr('Mobile navigation', '移动端导航')} role="navigation">
           <ClientNavigation mobile pathname={pathname} />
         </Navbar.Menu>
       </Navbar>
@@ -96,6 +99,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
 }
 
 function ClientNavigation({ mobile = false, pathname }: { mobile?: boolean; pathname: string }) {
+  const tr = useTranslate();
   return (
     links.map(({ to, label, icon: Icon }) => {
       const Item = mobile ? Navbar.MenuItem : Navbar.Item;
@@ -107,7 +111,7 @@ function ClientNavigation({ mobile = false, pathname }: { mobile?: boolean; path
           key={to}
         >
           <Icon aria-hidden="true" className={mobile ? 'size-5' : 'size-4'} />
-          <Navbar.Label>{label}</Navbar.Label>
+          <Navbar.Label>{tr(label, ({ Home: '首页', Libraries: '媒体库', Search: '搜索', Rankings: '排行榜', 'AI assistant': 'AI 助手' } as Record<string, string>)[label] ?? label)}</Navbar.Label>
         </Item>
       );
     })

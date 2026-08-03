@@ -89,6 +89,10 @@ vi.mock('./settings/MetadataSettingsPage', async () => {
   const React = await import('react');
   return { MetadataSettingsPage: () => React.createElement('h1', null, 'Metadata page') };
 });
+vi.mock('./settings/AiSettingsPage', async () => {
+  const React = await import('react');
+  return { AiSettingsPage: () => React.createElement('h1', null, 'AI settings page') };
+});
 vi.mock('./dashboard/DashboardPage', async () => {
   const React = await import('react');
   return { DashboardPage: () => React.createElement('h1', null, 'Dashboard page') };
@@ -97,6 +101,7 @@ vi.mock('./dashboard/DashboardPage', async () => {
 const readinessMock = vi.mocked(checkServerReadiness);
 
 beforeEach(() => {
+  window.localStorage.setItem('tjxy-system-locale', 'en-US');
   authControl.state.authenticated = true;
   authControl.login.mockClear();
   authControl.logout.mockClear();
@@ -156,6 +161,7 @@ it.each([
   ['/admin/storage/google-drive', 'Google Drive page'],
   ['/admin/storage/onedrive', 'OneDrive page'],
   ['/admin/settings/metadata', 'Metadata page'],
+  ['/admin/settings/ai', 'AI settings page'],
 ])('renders %s inside the guarded shell', async (path, heading) => {
   renderRoute(path);
 

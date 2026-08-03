@@ -1,5 +1,7 @@
 //! TJXY's SQL schema and migration entry point.
 
+mod ai;
+mod ai_usage;
 mod api_key;
 mod asset;
 mod auth;
@@ -40,9 +42,19 @@ mod storage_credential;
 mod storage_path_authorization;
 mod storage_relink;
 mod storage_sync;
+mod system_settings;
 mod user_data;
 mod work_job;
 
+pub use ai::{
+    AI_PROVIDER_KEY, AiConversationRecord, AiConversationRepository, AiConversationRepositoryError,
+    AiMessageRecord, AiModelInput, AiModelRecord, AiReasoningEffort, AiSettingsRecord,
+    AiSettingsRepository, AiSettingsRepositoryError,
+};
+pub use ai_usage::{
+    AiExecutionInput, AiExecutionOutcome, AiUsageAnalytics, AiUsageDaily, AiUsageFailure,
+    AiUsageModel, AiUsageRepository, AiUsageRepositoryError, AiUsageSummary, AiUsageUser,
+};
 pub use api_key::{ApiKeyDraft, ApiKeyRepository, ApiKeyRepositoryError, StoredApiKey};
 pub use asset::{AssetPublication, AssetPublicationReport, AssetRepository, AssetRepositoryError};
 pub use auth::{
@@ -166,6 +178,11 @@ pub use storage_relink::{
 pub use storage_sync::{
     CommittedStoragePage, ObjectAvailabilityUpdate, ScopedInventoryTarget, StorageSyncPage,
     StorageSyncRepository, StorageSyncRepositoryError, TemporaryAvailabilityReason,
+};
+pub use system_settings::{
+    DEFAULT_ICON_URL, DEFAULT_LISTEN_HOST, DEFAULT_LOGO_URL, DEFAULT_PORT, DEFAULT_SITE_SUBTITLE,
+    DEFAULT_SITE_TITLE, DEFAULT_SYSTEM_LOCALE, SystemSettingsInput, SystemSettingsRecord,
+    SystemSettingsRepository, SystemSettingsRepositoryError,
 };
 pub use user_data::{
     UserDataCommit, UserDataPatch, UserDataRecord, UserDataRepository, UserDataRepositoryError,

@@ -376,6 +376,7 @@ async fn test_app() -> TestApp {
                 .with_user_data(user_data)
                 .with_dashboard(database.clone())
                 .with_client_portal(database.clone())
+                .with_system_settings(database.clone())
                 .with_ready(true),
         ),
         database,
@@ -6823,6 +6824,19 @@ async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
     let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let poster_tag = seed_asset(&app, item, b"poster").await;
+    let metadata_update = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("overview"),
+            "A linguist learns to communicate with visitors.",
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid()))
+        .to_owned();
+    app.database
+        .execute(app.database.get_database_backend().build(&metadata_update))
+        .await
+        .unwrap();
     let presentation = seed_playable_source(
         &app.database,
         item,
@@ -6894,6 +6908,100 @@ async fn client_portal_reports_personal_insights_and_yesterday_rankings() {
     let ranking: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(ranking["Items"][0]["Name"], "Arrival");
     assert_eq!(ranking["Items"][0]["PlayCount"], 1);
+    assert_eq!(
+        ranking["Items"][0]["Overview"],
+        "A linguist learns to communicate with visitors."
+    );
+    assert_eq!(
+        ranking["Items"][0]["PosterUrl"],
+        format!("/Items/{item}/Images/Primary?tag={poster_tag}")
+    );
+    assert_eq!(ranking["Items"][0]["PrimaryImageTag"], poster_tag);
+}
+
+#[tokio::test]
+async fn administrator_can_manage_complete_system_settings() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let media_browser_root = app.media.path().to_string_lossy().into_owned();
+
+    let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let settings: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(settings["Locale"], "zh-CN");
+    assert_eq!(settings["SiteTitle"], "TJXY");
+    assert_eq!(settings["ListenHost"], "127.0.0.1");
+    assert_eq!(settings["Port"], 8096);
+    assert_eq!(settings["MediaBrowserRoots"], json!([]));
+
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        json!({
+            "Locale": "en-US",
+            "SiteTitle": "Cinema",
+            "SiteSubtitle": "Private screenings",
+            "LogoUrl": "/brand/tjxy-mark.webp",
+            "IconUrl": "/brand/favicon.svg",
+            "PublicUrl": "https://media.example.com",
+            "ListenHost": "0.0.0.0",
+            "Port": 9000,
+            "MediaBrowserRoots": [media_browser_root]
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(saved["SiteTitle"], "Cinema");
+    assert_eq!(saved["Port"], 9000);
+    assert_eq!(
+        saved["MediaBrowserRoots"],
+        json!([app.media.path().to_string_lossy()])
+    );
+    assert_eq!(saved["RestartRequired"], true);
+    assert_eq!(saved["Revision"], 1);
+
+    let response = get(&app.router, "/System/Settings", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let public: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(public.get("MediaBrowserRoots").is_none());
+}
+
+#[tokio::test]
+async fn system_settings_reject_missing_media_browser_roots_without_advancing_revision() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        json!({
+            "Locale": "zh-CN",
+            "SiteTitle": "TJXY",
+            "SiteSubtitle": "Your media library",
+            "LogoUrl": "/brand/tjxy-mark.webp",
+            "IconUrl": "/brand/favicon.svg",
+            "PublicUrl": null,
+            "ListenHost": "127.0.0.1",
+            "Port": 8096,
+            "MediaBrowserRoots": [app.media.path().join("missing")]
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
+    let settings: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(settings["Revision"], 0);
+    assert_eq!(settings["MediaBrowserRoots"], json!([]));
 }
 
 #[tokio::test]

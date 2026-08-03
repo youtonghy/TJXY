@@ -45,6 +45,7 @@ it('presents the same primary destinations in the top bar and mobile navigation'
   expect(mobileNavigation).toHaveTextContent('Home');
   expect(mobileNavigation).toHaveTextContent('Libraries');
   expect(mobileNavigation).toHaveTextContent('Search');
+  expect(mobileNavigation).toHaveTextContent('AI assistant');
   expect(within(mobileNavigation).getByRole('link', { name: 'Libraries' })).toHaveAttribute('aria-current', 'page');
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
@@ -54,6 +55,7 @@ it('exposes rankings and a profile destination from the account menu', async () 
   renderShell('/app/');
 
   expect(screen.getByRole('link', { name: 'Rankings' })).toHaveAttribute('href', '/app/rankings');
+  expect(screen.getByRole('link', { name: 'AI assistant' })).toHaveAttribute('href', '/app/ai');
   await user.click(screen.getByRole('button', { name: 'Open account menu for Admin' }));
 
   expect(await screen.findByRole('menuitem', { name: 'Profile & stats' })).toBeVisible();

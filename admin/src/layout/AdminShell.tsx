@@ -15,9 +15,13 @@ import {
 import { NavLink } from 'react-router-dom';
 
 import { BrandMark } from '../ui/BrandMark';
+import { interpolate, useTranslate } from '../settings/i18n';
+import { useSystemLocale } from '../settings/SystemLocaleProvider';
 import { adminNavigation } from './adminNavigation';
 
 export function AdminShell({ children }: { children: ReactNode }) {
+  const tr = useTranslate();
+  const { siteTitle } = useSystemLocale();
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
   const shouldRestoreNavigationFocusRef = useRef(false);
@@ -36,7 +40,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-background lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
       <a className="skip-link" href="#main-content" onClick={focusMainContent}>
-        Skip to content
+        {tr('admin.shell.skip')}
       </a>
 
       <aside className="hidden h-screen w-60 flex-col border-r border-border bg-surface lg:sticky lg:top-0 lg:flex">
@@ -53,7 +57,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
         <div className="flex h-14 items-center gap-3 border-b border-border bg-surface px-4 lg:hidden">
           <Drawer isOpen={isNavigationOpen} onOpenChange={setIsNavigationOpen}>
             <Drawer.Trigger
-              aria-label="Open navigation"
+              aria-label={tr('admin.navigation.open')}
               className="inline-flex size-10 shrink-0 items-center justify-center rounded-md text-foreground hover:bg-default"
               ref={navigationTriggerRef}
             >
@@ -63,8 +67,8 @@ export function AdminShell({ children }: { children: ReactNode }) {
               <Drawer.Content className="max-w-[20rem]" placement="left">
                 <Drawer.Dialog>
                   <Drawer.Header>
-                    <Drawer.Heading>Navigation</Drawer.Heading>
-                    <Drawer.CloseTrigger aria-label="Close navigation" />
+                    <Drawer.Heading>{tr('admin.navigation.title')}</Drawer.Heading>
+                    <Drawer.CloseTrigger aria-label={tr('admin.navigation.close')} />
                   </Drawer.Header>
                   <Drawer.Body>
                     <PrimaryNavigation onNavigate={() => {
@@ -80,12 +84,12 @@ export function AdminShell({ children }: { children: ReactNode }) {
             </Drawer.Backdrop>
           </Drawer>
           <NavLink
-            aria-label="TJXY Admin home"
+            aria-label={interpolate(tr('admin.brand.home'), { title: siteTitle })}
             className="flex items-center gap-2 rounded-md text-foreground"
             to="/admin"
           >
             <BrandMark className="size-8" priority />
-            <span className="text-sm font-semibold">TJXY Admin</span>
+            <span className="text-sm font-semibold">{interpolate(tr('admin.brand.title'), { title: siteTitle })}</span>
           </NavLink>
         </div>
 
@@ -102,27 +106,30 @@ export function AdminShell({ children }: { children: ReactNode }) {
 }
 
 function Brand() {
+  const tr = useTranslate();
+  const { siteTitle } = useSystemLocale();
   return (
     <NavLink
-      aria-label="TJXY Admin home"
+      aria-label={interpolate(tr('admin.brand.home'), { title: siteTitle })}
       className="flex h-20 items-center gap-3 rounded-md px-5 text-foreground"
       to="/admin"
     >
       <BrandMark className="size-10" priority />
       <div>
-        <p className="text-base font-semibold text-foreground">TJXY Admin</p>
-        <p className="text-xs text-muted">Administrator workspace</p>
+        <p className="text-base font-semibold text-foreground">{interpolate(tr('admin.brand.title'), { title: siteTitle })}</p>
+        <p className="text-xs text-muted">{tr('admin.brand.subtitle')}</p>
       </div>
     </NavLink>
   );
 }
 
 function PrimaryNavigation({ onNavigate }: { onNavigate?: () => void }) {
+  const tr = useTranslate();
   return (
-    <nav aria-label="Primary" className="space-y-5">
+    <nav aria-label={tr('admin.navigation.primary')} className="space-y-5">
       {adminNavigation.map((group) => (
-        <div key={group.label}>
-          <p className="mb-1.5 px-2 text-xs font-semibold text-muted">{group.label}</p>
+        <div key={group.labelKey}>
+          <p className="mb-1.5 px-2 text-xs font-semibold text-muted">{tr(group.labelKey)}</p>
           <ul className="space-y-1">
             {group.items.map((item) => {
               const Icon = item.icon;
@@ -135,11 +142,12 @@ function PrimaryNavigation({ onNavigate }: { onNavigate?: () => void }) {
                         ? 'bg-accent/12 text-accent'
                         : 'text-muted hover:bg-default/70 hover:text-foreground',
                     ].join(' ')}
+                    end={item.to === '/admin'}
                     onClick={onNavigate}
                     to={item.to}
                   >
                     <Icon aria-hidden={true} size={17} />
-                    <span>{item.label}</span>
+                    <span>{tr(item.labelKey)}</span>
                   </NavLink>
                 </li>
               );
@@ -152,6 +160,7 @@ function PrimaryNavigation({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function AccountIdentity() {
+  const tr = useTranslate();
   const { identity, error, isPending } = useGetIdentity({ retry: false });
   const logout = useLogout();
   const [logoutFailed, setLogoutFailed] = useState(false);
@@ -159,8 +168,8 @@ function AccountIdentity() {
   if (isPending) {
     return (
       <div className="flex min-h-12 items-center gap-3 text-sm text-muted" role="status">
-        <Spinner aria-label="Loading administrator identity" size="sm" />
-        Loading identity
+        <Spinner aria-label={tr('admin.shell.identityLoading')} size="sm" />
+        {tr('admin.shell.identityLoading')}
       </div>
     );
   }
@@ -170,7 +179,7 @@ function AccountIdentity() {
     return (
       <div className="flex min-h-12 items-start gap-2 text-sm text-danger" role="alert">
         <TriangleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        Administrator identity unavailable
+        {tr('admin.shell.identityUnavailable')}
       </div>
     );
   }
@@ -188,7 +197,7 @@ function AccountIdentity() {
     <div className="space-y-2">
       <Dropdown>
         <Dropdown.Trigger
-          aria-label={`Open account menu for ${fullName}`}
+          aria-label={interpolate(tr('admin.shell.openAccount'), { name: fullName })}
           className="flex min-h-12 w-full items-center gap-3 rounded-md px-2 text-left hover:bg-default/70"
         >
           <Avatar aria-label="Administrator avatar" size="sm">
@@ -197,24 +206,24 @@ function AccountIdentity() {
           </Avatar>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm font-medium text-foreground">{fullName}</span>
-            <span className="block text-xs text-muted">Administrator</span>
+            <span className="block text-xs text-muted">{tr('admin.shell.administrator')}</span>
           </span>
         </Dropdown.Trigger>
         <Dropdown.Popover placement="top start">
           <Dropdown.Menu
-            aria-label="Account actions"
+            aria-label={tr('admin.shell.accountActions')}
             onAction={(key) => {
               if (key === 'sign-out') void handleLogout();
             }}
           >
-            <Dropdown.Item id="sign-out" textValue="Sign out" variant="danger">
+            <Dropdown.Item id="sign-out" textValue={tr('admin.shell.signOut')} variant="danger">
               <LogOut aria-hidden="true" className="size-4" />
-              Sign out
+              {tr('admin.shell.signOut')}
             </Dropdown.Item>
           </Dropdown.Menu>
         </Dropdown.Popover>
       </Dropdown>
-      {logoutFailed && <p className="text-xs text-danger" role="alert">Sign out failed. Try again.</p>}
+      {logoutFailed && <p className="text-xs text-danger" role="alert">{tr('admin.shell.signOutFailed')}</p>}
     </div>
   );
 }

@@ -28,6 +28,11 @@ Object.defineProperty(Element.prototype, 'getAnimations', {
   value: () => [],
 });
 
+Object.defineProperty(Element.prototype, 'scrollTo', {
+  configurable: true,
+  value: () => undefined,
+});
+
 Object.defineProperty(globalThis, 'ResizeObserver', {
   configurable: true,
   value: class ResizeObserver {

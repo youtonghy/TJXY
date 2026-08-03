@@ -60,6 +60,21 @@ it('supports a context-specific destination without changing the default item li
   expect(screen.getByRole('link', { name: /Example Movie/ })).toHaveAttribute('href', '/app/items/movie-1');
 });
 
+it('uses square artwork for audio while preserving portrait movie posters', () => {
+  const { rerender } = renderTile({ Type: 'Audio' });
+
+  expect(screen.getByRole('img', { name: 'Poster for Example Movie' }).parentElement)
+    .toHaveClass('aspect-square');
+
+  rerender(
+    <MemoryRouter>
+      <MediaTile item={{ Id: 'movie-1', Name: 'Example Movie', Type: 'Movie' }} />
+    </MemoryRouter>,
+  );
+  expect(screen.getByRole('img', { name: 'Poster for Example Movie' }).parentElement)
+    .toHaveClass('aspect-[2/3]');
+});
+
 function renderTile(overrides: Partial<MediaItem>, to?: string) {
   return render(
     <MemoryRouter>

@@ -11,6 +11,20 @@ export function validText(
     && !hasControlCharacters(value);
 }
 
+export function validMultilineText(
+  value: unknown,
+  maxLength: number,
+  allowEmpty = false,
+): value is string {
+  return typeof value === 'string'
+    && (allowEmpty || value.trim().length > 0)
+    && Array.from(value).length <= maxLength
+    && !Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return (codePoint < 0x20 && character !== '\n' && character !== '\t') || codePoint === 0x7f;
+    });
+}
+
 export function validUuid(value: unknown): value is string {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);

@@ -844,6 +844,7 @@ fn validate_resolution(resolution: &MetadataResolution) -> Result<(), MetadataPu
 
 fn item_kind(kind: MetadataItemKind) -> &'static str {
     match kind {
+        MetadataItemKind::Audio => "Audio",
         MetadataItemKind::Movie => "Movie",
         MetadataItemKind::Series => "Series",
         MetadataItemKind::Season => "Season",
@@ -853,6 +854,7 @@ fn item_kind(kind: MetadataItemKind) -> &'static str {
 
 fn parse_item_kind(kind: &str) -> Result<MetadataItemKind, MetadataPublicationError> {
     match kind {
+        "Audio" => Ok(MetadataItemKind::Audio),
         "Movie" => Ok(MetadataItemKind::Movie),
         "Series" => Ok(MetadataItemKind::Series),
         "Season" => Ok(MetadataItemKind::Season),

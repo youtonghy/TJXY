@@ -18,9 +18,12 @@ use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
     MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
     StorageAccountRepository, StorageAccountRepositoryError, StorageCredentialRepository,
-    StorageCredentialRepositoryError,
+    StorageCredentialRepositoryError, SystemSettingsRepository, SystemSettingsRepositoryError,
 };
-use tjxy_metadata::{MetadataError, MetadataProvider, ReloadableMetadataProvider, TmdbProvider};
+use tjxy_metadata::{
+    MetadataError, MetadataProvider, MusicBrainzProvider, ReloadableMetadataProvider,
+    TheAudioDbProvider, TmdbProvider,
+};
 use tjxy_storage::StorageBackend;
 use tjxy_storage_filesystem::FilesystemBackend;
 use tjxy_storage_google_drive::{
@@ -70,7 +73,7 @@ pub struct StartupOptions {
     assets_dir: PathBuf,
     lazy_wait_timeout: StdDuration,
     filesystem_backends: Vec<(Uuid, PathBuf)>,
-    filesystem_browser_roots: Vec<PathBuf>,
+    filesystem_browser_roots: Option<Vec<PathBuf>>,
     filesystem_realtime_enabled: bool,
     storage_backends: Vec<ConfiguredStorageBackend>,
     credential_cipher: Option<Arc<CredentialCipher>>,
@@ -81,6 +84,14 @@ pub struct StartupOptions {
     tmdb_provider: Arc<ReloadableMetadataProvider>,
     tmdb_environment_fallback: Option<crate::metadata_settings_admin::TmdbEnvironmentFallback>,
     tmdb_provider_factory: Arc<crate::metadata_settings_admin::TmdbProviderFactory>,
+    the_audio_db_provider: Arc<ReloadableMetadataProvider>,
+    the_audio_db_environment_fallback:
+        Option<crate::metadata_settings_admin::MusicProviderEnvironmentFallback>,
+    the_audio_db_provider_factory: Arc<crate::metadata_settings_admin::MusicProviderFactory>,
+    musicbrainz_provider: Arc<ReloadableMetadataProvider>,
+    musicbrainz_environment_fallback:
+        Option<crate::metadata_settings_admin::MusicProviderEnvironmentFallback>,
+    musicbrainz_provider_factory: Arc<crate::metadata_settings_admin::MusicProviderFactory>,
     media_refresh_interval: Option<StdDuration>,
 }
 
@@ -114,7 +125,7 @@ impl fmt::Debug for StartupOptions {
             .field("filesystem_backend_count", &self.filesystem_backends.len())
             .field(
                 "filesystem_browser_root_count",
-                &self.filesystem_browser_roots.len(),
+                &self.filesystem_browser_roots.as_ref().map_or(0, Vec::len),
             )
             .field(
                 "filesystem_realtime_enabled",
@@ -135,6 +146,8 @@ impl fmt::Debug for StartupOptions {
                 &self.tmdb_environment_fallback.is_some(),
             )
             .field("tmdb_provider_factory", &"[CONFIGURED]")
+            .field("the_audio_db_provider", &"[RELOADABLE]")
+            .field("musicbrainz_provider", &"[RELOADABLE]")
             .field("media_refresh_interval", &self.media_refresh_interval)
             .finish()
     }
@@ -153,7 +166,7 @@ impl StartupOptions {
             assets_dir: PathBuf::from("./data/assets"),
             lazy_wait_timeout: StdDuration::from_millis(2_500),
             filesystem_backends: Vec::new(),
-            filesystem_browser_roots: Vec::new(),
+            filesystem_browser_roots: None,
             filesystem_realtime_enabled: true,
             storage_backends: Vec::new(),
             credential_cipher: None,
@@ -165,6 +178,18 @@ impl StartupOptions {
             tmdb_environment_fallback: None,
             tmdb_provider_factory: Arc::new(|access_token, language| {
                 TmdbProvider::new(access_token.to_owned(), language.to_owned())
+            }),
+            the_audio_db_provider: Arc::new(ReloadableMetadataProvider::new("TheAudioDB")),
+            the_audio_db_environment_fallback: None,
+            the_audio_db_provider_factory: Arc::new(|api_key| {
+                TheAudioDbProvider::new(api_key.to_owned())
+                    .map(|provider| Arc::new(provider) as Arc<dyn MetadataProvider>)
+            }),
+            musicbrainz_provider: Arc::new(ReloadableMetadataProvider::new("MusicBrainz")),
+            musicbrainz_environment_fallback: None,
+            musicbrainz_provider_factory: Arc::new(|user_agent| {
+                MusicBrainzProvider::new(user_agent.to_owned())
+                    .map(|provider| Arc::new(provider) as Arc<dyn MetadataProvider>)
             }),
             media_refresh_interval: None,
         }
@@ -206,7 +231,7 @@ impl StartupOptions {
         I: IntoIterator<Item = P>,
         P: Into<PathBuf>,
     {
-        self.filesystem_browser_roots = roots.into_iter().map(Into::into).collect();
+        self.filesystem_browser_roots = Some(roots.into_iter().map(Into::into).collect());
         self
     }
 
@@ -304,6 +329,73 @@ impl StartupOptions {
         self
     }
 
+    #[must_use]
+    pub fn with_theaudiodb_provider(mut self, provider: Arc<ReloadableMetadataProvider>) -> Self {
+        self.the_audio_db_provider = provider;
+        self
+    }
+
+    #[must_use]
+    pub fn with_theaudiodb_environment_fallback<Provider>(mut self, provider: Arc<Provider>) -> Self
+    where
+        Provider: MetadataProvider + 'static,
+    {
+        let provider: Arc<dyn MetadataProvider> = provider;
+        self.the_audio_db_provider
+            .replace(Some(Arc::clone(&provider)));
+        self.the_audio_db_environment_fallback = Some(
+            crate::metadata_settings_admin::MusicProviderEnvironmentFallback::new(provider, None),
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn with_theaudiodb_provider_factory<Factory>(mut self, factory: Factory) -> Self
+    where
+        Factory:
+            Fn(&str) -> Result<Arc<dyn MetadataProvider>, MetadataError> + Send + Sync + 'static,
+    {
+        self.the_audio_db_provider_factory = Arc::new(factory);
+        self
+    }
+
+    #[must_use]
+    pub fn with_musicbrainz_provider(mut self, provider: Arc<ReloadableMetadataProvider>) -> Self {
+        self.musicbrainz_provider = provider;
+        self
+    }
+
+    #[must_use]
+    pub fn with_musicbrainz_environment_fallback<Provider>(
+        mut self,
+        provider: Arc<Provider>,
+        user_agent: impl Into<String>,
+    ) -> Self
+    where
+        Provider: MetadataProvider + 'static,
+    {
+        let provider: Arc<dyn MetadataProvider> = provider;
+        self.musicbrainz_provider
+            .replace(Some(Arc::clone(&provider)));
+        self.musicbrainz_environment_fallback = Some(
+            crate::metadata_settings_admin::MusicProviderEnvironmentFallback::new(
+                provider,
+                Some(user_agent.into()),
+            ),
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn with_musicbrainz_provider_factory<Factory>(mut self, factory: Factory) -> Self
+    where
+        Factory:
+            Fn(&str) -> Result<Arc<dyn MetadataProvider>, MetadataError> + Send + Sync + 'static,
+    {
+        self.musicbrainz_provider_factory = Arc::new(factory);
+        self
+    }
+
     /// Enables periodic durable media refresh submission. A zero duration disables it.
     #[must_use]
     pub fn with_media_refresh_interval(mut self, interval: StdDuration) -> Self {
@@ -321,18 +413,18 @@ impl StartupOptions {
 /// connection, migration, or authentication setup fails.
 #[allow(clippy::too_many_lines)] // Startup deliberately composes every long-lived service once.
 pub async fn initialize(options: StartupOptions) -> Result<AppState, InitializationError> {
-    let filesystem_browser = if options.filesystem_browser_roots.is_empty() {
-        None
-    } else {
-        Some(Arc::new(
-            FilesystemBrowser::from_roots(options.filesystem_browser_roots.clone()).await?,
-        ))
-    };
     let storage_admin_cipher = options.credential_cipher.clone();
     let metadata_settings_cipher = options.credential_cipher.clone();
+    let ai_settings_cipher = options.credential_cipher.clone();
     let tmdb_provider = Arc::clone(&options.tmdb_provider);
     let tmdb_environment_fallback = options.tmdb_environment_fallback.clone();
     let tmdb_provider_factory = Arc::clone(&options.tmdb_provider_factory);
+    let the_audio_db_provider = Arc::clone(&options.the_audio_db_provider);
+    let the_audio_db_environment_fallback = options.the_audio_db_environment_fallback.clone();
+    let the_audio_db_provider_factory = Arc::clone(&options.the_audio_db_provider_factory);
+    let musicbrainz_provider = Arc::clone(&options.musicbrainz_provider);
+    let musicbrainz_environment_fallback = options.musicbrainz_environment_fallback.clone();
+    let musicbrainz_provider_factory = Arc::clone(&options.musicbrainz_provider_factory);
     validate_storage_backends(&options.storage_backends)?;
     let database = Database::connect(&options.database_url).await?;
     if database.get_database_backend() == DbBackend::Sqlite {
@@ -344,11 +436,49 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .await?;
     }
     tjxy_db::Migrator::up(&database, None).await?;
+    let filesystem_browser_roots = match options.filesystem_browser_roots.clone() {
+        Some(roots) => roots,
+        None => SystemSettingsRepository::new(&database)
+            .get()
+            .await?
+            .map_or_else(Vec::new, |settings| {
+                settings
+                    .media_browser_roots()
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect()
+            }),
+    };
+    let filesystem_browser = if filesystem_browser_roots.is_empty() {
+        None
+    } else {
+        Some(Arc::new(
+            FilesystemBrowser::from_roots(filesystem_browser_roots).await?,
+        ))
+    };
     load_persisted_tmdb_settings(
         &database,
         metadata_settings_cipher.as_deref(),
         &tmdb_provider,
         tmdb_provider_factory.as_ref(),
+    )
+    .await
+    .map_err(InitializationError::MetadataSettingsValidation)?;
+    load_persisted_music_settings(
+        &database,
+        metadata_settings_cipher.as_deref(),
+        crate::metadata_settings_admin::THEAUDIODB_PROVIDER_KEY,
+        &the_audio_db_provider,
+        the_audio_db_provider_factory.as_ref(),
+    )
+    .await
+    .map_err(InitializationError::MetadataSettingsValidation)?;
+    load_persisted_music_settings(
+        &database,
+        metadata_settings_cipher.as_deref(),
+        crate::metadata_settings_admin::MUSICBRAINZ_PROVIDER_KEY,
+        &musicbrainz_provider,
+        musicbrainz_provider_factory.as_ref(),
     )
     .await
     .map_err(InitializationError::MetadataSettingsValidation)?;
@@ -426,6 +556,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     }
     let catalog = Arc::new(catalog);
     let libraries = Arc::new(LibraryService::new(database.clone()));
+    let branding_assets_dir = options.assets_dir.join("branding");
     let asset_writer =
         Arc::new(AssetWriteService::new(database.clone(), options.assets_dir.clone()).await?);
     let image_fetcher = Arc::new(ReqwestMetadataImageFetcher::new()?);
@@ -434,6 +565,14 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
         prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled)
             .await?;
     let mut metadata_providers = options.metadata_providers;
+    metadata_providers.insert(
+        0,
+        Arc::clone(&musicbrainz_provider) as Arc<dyn MetadataProvider>,
+    );
+    metadata_providers.insert(
+        0,
+        Arc::clone(&the_audio_db_provider) as Arc<dyn MetadataProvider>,
+    );
     metadata_providers.insert(0, Arc::clone(&tmdb_provider) as Arc<dyn MetadataProvider>);
     let (media, storage_runtime) = configure_storage(
         &database,
@@ -476,6 +615,12 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             tmdb_provider,
             tmdb_environment_fallback,
             tmdb_provider_factory,
+            the_audio_db_provider,
+            the_audio_db_environment_fallback,
+            the_audio_db_provider_factory,
+            musicbrainz_provider,
+            musicbrainz_environment_fallback,
+            musicbrainz_provider_factory,
         ),
     );
     let relink_admin = Arc::new(crate::relink_admin::RelinkAdminService::new(
@@ -492,6 +637,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .with_startup_wizard_completed(has_enabled_admin),
     )
     .with_auth(auth.clone())
+    .with_ai(database.clone(), ai_settings_cipher)
     .with_catalog(catalog.clone())
     .with_libraries(libraries)
     .with_assets(assets)
@@ -508,6 +654,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_import_admin(import_admin)
     .with_metadata_import(metadata_import)
     .with_metadata_settings_admin(metadata_settings_admin)
+    .with_system_settings_assets(database.clone(), branding_assets_dir)
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)
     .with_realtime_events(realtime_events)
@@ -574,6 +721,32 @@ async fn load_persisted_tmdb_settings(
         .map(Arc::new)
         .map_err(|_| MetadataSettingsValidationError::StoredStateInvalid)?;
     runtime.replace(stored.enabled().then_some(provider as Arc<_>));
+    Ok(())
+}
+
+async fn load_persisted_music_settings(
+    database: &sea_orm::DatabaseConnection,
+    cipher: Option<&CredentialCipher>,
+    provider_key: &str,
+    runtime: &ReloadableMetadataProvider,
+    provider_factory: &crate::metadata_settings_admin::MusicProviderFactory,
+) -> Result<(), MetadataSettingsValidationError> {
+    let stored = MetadataProviderSettingsRepository::new(database)
+        .get(provider_key)
+        .await
+        .map_err(|error| metadata_settings_repository_error(&error))?;
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let cipher = cipher.ok_or(MetadataSettingsValidationError::KeyringUnavailable)?;
+    let plaintext = cipher
+        .open(stored.credential_id(), stored.provider(), stored.envelope())
+        .map_err(|error| metadata_settings_cipher_error(&error))?;
+    let value = std::str::from_utf8(&plaintext)
+        .map_err(|_| MetadataSettingsValidationError::StoredStateInvalid)?;
+    let provider =
+        provider_factory(value).map_err(|_| MetadataSettingsValidationError::StoredStateInvalid)?;
+    runtime.replace(stored.enabled().then_some(provider));
     Ok(())
 }
 
@@ -846,6 +1019,8 @@ pub enum InitializationError {
     Database(#[from] DbErr),
     #[error("filesystem storage configuration query failed: {0}")]
     FilesystemConfiguration(#[from] LibraryRepositoryError),
+    #[error("system settings query failed: {0}")]
+    SystemSettings(#[from] SystemSettingsRepositoryError),
     #[error("authentication initialization failed: {0}")]
     Authentication(#[from] AuthError),
     #[error("API key validation failed")]

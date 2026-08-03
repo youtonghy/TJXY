@@ -10,6 +10,7 @@ import {
   type MediaItem,
 } from '../api/catalogApi';
 import { MediaRow } from '../ui/MediaRow';
+import { useTranslate } from '../../settings/i18n';
 
 const HOME_LIBRARY_LIMIT = 12;
 const playbackDestination = (item: MediaItem): string => `/app/play/${item.Id}`;
@@ -24,6 +25,7 @@ export function HomePage() {
   const [libraryRows, setLibraryRows] = useState<LibraryRow[]>([]);
   const [hasUnavailableLibraries, setHasUnavailableLibraries] = useState(false);
   const [loading, setLoading] = useState(true);
+  const tr = useTranslate();
 
   useEffect(() => {
     let active = true;
@@ -58,12 +60,12 @@ export function HomePage() {
   return (
     <div className="space-y-10">
       <div>
-        <p className="text-sm font-medium text-accent">Your library</p>
+        <p className="text-sm font-medium text-accent">{tr('Your library', '你的媒体库')}</p>
         <h1 className="mt-1 text-3xl font-semibold text-foreground sm:text-4xl">
-          What do you want to watch?
+          {tr('What do you want to watch?', '今天想看什么？')}
         </h1>
         <p className="mt-2 max-w-2xl text-muted">
-          Pick up where you left off or explore something new.
+          {tr('Pick up where you left off or explore something new.', '从上次离开的地方继续，或探索新的内容。')}
         </p>
       </div>
 
@@ -79,12 +81,12 @@ export function HomePage() {
             <Alert role="alert" status="warning">
               <Alert.Indicator />
               <Alert.Content>
-                <Alert.Title>Some library sections are unavailable</Alert.Title>
-                <Alert.Description>Refresh the page to try loading them again.</Alert.Description>
+                <Alert.Title>{tr('Some library sections are unavailable', '部分媒体库暂时不可用')}</Alert.Title>
+                <Alert.Description>{tr('Refresh the page to try loading them again.', '请刷新页面后重试。')}</Alert.Description>
               </Alert.Content>
             </Alert>
           )}
-          <MediaRow itemTo={playbackDestination} items={resume} title="Continue watching" />
+          <MediaRow itemTo={playbackDestination} items={resume} title={tr('Continue watching', '继续观看')} />
           {libraryRows.map(({ library, items }) => (
             <MediaRow
               items={items}

@@ -196,6 +196,32 @@ it('retains valid data after a failed poll and cleans up the timer and request',
   expect(snapshotMock).toHaveBeenCalledTimes(callsBeforeUnmount);
 });
 
+it('keeps background polling visually quiet while preserving the current snapshot', async () => {
+  vi.useFakeTimers();
+  let finishPoll: ((value: TaskSnapshot) => void) | undefined;
+  snapshotMock
+    .mockResolvedValueOnce(snapshot)
+    .mockImplementationOnce(() => new Promise((resolve) => { finishPoll = resolve; }));
+  renderTasks();
+
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const reloadButton = screen.getByRole('button', { name: 'Reload tasks' });
+  expect(reloadButton).not.toHaveAttribute('data-pending');
+
+  act(() => { vi.advanceTimersByTime(5_000); });
+  await act(async () => { await Promise.resolve(); });
+
+  expect(snapshotMock).toHaveBeenCalledTimes(2);
+  expect(reloadButton).not.toHaveAttribute('data-pending');
+  expect(screen.queryByText('Refreshing tasks...')).not.toBeInTheDocument();
+  expect(screen.getByRole('list', { name: 'Scheduled tasks' })).toHaveTextContent('Scan Media Library');
+
+  finishPoll?.(snapshot);
+});
+
 it('does not abort or restart a snapshot request that exceeds the polling interval', async () => {
   vi.useFakeTimers();
   let initialSignal: AbortSignal | undefined;

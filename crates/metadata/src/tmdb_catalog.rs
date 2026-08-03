@@ -557,7 +557,10 @@ impl TmdbCatalogClient {
     /// # Errors
     ///
     /// Returns a sanitized provider error for invalid page numbers or response data.
-    pub async fn now_playing_movie_ids(&self, page: u16) -> Result<Vec<u64>, MetadataProviderError> {
+    pub async fn now_playing_movie_ids(
+        &self,
+        page: u16,
+    ) -> Result<Vec<u64>, MetadataProviderError> {
         self.now_playing_movies(page)
             .await
             .map(|items| items.into_iter().map(|item| item.id).collect())

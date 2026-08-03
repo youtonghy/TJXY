@@ -764,7 +764,7 @@ async fn handle_source_index_outcome(
 fn source_index_error_is_terminal(error: &SourceIndexError) -> bool {
     matches!(
         error,
-        SourceIndexError::NoVideo
+        SourceIndexError::NoMedia
             | SourceIndexError::Repository(
                 SourceIndexRepositoryError::InvalidClaim
                     | SourceIndexRepositoryError::MissingSyncRevision

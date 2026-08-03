@@ -51,7 +51,11 @@ export async function apiRequest<T = undefined>(
   validatePath(path);
   const { auth = 'token', headers: suppliedHeaders, ...requestOptions } = options;
   const headers = new Headers(suppliedHeaders);
-  if (requestOptions.body !== undefined && requestOptions.body !== null) {
+  if (
+    requestOptions.body !== undefined
+    && requestOptions.body !== null
+    && !headers.has('Content-Type')
+  ) {
     headers.set('Content-Type', 'application/json');
   }
   if (auth === 'identity') {

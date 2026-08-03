@@ -83,6 +83,29 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
             .await
             .unwrap()
     );
+    assert!(
+        schema
+            .has_column("ai_models", "reasoning_effort")
+            .await
+            .unwrap()
+    );
+    assert!(schema.has_table("ai_execution_records").await.unwrap());
+    for column in [
+        "day_key",
+        "elapsed_ms",
+        "outcome",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    ] {
+        assert!(
+            schema
+                .has_column("ai_execution_records", column)
+                .await
+                .unwrap(),
+            "ai_execution_records missing {column}"
+        );
+    }
 }
 
 #[tokio::test]
