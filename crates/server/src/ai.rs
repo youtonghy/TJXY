@@ -45,12 +45,15 @@ use crate::{
         AiAdmissionConfig, AiAdmissionController, AiAdmissionError, AiAdmissionRejection,
         AiStreamPermit,
     },
+    ai_provider::{
+        AiProviderSession, AiProviderTransport, AiProviderTransportError, ProviderMethod,
+        is_public_address,
+    },
     auth,
     client_portal::ClientPortalService,
 };
 
 const MAX_MESSAGE_CHARS: usize = 16_000;
-const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_DISCOVERED_MODELS: usize = 1_000;
 const MAX_AGENT_CONTEXT_BYTES: usize = 512 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
@@ -61,32 +64,21 @@ const MAX_TOOL_CALLS_PER_ROUND: usize = 8;
 pub(crate) struct AiService {
     database: sea_orm::DatabaseConnection,
     cipher: Option<Arc<CredentialCipher>>,
-    client: reqwest::Client,
+    transport: Arc<dyn AiProviderTransport>,
     pub(crate) admission: Arc<AiAdmissionController>,
 }
 
 impl AiService {
-    pub(crate) fn new(
+    pub(crate) fn new_with_transport_config(
         database: sea_orm::DatabaseConnection,
         cipher: Option<Arc<CredentialCipher>>,
-    ) -> Self {
-        Self::new_with_config(database, cipher, AiAdmissionConfig::default())
-    }
-
-    pub(crate) fn new_with_config(
-        database: sea_orm::DatabaseConnection,
-        cipher: Option<Arc<CredentialCipher>>,
+        transport: Arc<dyn AiProviderTransport>,
         admission_config: AiAdmissionConfig,
     ) -> Self {
         Self {
             database,
             cipher,
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("AI HTTP client configuration is valid"),
+            transport,
             admission: Arc::new(AiAdmissionController::new(admission_config)),
         }
     }
@@ -190,22 +182,24 @@ impl AiService {
         let endpoint = url
             .join("chat/completions")
             .map_err(|_| AiServiceError::InvalidBaseUrl)?;
-        let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(key.as_str())
-            .json(&json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "Reply with OK."}],
-                "max_tokens": 8,
-                "stream": false
-            }))
-            .send()
+        let session = self.transport.open(&url).await?;
+        let response = session
+            .request(
+                ProviderMethod::Post,
+                endpoint,
+                key.as_str(),
+                Some(json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                    "max_tokens": 8,
+                    "stream": false
+                })),
+            )
             .await?;
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             return Err(AiServiceError::UpstreamRejected);
         }
-        let value = limited_json_response(response).await?;
+        let value = response.body;
         if value
             .get("choices")
             .and_then(serde_json::Value::as_array)
@@ -226,18 +220,15 @@ impl AiService {
         let endpoint = url
             .join("models")
             .map_err(|_| AiServiceError::InvalidBaseUrl)?;
-        let response = self
-            .client
-            .get(endpoint)
-            .bearer_auth(key.as_str())
-            .send()
+        let session = self.transport.open(&url).await?;
+        let response = session
+            .request(ProviderMethod::Get, endpoint, key.as_str(), None)
             .await?;
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             return Err(AiServiceError::UpstreamRejected);
         }
-        let envelope: ProviderModelList =
-            serde_json::from_value(limited_json_response(response).await?)
-                .map_err(|_| AiServiceError::InvalidUpstreamResponse)?;
+        let envelope: ProviderModelList = serde_json::from_value(response.body)
+            .map_err(|_| AiServiceError::InvalidUpstreamResponse)?;
         let models = envelope
             .data
             .into_iter()
@@ -667,7 +658,9 @@ fn execution_outcome(error: &AiServiceError) -> AiExecutionOutcome {
     match error {
         AiServiceError::UpstreamRejected => AiExecutionOutcome::UpstreamRejected,
         AiServiceError::InvalidUpstreamResponse => AiExecutionOutcome::UpstreamInvalid,
-        AiServiceError::Request(error) if error.is_timeout() => AiExecutionOutcome::UpstreamTimeout,
+        AiServiceError::ProviderTransport(error) if error.is_timeout() => {
+            AiExecutionOutcome::UpstreamTimeout
+        }
         AiServiceError::InvalidToolCall
         | AiServiceError::InvalidToolArguments
         | AiServiceError::InvalidToolResponse
@@ -749,10 +742,12 @@ impl AiService {
             )
             .map_err(|_| AiServiceError::InvalidCredential)?,
         );
-        let endpoint = normalize_base_url(settings.base_url())?
+        let provider_origin = normalize_base_url(settings.base_url())?;
+        let endpoint = provider_origin
             .join("chat/completions")
             .map_err(|_| AiServiceError::InvalidBaseUrl)?;
         Ok(PreparedChat {
+            provider_origin,
             endpoint,
             api_key,
             upstream_model: model.upstream_id().to_owned(),
@@ -772,9 +767,20 @@ impl AiService {
         client_portal: Option<&ClientPortalService>,
     ) -> AgentRun {
         let mut usage = UsageAccumulator::default();
+        let session = match self.transport.open(&prepared.provider_origin).await {
+            Ok(session) => session,
+            Err(error) => {
+                usage.mark_unknown();
+                return AgentRun {
+                    result: Err(error.into()),
+                    usage: usage.finish(),
+                };
+            }
+        };
         let result = self
             .run_agent_inner(
                 &prepared,
+                session.as_ref(),
                 history,
                 user_message,
                 user_id,
@@ -793,6 +799,7 @@ impl AiService {
     async fn run_agent_inner(
         &self,
         prepared: &PreparedChat,
+        session: &dyn AiProviderSession,
         history: Vec<Value>,
         user_message: &str,
         user_id: UserId,
@@ -812,7 +819,7 @@ impl AiService {
         let mut source_ids = HashSet::new();
         let mut tools_used = Vec::new();
         for _round in 0..MAX_TOOL_ROUNDS {
-            let completion = match self.complete(prepared, &messages).await {
+            let completion = match self.complete(session, prepared, &messages).await {
                 Ok(completion) => completion,
                 Err(error) => {
                     usage.mark_unknown();
@@ -881,20 +888,22 @@ impl AiService {
 
     async fn complete(
         &self,
+        session: &dyn AiProviderSession,
         prepared: &PreparedChat,
         messages: &[Value],
     ) -> Result<ProviderCompletion, AiServiceError> {
-        let response = self
-            .client
-            .post(prepared.endpoint.clone())
-            .bearer_auth(prepared.api_key.as_str())
-            .json(&completion_payload(prepared, messages))
-            .send()
+        let response = session
+            .request(
+                ProviderMethod::Post,
+                prepared.endpoint.clone(),
+                prepared.api_key.as_str(),
+                Some(completion_payload(prepared, messages)),
+            )
             .await?;
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             return Err(AiServiceError::UpstreamRejected);
         }
-        parse_completion(limited_json_response(response).await?)
+        parse_completion(response.body)
     }
 
     async fn call_tool(
@@ -1106,6 +1115,7 @@ impl AiService {
 }
 
 struct PreparedChat {
+    provider_origin: Url,
     endpoint: Url,
     api_key: Zeroizing<String>,
     upstream_model: String,
@@ -1781,23 +1791,6 @@ fn daily_retry_after_seconds(now: chrono::DateTime<Utc>) -> u64 {
         .max(1)
 }
 
-async fn limited_json_response(mut response: reqwest::Response) -> Result<Value, AiServiceError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
-    {
-        return Err(AiServiceError::InvalidUpstreamResponse);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > MAX_PROVIDER_RESPONSE_BYTES {
-            return Err(AiServiceError::InvalidUpstreamResponse);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&body).map_err(|_| AiServiceError::InvalidUpstreamResponse)
-}
-
 fn serialized_context_size(messages: &[Value]) -> Result<usize, AiServiceError> {
     messages.iter().try_fold(0usize, |total, message| {
         let bytes = serde_json::to_vec(message).map_err(|_| AiServiceError::InvalidToolResponse)?;
@@ -1839,7 +1832,7 @@ fn chat_error_response(error: &AiServiceError) -> Response {
 pub(crate) fn normalize_base_url(value: &str) -> Result<Url, AiServiceError> {
     let normalized = format!("{}/", value.trim().trim_end_matches('/'));
     let url = Url::parse(&normalized).map_err(|_| AiServiceError::InvalidBaseUrl)?;
-    if !matches!(url.scheme(), "http" | "https")
+    if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -1854,11 +1847,7 @@ pub(crate) fn normalize_base_url(value: &str) -> Result<Url, AiServiceError> {
         Host::Ipv6(address) => Some(IpAddr::V6(address)),
         Host::Domain(_) => None,
     };
-    let is_loopback = matches!(host, Host::Domain(name) if name.eq_ignore_ascii_case("localhost"))
-        || literal_ip.is_some_and(|address| address.is_loopback());
-    if (url.scheme() == "http" && !is_loopback)
-        || literal_ip.is_some_and(|address| !address.is_loopback() && is_non_public_ip(address))
-    {
+    if literal_ip.is_some_and(|address| !is_public_address(address)) {
         return Err(AiServiceError::InvalidBaseUrl);
     }
     Ok(url)
@@ -1868,34 +1857,6 @@ fn same_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
-}
-
-fn is_non_public_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let octets = address.octets();
-            address.is_private()
-                || address.is_link_local()
-                || address.is_broadcast()
-                || address.is_documentation()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || octets[0] == 0
-                || octets[0] >= 240
-                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
-                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
-        }
-        IpAddr::V6(address) => {
-            if let Some(mapped) = address.to_ipv4_mapped() {
-                return is_non_public_ip(IpAddr::V4(mapped));
-            }
-            address.is_unspecified()
-                || address.is_multicast()
-                || address.is_unique_local()
-                || address.is_unicast_link_local()
-        }
-    }
 }
 
 fn validate_api_key(value: &str) -> Result<(), AiServiceError> {
@@ -1953,12 +1914,26 @@ pub(crate) enum AiServiceError {
     Settings(#[from] AiSettingsRepositoryError),
     #[error("AI credential failed: {0}")]
     Cipher(#[from] CredentialCipherError),
-    #[error("AI provider request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    #[error("AI provider transport failed: {0}")]
+    ProviderTransport(AiProviderTransportError),
     #[error("AI database request failed: {0}")]
     Database(#[from] sea_orm::DbErr),
     #[error("AI usage analytics failed: {0}")]
     Usage(#[from] AiUsageRepositoryError),
+}
+
+impl From<AiProviderTransportError> for AiServiceError {
+    fn from(error: AiProviderTransportError) -> Self {
+        match error {
+            AiProviderTransportError::InvalidUrl
+            | AiProviderTransportError::DnsResolutionRejected(_) => Self::InvalidBaseUrl,
+            AiProviderTransportError::ResponseTooLarge
+            | AiProviderTransportError::InvalidJson(_) => Self::InvalidUpstreamResponse,
+            error @ AiProviderTransportError::ConnectionFailure { .. } => {
+                Self::ProviderTransport(error)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2011,7 +1986,7 @@ mod tests {
                 .as_str(),
             "https://example.test/v1/"
         );
-        assert!(normalize_base_url("http://127.0.0.1:11434/v1").is_ok());
+        assert!(normalize_base_url("http://127.0.0.1:11434/v1").is_err());
         assert!(normalize_base_url("https://[2606:4700:4700::1111]/v1").is_ok());
         assert!(same_origin(
             &normalize_base_url("https://example.test/v1").unwrap(),
@@ -2035,6 +2010,7 @@ mod tests {
     #[test]
     fn reasoning_effort_is_omitted_when_off_and_sent_for_supported_values() {
         let mut prepared = PreparedChat {
+            provider_origin: normalize_base_url("https://example.test/v1").unwrap(),
             endpoint: normalize_base_url("https://example.test/v1/chat/completions").unwrap(),
             api_key: Zeroizing::new("secret".to_owned()),
             upstream_model: "movie-model".to_owned(),

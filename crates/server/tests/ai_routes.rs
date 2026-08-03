@@ -3,12 +3,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use async_trait::async_trait;
 use axum::{
-    Json, Router,
     body::Body,
     http::{Method, Request, StatusCode, header},
-    response::IntoResponse,
-    routing::post,
 };
 use chrono::{Duration, Local};
 use http_body_util::BodyExt;
@@ -19,7 +17,10 @@ use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     AI_PROVIDER_KEY, AiModelInput, AiReasoningEffort, AiSettingsRepository, AiUsageRepository,
 };
-use tjxy_server::{AiAdmissionConfig, AppState, ServerIdentity, build_router};
+use tjxy_server::{
+    AiAdmissionConfig, AiProviderSession, AiProviderTransport, AiProviderTransportError, AppState,
+    ProviderMethod, ProviderResponse, ServerIdentity, build_router,
+};
 use tjxy_test_support::test_database;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -40,111 +41,48 @@ struct ConfiguredApp {
     user_tokens: Vec<String>,
     visible_model: Uuid,
     hidden_model: Uuid,
-    upstream: TestServer,
+    upstream: Arc<TestProvider>,
 }
 
-struct TestServer {
-    base_url: String,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+struct TestProvider {
     hits: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     releases: Option<Arc<tokio::sync::Semaphore>>,
     failures: Arc<AtomicUsize>,
+    always_reject: bool,
 }
 
-impl TestServer {
-    async fn start() -> Self {
+impl TestProvider {
+    async fn start() -> Arc<Self> {
         Self::start_with_behavior(false, false).await
     }
 
-    async fn blocking() -> Self {
+    async fn blocking() -> Arc<Self> {
         Self::start_with_behavior(true, false).await
     }
 
-    async fn rejecting() -> Self {
+    async fn rejecting() -> Arc<Self> {
         Self::start_with_behavior(false, true).await
     }
 
-    async fn start_with_behavior(blocking: bool, always_reject: bool) -> Self {
+    async fn start_with_behavior(blocking: bool, always_reject: bool) -> Arc<Self> {
         let hits = Arc::new(AtomicUsize::new(0));
-        let handler_hits = Arc::clone(&hits);
         let active = Arc::new(AtomicUsize::new(0));
-        let handler_active = Arc::clone(&active);
         let max_active = Arc::new(AtomicUsize::new(0));
-        let handler_max_active = Arc::clone(&max_active);
         let entered = Arc::new(tokio::sync::Notify::new());
-        let handler_entered = Arc::clone(&entered);
         let releases = blocking.then(|| Arc::new(tokio::sync::Semaphore::new(0)));
-        let handler_releases = releases.clone();
         let failures = Arc::new(AtomicUsize::new(0));
-        let handler_failures = Arc::clone(&failures);
-        let app = Router::new().route(
-            "/v1/chat/completions",
-            post(move |Json(request): Json<Value>| {
-                let hits = Arc::clone(&handler_hits);
-                let active = Arc::clone(&handler_active);
-                let max_active = Arc::clone(&handler_max_active);
-                let entered = Arc::clone(&handler_entered);
-                let releases = handler_releases.clone();
-                let failures = Arc::clone(&handler_failures);
-                async move {
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_active.fetch_max(current, Ordering::SeqCst);
-                    let _activity = UpstreamActivity(Arc::clone(&active));
-                    entered.notify_waiters();
-                    assert_eq!(request["reasoning_effort"], "high");
-                    if let Some(releases) = releases {
-                        releases.acquire().await.unwrap().forget();
-                    }
-                    let reject_once = failures
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                            remaining.checked_sub(1)
-                        })
-                        .is_ok();
-                    if always_reject || reject_once {
-                        StatusCode::BAD_GATEWAY.into_response()
-                    } else {
-                        Json(json!({
-                            "choices": [{
-                                "message": {
-                                    "role": "assistant",
-                                    "content": "Based on your library, try Arrival.",
-                                    "tool_calls": []
-                                }
-                            }],
-                            "usage": {
-                                "prompt_tokens": 120,
-                                "completion_tokens": 30,
-                                "total_tokens": 150
-                            }
-                        }))
-                        .into_response()
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (shutdown, receiver) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        Self {
-            base_url: format!("http://{address}/v1"),
-            shutdown: Some(shutdown),
+        Arc::new(Self {
             hits,
+            active,
             max_active,
             entered,
             releases,
             failures,
-        }
+            always_reject,
+        })
     }
 
     fn hits(&self) -> usize {
@@ -181,39 +119,115 @@ impl TestServer {
     }
 }
 
-struct UpstreamActivity(Arc<AtomicUsize>);
+struct TestProviderSession {
+    hits: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    releases: Option<Arc<tokio::sync::Semaphore>>,
+    failures: Arc<AtomicUsize>,
+    always_reject: bool,
+}
 
-impl Drop for UpstreamActivity {
+#[async_trait]
+impl AiProviderTransport for TestProvider {
+    async fn open(
+        &self,
+        base_url: &reqwest::Url,
+    ) -> Result<Arc<dyn AiProviderSession>, AiProviderTransportError> {
+        assert_eq!(base_url.as_str(), "https://provider.example.test/v1/");
+        Ok(Arc::new(TestProviderSession {
+            hits: Arc::clone(&self.hits),
+            active: Arc::clone(&self.active),
+            max_active: Arc::clone(&self.max_active),
+            entered: Arc::clone(&self.entered),
+            releases: self.releases.clone(),
+            failures: Arc::clone(&self.failures),
+            always_reject: self.always_reject,
+        }))
+    }
+}
+
+#[async_trait]
+impl AiProviderSession for TestProviderSession {
+    async fn request(
+        &self,
+        method: ProviderMethod,
+        endpoint: reqwest::Url,
+        api_key: &str,
+        body: Option<Value>,
+    ) -> Result<ProviderResponse, AiProviderTransportError> {
+        assert_eq!(method, ProviderMethod::Post);
+        assert_eq!(endpoint.path(), "/v1/chat/completions");
+        assert_eq!(api_key, "test-secret");
+        let request = body.expect("chat completions include a request body");
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(current, Ordering::SeqCst);
+        let _activity = ProviderActivity(Arc::clone(&self.active));
+        self.entered.notify_waiters();
+        assert_eq!(request["reasoning_effort"], "high");
+        if let Some(releases) = &self.releases {
+            releases.acquire().await.unwrap().forget();
+        }
+        let reject_once = self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        let status = if self.always_reject || reject_once {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::OK
+        };
+        let body = if status.is_success() {
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Based on your library, try Arrival.",
+                        "tool_calls": []
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "total_tokens": 150
+                }
+            })
+        } else {
+            json!({})
+        };
+        Ok(ProviderResponse { status, body })
+    }
+}
+
+struct ProviderActivity(Arc<AtomicUsize>);
+
+impl Drop for ProviderActivity {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-    }
-}
-
 async fn configured_app() -> ConfiguredApp {
-    configured_app_with(TestServer::start().await).await
+    configured_app_with(TestProvider::start().await).await
 }
 
-async fn configured_app_with(upstream: TestServer) -> ConfiguredApp {
+async fn configured_app_with(upstream: Arc<TestProvider>) -> ConfiguredApp {
     configured_app_with_config(upstream, AiAdmissionConfig::default()).await
 }
 
 async fn configured_app_with_config(
-    upstream: TestServer,
+    upstream: Arc<TestProvider>,
     admission_config: AiAdmissionConfig,
 ) -> ConfiguredApp {
     configured_app_with_user_count(upstream, admission_config, 2).await
 }
 
 async fn configured_app_with_user_count(
-    upstream: TestServer,
+    upstream: Arc<TestProvider>,
     admission_config: AiAdmissionConfig,
     user_count: usize,
 ) -> ConfiguredApp {
@@ -255,7 +269,7 @@ async fn configured_app_with_user_count(
         .put(
             &sealed,
             true,
-            &upstream.base_url,
+            "https://provider.example.test/v1",
             "Only discuss movies and television using catalog tools.",
             &[
                 AiModelInput::new(
@@ -276,7 +290,12 @@ async fn configured_app_with_user_count(
     let router = build_router(
         AppState::new(ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"))
             .with_auth(auth)
-            .with_ai_config(database.clone(), Some(cipher), admission_config)
+            .with_ai_transport_config(
+                database.clone(),
+                Some(cipher),
+                upstream.clone(),
+                admission_config,
+            )
             .with_catalog(Arc::new(CatalogQueryService::new(database.clone())))
             .with_client_portal(database.clone())
             .with_ready(true),
@@ -363,7 +382,7 @@ async fn receive_statuses(
 #[tokio::test]
 async fn admission_enforces_per_user_stream_capacity_before_provider_io() {
     let app = configured_app_with_config(
-        TestServer::blocking().await,
+        TestProvider::blocking().await,
         AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
     )
     .await;
@@ -416,7 +435,7 @@ async fn admission_enforces_per_user_stream_capacity_before_provider_io() {
 #[tokio::test]
 async fn admission_enforces_global_stream_capacity_across_distinct_users() {
     let app = configured_app_with_user_count(
-        TestServer::blocking().await,
+        TestProvider::blocking().await,
         AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
         16,
     )
@@ -463,7 +482,7 @@ async fn admission_enforces_global_stream_capacity_across_distinct_users() {
 #[tokio::test]
 async fn admission_releases_stream_permits_on_disconnect_and_provider_error() {
     let app = configured_app_with_config(
-        TestServer::blocking().await,
+        TestProvider::blocking().await,
         AiAdmissionConfig::new(10, 1, 8, 100).unwrap(),
     )
     .await;
@@ -519,7 +538,7 @@ async fn admission_releases_stream_permits_on_disconnect_and_provider_error() {
 #[tokio::test]
 async fn admission_enforces_minute_rate_with_retry_headers_before_provider_io() {
     let minute = configured_app_with_config(
-        TestServer::start().await,
+        TestProvider::start().await,
         AiAdmissionConfig::new(1, 2, 8, 100).unwrap(),
     )
     .await;
@@ -543,7 +562,7 @@ async fn admission_enforces_minute_rate_with_retry_headers_before_provider_io() 
 #[tokio::test]
 async fn admission_enforces_daily_quota_before_provider_io_or_analytics() {
     let daily = configured_app_with_config(
-        TestServer::start().await,
+        TestProvider::start().await,
         AiAdmissionConfig::new(10, 2, 8, 1).unwrap(),
     )
     .await;
@@ -803,7 +822,7 @@ async fn connection_test_requires_a_new_key_when_the_provider_origin_changes() {
 
 #[tokio::test]
 async fn upstream_rejections_are_counted_without_storing_provider_details() {
-    let app = configured_app_with(TestServer::rejecting().await).await;
+    let app = configured_app_with(TestProvider::rejecting().await).await;
     let response = app
         .router
         .clone()

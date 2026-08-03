@@ -1,10 +1,16 @@
-use std::sync::Arc;
+use std::{
+    net::SocketAddr,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
+use async_trait::async_trait;
 use axum::{
-    Json, Router,
     body::Body,
     http::{Method, Request, StatusCode, header},
-    routing::get,
 };
 use chrono::{Duration, Local, Utc};
 use http_body_util::BodyExt;
@@ -16,13 +22,59 @@ use tjxy_db::{
     AI_PROVIDER_KEY, AiExecutionInput, AiExecutionOutcome, AiModelInput, AiSettingsRepository,
     AiUsageRepository,
 };
-use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_server::{
+    AiProviderSession, AiProviderTransport, AiProviderTransportError, AppState,
+    ProviderDnsResolver, ProviderMethod, ProviderResponse, SafeReqwestTransport, ServerIdentity,
+    build_router,
+};
 use tjxy_test_support::test_database;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn state() -> AppState {
     AppState::new(ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"))
+}
+
+struct ModelProvider;
+
+struct ModelProviderSession;
+
+#[async_trait]
+impl AiProviderTransport for ModelProvider {
+    async fn open(
+        &self,
+        base_url: &reqwest::Url,
+    ) -> Result<Arc<dyn AiProviderSession>, AiProviderTransportError> {
+        assert_eq!(base_url.as_str(), "https://provider.example.test/v1/");
+        Ok(Arc::new(ModelProviderSession))
+    }
+}
+
+#[async_trait]
+impl AiProviderSession for ModelProviderSession {
+    async fn request(
+        &self,
+        method: ProviderMethod,
+        endpoint: reqwest::Url,
+        api_key: &str,
+        body: Option<Value>,
+    ) -> Result<ProviderResponse, AiProviderTransportError> {
+        assert_eq!(method, ProviderMethod::Get);
+        assert_eq!(endpoint.path(), "/v1/models");
+        assert_eq!(api_key, "test-secret");
+        assert!(body.is_none());
+        Ok(ProviderResponse {
+            status: StatusCode::OK,
+            body: json!({
+                "data": [
+                    {"id": "zeta-model"},
+                    {"id": "alpha-model"},
+                    {"id": "alpha-model"},
+                    {"id": ""}
+                ]
+            }),
+        })
+    }
 }
 
 #[tokio::test]
@@ -136,29 +188,6 @@ async fn models_fail_closed_without_encryption_and_delete_uses_a_revision_fence(
 
 #[tokio::test]
 async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
-    let provider = Router::new().route(
-        "/v1/models",
-        get(|headers: axum::http::HeaderMap| async move {
-            assert_eq!(
-                headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer test-secret")
-            );
-            Json(json!({
-                "data": [
-                    {"id": "zeta-model"},
-                    {"id": "alpha-model"},
-                    {"id": "alpha-model"},
-                    {"id": ""}
-                ]
-            }))
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let provider_task = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
-
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
@@ -175,12 +204,12 @@ async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
     let sealed = cipher
         .seal_bound(Uuid::new_v4(), AI_PROVIDER_KEY, b"test-secret")
         .unwrap();
-    let base_url = format!("http://{address}/v1");
+    let base_url = "https://provider.example.test/v1";
     AiSettingsRepository::new(&database)
         .put(
             &sealed,
             true,
-            &base_url,
+            base_url,
             "Only discuss media.",
             &[AiModelInput::new(
                 Uuid::new_v4(),
@@ -197,7 +226,7 @@ async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
     let router = build_router(
         AppState::new(ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"))
             .with_auth(auth)
-            .with_ai(database, Some(cipher)),
+            .with_ai_transport(database, Some(cipher), Arc::new(ModelProvider)),
     );
     let token = login(router.clone()).await;
     let changed_origin = router
@@ -206,7 +235,7 @@ async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
             Method::POST,
             "/Admin/Ai/Settings/Models",
             &token,
-            Some(json!({"BaseUrl": "http://127.0.0.1:9/v1"})),
+            Some(json!({"BaseUrl": "https://other.example.test/v1"})),
         ))
         .await
         .unwrap();
@@ -229,7 +258,6 @@ async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
         json_body(response).await,
         json!({"Items": [{"Id": "alpha-model"}, {"Id": "zeta-model"}]})
     );
-    provider_task.abort();
 }
 
 #[tokio::test]
@@ -356,4 +384,78 @@ fn authenticated_request(
 async fn json_body(response: axum::response::Response) -> Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+struct PublicTestResolver;
+
+#[async_trait]
+impl ProviderDnsResolver for PublicTestResolver {
+    async fn resolve(
+        &self,
+        _host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, AiProviderTransportError> {
+        Ok(vec![SocketAddr::from(([1, 1, 1, 1], port))])
+    }
+}
+
+#[tokio::test]
+async fn provider_transport_proxy_bypass_child() {
+    if std::env::var_os("TJXY_PROXY_BYPASS_CHILD").is_none() {
+        return;
+    }
+    let transport = SafeReqwestTransport::with_resolver(Arc::new(PublicTestResolver));
+    let base_url = reqwest::Url::parse("http://provider.example.test:9/v1/").unwrap();
+    let session = transport.open(&base_url).await.unwrap();
+    let endpoint = base_url.join("models").unwrap();
+    let _ = session
+        .request(ProviderMethod::Get, endpoint, "test-secret", None)
+        .await;
+}
+
+#[tokio::test]
+async fn provider_transport_ignores_proxy_environment() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let trap_hits = Arc::clone(&hits);
+    let trap = tokio::spawn(async move {
+        if let Ok(Ok((mut stream, _))) =
+            tokio::time::timeout(std::time::Duration::from_secs(7), listener.accept()).await
+        {
+            trap_hits.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .await;
+        }
+    });
+    let child = tokio::task::spawn_blocking(move || {
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("provider_transport_proxy_bypass_child")
+            .arg("--nocapture")
+            .env("TJXY_PROXY_BYPASS_CHILD", "1")
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env_remove("NO_PROXY")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    trap.abort();
+    assert!(
+        child.status.success(),
+        "child test failed: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
 }

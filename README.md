@@ -116,10 +116,13 @@ returned by the settings API.
 
 Reusing the stored key is allowed only while the provider origin is unchanged;
 changing the scheme, host, or port requires entering a new key. Provider URLs
-using non-loopback plain HTTP or private literal IP addresses are rejected.
-Loopback HTTP remains available for local development providers. DNS names still
-require deployment-level outbound allowlisting because their resolved addresses
-can change after configuration validation.
+must use HTTPS. Immediately before each provider operation, TJXY resolves the
+hostname, rejects the entire DNS answer set if any address is loopback, private,
+link-local, multicast, documentation, benchmark, reserved, or otherwise
+non-public, and pins the accepted addresses for that operation without changing
+the HTTP Host header or TLS SNI. Redirects are disabled and system proxy settings
+are ignored. Loopback and private-network providers are not supported, including
+for local development.
 
 Authenticated administrators use `GET`, `PUT`, and `DELETE /Admin/Ai/Settings`,
 `POST /Admin/Ai/Settings/Test`, and `POST /Admin/Ai/Settings/Models`. The model
@@ -135,6 +138,15 @@ kept in tab-scoped session storage and checked again after reload or reconnect.
 Conversation detail is bounded to the latest 200 messages, returned in chronological order;
 older messages remain stored but are not currently exposed through pagination.
 
+AI admission defaults to 10 new chat requests per user per minute, 2 concurrent
+SSE streams per user, 8 concurrent SSE streams server-wide, and 100 requests per
+user per UTC day. Configure these limits with
+`TJXY_AI_REQUESTS_PER_MINUTE`,
+`TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER`,
+`TJXY_AI_MAX_CONCURRENT_STREAMS`, and `TJXY_AI_DAILY_QUOTA`. Admission rejections
+return `429 Too Many Requests` with `Retry-After` in delta seconds and
+`Cache-Control: no-store`; provider I/O is not started for rejected requests.
+
 The server applies a non-overridable media-only policy and gives the Agent a
 bounded, read-only MCP-style tool registry for catalog search, media details,
 recent viewing history, aggregate preferences, favorites, resume items, and
@@ -146,8 +158,8 @@ MCP transport.
 
 Retrieval currently uses structured SQL queries over TJXY catalog and user data.
 It does not yet provide embeddings, a vector index, or semantic similarity search.
-Deployments should restrict outbound network access so the configured provider
-URL can reach only approved AI endpoints.
+Deployments should still restrict outbound network access so the configured
+provider URL can reach only approved AI endpoints as a defense-in-depth control.
 
 ## Run the management TUI
 

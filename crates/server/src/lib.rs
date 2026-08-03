@@ -3,6 +3,7 @@
 mod admin_assets;
 mod ai;
 mod ai_admission;
+mod ai_provider;
 mod ai_settings;
 mod api_key;
 mod auth;
@@ -63,6 +64,10 @@ use uuid::Uuid;
 
 pub use admin_assets::AdminAssetsError;
 pub use ai_admission::{AiAdmissionConfig, AiAdmissionConfigError};
+pub use ai_provider::{
+    AiProviderSession, AiProviderTransport, AiProviderTransportError, ProviderDnsResolver,
+    ProviderMethod, ProviderResponse, SafeReqwestTransport,
+};
 pub use configuration::{CredentialKeyringError, parse_credential_keyring};
 pub use runtime_storage::RuntimeStorageError;
 pub use startup::{
@@ -212,15 +217,42 @@ impl AppState {
 
     #[must_use]
     pub fn with_ai_config(
-        mut self,
+        self,
         database: sea_orm::DatabaseConnection,
         cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
         admission_config: AiAdmissionConfig,
     ) -> Self {
-        self.ai_encryption_available = cipher.is_some();
-        self.ai = Some(Arc::new(ai::AiService::new_with_config(
+        self.with_ai_transport_config(
             database,
             cipher,
+            Arc::new(SafeReqwestTransport::new()),
+            admission_config,
+        )
+    }
+
+    #[must_use]
+    pub fn with_ai_transport(
+        self,
+        database: sea_orm::DatabaseConnection,
+        cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
+        transport: Arc<dyn AiProviderTransport>,
+    ) -> Self {
+        self.with_ai_transport_config(database, cipher, transport, AiAdmissionConfig::default())
+    }
+
+    #[must_use]
+    pub fn with_ai_transport_config(
+        mut self,
+        database: sea_orm::DatabaseConnection,
+        cipher: Option<Arc<tjxy_credentials::CredentialCipher>>,
+        transport: Arc<dyn AiProviderTransport>,
+        admission_config: AiAdmissionConfig,
+    ) -> Self {
+        self.ai_encryption_available = cipher.is_some();
+        self.ai = Some(Arc::new(ai::AiService::new_with_transport_config(
+            database,
+            cipher,
+            transport,
             admission_config,
         )));
         self
