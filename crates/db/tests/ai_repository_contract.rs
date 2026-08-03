@@ -1,13 +1,18 @@
-use chrono::{Duration, Utc};
+use std::sync::Arc;
+
+use chrono::{Duration, NaiveDate, Utc};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+};
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     AiConversationRepository, AiExecutionInput, AiExecutionOutcome, AiModelInput,
     AiReasoningEffort, AiSettingsRepository, AiSettingsRepositoryError, AiUsageRepository,
-    AuthRepository, Migrator,
+    AiUsageRepositoryError, AuthRepository, Migrator,
 };
-use tjxy_test_support::test_database;
+use tjxy_test_support::{reconnectable_test_database, test_database};
 use uuid::Uuid;
 
 const PROVIDER: &str = "openai-compatible";
@@ -23,6 +28,22 @@ fn models() -> Vec<AiModelInput> {
             .with_reasoning_effort(AiReasoningEffort::High),
         AiModelInput::new(Uuid::new_v4(), "internal", "内部模型", false, false, 2),
     ]
+}
+
+async fn quota_database_connection(database_url: &str) -> DatabaseConnection {
+    let mut options = ConnectOptions::new(database_url);
+    options.max_connections(1).min_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    if database.get_database_backend() == DbBackend::Sqlite {
+        database
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA busy_timeout = 5000",
+            ))
+            .await
+            .unwrap();
+    }
+    database
 }
 
 #[tokio::test]
@@ -379,5 +400,142 @@ async fn ai_usage_analytics_tracks_unknown_tokens_and_rankings() {
     assert_eq!(
         analytics.recent_failures[0].outcome,
         AiExecutionOutcome::UpstreamTimeout
+    );
+}
+
+#[tokio::test]
+async fn daily_quota_counts_requests_per_user_and_utc_day() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let auth = AuthRepository::new(&database);
+    let alice = auth
+        .create_user(
+            &tjxy_common::Username::parse("alice-daily-quota").unwrap(),
+            "test-only",
+            false,
+            false,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let bob = auth
+        .create_user(
+            &tjxy_common::Username::parse("bob-daily-quota").unwrap(),
+            "test-only",
+            false,
+            false,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let repository = AiUsageRepository::new(&database);
+    let usage_day = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+
+    assert!(
+        repository
+            .try_consume_daily_quota(alice.id(), usage_day, 2)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository
+            .daily_quota_count(alice.id(), usage_day)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        repository
+            .try_consume_daily_quota(alice.id(), usage_day, 2)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository
+            .daily_quota_count(alice.id(), usage_day)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        !repository
+            .try_consume_daily_quota(alice.id(), usage_day, 2)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository
+            .daily_quota_count(alice.id(), usage_day)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let next_day = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+    assert!(
+        repository
+            .try_consume_daily_quota(alice.id(), next_day, 2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .try_consume_daily_quota(bob.id(), usage_day, 2)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        repository
+            .try_consume_daily_quota(alice.id(), usage_day, 0)
+            .await,
+        Err(AiUsageRepositoryError::InvalidInput)
+    ));
+}
+
+#[tokio::test]
+async fn daily_quota_consumption_is_atomic_across_five_connections() {
+    let fixture = reconnectable_test_database().await.unwrap();
+    let database = fixture.connection();
+    Migrator::up(database, None).await.unwrap();
+    let user = AuthRepository::new(database)
+        .create_user(
+            &tjxy_common::Username::parse("concurrent-daily-quota").unwrap(),
+            "test-only",
+            false,
+            false,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let user_id = user.id();
+    let usage_day = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+    let connections = Arc::new(vec![
+        quota_database_connection(fixture.database_url()).await,
+        quota_database_connection(fixture.database_url()).await,
+        quota_database_connection(fixture.database_url()).await,
+        quota_database_connection(fixture.database_url()).await,
+        quota_database_connection(fixture.database_url()).await,
+    ]);
+
+    let calls = (0..10).map(|index| {
+        let connections = Arc::clone(&connections);
+        tokio::spawn(async move {
+            AiUsageRepository::new(&connections[index % connections.len()])
+                .try_consume_daily_quota(user_id, usage_day, 5)
+                .await
+        })
+    });
+    let mut successful = 0;
+    for call in calls {
+        successful += usize::from(call.await.unwrap().unwrap());
+    }
+
+    assert_eq!(successful, 5);
+    assert_eq!(
+        AiUsageRepository::new(database)
+            .daily_quota_count(user_id, usage_day)
+            .await
+            .unwrap(),
+        5
     );
 }

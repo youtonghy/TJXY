@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
-    sea_query::{Alias, Expr, JoinType, Order, Query},
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, QueryResult,
+    TransactionTrait,
+    sea_query::{Alias, Expr, JoinType, OnConflict, Order, Query},
 };
 use thiserror::Error;
 use tjxy_common::UserId;
@@ -230,6 +231,54 @@ impl<'a> AiUsageRepository<'a> {
             .execute(self.database.get_database_backend().build(&statement))
             .await?;
         Ok(())
+    }
+
+    /// Atomically consumes one request from a user's daily AI quota.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiUsageRepositoryError::InvalidInput`] when `limit` is zero, or a database
+    /// error when the quota row cannot be persisted.
+    pub async fn try_consume_daily_quota(
+        &self,
+        user_id: UserId,
+        usage_day: NaiveDate,
+        limit: u32,
+    ) -> Result<bool, AiUsageRepositoryError> {
+        if limit == 0 {
+            return Err(AiUsageRepositoryError::InvalidInput);
+        }
+        let day_key = usage_day.format("%Y-%m-%d").to_string();
+        let transaction = self.database.begin().await?;
+        let result = consume_daily_quota(&transaction, user_id, &day_key, i64::from(limit)).await;
+        finish(transaction, result).await
+    }
+
+    /// Returns the number of AI requests recorded for a user on one UTC day.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the quota count cannot be read.
+    pub async fn daily_quota_count(
+        &self,
+        user_id: UserId,
+        usage_day: NaiveDate,
+    ) -> Result<u64, AiUsageRepositoryError> {
+        let day_key = usage_day.format("%Y-%m-%d").to_string();
+        let query = Query::select()
+            .expr(Expr::col(Alias::new("request_count")))
+            .from(Alias::new("ai_daily_usage"))
+            .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+            .and_where(Expr::col(Alias::new("day_key")).eq(day_key))
+            .to_owned();
+        let Some(row) = self
+            .database
+            .query_one(self.database.get_database_backend().build(&query))
+            .await?
+        else {
+            return Ok(0);
+        };
+        unsigned(row.try_get("", "request_count")?)
     }
 
     /// Aggregates a bounded local-day window for the administrator analytics view.
@@ -558,6 +607,83 @@ fn optional_i64(value: Option<u64>) -> Result<Option<i64>, AiUsageRepositoryErro
         .transpose()
 }
 
+async fn consume_daily_quota(
+    transaction: &DatabaseTransaction,
+    user_id: UserId,
+    day_key: &str,
+    limit: i64,
+) -> Result<bool, AiUsageRepositoryError> {
+    let now = Utc::now();
+    let insert = Query::insert()
+        .into_table(Alias::new("ai_daily_usage"))
+        .columns([
+            Alias::new("id"),
+            Alias::new("user_id"),
+            Alias::new("day_key"),
+            Alias::new("request_count"),
+            Alias::new("created_at"),
+            Alias::new("updated_at"),
+        ])
+        .values_panic([
+            Uuid::new_v4().into(),
+            user_id.as_uuid().into(),
+            day_key.into(),
+            0_i64.into(),
+            now.into(),
+            now.into(),
+        ])
+        .on_conflict(idempotent_insert_conflict(
+            transaction.get_database_backend(),
+        ))
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    transaction.execute(backend.build(&insert)).await?;
+
+    let update = Query::update()
+        .table(Alias::new("ai_daily_usage"))
+        .value(
+            Alias::new("request_count"),
+            Expr::col(Alias::new("request_count")).add(1_i64),
+        )
+        .value(Alias::new("updated_at"), Utc::now())
+        .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("day_key")).eq(day_key))
+        .and_where(Expr::col(Alias::new("request_count")).lt(limit))
+        .to_owned();
+    Ok(transaction
+        .execute(backend.build(&update))
+        .await?
+        .rows_affected()
+        == 1)
+}
+
+fn idempotent_insert_conflict(backend: DbBackend) -> OnConflict {
+    if backend == DbBackend::MySql {
+        OnConflict::new().update_column(Alias::new("id")).to_owned()
+    } else {
+        OnConflict::new().do_nothing().to_owned()
+    }
+}
+
+async fn finish<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, AiUsageRepositoryError>,
+) -> Result<T, AiUsageRepositoryError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await?;
+            Ok(value)
+        }
+        Err(original) => match transaction.rollback().await {
+            Ok(()) => Err(original),
+            Err(rollback) => Err(AiUsageRepositoryError::RollbackFailed {
+                original: original.to_string(),
+                rollback,
+            }),
+        },
+    }
+}
+
 fn validate_input(input: &AiExecutionInput) -> Result<(), AiUsageRepositoryError> {
     validate_day(&input.day_key)?;
     if input.model_id.is_nil()
@@ -595,4 +721,6 @@ pub enum AiUsageRepositoryError {
     MissingAggregate,
     #[error("AI usage database operation failed: {0}")]
     Database(#[from] DbErr),
+    #[error("AI usage rollback failed after {original}: {rollback}")]
+    RollbackFailed { original: String, rollback: DbErr },
 }

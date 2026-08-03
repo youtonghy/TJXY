@@ -106,6 +106,47 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
             "ai_execution_records missing {column}"
         );
     }
+    assert!(schema.has_table("ai_daily_usage").await.unwrap());
+    for column in [
+        "id",
+        "user_id",
+        "day_key",
+        "request_count",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            schema.has_column("ai_daily_usage", column).await.unwrap(),
+            "ai_daily_usage missing {column}"
+        );
+    }
+    for index in ["uq_ai_daily_usage_user_day", "ix_ai_daily_usage_user"] {
+        assert!(
+            schema.has_index("ai_daily_usage", index).await.unwrap(),
+            "ai_daily_usage missing {index}"
+        );
+    }
+    let daily_usage_definitions = unique_definitions(&database, "ai_daily_usage").await;
+    assert!(
+        daily_usage_definitions.contains("unique")
+            && daily_usage_definitions.contains("user_id")
+            && daily_usage_definitions.contains("day_key"),
+        "ai_daily_usage must uniquely identify a user-day: {daily_usage_definitions}"
+    );
+    let user_fk = foreign_keys(&database, "ai_daily_usage")
+        .await
+        .into_iter()
+        .find(|foreign_key| {
+            foreign_key.source_column == "user_id"
+                && foreign_key.target_table == "users"
+                && foreign_key.target_column == "id"
+        })
+        .unwrap_or_else(|| panic!("missing AI daily usage FK user_id -> users(id)"));
+    assert!(
+        user_fk.delete_rule.eq_ignore_ascii_case("CASCADE"),
+        "ai_daily_usage user FK must use CASCADE, got {}",
+        user_fk.delete_rule
+    );
 }
 
 #[tokio::test]
@@ -1053,7 +1094,7 @@ async fn api_key_schema_is_bounded_binary_and_restrictive() {
         DbBackend::Postgres => assert_eq!(token_digest_type, "bytea"),
         DbBackend::Sqlite => assert!(token_digest_type.to_ascii_uppercase().contains("BLOB")),
     }
-    let creator_fk = api_key_foreign_keys(&database)
+    let creator_fk = foreign_keys(&database, "api_keys")
         .await
         .into_iter()
         .find(|foreign_key| {
@@ -1399,13 +1440,16 @@ struct ApiKeyForeignKey {
     delete_rule: String,
 }
 
-async fn api_key_foreign_keys(database: &sea_orm::DatabaseConnection) -> Vec<ApiKeyForeignKey> {
+async fn foreign_keys(
+    database: &sea_orm::DatabaseConnection,
+    table: &str,
+) -> Vec<ApiKeyForeignKey> {
     let statement = match database.get_database_backend() {
         DbBackend::Sqlite => Statement::from_string(
             DbBackend::Sqlite,
-            "PRAGMA foreign_key_list('api_keys')".to_owned(),
+            format!("PRAGMA foreign_key_list('{table}')"),
         ),
-        DbBackend::Postgres => Statement::from_string(
+        DbBackend::Postgres => Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT kcu.column_name AS source_column, \
                     ccu.table_name AS target_table, \
@@ -1425,10 +1469,11 @@ async fn api_key_foreign_keys(database: &sea_orm::DatabaseConnection) -> Vec<Api
               AND ccu.constraint_schema = rc.unique_constraint_schema \
               AND ccu.constraint_name = rc.unique_constraint_name \
              WHERE tc.table_schema = current_schema() \
-               AND tc.table_name = 'api_keys'"
+               AND tc.table_name = $1"
                 .to_owned(),
+            [table.into()],
         ),
-        DbBackend::MySql => Statement::from_string(
+        DbBackend::MySql => Statement::from_sql_and_values(
             DbBackend::MySql,
             "SELECT kcu.column_name AS source_column, \
                     kcu.referenced_table_name AS target_table, \
@@ -1439,9 +1484,10 @@ async fn api_key_foreign_keys(database: &sea_orm::DatabaseConnection) -> Vec<Api
                ON rc.constraint_schema = kcu.constraint_schema \
               AND rc.constraint_name = kcu.constraint_name \
              WHERE kcu.constraint_schema = DATABASE() \
-               AND kcu.table_name = 'api_keys' \
+               AND kcu.table_name = ? \
                AND kcu.referenced_table_name IS NOT NULL"
                 .to_owned(),
+            [table.into()],
         ),
     };
 

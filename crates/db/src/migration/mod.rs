@@ -48,6 +48,7 @@ mod m20260802_000047_ai_assistant;
 mod m20260802_000048_system_media_browser_roots;
 mod m20260803_000049_ai_model_reasoning_effort;
 mod m20260803_000050_ai_usage_analytics;
+mod m20260803_000051_ai_daily_quota;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -118,6 +119,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260802_000048_system_media_browser_roots::Migration),
             Box::new(m20260803_000049_ai_model_reasoning_effort::Migration),
             Box::new(m20260803_000050_ai_usage_analytics::Migration),
+            Box::new(m20260803_000051_ai_daily_quota::Migration),
         ]
     }
 }
