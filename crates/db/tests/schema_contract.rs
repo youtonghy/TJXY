@@ -8,6 +8,7 @@ use tjxy_db::{AuthRepository, Migrator};
 use tjxy_test_support::test_database;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One contract enumerates the complete foundational schema boundary.
 async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();

@@ -65,6 +65,7 @@ struct AdminSystemSettingsDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // Each field reports one independent environment override.
 struct EnvironmentOverridesDto {
     site_title: bool,
     public_url: bool,
@@ -148,9 +149,8 @@ pub(crate) async fn put_setup(State(state): State<AppState>, body: Bytes) -> Res
         Ok(false) => {}
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-    let request = match serde_json::from_slice::<UpdateSystemLanguageRequest>(&body) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(request) = serde_json::from_slice::<UpdateSystemLanguageRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let Some(service) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -161,7 +161,7 @@ pub(crate) async fn put_setup(State(state): State<AppState>, body: Bytes) -> Res
     };
     match service.put_locale(&request.locale, revision).await {
         Ok(record) => Json(language_dto(Some(&record))).into_response(),
-        Err(error) => repository_error(error),
+        Err(error) => repository_error(&error),
     }
 }
 
@@ -176,16 +176,15 @@ pub(crate) async fn put_admin_language(
     {
         return response;
     }
-    let request = match serde_json::from_slice::<UpdateSystemLanguageRequest>(&body) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(request) = serde_json::from_slice::<UpdateSystemLanguageRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let Some(service) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match service.put_locale(&request.locale, request.revision).await {
         Ok(record) => Json(language_dto(Some(&record))).into_response(),
-        Err(error) => repository_error(error),
+        Err(error) => repository_error(&error),
     }
 }
 
@@ -200,16 +199,14 @@ pub(crate) async fn put_admin(
     {
         return response;
     }
-    let request = match serde_json::from_slice::<UpdateSystemSettingsRequest>(&body) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(request) = serde_json::from_slice::<UpdateSystemSettingsRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let Some(service) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let previous = match service.get().await {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(previous) = service.get().await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let browser_roots_overridden = environment_media_browser_roots().is_some();
     let media_browser_roots = if browser_roots_overridden {
@@ -252,7 +249,7 @@ pub(crate) async fn put_admin(
             });
             Json(admin_dto(Some(&record), restart_required)).into_response()
         }
-        Err(error) => repository_error(error),
+        Err(error) => repository_error(&error),
     }
 }
 
@@ -519,7 +516,7 @@ fn admin_dto(
     }
 }
 
-fn repository_error(error: SystemSettingsRepositoryError) -> Response {
+fn repository_error(error: &SystemSettingsRepositoryError) -> Response {
     match error {
         SystemSettingsRepositoryError::Conflict => StatusCode::CONFLICT.into_response(),
         SystemSettingsRepositoryError::InvalidLocale

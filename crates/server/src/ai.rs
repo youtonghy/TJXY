@@ -487,6 +487,7 @@ struct ChatStreamRequest {
     permit: AiStreamPermit,
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the SSE permit and all terminal analytics paths in one generator.
 fn agent_stream_response(request: ChatStreamRequest) -> Response {
     let ChatStreamRequest {
         service,

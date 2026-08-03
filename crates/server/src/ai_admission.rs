@@ -23,6 +23,11 @@ pub struct AiAdmissionConfig {
 }
 
 impl AiAdmissionConfig {
+    /// Builds validated AI admission limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any limit is zero or exceeds its supported bound.
     pub fn new(
         requests_per_minute: u32,
         max_user_concurrent_sse: usize,
@@ -326,6 +331,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // Consumes any unexpected lease so its permits release immediately.
     fn expect_rejection(
         result: Result<super::AiAdmissionLease, AiAdmissionError>,
     ) -> AiAdmissionError {

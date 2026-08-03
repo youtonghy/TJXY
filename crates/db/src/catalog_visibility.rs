@@ -70,7 +70,7 @@ pub(crate) fn projected_enabled_membership_in_library(
     if let Some(library_id) = library_id {
         query.and_where(Expr::col((library, Alias::new("id"))).eq(library_id));
     }
-    query.to_owned()
+    query.clone()
 }
 
 pub(crate) fn enabled_membership_for_item(item: &Alias) -> SelectStatement {
@@ -102,5 +102,5 @@ pub(crate) fn enabled_membership_for_item_in_library(
     if let Some(library_id) = library_id {
         query.and_where(Expr::col((library, Alias::new("id"))).eq(library_id));
     }
-    query.to_owned()
+    query.clone()
 }

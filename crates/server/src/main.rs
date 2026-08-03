@@ -98,7 +98,7 @@ async fn main() -> Result<(), StartupError> {
         .with_tmdb_provider(Arc::clone(&tmdb))
         .with_theaudiodb_provider(Arc::clone(&the_audio_db))
         .with_musicbrainz_provider(Arc::clone(&musicbrainz));
-    startup = startup.with_ai_admission_config(ai_admission_config(|name| env::var(name))?);
+    startup = startup.with_ai_admission_config(ai_admission_config(env::var)?);
     let audio_db_key = env::var("TJXY_THEAUDIODB_API_KEY").unwrap_or_else(|_| "2".to_owned());
     let musicbrainz_user_agent = env::var("TJXY_MUSICBRAINZ_USER_AGENT").unwrap_or_else(|_| {
         format!(

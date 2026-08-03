@@ -73,6 +73,7 @@ struct MediaFile {
     source: MediaSourceId,
 }
 
+#[allow(clippy::too_many_lines)] // Keeps source, location, and subtitle identity construction consistent.
 fn build_graph(
     objects: &[SourceIndexObject],
     restrict_to_stable_sources: bool,

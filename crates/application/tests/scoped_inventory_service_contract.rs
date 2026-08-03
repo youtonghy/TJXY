@@ -1385,7 +1385,7 @@ async fn automatic_discovery_does_not_publish_into_a_manual_library_sharing_the_
         .database
         .query_all(Statement::from_string(
             sql,
-            "SELECT library_id FROM library_catalog_items ORDER BY library_id".to_owned(),
+            "SELECT DISTINCT library_id FROM library_catalog_items ORDER BY library_id".to_owned(),
         ))
         .await
         .unwrap();

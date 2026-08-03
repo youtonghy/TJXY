@@ -151,7 +151,7 @@ impl fmt::Debug for StartupOptions {
             .field("musicbrainz_provider", &"[RELOADABLE]")
             .field("media_refresh_interval", &self.media_refresh_interval)
             .field("ai_admission", &self.ai_admission)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

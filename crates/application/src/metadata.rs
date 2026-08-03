@@ -323,6 +323,7 @@ impl MetadataResolveService {
     ///
     /// Returns an error without completing the job when its snapshot, object revision,
     /// NFO document, or fenced publication is invalid.
+    #[allow(clippy::too_many_lines)] // Keeps one durable metadata job's snapshot-to-publication flow together.
     pub async fn execute(
         &self,
         claimed: &ClaimedWorkJob,

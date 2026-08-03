@@ -668,7 +668,7 @@ impl<'connection> LibraryRepository<'connection> {
         if let Some(mode) = update.metadata_source_mode.as_deref() {
             statement.value(Alias::new("metadata_source_mode"), mode);
         }
-        let statement = statement.to_owned();
+        let statement = statement.clone();
         let backend = self.database.get_database_backend();
         if self
             .database

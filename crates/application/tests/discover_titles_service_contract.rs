@@ -306,6 +306,7 @@ async fn discover_titles_publishes_root_children_without_reading_a_backend() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the recursive music discovery fixture and assertions together.
 async fn discover_titles_recursively_publishes_music_files_as_audio_items() {
     let fixture = discovery_fixture("basic").await;
     let sql = fixture.database.get_database_backend();

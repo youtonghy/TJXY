@@ -170,6 +170,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
     /// # Errors
     ///
     /// Returns [`MetadataWorkError`] for invalid/stale claims, ambiguous sidecars, or SQL errors.
+    #[allow(clippy::too_many_lines)] // Keeps inventory fencing and sidecar selection in one auditable snapshot.
     pub async fn snapshot(
         &self,
         claimed: &ClaimedWorkJob,
@@ -265,7 +266,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
             return Err(MetadataWorkError::TooManyImages);
         }
         let images = select_images(
-            image_rows
+            &image_rows
                 .iter()
                 .map(sidecar_from_row)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -437,7 +438,7 @@ async fn revalidate_metadata_snapshot(
         return Err(MetadataWorkError::TooManyImages);
     }
     let images = select_images(
-        image_rows
+        &image_rows
             .iter()
             .map(sidecar_from_row)
             .collect::<Result<Vec<_>, _>>()?,
@@ -846,7 +847,7 @@ fn sidecar_from_row(
     })
 }
 
-fn select_images(candidates: Vec<MetadataSidecarCandidate>) -> Vec<MetadataImageCandidate> {
+fn select_images(candidates: &[MetadataSidecarCandidate]) -> Vec<MetadataImageCandidate> {
     let mut selected = Vec::new();
     for image_type in [ImageType::Primary, ImageType::Backdrop] {
         let mut matches = candidates

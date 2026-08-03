@@ -417,6 +417,11 @@ impl AppState {
         self.restart.clone()
     }
 
+    /// Reads the persisted listen address, if system settings are configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when persisted settings cannot be read or parsed.
     pub async fn persisted_bind_address(
         &self,
     ) -> Result<Option<SocketAddr>, tjxy_db::SystemSettingsRepositoryError> {
@@ -878,7 +883,7 @@ async fn public_system_info(State(state): State<AppState>) -> Json<PublicSystemI
     if let Some(service) = state.system_settings.as_ref()
         && let Ok(Some(settings)) = service.get().await
     {
-        info.server_name = settings.site_title().to_owned();
+        settings.site_title().clone_into(&mut info.server_name);
         if let Some(public_url) = settings.public_url() {
             info.local_address = Some(public_url.to_owned());
         }

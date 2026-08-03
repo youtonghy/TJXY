@@ -6826,6 +6826,7 @@ async fn administrator_dashboard_reports_real_catalog_playback_and_session_activ
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps personal insights and both ranking endpoints on one fixture.
 async fn client_portal_reports_personal_insights_and_discover_rankings() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;

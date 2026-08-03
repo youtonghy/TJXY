@@ -115,7 +115,7 @@ async fn concurrent_saves_have_exactly_one_revision_winner() {
     let fixture = reconnectable_test_database().await.unwrap();
     let database = fixture.connection();
     Migrator::up(database, None).await.unwrap();
-    SystemSettingsRepository::new(&database)
+    SystemSettingsRepository::new(database)
         .put(&input("Initial"), None)
         .await
         .unwrap();

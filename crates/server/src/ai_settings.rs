@@ -437,7 +437,7 @@ pub(crate) async fn analytics(
                 today,
                 starts_at,
                 ends_at,
-                now.offset().to_string(),
+                &now.offset().to_string(),
             ))
             .into_response(),
         ),
@@ -460,7 +460,7 @@ fn analytics_dto(
     today: NaiveDate,
     starts_at: DateTime<Utc>,
     ends_at: DateTime<Utc>,
-    time_zone: String,
+    time_zone: &str,
 ) -> AiAnalyticsDto {
     AiAnalyticsDto {
         window: AiAnalyticsWindowDto {
@@ -469,7 +469,7 @@ fn analytics_dto(
             ends_at,
             time_zone: format!("server-local {time_zone}"),
         },
-        summary: summary_dto(usage.summary),
+        summary: summary_dto(&usage.summary),
         daily: usage.daily.into_iter().map(daily_dto).collect(),
         users: usage.users.into_iter().map(user_dto).collect(),
         models: usage.models.into_iter().map(model_usage_dto).collect(),
@@ -477,7 +477,7 @@ fn analytics_dto(
     }
 }
 
-fn summary_dto(value: AiUsageSummary) -> AiUsageSummaryDto {
+fn summary_dto(value: &AiUsageSummary) -> AiUsageSummaryDto {
     AiUsageSummaryDto {
         total_requests: value.total_requests,
         active_users: value.active_users,

@@ -1629,6 +1629,13 @@ impl<'connection> CatalogQueryRepository<'connection> {
         query
             .from_as(Alias::new("publication_catalog_items"), pci.clone())
             .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                Alias::new("publication_item"),
+                Expr::col((Alias::new("publication_item"), Alias::new("id")))
+                    .equals((pci.clone(), Alias::new("catalog_item_id"))),
+            )
+            .join_as(
                 JoinType::LeftJoin,
                 Alias::new("user_data"),
                 ud.clone(),

@@ -81,6 +81,7 @@ pub(crate) async fn virtual_folders(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps request validation and the complete virtual-folder write together.
 pub(crate) async fn add_virtual_folder(
     State(state): State<AppState>,
     headers: HeaderMap,

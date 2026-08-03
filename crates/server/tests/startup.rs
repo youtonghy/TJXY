@@ -815,8 +815,10 @@ async fn media_browser_roots_load_from_database_unless_startup_explicitly_overri
         .unwrap();
     let database_root = TempDir::new().unwrap();
     let override_root = TempDir::new().unwrap();
-    let mut settings = SystemSettingsInput::default();
-    settings.media_browser_roots = vec![database_root.path().to_string_lossy().into_owned()];
+    let settings = SystemSettingsInput {
+        media_browser_roots: vec![database_root.path().to_string_lossy().into_owned()],
+        ..SystemSettingsInput::default()
+    };
     SystemSettingsRepository::new(database.connection())
         .put(&settings, None)
         .await
@@ -875,7 +877,10 @@ async fn media_browser_roots_load_from_database_unless_startup_explicitly_overri
         database_root.path().file_name().unwrap().to_str().unwrap()
     );
 
-    settings.media_browser_roots = vec![format!("/definitely/missing/tjxy-{}", Uuid::new_v4())];
+    let settings = SystemSettingsInput {
+        media_browser_roots: vec![format!("/definitely/missing/tjxy-{}", Uuid::new_v4())],
+        ..settings
+    };
     SystemSettingsRepository::new(database.connection())
         .put(&settings, Some(1))
         .await

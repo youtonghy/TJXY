@@ -84,12 +84,14 @@ impl MetadataImageFetcher for FixtureImageFetcher {
     }
 }
 
+type ExtraObject = (String, Vec<u8>, String);
+
 struct NfoBackend {
     object_id: StorageObjectId,
     bytes: Vec<u8>,
     get_errors: Mutex<VecDeque<BackendError>>,
     ranges: Mutex<Vec<ByteRange>>,
-    extra_objects: Mutex<HashMap<String, (String, Vec<u8>, String)>>,
+    extra_objects: Mutex<HashMap<String, ExtraObject>>,
 }
 
 #[async_trait::async_trait]

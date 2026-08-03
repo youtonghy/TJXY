@@ -28,6 +28,7 @@ const METADATA_FETCH_CONCURRENCY: usize = 8;
 const ASSET_FETCH_CONCURRENCY: usize = 12;
 const MOVIES_PER_LIST: usize = 1000;
 const PAGES_PER_LIST: u16 = 50; // 20 items per page * 50 pages = 1000
+const BATCH_SIZE: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum ContentType {
@@ -83,11 +84,6 @@ enum ImportError {
     MetadataConfiguration(#[from] MetadataError),
     #[error("TMDB catalog request failed: {0}")]
     MetadataProvider(#[from] MetadataProviderError),
-    #[error("TMDB movie {id} request failed: {source}")]
-    MovieRecord {
-        id: u64,
-        source: MetadataProviderError,
-    },
     #[error("image client configuration failed: {0}")]
     ImageFetch(#[from] MetadataImageFetchError),
     #[error("asset storage failed: {0}")]
@@ -97,6 +93,7 @@ enum ImportError {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // This one-shot importer keeps its fetch and publication progress linear.
 async fn main() -> Result<(), ImportError> {
     if env::args().len() > 1 {
         return Err(ImportError::InvalidArguments);
@@ -134,15 +131,12 @@ async fn main() -> Result<(), ImportError> {
                 TmdbList::Popular => client.popular_movie_ids(page).await,
                 TmdbList::TopRated => client.top_rated_movie_ids(page).await,
             };
-            let page_ids = match page_result {
-                Ok(ids) => ids,
-                Err(_) => {
-                    println!("  Page {}: exhausted (API limit reached)", page);
-                    break;
-                }
+            let Ok(page_ids) = page_result else {
+                println!("  Page {page}: exhausted (API limit reached)");
+                break;
             };
             if page_ids.is_empty() {
-                println!("  Page {}: empty (list exhausted)", page);
+                println!("  Page {page}: empty (list exhausted)");
                 break;
             }
             ids.extend(page_ids);
@@ -182,15 +176,12 @@ async fn main() -> Result<(), ImportError> {
                 TmdbList::Popular => client.popular_series_ids(page).await,
                 TmdbList::TopRated => client.top_rated_series_ids(page).await,
             };
-            let page_ids = match page_result {
-                Ok(ids) => ids,
-                Err(_) => {
-                    println!("  Page {}: exhausted (API limit reached)", page);
-                    break;
-                }
+            let Ok(page_ids) = page_result else {
+                println!("  Page {page}: exhausted (API limit reached)");
+                break;
             };
             if page_ids.is_empty() {
-                println!("  Page {}: empty (list exhausted)", page);
+                println!("  Page {page}: empty (list exhausted)");
                 break;
             }
             ids.extend(page_ids);
@@ -220,8 +211,6 @@ async fn main() -> Result<(), ImportError> {
     let image_fetcher = ReqwestMetadataImageFetcher::new()?;
     let asset_writer = AssetWriteService::new(database.clone(), assets_dir).await?;
 
-    const BATCH_SIZE: usize = 100;
-
     // Import movies for each list, batched to stay within the per-publication limit
     for (list, content_type, ids) in &all_ids {
         if ids.is_empty() {
@@ -247,26 +236,26 @@ async fn main() -> Result<(), ImportError> {
             println!(
                 "  Fetching batch {}/{} ({} items)...",
                 batch_idx + 1,
-                (ids.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                ids.len().div_ceil(BATCH_SIZE),
                 batch_ids.len()
             );
 
             let (batch_movies, batch_series) = match content_type {
                 ContentType::Movie => {
                     let mut batch_movies = Vec::with_capacity(batch_ids.len());
-                    for chunk in batch_ids.chunks(8) {
+                    for chunk in batch_ids.chunks(METADATA_FETCH_CONCURRENCY) {
                         let results = stream::iter(chunk.iter().copied())
                             .map(|id| {
                                 let client = &client;
                                 async move { (id, client.movie(id).await) }
                             })
-                            .buffered(8)
+                            .buffered(METADATA_FETCH_CONCURRENCY)
                             .collect::<Vec<_>>()
                             .await;
                         for (id, result) in results {
                             match result {
                                 Ok(movie) => batch_movies.push(movie),
-                                Err(_) => eprintln!("    Warning: failed to fetch movie {}", id),
+                                Err(_) => eprintln!("    Warning: failed to fetch movie {id}"),
                             }
                         }
                     }
@@ -274,19 +263,19 @@ async fn main() -> Result<(), ImportError> {
                 }
                 ContentType::Series => {
                     let mut batch_series = Vec::with_capacity(batch_ids.len());
-                    for chunk in batch_ids.chunks(8) {
+                    for chunk in batch_ids.chunks(METADATA_FETCH_CONCURRENCY) {
                         let results = stream::iter(chunk.iter().copied())
                             .map(|id| {
                                 let client = &client;
                                 async move { (id, client.series(id).await) }
                             })
-                            .buffered(8)
+                            .buffered(METADATA_FETCH_CONCURRENCY)
                             .collect::<Vec<_>>()
                             .await;
                         for (id, result) in results {
                             match result {
                                 Ok(series) => batch_series.push(series),
-                                Err(_) => eprintln!("    Warning: failed to fetch series {}", id),
+                                Err(_) => eprintln!("    Warning: failed to fetch series {id}"),
                             }
                         }
                     }
@@ -299,10 +288,10 @@ async fn main() -> Result<(), ImportError> {
                 continue;
             }
 
-            let (batch_assets, batch_warnings) = if !batch_movies.is_empty() {
-                prepare_assets(&asset_writer, &image_fetcher, &batch_movies).await?
-            } else {
+            let (batch_assets, batch_warnings) = if batch_movies.is_empty() {
                 prepare_series_assets(&asset_writer, &image_fetcher, &batch_series).await?
+            } else {
+                prepare_assets(&asset_writer, &image_fetcher, &batch_movies).await?
             };
             total_warnings += batch_warnings;
 

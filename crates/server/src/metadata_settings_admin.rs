@@ -81,6 +81,7 @@ pub(crate) struct MetadataSettingsAdminService {
 }
 
 impl MetadataSettingsAdminService {
+    #[allow(clippy::too_many_arguments)] // Constructor wires three independently reloadable provider configurations.
     pub(crate) fn new(
         database: sea_orm::DatabaseConnection,
         cipher: Option<Arc<CredentialCipher>>,
@@ -154,7 +155,7 @@ impl MetadataSettingsAdminService {
         let stored = MetadataProviderSettingsRepository::new(&self.database)
             .get(admin.key)
             .await?;
-        self.music_settings_dto(admin, stored.as_ref()).await
+        self.music_settings_dto(admin, stored.as_ref())
     }
 
     async fn put_music(
@@ -203,7 +204,7 @@ impl MetadataSettingsAdminService {
             )
             .await?;
         admin.runtime.replace(request.enabled.then_some(provider));
-        self.music_settings_dto(admin, Some(&stored)).await
+        self.music_settings_dto(admin, Some(&stored))
     }
 
     async fn delete_music(&self, provider: &str) -> Result<(), MetadataSettingsAdminError> {
@@ -273,7 +274,7 @@ impl MetadataSettingsAdminService {
         }
     }
 
-    async fn music_settings_dto(
+    fn music_settings_dto(
         &self,
         admin: &MusicProviderAdmin,
         stored: Option<&MetadataProviderSettingRecord>,

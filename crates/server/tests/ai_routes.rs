@@ -63,25 +63,25 @@ struct TestProvider {
 }
 
 impl TestProvider {
-    async fn start() -> Arc<Self> {
-        Self::start_with_behavior(false, false).await
+    fn start() -> Arc<Self> {
+        Self::start_with_behavior(false, false)
     }
 
-    async fn blocking() -> Arc<Self> {
-        Self::start_with_behavior(true, false).await
+    fn blocking() -> Arc<Self> {
+        Self::start_with_behavior(true, false)
     }
 
-    async fn rejecting() -> Arc<Self> {
-        Self::start_with_behavior(false, true).await
+    fn rejecting() -> Arc<Self> {
+        Self::start_with_behavior(false, true)
     }
 
-    async fn favorites_tool() -> Arc<Self> {
-        let mut provider = Self::start_with_behavior(false, false).await;
+    fn favorites_tool() -> Arc<Self> {
+        let mut provider = Self::start_with_behavior(false, false);
         Arc::get_mut(&mut provider).unwrap().favorites_tool = true;
         provider
     }
 
-    async fn start_with_behavior(blocking: bool, always_reject: bool) -> Arc<Self> {
+    fn start_with_behavior(blocking: bool, always_reject: bool) -> Arc<Self> {
         let hits = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
@@ -255,7 +255,7 @@ impl Drop for ProviderActivity {
 }
 
 async fn configured_app() -> ConfiguredApp {
-    configured_app_with(TestProvider::start().await).await
+    configured_app_with(TestProvider::start()).await
 }
 
 async fn configured_app_with(upstream: Arc<TestProvider>) -> ConfiguredApp {
@@ -425,7 +425,7 @@ async fn receive_statuses(
 #[tokio::test]
 async fn admission_enforces_per_user_stream_capacity_before_provider_io() {
     let app = configured_app_with_config(
-        TestProvider::blocking().await,
+        TestProvider::blocking(),
         AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
     )
     .await;
@@ -478,7 +478,7 @@ async fn admission_enforces_per_user_stream_capacity_before_provider_io() {
 #[tokio::test]
 async fn admission_enforces_global_stream_capacity_across_distinct_users() {
     let app = configured_app_with_user_count(
-        TestProvider::blocking().await,
+        TestProvider::blocking(),
         AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
         16,
     )
@@ -525,7 +525,7 @@ async fn admission_enforces_global_stream_capacity_across_distinct_users() {
 #[tokio::test]
 async fn admission_releases_stream_permits_on_disconnect_and_provider_error() {
     let app = configured_app_with_config(
-        TestProvider::blocking().await,
+        TestProvider::blocking(),
         AiAdmissionConfig::new(10, 1, 8, 100).unwrap(),
     )
     .await;
@@ -581,7 +581,7 @@ async fn admission_releases_stream_permits_on_disconnect_and_provider_error() {
 #[tokio::test]
 async fn admission_enforces_minute_rate_with_retry_headers_before_provider_io() {
     let minute = configured_app_with_config(
-        TestProvider::start().await,
+        TestProvider::start(),
         AiAdmissionConfig::new(1, 2, 8, 100).unwrap(),
     )
     .await;
@@ -605,7 +605,7 @@ async fn admission_enforces_minute_rate_with_retry_headers_before_provider_io() 
 #[tokio::test]
 async fn admission_enforces_daily_quota_before_provider_io_or_analytics() {
     let daily = configured_app_with_config(
-        TestProvider::start().await,
+        TestProvider::start(),
         AiAdmissionConfig::new(10, 2, 8, 1).unwrap(),
     )
     .await;
@@ -691,7 +691,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn favorites_tool_excludes_items_from_disabled_or_unlinked_libraries() {
-    let provider = TestProvider::favorites_tool().await;
+    let provider = TestProvider::favorites_tool();
     let app = configured_app_with(provider.clone()).await;
     let (hidden_item, library_id) = seed_favorite_item(&app, "Hidden Favorite").await;
 
@@ -759,6 +759,7 @@ fn assert_hidden_favorite_tool_round(request: &Value, hidden_item: CatalogItemId
     assert!(!tool_round.contains(&hidden_item.to_string()));
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the complete visible favorite fixture in one helper.
 async fn seed_favorite_item(app: &ConfiguredApp, name: &str) -> (CatalogItemId, Uuid) {
     let backend = app.database.get_database_backend();
     let library_id = Uuid::new_v4();
@@ -897,6 +898,7 @@ async fn conversation_and_chat_routes_require_authentication() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One end-to-end exchange asserts authorization, SSE, and persistence.
 async fn chat_rejects_hidden_models_and_persists_an_sse_exchange_for_its_owner() {
     let app = configured_app().await;
     let new_conversation_id = Uuid::new_v4();
@@ -1048,7 +1050,7 @@ async fn connection_test_requires_a_new_key_when_the_provider_origin_changes() {
 
 #[tokio::test]
 async fn upstream_rejections_are_counted_without_storing_provider_details() {
-    let app = configured_app_with(TestProvider::rejecting().await).await;
+    let app = configured_app_with(TestProvider::rejecting()).await;
     let response = app
         .router
         .clone()
