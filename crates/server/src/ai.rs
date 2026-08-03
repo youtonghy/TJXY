@@ -41,7 +41,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     AppState,
-    ai_admission::{AiAdmissionConfig, AiAdmissionController},
+    ai_admission::{
+        AiAdmissionConfig, AiAdmissionController, AiAdmissionError, AiAdmissionRejection,
+        AiStreamPermit,
+    },
     auth,
     client_portal::ClientPortalService,
 };
@@ -435,6 +438,33 @@ pub(crate) async fn chat(
     } else {
         None
     };
+    let admission = match service.admission.try_acquire(user_id) {
+        Ok(admission) => admission,
+        Err(error) => return admission_error_response(error),
+    };
+    let quota_now = Utc::now();
+    match AiUsageRepository::new(&service.database)
+        .try_consume_daily_quota(
+            user_id,
+            quota_now.date_naive(),
+            service.admission.config().daily_quota(),
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return admission_error_response(AiAdmissionError::Rejected(
+                AiAdmissionRejection::DailyQuota {
+                    retry_after_seconds: daily_retry_after_seconds(quota_now),
+                },
+            ));
+        }
+        Err(error) => {
+            eprintln!("AI daily quota check failed: {error}");
+            return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        }
+    }
+    let permit = admission.commit();
     agent_stream_response(ChatStreamRequest {
         service,
         prepared,
@@ -448,6 +478,7 @@ pub(crate) async fn chat(
         model_id: payload.model_id,
         catalog: state.catalog.clone(),
         client_portal: state.client_portal.clone(),
+        permit,
     })
 }
 
@@ -462,6 +493,7 @@ struct ChatStreamRequest {
     model_id: Uuid,
     catalog: Option<Arc<CatalogQueryService>>,
     client_portal: Option<Arc<ClientPortalService>>,
+    permit: AiStreamPermit,
 }
 
 fn agent_stream_response(request: ChatStreamRequest) -> Response {
@@ -476,11 +508,15 @@ fn agent_stream_response(request: ChatStreamRequest) -> Response {
         model_id,
         catalog,
         client_portal,
+        permit,
     } = request;
     let title = user_message.chars().take(80).collect::<String>();
     let model_display_name = prepared.model_display_name.clone();
     let upstream_model_id = prepared.upstream_model.clone();
     let stream = async_stream::stream! {
+        // The permit intentionally lives with the SSE body so completion, provider errors, and
+        // client cancellation all release both concurrency slots through normal drop semantics.
+        let _permit = permit;
         let started_at = Utc::now();
         let started = Instant::now();
         let day_key = Local::now().date_naive().to_string();
@@ -1709,6 +1745,42 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
+fn admission_error_response(error: AiAdmissionError) -> Response {
+    match error {
+        AiAdmissionError::Rejected(rejection) => {
+            let retry_after =
+                HeaderValue::from_str(&rejection.retry_after_seconds().max(1).to_string())
+                    .expect("integer retry delay is a valid header value");
+            let mut response = no_store(StatusCode::TOO_MANY_REQUESTS.into_response());
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after);
+            response
+        }
+        AiAdmissionError::Unavailable => no_store(StatusCode::SERVICE_UNAVAILABLE.into_response()),
+    }
+}
+
+fn daily_retry_after_seconds(now: chrono::DateTime<Utc>) -> u64 {
+    let Some(next_day) = now.date_naive().succ_opt() else {
+        return 1;
+    };
+    let Some(next_midnight) = next_day.and_hms_opt(0, 0, 0).map(|value| value.and_utc()) else {
+        return 1;
+    };
+    let Some(remaining_nanos) = next_midnight.signed_duration_since(now).num_nanoseconds() else {
+        return 1;
+    };
+    let Ok(remaining_nanos) = u64::try_from(remaining_nanos) else {
+        return 1;
+    };
+    remaining_nanos
+        .saturating_add(999_999_999)
+        .checked_div(1_000_000_000)
+        .unwrap_or(1)
+        .max(1)
+}
+
 async fn limited_json_response(mut response: reqwest::Response) -> Result<Value, AiServiceError> {
     if response
         .content_length()
@@ -1891,14 +1963,28 @@ pub(crate) enum AiServiceError {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, TimeZone, Utc};
     use serde_json::json;
     use tjxy_db::AiReasoningEffort;
     use zeroize::Zeroizing;
 
     use super::{
-        AiServiceError, PreparedChat, ToolName, completion_payload, normalize_base_url,
-        parse_completion, parse_tool_arguments, same_origin, server_system_prompt,
+        AiServiceError, PreparedChat, ToolName, completion_payload, daily_retry_after_seconds,
+        normalize_base_url, parse_completion, parse_tool_arguments, same_origin,
+        server_system_prompt,
     };
+
+    #[test]
+    fn daily_quota_retry_reaches_the_next_utc_midnight_exactly() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 3, 23, 58, 30).unwrap();
+        let retry_after = daily_retry_after_seconds(now);
+
+        assert_eq!(retry_after, 90);
+        assert_eq!(
+            now + Duration::seconds(i64::try_from(retry_after).unwrap()),
+            Utc.with_ymd_and_hms(2026, 8, 4, 0, 0, 0).unwrap()
+        );
+    }
 
     #[test]
     fn base_url_rejects_credentials_query_and_non_http_schemes() {

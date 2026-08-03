@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
     body::Body,
     http::{Method, Request, StatusCode, header},
+    response::IntoResponse,
     routing::post,
 };
 use chrono::{Duration, Local};
@@ -36,6 +37,7 @@ struct ConfiguredApp {
     alice_user_id: tjxy_common::UserId,
     alice_token: String,
     bob_token: String,
+    user_tokens: Vec<String>,
     visible_model: Uuid,
     hidden_model: Uuid,
     upstream: TestServer,
@@ -45,33 +47,81 @@ struct TestServer {
     base_url: String,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     hits: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    releases: Option<Arc<tokio::sync::Semaphore>>,
+    failures: Arc<AtomicUsize>,
 }
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_behavior(false, false).await
+    }
+
+    async fn blocking() -> Self {
+        Self::start_with_behavior(true, false).await
+    }
+
+    async fn rejecting() -> Self {
+        Self::start_with_behavior(false, true).await
+    }
+
+    async fn start_with_behavior(blocking: bool, always_reject: bool) -> Self {
         let hits = Arc::new(AtomicUsize::new(0));
         let handler_hits = Arc::clone(&hits);
+        let active = Arc::new(AtomicUsize::new(0));
+        let handler_active = Arc::clone(&active);
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let handler_max_active = Arc::clone(&max_active);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let handler_entered = Arc::clone(&entered);
+        let releases = blocking.then(|| Arc::new(tokio::sync::Semaphore::new(0)));
+        let handler_releases = releases.clone();
+        let failures = Arc::new(AtomicUsize::new(0));
+        let handler_failures = Arc::clone(&failures);
         let app = Router::new().route(
             "/v1/chat/completions",
             post(move |Json(request): Json<Value>| {
                 let hits = Arc::clone(&handler_hits);
+                let active = Arc::clone(&handler_active);
+                let max_active = Arc::clone(&handler_max_active);
+                let entered = Arc::clone(&handler_entered);
+                let releases = handler_releases.clone();
+                let failures = Arc::clone(&handler_failures);
                 async move {
                     hits.fetch_add(1, Ordering::SeqCst);
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    let _activity = UpstreamActivity(Arc::clone(&active));
+                    entered.notify_waiters();
                     assert_eq!(request["reasoning_effort"], "high");
-                    Json(json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": "Based on your library, try Arrival.",
-                                "tool_calls": []
+                    if let Some(releases) = releases {
+                        releases.acquire().await.unwrap().forget();
+                    }
+                    let reject_once = failures
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            remaining.checked_sub(1)
+                        })
+                        .is_ok();
+                    if always_reject || reject_once {
+                        StatusCode::BAD_GATEWAY.into_response()
+                    } else {
+                        Json(json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Based on your library, try Arrival.",
+                                    "tool_calls": []
+                                }
+                            }],
+                            "usage": {
+                                "prompt_tokens": 120,
+                                "completion_tokens": 30,
+                                "total_tokens": 150
                             }
-                        }],
-                        "usage": {
-                            "prompt_tokens": 120,
-                            "completion_tokens": 30,
-                            "total_tokens": 150
-                        }
-                    }))
+                        }))
+                        .into_response()
+                    }
                 }
             }),
         );
@@ -90,42 +140,52 @@ impl TestServer {
             base_url: format!("http://{address}/v1"),
             shutdown: Some(shutdown),
             hits,
-        }
-    }
-
-    async fn rejecting() -> Self {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let handler_hits = Arc::clone(&hits);
-        let app = Router::new().route(
-            "/v1/chat/completions",
-            post(move || {
-                let hits = Arc::clone(&handler_hits);
-                async move {
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::BAD_GATEWAY
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (shutdown, receiver) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        Self {
-            base_url: format!("http://{address}/v1"),
-            shutdown: Some(shutdown),
-            hits,
+            max_active,
+            entered,
+            releases,
+            failures,
         }
     }
 
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+
+    fn release(&self, count: usize) {
+        self.releases
+            .as_ref()
+            .expect("only blocking test servers can release completions")
+            .add_permits(count);
+    }
+
+    fn reject_next(&self) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn wait_for_hits(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let entered = self.entered.notified();
+                if self.hits() >= expected {
+                    break;
+                }
+                entered.await;
+            }
+        })
+        .await
+        .expect("upstream did not receive the expected requests");
+    }
+}
+
+struct UpstreamActivity(Arc<AtomicUsize>);
+
+impl Drop for UpstreamActivity {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -149,6 +209,15 @@ async fn configured_app_with_config(
     upstream: TestServer,
     admission_config: AiAdmissionConfig,
 ) -> ConfiguredApp {
+    configured_app_with_user_count(upstream, admission_config, 2).await
+}
+
+async fn configured_app_with_user_count(
+    upstream: TestServer,
+    admission_config: AiAdmissionConfig,
+    user_count: usize,
+) -> ConfiguredApp {
+    assert!(user_count >= 2);
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
@@ -164,6 +233,16 @@ async fn configured_app_with_config(
     auth.create_user("Bob", "ordinary password", false)
         .await
         .unwrap();
+    let mut users = vec![
+        ("Alice".to_owned(), "correct horse".to_owned()),
+        ("Bob".to_owned(), "ordinary password".to_owned()),
+    ];
+    for index in 2..user_count {
+        let username = format!("AdmissionUser{index}");
+        let password = format!("admission password {index}");
+        auth.create_user(&username, &password, false).await.unwrap();
+        users.push((username, password));
+    }
     let cipher = Arc::new(
         CredentialCipher::new(CredentialKey::new(1, [19_u8; 32]).unwrap(), Vec::new()).unwrap(),
     );
@@ -202,14 +281,19 @@ async fn configured_app_with_config(
             .with_client_portal(database.clone())
             .with_ready(true),
     );
-    let alice_token = login(router.clone(), "Alice", "correct horse").await;
-    let bob_token = login(router.clone(), "Bob", "ordinary password").await;
+    let mut user_tokens = Vec::with_capacity(users.len());
+    for (username, password) in users {
+        user_tokens.push(login(router.clone(), &username, &password).await);
+    }
+    let alice_token = user_tokens[0].clone();
+    let bob_token = user_tokens[1].clone();
     ConfiguredApp {
         router,
         database,
         alice_user_id,
         alice_token,
         bob_token,
+        user_tokens,
         visible_model,
         hidden_model,
         upstream,
@@ -243,28 +327,153 @@ fn assert_rate_limited(response: &axum::response::Response) {
     assert!(retry_after >= 1);
 }
 
+fn spawn_body_consuming_chat(
+    router: axum::Router,
+    token: String,
+    model_id: Uuid,
+    statuses: tokio::sync::mpsc::UnboundedSender<StatusCode>,
+) -> tokio::task::JoinHandle<StatusCode> {
+    tokio::spawn(async move {
+        let response = router
+            .oneshot(chat_request(&token, model_id))
+            .await
+            .unwrap();
+        let status = response.status();
+        statuses.send(status).unwrap();
+        response.into_body().collect().await.unwrap();
+        status
+    })
+}
+
+async fn receive_statuses(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<StatusCode>,
+    count: usize,
+) -> Vec<StatusCode> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut statuses = Vec::with_capacity(count);
+        while statuses.len() < count {
+            statuses.push(receiver.recv().await.unwrap());
+        }
+        statuses
+    })
+    .await
+    .expect("chat handlers did not return response headers")
+}
+
 #[tokio::test]
-async fn chat_enforces_per_user_stream_capacity_and_releases_on_disconnect() {
+async fn admission_enforces_per_user_stream_capacity_before_provider_io() {
     let app = configured_app_with_config(
-        TestServer::start().await,
+        TestServer::blocking().await,
         AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
     )
     .await;
-    let first = app
-        .router
-        .clone()
-        .oneshot(chat_request(&app.alice_token, app.visible_model))
-        .await
-        .unwrap();
-    let second = app
-        .router
-        .clone()
-        .oneshot(chat_request(&app.alice_token, app.visible_model))
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(second.status(), StatusCode::OK);
+    let (status_sender, mut status_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let tasks = (0..4)
+        .map(|_| {
+            spawn_body_consuming_chat(
+                app.router.clone(),
+                app.alice_token.clone(),
+                app.visible_model,
+                status_sender.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    drop(status_sender);
 
+    let statuses = receive_statuses(&mut status_receiver, 4).await;
+    app.upstream.wait_for_hits(2).await;
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        2
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::TOO_MANY_REQUESTS)
+            .count(),
+        2
+    );
+    assert_eq!(app.upstream.hits(), 2);
+    app.upstream.release(2);
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let day = Local::now().date_naive().to_string();
+    assert_eq!(
+        AiUsageRepository::new(&app.database)
+            .analytics(&day, &day, &day, 10)
+            .await
+            .unwrap()
+            .summary
+            .total_requests,
+        2
+    );
+}
+
+#[tokio::test]
+async fn admission_enforces_global_stream_capacity_across_distinct_users() {
+    let app = configured_app_with_user_count(
+        TestServer::blocking().await,
+        AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
+        16,
+    )
+    .await;
+    let (status_sender, mut status_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let tasks = app
+        .user_tokens
+        .iter()
+        .map(|token| {
+            spawn_body_consuming_chat(
+                app.router.clone(),
+                token.clone(),
+                app.visible_model,
+                status_sender.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    drop(status_sender);
+
+    let statuses = receive_statuses(&mut status_receiver, 16).await;
+    app.upstream.wait_for_hits(8).await;
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        8
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::TOO_MANY_REQUESTS)
+            .count(),
+        8
+    );
+    assert_eq!(app.upstream.hits(), 8);
+    assert_eq!(app.upstream.max_active(), 8);
+    app.upstream.release(8);
+    for task in tasks {
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admission_releases_stream_permits_on_disconnect_and_provider_error() {
+    let app = configured_app_with_config(
+        TestServer::blocking().await,
+        AiAdmissionConfig::new(10, 1, 8, 100).unwrap(),
+    )
+    .await;
+    let held = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_eq!(held.status(), StatusCode::OK);
     let rejected = app
         .router
         .clone()
@@ -274,7 +483,7 @@ async fn chat_enforces_per_user_stream_capacity_and_releases_on_disconnect() {
     assert_rate_limited(&rejected);
     assert_eq!(app.upstream.hits(), 0);
 
-    drop(first);
+    drop(held);
     let replacement = app
         .router
         .clone()
@@ -282,41 +491,33 @@ async fn chat_enforces_per_user_stream_capacity_and_releases_on_disconnect() {
         .await
         .unwrap();
     assert_eq!(replacement.status(), StatusCode::OK);
-    drop((second, replacement));
-}
+    drop(replacement);
 
-#[tokio::test]
-async fn chat_enforces_global_stream_capacity_across_users() {
-    let app = configured_app_with_config(
-        TestServer::start().await,
-        AiAdmissionConfig::new(10, 2, 2, 100).unwrap(),
-    )
-    .await;
-    let alice = app
+    app.upstream.reject_next();
+    let failed = app
         .router
         .clone()
         .oneshot(chat_request(&app.alice_token, app.visible_model))
         .await
         .unwrap();
-    let bob = app
-        .router
-        .clone()
-        .oneshot(chat_request(&app.bob_token, app.visible_model))
-        .await
-        .unwrap();
-    let rejected = app
+    assert_eq!(failed.status(), StatusCode::OK);
+    let failed_body = tokio::spawn(async move { failed.into_body().collect().await.unwrap() });
+    app.upstream.wait_for_hits(1).await;
+    app.upstream.release(1);
+    let body = String::from_utf8(failed_body.await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("AssistantUnavailable"));
+
+    let replacement = app
         .router
         .clone()
         .oneshot(chat_request(&app.alice_token, app.visible_model))
         .await
         .unwrap();
-    assert_rate_limited(&rejected);
-    assert_eq!(app.upstream.hits(), 0);
-    drop((alice, bob));
+    assert_eq!(replacement.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn chat_enforces_minute_and_daily_quotas_before_provider_io() {
+async fn admission_enforces_minute_rate_with_retry_headers_before_provider_io() {
     let minute = configured_app_with_config(
         TestServer::start().await,
         AiAdmissionConfig::new(1, 2, 8, 100).unwrap(),
@@ -337,7 +538,10 @@ async fn chat_enforces_minute_and_daily_quotas_before_provider_io() {
     assert_rate_limited(&rejected);
     assert_eq!(minute.upstream.hits(), 0);
     drop(accepted);
+}
 
+#[tokio::test]
+async fn admission_enforces_daily_quota_before_provider_io_or_analytics() {
     let daily = configured_app_with_config(
         TestServer::start().await,
         AiAdmissionConfig::new(10, 2, 8, 1).unwrap(),
@@ -363,6 +567,16 @@ async fn chat_enforces_minute_and_daily_quotas_before_provider_io() {
             .await
             .unwrap(),
         1
+    );
+    let day = Local::now().date_naive().to_string();
+    assert_eq!(
+        AiUsageRepository::new(&daily.database)
+            .analytics(&day, &day, &day, 10)
+            .await
+            .unwrap()
+            .summary
+            .total_requests,
+        0
     );
     drop(accepted);
 }
