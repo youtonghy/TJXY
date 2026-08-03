@@ -2,7 +2,8 @@ use std::{collections::HashSet, net::IpAddr, path::Path};
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbErr,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, SqlErr,
+    TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 use thiserror::Error;
@@ -139,53 +140,7 @@ impl<'connection> SystemSettingsRepository<'connection> {
     ///
     /// Returns a repository error when the database cannot be queried or stored values are invalid.
     pub async fn get(&self) -> Result<Option<SystemSettingsRecord>, SystemSettingsRepositoryError> {
-        let query = Query::select()
-            .columns([
-                Alias::new("locale"),
-                Alias::new("site_title"),
-                Alias::new("site_subtitle"),
-                Alias::new("logo_url"),
-                Alias::new("icon_url"),
-                Alias::new("public_url"),
-                Alias::new("listen_host"),
-                Alias::new("port"),
-                Alias::new("media_browser_roots"),
-                Alias::new("revision"),
-                Alias::new("updated_at"),
-            ])
-            .from(Alias::new("system_settings"))
-            .and_where(Expr::col(Alias::new("id")).eq(1_i32))
-            .to_owned();
-        let Some(row) = self
-            .database
-            .query_one(self.database.get_database_backend().build(&query))
-            .await?
-        else {
-            return Ok(None);
-        };
-        let port: i32 = row.try_get("", "port")?;
-        let media_browser_roots = row
-            .try_get::<Option<serde_json::Value>>("", "media_browser_roots")?
-            .map_or_else(
-                || Ok(Vec::new()),
-                |value| {
-                    serde_json::from_value(value)
-                        .map_err(|_| SystemSettingsRepositoryError::InvalidMediaBrowserRoots)
-                },
-            )?;
-        Ok(Some(SystemSettingsRecord {
-            locale: row.try_get("", "locale")?,
-            site_title: row.try_get("", "site_title")?,
-            site_subtitle: row.try_get("", "site_subtitle")?,
-            logo_url: row.try_get("", "logo_url")?,
-            icon_url: row.try_get("", "icon_url")?,
-            public_url: row.try_get("", "public_url")?,
-            listen_host: row.try_get("", "listen_host")?,
-            port: u16::try_from(port).map_err(|_| SystemSettingsRepositoryError::InvalidPort)?,
-            media_browser_roots,
-            revision: row.try_get("", "revision")?,
-            updated_at: row.try_get("", "updated_at")?,
-        }))
+        get_on(self.database).await
     }
 
     /// Updates only the interface locale while preserving the remaining settings.
@@ -198,12 +153,18 @@ impl<'connection> SystemSettingsRepository<'connection> {
         locale: &str,
         expected_revision: Option<i64>,
     ) -> Result<SystemSettingsRecord, SystemSettingsRepositoryError> {
-        let current = self.get().await?;
-        let mut input = current
-            .as_ref()
-            .map_or_else(SystemSettingsInput::default, Into::into);
-        input.locale = locale.to_owned();
-        self.put(&input, expected_revision).await
+        let transaction = self.database.begin().await?;
+        let result = async {
+            let current = get_on(&transaction).await?;
+            let mut input = current
+                .as_ref()
+                .map_or_else(SystemSettingsInput::default, Into::into);
+            input.locale = locale.to_owned();
+            let input = validate(&input)?;
+            put_on(&transaction, &input, expected_revision).await
+        }
+        .await;
+        finish(transaction, result).await
     }
 
     /// Validates and persists the complete system settings document.
@@ -217,91 +178,190 @@ impl<'connection> SystemSettingsRepository<'connection> {
         expected_revision: Option<i64>,
     ) -> Result<SystemSettingsRecord, SystemSettingsRepositoryError> {
         let input = validate(input)?;
-        if expected_revision.is_some_and(|value| value <= 0) {
-            return Err(SystemSettingsRepositoryError::InvalidRevision);
+        let transaction = self.database.begin().await?;
+        let result = put_on(&transaction, &input, expected_revision).await;
+        finish(transaction, result).await
+    }
+}
+
+async fn put_on(
+    transaction: &DatabaseTransaction,
+    input: &SystemSettingsInput,
+    expected_revision: Option<i64>,
+) -> Result<SystemSettingsRecord, SystemSettingsRepositoryError> {
+    let now = Utc::now();
+    let backend = transaction.get_database_backend();
+    match expected_revision {
+        None => {
+            let statement = Query::insert()
+                .into_table(Alias::new("system_settings"))
+                .columns([
+                    Alias::new("id"),
+                    Alias::new("locale"),
+                    Alias::new("site_title"),
+                    Alias::new("site_subtitle"),
+                    Alias::new("logo_url"),
+                    Alias::new("icon_url"),
+                    Alias::new("public_url"),
+                    Alias::new("listen_host"),
+                    Alias::new("port"),
+                    Alias::new("media_browser_roots"),
+                    Alias::new("revision"),
+                    Alias::new("created_at"),
+                    Alias::new("updated_at"),
+                ])
+                .values_panic([
+                    1_i32.into(),
+                    input.locale.clone().into(),
+                    input.site_title.clone().into(),
+                    input.site_subtitle.clone().into(),
+                    input.logo_url.clone().into(),
+                    input.icon_url.clone().into(),
+                    input.public_url.clone().into(),
+                    input.listen_host.clone().into(),
+                    i32::from(input.port).into(),
+                    media_browser_roots_json(input).into(),
+                    1_i64.into(),
+                    now.into(),
+                    now.into(),
+                ])
+                .to_owned();
+            if let Err(error) = transaction.execute(backend.build(&statement)).await {
+                if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
+                    return Err(SystemSettingsRepositoryError::Conflict);
+                }
+                return Err(error.into());
+            }
         }
-        let current = self.get().await?;
-        if current.as_ref().map(SystemSettingsRecord::revision) != expected_revision
-            && current.is_some()
-        {
-            return Err(SystemSettingsRepositoryError::Conflict);
-        }
-        let now = Utc::now();
-        let revision = current.as_ref().map_or(1, |value| value.revision + 1);
-        let statement = Query::insert()
-            .into_table(Alias::new("system_settings"))
-            .columns([
-                Alias::new("id"),
-                Alias::new("locale"),
-                Alias::new("site_title"),
-                Alias::new("site_subtitle"),
-                Alias::new("logo_url"),
-                Alias::new("icon_url"),
-                Alias::new("public_url"),
-                Alias::new("listen_host"),
-                Alias::new("port"),
-                Alias::new("media_browser_roots"),
-                Alias::new("revision"),
-                Alias::new("created_at"),
-                Alias::new("updated_at"),
-            ])
-            .values_panic([
-                1_i32.into(),
-                input.locale.clone().into(),
-                input.site_title.clone().into(),
-                input.site_subtitle.clone().into(),
-                input.logo_url.clone().into(),
-                input.icon_url.clone().into(),
-                input.public_url.clone().into(),
-                input.listen_host.clone().into(),
-                i32::from(input.port).into(),
-                serde_json::Value::Array(
-                    input
-                        .media_browser_roots
-                        .iter()
-                        .cloned()
-                        .map(serde_json::Value::String)
-                        .collect(),
-                )
-                .into(),
-                revision.into(),
-                now.into(),
-                now.into(),
-            ])
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::column(Alias::new("id"))
-                    .update_columns([
-                        Alias::new("locale"),
-                        Alias::new("site_title"),
+        Some(expected) => {
+            if expected <= 0 {
+                return Err(SystemSettingsRepositoryError::InvalidRevision);
+            }
+            let revision = expected
+                .checked_add(1)
+                .ok_or(SystemSettingsRepositoryError::InvalidRevision)?;
+            let statement = Query::update()
+                .table(Alias::new("system_settings"))
+                .values([
+                    (Alias::new("locale"), input.locale.clone().into()),
+                    (Alias::new("site_title"), input.site_title.clone().into()),
+                    (
                         Alias::new("site_subtitle"),
-                        Alias::new("logo_url"),
-                        Alias::new("icon_url"),
-                        Alias::new("public_url"),
-                        Alias::new("listen_host"),
-                        Alias::new("port"),
+                        input.site_subtitle.clone().into(),
+                    ),
+                    (Alias::new("logo_url"), input.logo_url.clone().into()),
+                    (Alias::new("icon_url"), input.icon_url.clone().into()),
+                    (Alias::new("public_url"), input.public_url.clone().into()),
+                    (Alias::new("listen_host"), input.listen_host.clone().into()),
+                    (Alias::new("port"), i32::from(input.port).into()),
+                    (
                         Alias::new("media_browser_roots"),
-                        Alias::new("revision"),
-                        Alias::new("updated_at"),
-                    ])
-                    .to_owned(),
-            )
-            .to_owned();
-        self.database
-            .execute(self.database.get_database_backend().build(&statement))
-            .await?;
-        Ok(SystemSettingsRecord {
-            locale: input.locale,
-            site_title: input.site_title,
-            site_subtitle: input.site_subtitle,
-            logo_url: input.logo_url,
-            icon_url: input.icon_url,
-            public_url: input.public_url,
-            listen_host: input.listen_host,
-            port: input.port,
-            media_browser_roots: input.media_browser_roots,
-            revision,
-            updated_at: now,
-        })
+                        media_browser_roots_json(input).into(),
+                    ),
+                    (Alias::new("revision"), revision.into()),
+                    (Alias::new("updated_at"), now.into()),
+                ])
+                .and_where(Expr::col(Alias::new("id")).eq(1_i32))
+                .and_where(Expr::col(Alias::new("revision")).eq(expected))
+                .to_owned();
+            if transaction
+                .execute(backend.build(&statement))
+                .await?
+                .rows_affected()
+                != 1
+            {
+                return Err(SystemSettingsRepositoryError::Conflict);
+            }
+        }
+    }
+    get_on(transaction)
+        .await?
+        .ok_or(SystemSettingsRepositoryError::MissingPersistedSettings)
+}
+
+async fn get_on(
+    connection: &impl ConnectionTrait,
+) -> Result<Option<SystemSettingsRecord>, SystemSettingsRepositoryError> {
+    let query = Query::select()
+        .columns([
+            Alias::new("locale"),
+            Alias::new("site_title"),
+            Alias::new("site_subtitle"),
+            Alias::new("logo_url"),
+            Alias::new("icon_url"),
+            Alias::new("public_url"),
+            Alias::new("listen_host"),
+            Alias::new("port"),
+            Alias::new("media_browser_roots"),
+            Alias::new("revision"),
+            Alias::new("updated_at"),
+        ])
+        .from(Alias::new("system_settings"))
+        .and_where(Expr::col(Alias::new("id")).eq(1_i32))
+        .to_owned();
+    connection
+        .query_one(connection.get_database_backend().build(&query))
+        .await?
+        .as_ref()
+        .map(settings_from_row)
+        .transpose()
+}
+
+fn settings_from_row(
+    row: &QueryResult,
+) -> Result<SystemSettingsRecord, SystemSettingsRepositoryError> {
+    let port: i32 = row.try_get("", "port")?;
+    let media_browser_roots = row
+        .try_get::<Option<serde_json::Value>>("", "media_browser_roots")?
+        .map_or_else(
+            || Ok(Vec::new()),
+            |value| {
+                serde_json::from_value(value)
+                    .map_err(|_| SystemSettingsRepositoryError::InvalidMediaBrowserRoots)
+            },
+        )?;
+    Ok(SystemSettingsRecord {
+        locale: row.try_get("", "locale")?,
+        site_title: row.try_get("", "site_title")?,
+        site_subtitle: row.try_get("", "site_subtitle")?,
+        logo_url: row.try_get("", "logo_url")?,
+        icon_url: row.try_get("", "icon_url")?,
+        public_url: row.try_get("", "public_url")?,
+        listen_host: row.try_get("", "listen_host")?,
+        port: u16::try_from(port).map_err(|_| SystemSettingsRepositoryError::InvalidPort)?,
+        media_browser_roots,
+        revision: row.try_get("", "revision")?,
+        updated_at: row.try_get("", "updated_at")?,
+    })
+}
+
+fn media_browser_roots_json(input: &SystemSettingsInput) -> serde_json::Value {
+    serde_json::Value::Array(
+        input
+            .media_browser_roots
+            .iter()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect(),
+    )
+}
+
+async fn finish<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, SystemSettingsRepositoryError>,
+) -> Result<T, SystemSettingsRepositoryError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await?;
+            Ok(value)
+        }
+        Err(original) => match transaction.rollback().await {
+            Ok(()) => Err(original),
+            Err(rollback) => Err(SystemSettingsRepositoryError::RollbackFailed {
+                original: original.to_string(),
+                rollback,
+            }),
+        },
     }
 }
 
@@ -405,8 +465,12 @@ pub enum SystemSettingsRepositoryError {
     InvalidRevision,
     #[error("system settings revision conflict")]
     Conflict,
+    #[error("persisted system settings disappeared during the transaction")]
+    MissingPersistedSettings,
     #[error(transparent)]
     Database(#[from] DbErr),
+    #[error("system settings rollback failed after {original}: {rollback}")]
+    RollbackFailed { original: String, rollback: DbErr },
 }
 
 #[cfg(test)]
