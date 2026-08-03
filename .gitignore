@@ -1,13 +1,16 @@
 /target/
+/node_modules/
 *.db
 *.db-shm
 *.db-wal
 .env
+/.claude/settings.local.json
 /admin/node_modules/
 /admin/dist/
 /admin/test-results/
 /admin/playwright-report/
 /admin/output/
+/.playwright-cli/
 /.worktrees/
 /.superpowers/
 __pycache__/

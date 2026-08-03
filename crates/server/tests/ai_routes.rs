@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use axum::{
     Json, Router,
@@ -15,7 +18,7 @@ use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     AI_PROVIDER_KEY, AiModelInput, AiReasoningEffort, AiSettingsRepository, AiUsageRepository,
 };
-use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_server::{AiAdmissionConfig, AppState, ServerIdentity, build_router};
 use tjxy_test_support::test_database;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -30,6 +33,7 @@ fn state() -> AppState {
 struct ConfiguredApp {
     router: axum::Router,
     database: sea_orm::DatabaseConnection,
+    alice_user_id: tjxy_common::UserId,
     alice_token: String,
     bob_token: String,
     visible_model: Uuid,
@@ -40,28 +44,35 @@ struct ConfiguredApp {
 struct TestServer {
     base_url: String,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    hits: Arc<AtomicUsize>,
 }
 
 impl TestServer {
     async fn start() -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let handler_hits = Arc::clone(&hits);
         let app = Router::new().route(
             "/v1/chat/completions",
-            post(|Json(request): Json<Value>| async move {
-                assert_eq!(request["reasoning_effort"], "high");
-                Json(json!({
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": "Based on your library, try Arrival.",
-                            "tool_calls": []
+            post(move |Json(request): Json<Value>| {
+                let hits = Arc::clone(&handler_hits);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request["reasoning_effort"], "high");
+                    Json(json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "Based on your library, try Arrival.",
+                                "tool_calls": []
+                            }
+                        }],
+                        "usage": {
+                            "prompt_tokens": 120,
+                            "completion_tokens": 30,
+                            "total_tokens": 150
                         }
-                    }],
-                    "usage": {
-                        "prompt_tokens": 120,
-                        "completion_tokens": 30,
-                        "total_tokens": 150
-                    }
-                }))
+                    }))
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -78,13 +89,22 @@ impl TestServer {
         Self {
             base_url: format!("http://{address}/v1"),
             shutdown: Some(shutdown),
+            hits,
         }
     }
 
     async fn rejecting() -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let handler_hits = Arc::clone(&hits);
         let app = Router::new().route(
             "/v1/chat/completions",
-            post(|| async { StatusCode::BAD_GATEWAY }),
+            post(move || {
+                let hits = Arc::clone(&handler_hits);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::BAD_GATEWAY
+                }
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -100,7 +120,12 @@ impl TestServer {
         Self {
             base_url: format!("http://{address}/v1"),
             shutdown: Some(shutdown),
+            hits,
         }
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
     }
 }
 
@@ -117,6 +142,13 @@ async fn configured_app() -> ConfiguredApp {
 }
 
 async fn configured_app_with(upstream: TestServer) -> ConfiguredApp {
+    configured_app_with_config(upstream, AiAdmissionConfig::default()).await
+}
+
+async fn configured_app_with_config(
+    upstream: TestServer,
+    admission_config: AiAdmissionConfig,
+) -> ConfiguredApp {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
@@ -124,9 +156,11 @@ async fn configured_app_with(upstream: TestServer) -> ConfiguredApp {
             .await
             .unwrap(),
     );
-    auth.create_user("Alice", "correct horse", true)
+    let alice_user_id = auth
+        .create_user("Alice", "correct horse", true)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     auth.create_user("Bob", "ordinary password", false)
         .await
         .unwrap();
@@ -163,7 +197,7 @@ async fn configured_app_with(upstream: TestServer) -> ConfiguredApp {
     let router = build_router(
         AppState::new(ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"))
             .with_auth(auth)
-            .with_ai(database.clone(), Some(cipher))
+            .with_ai_config(database.clone(), Some(cipher), admission_config)
             .with_catalog(Arc::new(CatalogQueryService::new(database.clone())))
             .with_client_portal(database.clone())
             .with_ready(true),
@@ -173,12 +207,164 @@ async fn configured_app_with(upstream: TestServer) -> ConfiguredApp {
     ConfiguredApp {
         router,
         database,
+        alice_user_id,
         alice_token,
         bob_token,
         visible_model,
         hidden_model,
         upstream,
     }
+}
+
+fn chat_request(token: &str, model_id: Uuid) -> Request<Body> {
+    authenticated_request(
+        Method::POST,
+        "/Ai/Chat",
+        token,
+        Some(json!({
+            "NewConversationId": Uuid::new_v4(),
+            "ModelId": model_id,
+            "Message": "Recommend a film"
+        })),
+    )
+}
+
+fn assert_rate_limited(response: &axum::response::Response) {
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    let retry_after = response.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(retry_after >= 1);
+}
+
+#[tokio::test]
+async fn chat_enforces_per_user_stream_capacity_and_releases_on_disconnect() {
+    let app = configured_app_with_config(
+        TestServer::start().await,
+        AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
+    )
+    .await;
+    let first = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    let second = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let rejected = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&rejected);
+    assert_eq!(app.upstream.hits(), 0);
+
+    drop(first);
+    let replacement = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), StatusCode::OK);
+    drop((second, replacement));
+}
+
+#[tokio::test]
+async fn chat_enforces_global_stream_capacity_across_users() {
+    let app = configured_app_with_config(
+        TestServer::start().await,
+        AiAdmissionConfig::new(10, 2, 2, 100).unwrap(),
+    )
+    .await;
+    let alice = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    let bob = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.bob_token, app.visible_model))
+        .await
+        .unwrap();
+    let rejected = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&rejected);
+    assert_eq!(app.upstream.hits(), 0);
+    drop((alice, bob));
+}
+
+#[tokio::test]
+async fn chat_enforces_minute_and_daily_quotas_before_provider_io() {
+    let minute = configured_app_with_config(
+        TestServer::start().await,
+        AiAdmissionConfig::new(1, 2, 8, 100).unwrap(),
+    )
+    .await;
+    let accepted = minute
+        .router
+        .clone()
+        .oneshot(chat_request(&minute.alice_token, minute.visible_model))
+        .await
+        .unwrap();
+    let rejected = minute
+        .router
+        .clone()
+        .oneshot(chat_request(&minute.alice_token, minute.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&rejected);
+    assert_eq!(minute.upstream.hits(), 0);
+    drop(accepted);
+
+    let daily = configured_app_with_config(
+        TestServer::start().await,
+        AiAdmissionConfig::new(10, 2, 8, 1).unwrap(),
+    )
+    .await;
+    let accepted = daily
+        .router
+        .clone()
+        .oneshot(chat_request(&daily.alice_token, daily.visible_model))
+        .await
+        .unwrap();
+    let rejected = daily
+        .router
+        .clone()
+        .oneshot(chat_request(&daily.alice_token, daily.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&rejected);
+    assert_eq!(daily.upstream.hits(), 0);
+    assert_eq!(
+        AiUsageRepository::new(&daily.database)
+            .daily_quota_count(daily.alice_user_id, chrono::Utc::now().date_naive())
+            .await
+            .unwrap(),
+        1
+    );
+    drop(accepted);
 }
 
 async fn login(router: axum::Router, username: &str, password: &str) -> String {
