@@ -804,6 +804,26 @@ impl CatalogQueryService {
         }
     }
 
+    /// Returns visible same-type recommendations for one source item and principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError::ForbiddenUser`] for user impersonation or propagates a
+    /// catalog query failure.
+    pub async fn similar_items(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        item_id: CatalogItemId,
+        limit: u64,
+    ) -> Result<Option<Vec<CatalogItemRecord>>, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
+        CatalogQueryRepository::new(&self.database)
+            .similar_items(principal, item_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn read_item_with_lazy(
         &self,
         repository: &CatalogQueryRepository<'_>,

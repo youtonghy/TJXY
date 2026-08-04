@@ -98,6 +98,11 @@ export async function getPopular(limit = 12): Promise<MediaItem[]> {
   }));
 }
 export async function getItem(id: string): Promise<MediaItem> { return clientRequest<MediaItem>(`/Items/${encodeURIComponent(id)}`); }
+export async function getSimilarItems(id: string, limit = 4): Promise<MediaItem[]> {
+  const value = await clientRequest<ItemPage>(`/Items/${encodeURIComponent(id)}/Similar?limit=${String(limit)}`);
+  if (!Array.isArray(value.Items)) throw new Error('invalid similar items response');
+  return value.Items;
+}
 export async function getChildren(parentId: string): Promise<MediaItem[]> { return (await getItems({ parentId, limit: 200 })).Items; }
 export async function searchHints(term: string): Promise<SearchHint[]> { const value = await clientRequest<{ SearchHints?: unknown }>(`/Search/Hints?searchTerm=${encodeURIComponent(term)}&limit=24`); return Array.isArray(value.SearchHints) ? value.SearchHints.filter(isRecord).map((item) => item as unknown as SearchHint) : []; }
 export async function toggleFavorite(userId: string, itemId: string, favorite: boolean): Promise<void> { await clientRequest(`/Users/${userId}/FavoriteItems/${itemId}`, { method: favorite ? 'POST' : 'DELETE' }); }

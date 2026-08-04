@@ -1,4 +1,4 @@
-import { getItems, getLatest, getLibraryFilterFacets, getPopular, getResumeItems, latestTypesForLibrary, searchHints } from './catalogApi';
+import { getItems, getLatest, getLibraryFilterFacets, getPopular, getResumeItems, getSimilarItems, latestTypesForLibrary, searchHints } from './catalogApi';
 
 const client = vi.hoisted(() => ({ clientRequest: vi.fn() }));
 vi.mock('./clientApi', () => client);
@@ -58,4 +58,23 @@ it('hydrates popular summaries with full catalog records for poster metadata', a
 
 it('requests audio items for a music library', () => {
   expect(latestTypesForLibrary({ Id: 'music', Name: 'Music', CollectionType: 'music' })).toBe('Audio');
+});
+
+it('requests a bounded standard page of similar items', async () => {
+  client.clientRequest.mockResolvedValueOnce({
+    Items: [{ Id: 'movie-2', Name: 'Similar Movie', Type: 'Movie' }],
+    StartIndex: 0,
+    TotalRecordCount: 1,
+  });
+
+  await expect(getSimilarItems('movie / 1', 4)).resolves.toEqual([
+    { Id: 'movie-2', Name: 'Similar Movie', Type: 'Movie' },
+  ]);
+  expect(client.clientRequest).toHaveBeenCalledWith('/Items/movie%20%2F%201/Similar?limit=4');
+});
+
+it('rejects a malformed similar-item response instead of treating it as empty', async () => {
+  client.clientRequest.mockResolvedValueOnce({ StartIndex: 0, TotalRecordCount: 0 });
+
+  await expect(getSimilarItems('movie-1')).rejects.toThrow('invalid similar items response');
 });

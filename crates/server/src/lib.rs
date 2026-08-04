@@ -526,6 +526,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/UserItems/Resume", get(browse::resume_items))
         .route("/Shows/NextUp", get(browse::next_up_items))
         .route("/Items", get(browse::items))
+        .route("/Items/{item_id}/Similar", get(browse::similar_items))
         .route("/Items/{item_id}", get(browse::item_detail))
         .route(
             "/Items/{item_id}/PlaybackInfo",

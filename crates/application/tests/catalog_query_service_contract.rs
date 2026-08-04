@@ -516,12 +516,16 @@ async fn requested_user_must_match_the_authenticated_principal() {
     let detail = service
         .item_detail(principal, Some(other), CatalogItemId::new())
         .await;
+    let similar = service
+        .similar_items(principal, Some(other), CatalogItemId::new(), 4)
+        .await;
 
     assert!(matches!(views, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(items, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(latest, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(next_up, Err(CatalogServiceError::ForbiddenUser)));
     assert!(matches!(detail, Err(CatalogServiceError::ForbiddenUser)));
+    assert!(matches!(similar, Err(CatalogServiceError::ForbiddenUser)));
 }
 
 #[tokio::test]

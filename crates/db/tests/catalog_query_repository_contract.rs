@@ -20,9 +20,13 @@ async fn database() -> DatabaseConnection {
 }
 
 async fn seed_user(database: &DatabaseConnection) -> UserId {
+    seed_named_user(database, "alice").await
+}
+
+async fn seed_named_user(database: &DatabaseConnection, username: &str) -> UserId {
     AuthRepository::new(database)
         .create_user(
-            &Username::parse("alice").unwrap(),
+            &Username::parse(username).unwrap(),
             "$argon2id$test",
             true,
             false,
@@ -87,7 +91,27 @@ async fn seed_item(
     is_present: bool,
     classification_state: &str,
 ) -> CatalogItemId {
-    let id = CatalogItemId::new();
+    seed_item_with_id(
+        database,
+        CatalogItemId::new(),
+        name,
+        item_type,
+        parent_id,
+        is_present,
+        classification_state,
+    )
+    .await
+}
+
+async fn seed_item_with_id(
+    database: &DatabaseConnection,
+    id: CatalogItemId,
+    name: &str,
+    item_type: &str,
+    parent_id: Option<Uuid>,
+    is_present: bool,
+    classification_state: &str,
+) -> CatalogItemId {
     let backend = database.get_database_backend();
     database
         .execute(
@@ -158,6 +182,223 @@ async fn add_to_library(database: &DatabaseConnection, library_id: Uuid, item_id
         .unwrap();
 }
 
+async fn add_shared_genre(database: &DatabaseConnection, name: &str, item_ids: &[CatalogItemId]) {
+    let genre_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("genres"))
+                    .columns([Alias::new("id"), Alias::new("name")])
+                    .values_panic([genre_id.into(), name.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for item_id in item_ids {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("item_genres"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("genre_id"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            genre_id.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn add_shared_person(
+    database: &DatabaseConnection,
+    name: &str,
+    role: &str,
+    item_ids: &[CatalogItemId],
+) {
+    let credits = item_ids
+        .iter()
+        .map(|item_id| (*item_id, role, "Crew"))
+        .collect::<Vec<_>>();
+    add_person_credits(database, name, &credits).await;
+}
+
+async fn add_person_credits(
+    database: &DatabaseConnection,
+    name: &str,
+    credits: &[(CatalogItemId, &str, &str)],
+) {
+    let person_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("people"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                    ])
+                    .values_panic([person_id.into(), name.into(), name.to_lowercase().into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for (sort_order, (item_id, role, credit_type)) in credits.iter().enumerate() {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("item_people"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("person_id"),
+                            Alias::new("role"),
+                            Alias::new("sort_order"),
+                            Alias::new("credit_type"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            person_id.into(),
+                            (*role).into(),
+                            i32::try_from(sort_order).unwrap().into(),
+                            (*credit_type).into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn add_shared_named_feature(
+    database: &DatabaseConnection,
+    entity_table: &str,
+    link_table: &str,
+    foreign_key: &str,
+    name: &str,
+    item_ids: &[CatalogItemId],
+) {
+    let entity_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new(entity_table))
+                    .columns([Alias::new("id"), Alias::new("name")])
+                    .values_panic([entity_id.into(), name.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for item_id in item_ids {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new(link_table))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new(foreign_key),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            entity_id.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn add_shared_coded_feature(
+    database: &DatabaseConnection,
+    entity_table: &str,
+    link_table: &str,
+    foreign_key: &str,
+    code: &str,
+    name: &str,
+    item_ids: &[CatalogItemId],
+) {
+    let entity_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new(entity_table))
+                    .columns([Alias::new("id"), Alias::new("code"), Alias::new("name")])
+                    .values_panic([entity_id.into(), code.into(), name.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for (sort_order, item_id) in item_ids.iter().enumerate() {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new(link_table))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new(foreign_key),
+                            Alias::new("sort_order"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            entity_id.into(),
+                            i32::try_from(sort_order).unwrap().into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn set_similarity_fields(
+    database: &DatabaseConnection,
+    item_id: CatalogItemId,
+    original_language: &str,
+    production_year: i32,
+    community_rating: f64,
+) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .values([
+                        (Alias::new("original_language"), original_language.into()),
+                        (Alias::new("production_year"), production_year.into()),
+                        (Alias::new("community_rating"), community_rating.into()),
+                    ])
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
 async fn canonical_visibility(database: &DatabaseConnection, item_id: CatalogItemId) -> bool {
     let item = Alias::new("visibility_item");
     let query = Query::select()
@@ -221,6 +462,483 @@ async fn canonical_visibility_requires_enabled_current_library_membership() {
         .await
         .unwrap();
     assert!(!canonical_visibility(&database, item).await);
+}
+
+#[tokio::test]
+async fn similar_items_rank_shared_people_and_genres_without_weak_fallbacks() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let source = seed_item(&database, "Source", "Movie", None, true, "Matched").await;
+    let genre_match = seed_item(&database, "Genre match", "Movie", None, true, "Matched").await;
+    let director_match =
+        seed_item(&database, "Director match", "Movie", None, true, "Matched").await;
+    let weak_match = seed_item(&database, "Weak match", "Movie", None, true, "Matched").await;
+    for item in [source, genre_match, director_match, weak_match] {
+        add_to_library(&database, library, item).await;
+    }
+    add_shared_genre(&database, "Drama", &[source, genre_match, director_match]).await;
+    add_shared_person(
+        &database,
+        "Shared Director",
+        "Director",
+        &[source, director_match],
+    )
+    .await;
+    add_shared_coded_feature(
+        &database,
+        "languages",
+        "item_languages",
+        "language_id",
+        "fr",
+        "French",
+        &[source, weak_match],
+    )
+    .await;
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 4)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        recommendations
+            .iter()
+            .map(tjxy_db::CatalogItemRecord::name)
+            .collect::<Vec<_>>(),
+        ["Director match", "Genre match"]
+    );
+}
+
+#[tokio::test]
+async fn similar_items_prioritize_strong_matches_before_bounding_the_shortlist() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let source = seed_item_with_id(
+        &database,
+        CatalogItemId::from_uuid(Uuid::from_u128(1)),
+        "Source",
+        "Movie",
+        None,
+        true,
+        "Matched",
+    )
+    .await;
+    let strong = seed_item_with_id(
+        &database,
+        CatalogItemId::from_uuid(Uuid::from_u128(u128::MAX)),
+        "Strong",
+        "Movie",
+        None,
+        true,
+        "Matched",
+    )
+    .await;
+    let mut weak = Vec::with_capacity(256);
+    for value in 2..=257_u128 {
+        weak.push(
+            seed_item_with_id(
+                &database,
+                CatalogItemId::from_uuid(Uuid::from_u128(value)),
+                &format!("Weak {value}"),
+                "Movie",
+                None,
+                true,
+                "Matched",
+            )
+            .await,
+        );
+    }
+    for item in std::iter::once(source)
+        .chain(weak.iter().copied())
+        .chain(std::iter::once(strong))
+    {
+        add_to_library(&database, library, item).await;
+    }
+    let all_items = std::iter::once(source)
+        .chain(weak.iter().copied())
+        .chain(std::iter::once(strong))
+        .collect::<Vec<_>>();
+    add_shared_genre(&database, "Drama", &all_items).await;
+    add_shared_genre(&database, "Mystery", &[source, strong]).await;
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 3)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(recommendations[0].id(), strong);
+    assert_eq!(recommendations[1].id(), weak[0]);
+    assert_eq!(recommendations[2].id(), weak[1]);
+}
+
+#[tokio::test]
+async fn similar_items_count_exact_creator_credits_without_actor_role_false_positives() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let source = seed_item(&database, "Source", "Movie", None, true, "Matched").await;
+    let multi_creator = seed_item(&database, "Multi creator", "Movie", None, true, "Matched").await;
+    let single_creator =
+        seed_item(&database, "Single creator", "Movie", None, true, "Matched").await;
+    let actor = seed_item(&database, "Actor", "Movie", None, true, "Matched").await;
+    for item in [source, multi_creator, single_creator, actor] {
+        add_to_library(&database, library, item).await;
+    }
+    add_shared_genre(
+        &database,
+        "Drama",
+        &[source, multi_creator, single_creator, actor],
+    )
+    .await;
+    add_person_credits(
+        &database,
+        "Shared multi creator",
+        &[
+            (source, "Director", "Director"),
+            (source, "Writer", "Writer"),
+            (multi_creator, "Director", "Director"),
+            (multi_creator, "Writer", "Writer"),
+        ],
+    )
+    .await;
+    add_person_credits(
+        &database,
+        "Shared single creator",
+        &[
+            (source, "Director", "Director"),
+            (single_creator, "Director", "Director"),
+        ],
+    )
+    .await;
+    add_person_credits(
+        &database,
+        "Shared actor",
+        &[(source, "Writer", "Actor"), (actor, "Writer", "Actor")],
+    )
+    .await;
+    let backend = database.get_database_backend();
+    for (item, rating) in [
+        (multi_creator, 1.0_f64),
+        (single_creator, 9.0_f64),
+        (actor, 10.0_f64),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("community_rating"), rating)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 3)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(recommendations[0].id(), multi_creator);
+    assert_eq!(recommendations[1].id(), single_creator);
+    assert_eq!(recommendations[2].id(), actor);
+}
+
+#[tokio::test]
+async fn similar_items_prefer_unplayed_favorites_and_exclude_watched_or_wrong_type_titles() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let other_user_id = seed_named_user(&database, "bob").await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let hidden_library = seed_library(&database, "Hidden", "movies", false).await;
+    let source = seed_item(&database, "Source", "Movie", None, true, "Matched").await;
+    let plain = seed_item(&database, "Plain", "Movie", None, true, "Matched").await;
+    let favorite = seed_item(&database, "Favorite", "Movie", None, true, "Matched").await;
+    let watched = seed_item(&database, "Watched", "Movie", None, true, "Matched").await;
+    let series = seed_item(&database, "Series", "Series", None, true, "Matched").await;
+    let season = seed_item(&database, "Season", "Season", None, true, "Matched").await;
+    let episode = seed_item(&database, "Episode", "Episode", None, true, "Matched").await;
+    let hidden = seed_item(&database, "Hidden", "Movie", None, true, "Matched").await;
+    for item in [source, plain, favorite, watched, series, season, episode] {
+        add_to_library(&database, library, item).await;
+    }
+    add_to_library(&database, hidden_library, hidden).await;
+    add_shared_genre(
+        &database,
+        "Drama",
+        &[
+            source, plain, favorite, watched, series, season, episode, hidden,
+        ],
+    )
+    .await;
+    let backend = database.get_database_backend();
+    for (item, rating) in [(plain, 9.0_f64), (favorite, 1.0_f64)] {
+        database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("community_rating"), rating)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    UserDataRepository::new(&database)
+        .commit(user_id, favorite, UserDataPatch::favorite(true))
+        .await
+        .unwrap();
+    UserDataRepository::new(&database)
+        .commit(user_id, watched, UserDataPatch::default().with_played(true))
+        .await
+        .unwrap();
+    UserDataRepository::new(&database)
+        .commit(
+            other_user_id,
+            plain,
+            UserDataPatch::default().with_played(true),
+        )
+        .await
+        .unwrap();
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 4)
+        .await
+        .unwrap()
+        .unwrap();
+    let names = recommendations
+        .iter()
+        .map(tjxy_db::CatalogItemRecord::name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["Favorite", "Plain"]);
+
+    let other_names = CatalogQueryRepository::new(&database)
+        .similar_items(other_user_id, source, 4)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|item| item.name().to_owned())
+        .collect::<Vec<_>>();
+    assert!(!other_names.iter().any(|name| name == "Plain"));
+    assert!(other_names.iter().any(|name| name == "Watched"));
+}
+
+#[tokio::test]
+async fn similar_items_weight_language_studio_year_and_country_before_rating() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let source = seed_item(&database, "Source", "Movie", None, true, "Matched").await;
+    let language = seed_item(&database, "Language", "Movie", None, true, "Matched").await;
+    let studio = seed_item(&database, "Studio", "Movie", None, true, "Matched").await;
+    let year = seed_item(&database, "Year", "Movie", None, true, "Matched").await;
+    let country = seed_item(&database, "Country", "Movie", None, true, "Matched").await;
+    let plain = seed_item(&database, "Plain", "Movie", None, true, "Matched").await;
+    for item in [source, language, studio, year, country, plain] {
+        add_to_library(&database, library, item).await;
+    }
+    add_shared_genre(
+        &database,
+        "Drama",
+        &[source, language, studio, year, country, plain],
+    )
+    .await;
+    add_shared_coded_feature(
+        &database,
+        "languages",
+        "item_languages",
+        "language_id",
+        "en",
+        "English",
+        &[source, language],
+    )
+    .await;
+    add_shared_named_feature(
+        &database,
+        "studios",
+        "item_studios",
+        "studio_id",
+        "Studio One",
+        &[source, studio],
+    )
+    .await;
+    add_shared_coded_feature(
+        &database,
+        "countries",
+        "item_countries",
+        "country_id",
+        "FR",
+        "France",
+        &[source, country],
+    )
+    .await;
+    for (item, language_code, production_year, rating) in [
+        (source, "en", 2020, 5.0),
+        (language, "en", 1990, 1.0),
+        (studio, "fr", 1990, 5.0),
+        (year, "fr", 2021, 4.0),
+        (country, "fr", 1990, 3.0),
+        (plain, "fr", 1990, 9.0),
+    ] {
+        set_similarity_fields(&database, item, language_code, production_year, rating).await;
+    }
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 5)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        recommendations
+            .iter()
+            .map(tjxy_db::CatalogItemRecord::name)
+            .collect::<Vec<_>>(),
+        ["Language", "Studio", "Year", "Country", "Plain"]
+    );
+}
+
+#[tokio::test]
+async fn similar_series_exclude_titles_whose_known_visible_episodes_are_all_played() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Television", "tvshows", true).await;
+    let source = seed_item(&database, "Source", "Series", None, true, "Matched").await;
+    let completed = seed_item(&database, "Completed", "Series", None, true, "Matched").await;
+    let incomplete = seed_item(&database, "Incomplete", "Series", None, true, "Matched").await;
+    let unknown = seed_item(&database, "Unknown", "Series", None, true, "Matched").await;
+    let directly_played = seed_item(
+        &database,
+        "Directly played",
+        "Series",
+        None,
+        true,
+        "Matched",
+    )
+    .await;
+    let completed_one = seed_item(&database, "Completed 1", "Episode", None, true, "Matched").await;
+    let completed_two = seed_item(&database, "Completed 2", "Episode", None, true, "Matched").await;
+    let incomplete_one =
+        seed_item(&database, "Incomplete 1", "Episode", None, true, "Matched").await;
+    let incomplete_two =
+        seed_item(&database, "Incomplete 2", "Episode", None, true, "Matched").await;
+    for item in [
+        source,
+        completed,
+        incomplete,
+        unknown,
+        directly_played,
+        completed_one,
+        completed_two,
+        incomplete_one,
+        incomplete_two,
+    ] {
+        add_to_library(&database, library, item).await;
+    }
+    for episode in [completed_one, completed_two] {
+        set_structure_owner(&database, episode, completed).await;
+        UserDataRepository::new(&database)
+            .commit(user_id, episode, UserDataPatch::default().with_played(true))
+            .await
+            .unwrap();
+    }
+    for episode in [incomplete_one, incomplete_two] {
+        set_structure_owner(&database, episode, incomplete).await;
+    }
+    UserDataRepository::new(&database)
+        .commit(
+            user_id,
+            incomplete_one,
+            UserDataPatch::default().with_played(true),
+        )
+        .await
+        .unwrap();
+    UserDataRepository::new(&database)
+        .commit(
+            user_id,
+            directly_played,
+            UserDataPatch::default().with_played(true),
+        )
+        .await
+        .unwrap();
+    add_shared_genre(
+        &database,
+        "Drama",
+        &[source, completed, incomplete, unknown, directly_played],
+    )
+    .await;
+
+    let recommendations = CatalogQueryRepository::new(&database)
+        .similar_items(user_id, source, 4)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let names = recommendations
+        .iter()
+        .map(tjxy_db::CatalogItemRecord::name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"Incomplete"));
+    assert!(names.contains(&"Unknown"));
+    assert!(!names.contains(&"Completed"));
+    assert!(!names.contains(&"Directly played"));
+}
+
+#[tokio::test]
+async fn similar_items_return_empty_for_weak_only_and_unsupported_sources() {
+    let database = database().await;
+    let user_id = seed_user(&database).await;
+    let library = seed_library(&database, "Movies", "movies", true).await;
+    let source = seed_item(&database, "Source", "Movie", None, true, "Matched").await;
+    let language_only = seed_item(&database, "Language only", "Movie", None, true, "Matched").await;
+    let season = seed_item(&database, "Season", "Season", None, true, "Matched").await;
+    for item in [source, language_only, season] {
+        add_to_library(&database, library, item).await;
+    }
+    add_shared_coded_feature(
+        &database,
+        "languages",
+        "item_languages",
+        "language_id",
+        "en",
+        "English",
+        &[source, language_only],
+    )
+    .await;
+
+    let repository = CatalogQueryRepository::new(&database);
+    assert_eq!(
+        repository
+            .similar_items(user_id, source, 4)
+            .await
+            .unwrap()
+            .unwrap(),
+        []
+    );
+    assert_eq!(
+        repository
+            .similar_items(user_id, season, 4)
+            .await
+            .unwrap()
+            .unwrap(),
+        []
+    );
+    assert!(
+        repository
+            .similar_items(user_id, CatalogItemId::new(), 4)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 async fn set_rich_item_fields(

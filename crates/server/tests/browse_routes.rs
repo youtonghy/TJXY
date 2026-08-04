@@ -618,6 +618,43 @@ async fn seed_item(
     id
 }
 
+async fn add_shared_genre(database: &DatabaseConnection, name: &str, item_ids: &[CatalogItemId]) {
+    let genre_id = Uuid::new_v4();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("genres"))
+                    .columns([Alias::new("id"), Alias::new("name")])
+                    .values_panic([genre_id.into(), name.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    for item_id in item_ids {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("item_genres"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("genre_id"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            genre_id.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+}
+
 struct CloudMultiSourceFixture {
     item: CatalogItemId,
     root: Uuid,
@@ -3259,6 +3296,83 @@ async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
         .status(),
         StatusCode::FORBIDDEN
     );
+}
+
+#[tokio::test]
+async fn similar_items_require_auth_and_return_a_bounded_standard_item_page() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let hidden_library = seed_library(&app.database, "Hidden", false).await;
+    let source = seed_item(&app.database, library, "Source", "Movie").await;
+    let candidate = seed_item(&app.database, library, "Candidate", "Movie").await;
+    let unrelated = seed_item(&app.database, library, "Unrelated", "Movie").await;
+    let unsupported = seed_item(&app.database, library, "Season", "Season").await;
+    let hidden = seed_item(&app.database, hidden_library, "Hidden", "Movie").await;
+    let sha256 = seed_asset(&app, candidate, b"similar-poster").await;
+    add_shared_genre(&app.database, "Drama", &[source, candidate]).await;
+    let (user_id, _, token) = login(&app.router).await;
+    let path = format!("/Items/{source}/Similar?limit=4");
+
+    assert_eq!(
+        get(&app.router, &path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &path, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["TotalRecordCount"], 1);
+    assert_eq!(body["Items"][0]["Id"], candidate.to_string());
+    assert_eq!(body["Items"][0]["Name"], "Candidate");
+    assert_eq!(body["Items"][0]["ImageTags"]["Primary"], sha256);
+    assert_ne!(body["Items"][0]["Id"], unrelated.to_string());
+
+    for missing in [CatalogItemId::new(), hidden] {
+        assert_eq!(
+            get(
+                &app.router,
+                &format!("/Items/{missing}/Similar"),
+                Some(&token),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let response = get(
+        &app.router,
+        &format!("/Items/{unsupported}/Similar"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["Items"], json!([]));
+    assert_eq!(body["TotalRecordCount"], 0);
+
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Items/{source}/Similar?limit=4&userId={}", Uuid::new_v4()),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    for limit in [0, 21] {
+        assert_eq!(
+            get(
+                &app.router,
+                &format!("/Items/{source}/Similar?limit={limit}&userId={user_id}"),
+                Some(&token),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 #[tokio::test]

@@ -1375,6 +1375,11 @@ async fn durable_rows_are_not_cascade_deleted_and_active_jobs_are_single_flight(
             "storage_root_objects",
             "ix_storage_root_objects_object_root",
         ),
+        ("item_genres", "ix_item_genres_genre_item"),
+        ("item_people", "ix_item_people_person_item"),
+        ("item_languages", "ix_item_languages_language_item"),
+        ("item_studios", "ix_item_studios_studio_item"),
+        ("item_countries", "ix_item_countries_country_item"),
     ] {
         assert!(
             schema.has_index(table, index).await.unwrap(),

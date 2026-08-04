@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult,
     sea_query::{
         Alias, CommonTableExpression, Condition, Expr, Func, JoinType, LikeExpr, NullOrdering,
-        Order, Query, SelectStatement, UnionType, WithClause,
+        Order, Query, SelectStatement, SimpleExpr, UnionType, WithClause,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ use crate::{
 };
 
 const MAX_PAGE_SIZE: u64 = 200;
+const MAX_SIMILAR_ITEMS: u64 = 20;
+const SIMILAR_ITEM_SHORTLIST_SIZE: u64 = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrowseParent {
@@ -1469,6 +1471,80 @@ impl<'connection> CatalogQueryRepository<'connection> {
         }))
     }
 
+    /// Returns visible, unwatched titles that are structurally similar to one source title.
+    ///
+    /// A visible unsupported source returns an empty collection. A missing or invisible source
+    /// returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] for an invalid limit, SQL failure, or stored-value corruption.
+    pub async fn similar_items(
+        &self,
+        user_id: UserId,
+        source_id: CatalogItemId,
+        limit: u64,
+    ) -> Result<Option<Vec<CatalogItemRecord>>, CatalogQueryError> {
+        if limit == 0 || limit > MAX_SIMILAR_ITEMS {
+            return Err(CatalogQueryError::InvalidPage);
+        }
+        let Some(source) = self.item(user_id, source_id).await? else {
+            return Ok(None);
+        };
+        if !matches!(source.item_type(), "Movie" | "Series") {
+            return Ok(Some(Vec::new()));
+        }
+
+        let candidates =
+            similar_item_shortlist(self.database, user_id, source_id, source.item_type()).await?;
+        if candidates.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let feature_item_ids = std::iter::once(source_id)
+            .chain(candidates.iter().map(CatalogItemRecord::id))
+            .collect::<Vec<_>>();
+        let features = similarity_features(self.database, &feature_item_ids).await?;
+        let source_features = features
+            .get(&source_id.as_uuid())
+            .cloned()
+            .unwrap_or_default();
+        let empty_features = SimilarityFeatures::default();
+
+        let mut scored = candidates
+            .into_iter()
+            .map(|candidate| {
+                let score = similar_item_score(
+                    &source_features,
+                    features
+                        .get(&candidate.id().as_uuid())
+                        .unwrap_or(&empty_features),
+                    candidate.is_favorite(),
+                );
+                (candidate, score)
+            })
+            .filter(|(_, score)| score.score >= 24)
+            .collect::<Vec<_>>();
+        scored.sort_by(|(left, left_score), (right, right_score)| {
+            right_score
+                .score
+                .cmp(&left_score.score)
+                .then_with(|| right_score.shared_genres.cmp(&left_score.shared_genres))
+                .then_with(|| {
+                    compare_optional_rating(right.community_rating(), left.community_rating())
+                })
+                .then_with(|| right.production_year().cmp(&left.production_year()))
+                .then_with(|| left.id().as_uuid().cmp(&right.id().as_uuid()))
+        });
+        scored.truncate(usize::try_from(limit).map_err(|_| CatalogQueryError::InvalidPage)?);
+        let mut candidates = scored
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect::<Vec<_>>();
+        attach_image_tags(self.database, &mut candidates).await?;
+        Ok(Some(candidates))
+    }
+
     /// Returns the visible item's durable revisions used to join lazy work.
     ///
     /// # Errors
@@ -2017,6 +2093,460 @@ async fn item_provider_ids(
             ))
         })
         .collect()
+}
+
+fn shared_feature_candidate(
+    candidate: &Alias,
+    source_id: CatalogItemId,
+    link_table: &str,
+    feature_column: &str,
+    alias_prefix: &str,
+) -> SelectStatement {
+    shared_feature_query(
+        candidate,
+        source_id,
+        link_table,
+        feature_column,
+        alias_prefix,
+        false,
+    )
+}
+
+fn shared_feature_count(
+    candidate: &Alias,
+    source_id: CatalogItemId,
+    link_table: &str,
+    feature_column: &str,
+    alias_prefix: &str,
+) -> SimpleExpr {
+    SimpleExpr::SubQuery(
+        None,
+        Box::new(
+            shared_feature_query(
+                candidate,
+                source_id,
+                link_table,
+                feature_column,
+                alias_prefix,
+                true,
+            )
+            .into_sub_query_statement(),
+        ),
+    )
+}
+
+fn shared_feature_query(
+    candidate: &Alias,
+    source_id: CatalogItemId,
+    link_table: &str,
+    feature_column: &str,
+    alias_prefix: &str,
+    count_matches: bool,
+) -> SelectStatement {
+    let candidate_link = Alias::new(format!("{alias_prefix}_candidate"));
+    let source_link = Alias::new(format!("{alias_prefix}_source"));
+    let mut query = Query::select();
+    if count_matches {
+        query.expr(Func::count_distinct(Expr::col((
+            candidate_link.clone(),
+            Alias::new(feature_column),
+        ))));
+    } else {
+        query.expr(Expr::val(1_i32));
+    }
+    query
+        .from_as(Alias::new(link_table), candidate_link.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new(link_table),
+            source_link.clone(),
+            Expr::col((source_link.clone(), Alias::new(feature_column)))
+                .equals((candidate_link.clone(), Alias::new(feature_column))),
+        )
+        .and_where(
+            Expr::col((candidate_link, Alias::new("catalog_item_id")))
+                .equals((candidate.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((source_link, Alias::new("catalog_item_id"))).eq(source_id.as_uuid()));
+    query
+}
+
+async fn similar_item_shortlist(
+    database: &DatabaseConnection,
+    user_id: UserId,
+    source_id: CatalogItemId,
+    source_type: &str,
+) -> Result<Vec<CatalogItemRecord>, CatalogQueryError> {
+    let ci = Alias::new("ci");
+    let ud = Alias::new("ud");
+    let shared_genres = shared_feature_count(
+        &ci,
+        source_id,
+        "item_genres",
+        "genre_id",
+        "similar_genre_rank",
+    );
+    let shared_people = shared_feature_count(
+        &ci,
+        source_id,
+        "item_people",
+        "person_id",
+        "similar_person_rank",
+    );
+    let shortlist_score = Expr::expr(shared_genres.clone())
+        .mul(30_i32)
+        .add(Expr::expr(shared_people).mul(24_i32));
+    let mut query = home_item_query(user_id, &[source_type], None);
+    query
+        .and_where(Expr::col((ci.clone(), Alias::new("id"))).ne(source_id.as_uuid()))
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((ud.clone(), Alias::new("is_played"))).is_null())
+                .add(Expr::col((ud, Alias::new("is_played"))).eq(false)),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(shared_feature_candidate(
+                    &ci,
+                    source_id,
+                    "item_genres",
+                    "genre_id",
+                    "similar_genre",
+                )))
+                .add(Expr::exists(shared_feature_candidate(
+                    &ci,
+                    source_id,
+                    "item_people",
+                    "person_id",
+                    "similar_person",
+                ))),
+        )
+        .order_by_expr(shortlist_score, Order::Desc)
+        .order_by_expr(shared_genres, Order::Desc)
+        .order_by((ci.clone(), Alias::new("id")), Order::Asc)
+        .limit(SIMILAR_ITEM_SHORTLIST_SIZE);
+    if source_type == "Series" {
+        query.cond_where(
+            Condition::any()
+                .add(Expr::exists(series_episode_candidate(&ci, user_id, false)).not())
+                .add(Expr::exists(series_episode_candidate(&ci, user_id, true))),
+        );
+    }
+    select_item_columns(&mut query, ItemQuerySource::Catalog);
+    database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(item_from_row)
+        .collect()
+}
+
+fn series_episode_candidate(
+    series: &Alias,
+    user_id: UserId,
+    require_unplayed: bool,
+) -> SelectStatement {
+    let suffix = if require_unplayed {
+        "unplayed"
+    } else {
+        "known"
+    };
+    let episode = Alias::new(format!("similar_{suffix}_episode"));
+    let user_data = Alias::new(format!("similar_{suffix}_episode_user_data"));
+    let mut query = Query::select();
+    query
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("catalog_items"), episode.clone())
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("user_data"),
+            user_data.clone(),
+            Condition::all()
+                .add(
+                    Expr::col((user_data.clone(), Alias::new("catalog_item_id")))
+                        .equals((episode.clone(), Alias::new("id"))),
+                )
+                .add(Expr::col((user_data.clone(), Alias::new("user_id"))).eq(user_id.as_uuid())),
+        )
+        .and_where(Expr::col((episode.clone(), Alias::new("item_type"))).eq("Episode"))
+        .and_where(
+            Expr::col((episode.clone(), Alias::new("structure_owner_item_id")))
+                .equals((series.clone(), Alias::new("id"))),
+        )
+        .cond_where(catalog_item_visibility_condition(&episode));
+    if require_unplayed {
+        query.cond_where(
+            Condition::any()
+                .add(Expr::col((user_data.clone(), Alias::new("is_played"))).is_null())
+                .add(Expr::col((user_data, Alias::new("is_played"))).eq(false)),
+        );
+    }
+    query
+}
+
+async fn association_ids(
+    database: &DatabaseConnection,
+    item_ids: &[CatalogItemId],
+    link_table: &str,
+    feature_column: &str,
+) -> Result<BTreeMap<Uuid, BTreeSet<Uuid>>, CatalogQueryError> {
+    if item_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let link = Alias::new("similar_feature_link");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((link.clone(), Alias::new("catalog_item_id"))),
+            Alias::new("catalog_item_id"),
+        )
+        .expr_as(
+            Expr::col((link.clone(), Alias::new(feature_column))),
+            Alias::new("feature_id"),
+        )
+        .from_as(Alias::new(link_table), link.clone())
+        .and_where(
+            Expr::col((link, Alias::new("catalog_item_id")))
+                .is_in(item_ids.iter().map(|item_id| item_id.as_uuid())),
+        )
+        .to_owned();
+    let mut by_item = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    for row in database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+    {
+        let item_id = row.try_get("", "catalog_item_id")?;
+        by_item
+            .entry(item_id)
+            .or_default()
+            .insert(row.try_get("", "feature_id")?);
+    }
+    Ok(by_item)
+}
+
+async fn person_features(
+    database: &DatabaseConnection,
+    item_ids: &[CatalogItemId],
+) -> Result<BTreeMap<Uuid, PersonSimilarityFeatures>, CatalogQueryError> {
+    let credit = Alias::new("similar_credit");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("catalog_item_id"))),
+            Alias::new("catalog_item_id"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("person_id"))),
+            Alias::new("person_id"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("role"))),
+            Alias::new("role"),
+        )
+        .expr_as(
+            Expr::col((credit.clone(), Alias::new("credit_type"))),
+            Alias::new("credit_type"),
+        )
+        .from_as(Alias::new("item_people"), credit.clone())
+        .and_where(
+            Expr::col((credit, Alias::new("catalog_item_id")))
+                .is_in(item_ids.iter().map(|item_id| item_id.as_uuid())),
+        )
+        .to_owned();
+    let mut by_item = BTreeMap::<Uuid, PersonSimilarityFeatures>::new();
+    for row in database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+    {
+        let item_id = row.try_get("", "catalog_item_id")?;
+        let person_id = row.try_get("", "person_id")?;
+        let role: String = row.try_get("", "role")?;
+        let credit_type: Option<String> = row.try_get("", "credit_type")?;
+        let item = by_item.entry(item_id).or_default();
+        item.people.insert(person_id);
+        if let Some(kind) = creator_credit_kind(&role, credit_type.as_deref()) {
+            item.creator_credits.insert((person_id, kind));
+        }
+    }
+    Ok(by_item)
+}
+
+#[derive(Clone, Default)]
+struct PersonSimilarityFeatures {
+    people: BTreeSet<Uuid>,
+    creator_credits: BTreeSet<(Uuid, CreatorCreditKind)>,
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum CreatorCreditKind {
+    Creator,
+    Director,
+    Screenplay,
+    Writer,
+}
+
+#[derive(Clone, Default)]
+struct SimilarityFeatures {
+    genres: BTreeSet<Uuid>,
+    people: BTreeSet<Uuid>,
+    creator_credits: BTreeSet<(Uuid, CreatorCreditKind)>,
+    languages: BTreeSet<Uuid>,
+    studios: BTreeSet<Uuid>,
+    countries: BTreeSet<Uuid>,
+    original_language: Option<String>,
+    production_year: Option<i32>,
+}
+
+async fn similarity_features(
+    database: &DatabaseConnection,
+    item_ids: &[CatalogItemId],
+) -> Result<BTreeMap<Uuid, SimilarityFeatures>, CatalogQueryError> {
+    let mut features = item_ids
+        .iter()
+        .map(|item_id| (item_id.as_uuid(), SimilarityFeatures::default()))
+        .collect::<BTreeMap<_, _>>();
+    for (item_id, values) in association_ids(database, item_ids, "item_genres", "genre_id").await? {
+        features.entry(item_id).or_default().genres = values;
+    }
+    for (item_id, values) in person_features(database, item_ids).await? {
+        let item = features.entry(item_id).or_default();
+        item.people = values.people;
+        item.creator_credits = values.creator_credits;
+    }
+    for (item_id, values) in
+        association_ids(database, item_ids, "item_languages", "language_id").await?
+    {
+        features.entry(item_id).or_default().languages = values;
+    }
+    for (item_id, values) in
+        association_ids(database, item_ids, "item_studios", "studio_id").await?
+    {
+        features.entry(item_id).or_default().studios = values;
+    }
+    for (item_id, values) in
+        association_ids(database, item_ids, "item_countries", "country_id").await?
+    {
+        features.entry(item_id).or_default().countries = values;
+    }
+
+    let item = Alias::new("similar_scalar_item");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("id"))),
+            Alias::new("item_id"),
+        )
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("original_language"))),
+            Alias::new("original_language"),
+        )
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("production_year"))),
+            Alias::new("production_year"),
+        )
+        .from_as(Alias::new("catalog_items"), item.clone())
+        .and_where(
+            Expr::col((item, Alias::new("id")))
+                .is_in(item_ids.iter().map(|item_id| item_id.as_uuid())),
+        )
+        .to_owned();
+    for row in database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+    {
+        let item_id: Uuid = row.try_get("", "item_id")?;
+        let item_features = features.entry(item_id).or_default();
+        item_features.original_language = row.try_get("", "original_language")?;
+        item_features.production_year = row.try_get("", "production_year")?;
+    }
+    Ok(features)
+}
+
+#[derive(Clone, Copy)]
+struct SimilarItemScore {
+    score: usize,
+    shared_genres: usize,
+}
+
+fn similar_item_score(
+    source: &SimilarityFeatures,
+    candidate: &SimilarityFeatures,
+    is_favorite: bool,
+) -> SimilarItemScore {
+    let shared_genres = source.genres.intersection(&candidate.genres).count();
+    let shared_people = source.people.intersection(&candidate.people).count();
+    let shared_creators = source
+        .creator_credits
+        .intersection(&candidate.creator_credits)
+        .count();
+    let original_language_score = usize::from(
+        source.original_language.is_some()
+            && source.original_language == candidate.original_language,
+    ) * 10;
+    let language_score = source
+        .languages
+        .intersection(&candidate.languages)
+        .count()
+        .saturating_mul(5)
+        .min(10);
+    let studio_score = source
+        .studios
+        .intersection(&candidate.studios)
+        .count()
+        .saturating_mul(8)
+        .min(16);
+    let country_score = usize::from(
+        source
+            .countries
+            .intersection(&candidate.countries)
+            .next()
+            .is_some(),
+    ) * 6;
+    let year_score = match (source.production_year, candidate.production_year) {
+        (Some(source), Some(candidate)) if source.abs_diff(candidate) <= 3 => 8,
+        (Some(source), Some(candidate)) if source.abs_diff(candidate) <= 10 => 4,
+        _ => 0,
+    };
+    SimilarItemScore {
+        score: shared_genres.saturating_mul(30).min(60)
+            + (shared_people.saturating_mul(24) + shared_creators.saturating_mul(8)).min(48)
+            + original_language_score
+            + language_score
+            + studio_score
+            + country_score
+            + year_score
+            + usize::from(is_favorite).saturating_mul(5),
+        shared_genres,
+    }
+}
+
+fn creator_credit_kind(role: &str, credit_type: Option<&str>) -> Option<CreatorCreditKind> {
+    if credit_type.is_some_and(|value| {
+        ["actor", "actress", "cast"]
+            .iter()
+            .any(|candidate| value.trim().eq_ignore_ascii_case(candidate))
+    }) {
+        return None;
+    }
+    credit_type
+        .and_then(parse_creator_credit_kind)
+        .or_else(|| parse_creator_credit_kind(role))
+}
+
+fn parse_creator_credit_kind(value: &str) -> Option<CreatorCreditKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "creator" => Some(CreatorCreditKind::Creator),
+        "director" => Some(CreatorCreditKind::Director),
+        "screenplay" => Some(CreatorCreditKind::Screenplay),
+        "writer" => Some(CreatorCreditKind::Writer),
+        _ => None,
+    }
+}
+
+fn compare_optional_rating(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 #[derive(Debug, Error)]

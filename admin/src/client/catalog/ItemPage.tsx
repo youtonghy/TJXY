@@ -7,13 +7,20 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 import { useTranslate } from '../../settings/i18n';
 import { useClientAuth } from '../auth/ClientAuthContext';
-import { getChildren, getItem, getLibraries, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
+import { getChildren, getItem, getLibraries, getSimilarItems, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
 import { MediaImage } from '../ui/MediaImage';
+import { MediaTile } from '../ui/MediaTile';
 
 interface ItemBreadcrumbContext {
   ancestors: MediaItem[];
   itemId?: string;
   library?: Library;
+}
+
+interface RecommendationResult {
+  failed: boolean;
+  itemId: string;
+  items?: MediaItem[];
 }
 
 export function ItemPage() {
@@ -23,11 +30,14 @@ export function ItemPage() {
   const tr = useTranslate();
   const [item, setItem] = useState<MediaItem>();
   const [children, setChildren] = useState<MediaItem[]>([]);
+  const [recommendationResult, setRecommendationResult] = useState<RecommendationResult>();
   const [breadcrumbContext, setBreadcrumbContext] = useState<ItemBreadcrumbContext>({ ancestors: [] });
   const [failed, setFailed] = useState(false);
   const breadcrumbItemId = item?.Id;
   const breadcrumbParentId = item?.ParentId;
   const breadcrumbItemType = item?.Type;
+  const recommendationItemId = item?.Type === 'Movie' || item?.Type === 'Series' ? item.Id : undefined;
+  const recommendationItemType = item?.Type === 'Movie' || item?.Type === 'Series' ? item.Type : undefined;
 
   useEffect(() => {
     if (!id) return;
@@ -63,6 +73,26 @@ export function ItemPage() {
     };
   }, [breadcrumbItemId, breadcrumbItemType, breadcrumbParentId]);
 
+  useEffect(() => {
+    if (!recommendationItemId || !recommendationItemType) return;
+    let active = true;
+    void getSimilarItems(recommendationItemId, 4)
+      .then((items) => {
+        if (!active) return;
+        setRecommendationResult({
+          failed: false,
+          itemId: recommendationItemId,
+          items: items.filter((candidate) => candidate.Id !== recommendationItemId && candidate.Type === recommendationItemType && candidate.UserData?.Played !== true).slice(0, 4),
+        });
+      })
+      .catch(() => {
+        if (active) setRecommendationResult({ failed: true, itemId: recommendationItemId });
+      });
+    return () => {
+      active = false;
+    };
+  }, [recommendationItemId, recommendationItemType]);
+
   if (!id) return <NotFound />;
   if (failed) {
     return (
@@ -83,6 +113,7 @@ export function ItemPage() {
   const episodes = children.filter((child) => child.Type === 'Episode').sort(sortByIndex);
   const hasPlayableAction = item.Type !== 'Series' && item.Type !== 'Season';
   const artworkRatio = item.Type === 'Audio' ? 'aspect-square' : 'aspect-[2/3]';
+  const activeRecommendationResult = recommendationResult?.itemId === item.Id ? recommendationResult : undefined;
 
   return (
     <article className="space-y-8">
@@ -172,7 +203,48 @@ export function ItemPage() {
       </div>
 
       {item.People?.length ? <PeopleCard people={item.People} /> : null}
+      {item.Type === 'Movie' || item.Type === 'Series'
+        ? <RecommendationRail failed={activeRecommendationResult?.failed === true} items={activeRecommendationResult?.items} />
+        : null}
     </article>
+  );
+}
+
+function RecommendationRail({ failed, items }: { failed: boolean; items?: MediaItem[] }) {
+  const tr = useTranslate();
+  const label = tr('Recommended for you', '为你推荐');
+  return (
+    <section aria-label={label} className="space-y-3">
+      <h2 className="text-lg font-semibold text-foreground">{label}</h2>
+      {failed
+        ? <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>{tr('Recommendations are temporarily unavailable', '推荐暂时不可用')}</Alert.Title></Alert.Content></Alert>
+        : items === undefined
+          ? <RecommendationSkeleton label={tr('Loading recommendations', '正在加载推荐')} />
+          : items.length === 0
+            ? <p className="py-8 text-sm text-muted">{tr('No recommendations yet', '暂无推荐')}</p>
+            : (
+                <ul aria-label={label} className="-mx-2 flex snap-x snap-mandatory gap-4 overflow-x-auto px-2 pb-3 scrollbar-thin">
+                  {items.map((item) => (
+                    <li className="w-[9rem] shrink-0 snap-start sm:w-[11rem] lg:w-[calc((100%_-_3rem)/4)]" key={item.Id}>
+                      <MediaTile item={item} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+    </section>
+  );
+}
+
+function RecommendationSkeleton({ label }: { label: string }) {
+  return (
+    <div aria-label={label} className="flex gap-4 overflow-hidden" role="status">
+      {Array.from({ length: 4 }, (_, index) => (
+        <div className="w-[9rem] shrink-0 space-y-2 sm:w-[11rem] lg:w-[calc((100%_-_3rem)/4)]" key={index}>
+          <Skeleton className="aspect-[2/3] w-full rounded-xl" />
+          <Skeleton className="h-4 w-3/4 rounded" />
+        </div>
+      ))}
+    </div>
   );
 }
 

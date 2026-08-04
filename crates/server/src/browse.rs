@@ -502,6 +502,42 @@ pub(crate) async fn item_detail(
     }
 }
 
+pub(crate) async fn similar_items(
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let principal =
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
+    let query = match parse_similar_items_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
+    let Some(catalog) = state.catalog.as_ref() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
+    };
+    match catalog
+        .similar_items(
+            principal.user().id(),
+            query.user_id,
+            CatalogItemId::from_uuid(item_id),
+            query.limit,
+        )
+        .await
+    {
+        Ok(Some(items)) => match similar_item_result(state.identity.id, &items) {
+            Ok(result) => Json(result).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => error(StatusCode::NOT_FOUND, "catalog item was not found"),
+        Err(error) => service_error(&error),
+    }
+}
+
 pub(crate) async fn playback_info_get(
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
@@ -879,6 +915,11 @@ struct NextUpQuery {
     page: CatalogPageRequest,
 }
 
+struct SimilarItemsQuery {
+    user_id: Option<UserId>,
+    limit: u64,
+}
+
 fn parse_capability_session(raw_query: Option<&str>) -> Result<Option<Uuid>, HttpBrowseError> {
     let mut parameters = endpoint_parameters(raw_query)?;
     let session = take_capability_session(&mut parameters)?;
@@ -1163,6 +1204,22 @@ fn parse_item_detail_query(raw_query: Option<&str>) -> Result<Option<UserId>, Ht
     Ok(user_id)
 }
 
+fn parse_similar_items_query(
+    raw_query: Option<&str>,
+) -> Result<SimilarItemsQuery, HttpBrowseError> {
+    let mut parameters = endpoint_parameters(raw_query)?;
+    let user_id = take_user_id(&mut parameters)?;
+    let limit = take_u64(&mut parameters, "limit")?.unwrap_or(4);
+    if !(1..=20).contains(&limit) {
+        return Err(HttpBrowseError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid similar item limit",
+        ));
+    }
+    reject_remaining(&parameters)?;
+    Ok(SimilarItemsQuery { user_id, limit })
+}
+
 fn endpoint_parameters(
     raw_query: Option<&str>,
 ) -> Result<HashMap<String, String>, HttpBrowseError> {
@@ -1380,6 +1437,24 @@ fn item_result(
         page.start_index(),
         page.total_record_count(),
     ))
+}
+
+fn similar_item_result(
+    server_id: Uuid,
+    records: &[CatalogItemRecord],
+) -> Result<BaseItemDtoQueryResult, HttpBrowseError> {
+    let items = records
+        .iter()
+        .map(|item| {
+            item_dto(
+                server_id,
+                item.parent_id().map(CatalogItemId::as_uuid),
+                item,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let total = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    Ok(BaseItemDtoQueryResult::new(items, 0, total))
 }
 
 fn search_hint_result(page: &CatalogPage) -> Result<SearchHintResult, HttpBrowseError> {

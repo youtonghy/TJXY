@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   getChildren: vi.fn(),
   getItem: vi.fn(),
   getLibraries: vi.fn(),
+  getSimilarItems: vi.fn(),
   toggleFavorite: vi.fn(),
   togglePlayed: vi.fn(),
 }));
@@ -51,6 +52,8 @@ const series = {
 };
 
 beforeEach(() => {
+  api.getSimilarItems.mockReset();
+  api.getSimilarItems.mockResolvedValue([]);
   api.getItem.mockResolvedValue(series);
   api.getLibraries.mockResolvedValue([
     { Id: 'library-tv', Name: 'TV Shows', CollectionType: 'tvshows' },
@@ -143,6 +146,69 @@ it('shows two credit rows by default and expands the complete cast and crew list
   expect(screen.queryByText('Jared Harris')).not.toBeInTheDocument();
 });
 
+it('shows filtered same-type recommendations after cast and crew', async () => {
+  api.getSimilarItems.mockResolvedValueOnce([
+    { Id: 'movie-1', Name: 'Arrival', Type: 'Series', ProductionYear: 2016 },
+    { Id: 'movie-2', Name: 'Station Eleven', Type: 'Series', ProductionYear: 2021 },
+    { Id: 'movie-3', Name: 'Watched', Type: 'Series', UserData: { Played: true } },
+    { Id: 'movie-4', Name: 'Wrong type', Type: 'Movie' },
+    { Id: 'series-1', Name: 'Current', Type: 'Series' },
+    { Id: 'series-2', Name: 'The Leftovers', Type: 'Series' },
+    { Id: 'series-3', Name: 'Dark', Type: 'Series' },
+    { Id: 'series-4', Name: 'Severance', Type: 'Series' },
+  ]);
+  renderItem('series-1');
+
+  const recommendations = await screen.findByRole('region', { name: 'Recommended for you' });
+  expect(within(recommendations).getByRole('link', { name: /Arrival/ })).toHaveAttribute('href', '/app/items/movie-1');
+  expect(within(recommendations).getByRole('link', { name: /Station Eleven/ })).toHaveAttribute('href', '/app/items/movie-2');
+  expect(within(recommendations).queryByText('Watched')).not.toBeInTheDocument();
+  expect(within(recommendations).queryByText('Wrong type')).not.toBeInTheDocument();
+  expect(within(recommendations).queryByText('Current')).not.toBeInTheDocument();
+  expect(within(recommendations).getAllByRole('link')).toHaveLength(4);
+  expect(within(recommendations).queryByText('Severance')).not.toBeInTheDocument();
+  expect(api.getSimilarItems).toHaveBeenCalledWith('series-1', 4);
+
+  const peopleHeading = screen.getByRole('heading', { name: 'Cast and crew' });
+  const recommendationHeading = within(recommendations).getByRole('heading', { name: 'Recommended for you' });
+  expect(peopleHeading.compareDocumentPosition(recommendationHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it('renders four stable recommendation skeletons while the request is pending', async () => {
+  api.getSimilarItems.mockReturnValueOnce(new Promise(() => undefined));
+  renderItem('series-1');
+
+  const recommendations = await screen.findByRole('region', { name: 'Recommended for you' });
+  const loading = within(recommendations).getByRole('status', { name: 'Loading recommendations' });
+  expect(loading.children).toHaveLength(4);
+});
+
+it('distinguishes an empty recommendation result from an unavailable request', async () => {
+  renderItem('series-1');
+  const emptyRecommendations = await screen.findByRole('region', { name: 'Recommended for you' });
+  expect(within(emptyRecommendations).getByText('No recommendations yet')).toBeVisible();
+
+  api.getSimilarItems.mockReset();
+  api.getSimilarItems.mockRejectedValueOnce(new Error('offline'));
+  renderItem('series-1');
+  expect(await screen.findByText('Recommendations are temporarily unavailable')).toBeVisible();
+  expect(screen.getAllByRole('heading', { name: 'Chernobyl' }).length).toBeGreaterThan(0);
+});
+
+it.each([
+  ['track-1', 'Audio'],
+  ['season-1', 'Season'],
+  ['episode-1', 'Episode'],
+])('does not request or render recommendations for unsupported %s item types', async (id, type) => {
+  api.getItem.mockResolvedValueOnce({ Id: id, Name: 'Unsupported item', Type: type, IsFolder: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  renderItem(id);
+
+  expect(await screen.findByRole('heading', { name: 'Unsupported item' })).toBeVisible();
+  expect(api.getSimilarItems).not.toHaveBeenCalled();
+  expect(screen.queryByRole('region', { name: 'Recommended for you' })).not.toBeInTheDocument();
+});
+
 it('does not invent rich facts for a sparse movie response', async () => {
   api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Sparse Movie', Type: 'Movie', IsFolder: false });
   api.getChildren.mockResolvedValueOnce([]);
@@ -152,6 +218,7 @@ it('does not invent rich facts for a sparse movie response', async () => {
   expect(screen.getByText('No additional details are available.')).toBeInTheDocument();
   expect(screen.queryByText('Rating')).not.toBeInTheDocument();
   expect(screen.queryByText('Demo metadata only')).not.toBeInTheDocument();
+  expect(api.getSimilarItems).toHaveBeenCalledWith('movie-1', 4);
 });
 
 it('uses square primary artwork for an audio item', async () => {

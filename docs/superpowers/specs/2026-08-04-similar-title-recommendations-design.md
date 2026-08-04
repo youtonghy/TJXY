@@ -65,7 +65,10 @@ The repository uses two bounded phases:
 
 1. Build a shortlist from candidates that share a genre or person with the
    source. Apply source visibility, candidate visibility, same-type, source-ID,
-   and played-state filters in SQL. Bound this shortlist to 256 candidates.
+   and played-state filters in SQL. Before applying the 256-candidate bound,
+   order by a lightweight proxy of shared genres times 30 plus shared people
+   times 24, then shared genres and item ID. This keeps strong matches in the
+   exact-scoring phase instead of allowing UUID order to choose the shortlist.
 2. Batch-load the shortlist's genres, people, languages, studios, countries,
    year, rating, and current-user state. Compute the final integer score in a
    pure Rust function, filter by the relevance threshold, sort deterministically,
@@ -106,6 +109,11 @@ Use integer points so ordering is stable across database backends:
 Only candidates with a score of at least 24 remain. Because the shortlist
 already requires a shared genre or person, weak metadata and popularity cannot
 promote an unrelated title.
+
+Creator bonuses use distinct matching `(person, credit kind)` pairs and exact
+case-insensitive credit-kind matching. Actor/cast credits never receive a
+creator bonus from character-role text. Legacy rows without a specific credit
+type may fall back to an exact role match.
 
 Sort by:
 
