@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-misused-promises */
 import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
 import { Rating } from '@heroui-pro/react/rating';
+import { Carousel } from '@heroui-pro/react/carousel';
 import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -213,6 +214,7 @@ export function ItemPage() {
 function RecommendationRail({ failed, items }: { failed: boolean; items?: MediaItem[] }) {
   const tr = useTranslate();
   const label = tr('Recommended for you', '为你推荐');
+  const carouselLabel = tr('Recommended titles', '推荐影片');
   return (
     <section aria-label={label} className="space-y-3">
       <h2 className="text-lg font-semibold text-foreground">{label}</h2>
@@ -223,13 +225,21 @@ function RecommendationRail({ failed, items }: { failed: boolean; items?: MediaI
           : items.length === 0
             ? <p className="py-8 text-sm text-muted">{tr('No recommendations yet', '暂无推荐')}</p>
             : (
-                <ul aria-label={label} className="-mx-2 flex snap-x snap-mandatory gap-4 overflow-x-auto px-2 pb-3 scrollbar-thin">
-                  {items.map((item) => (
-                    <li className="w-[9rem] shrink-0 snap-start sm:w-[11rem] lg:w-[calc((100%_-_3rem)/4)]" key={item.Id}>
-                      <MediaTile item={item} />
-                    </li>
-                  ))}
-                </ul>
+                <Carousel
+                  aria-label={carouselLabel}
+                  className="relative min-w-0"
+                  opts={{ align: 'start', containScroll: 'trimSnaps', dragFree: true }}
+                >
+                  <Carousel.Previous />
+                  <Carousel.Next />
+                  <Carousel.Content className="-ml-3 pb-3">
+                    {items.map((item) => (
+                      <Carousel.Item className="basis-[8.5rem] pl-3 sm:basis-[10.5rem] lg:basis-[14rem]" key={item.Id}>
+                        <MediaTile item={item} />
+                      </Carousel.Item>
+                    ))}
+                  </Carousel.Content>
+                </Carousel>
               )}
     </section>
   );
@@ -238,8 +248,8 @@ function RecommendationRail({ failed, items }: { failed: boolean; items?: MediaI
 function RecommendationSkeleton({ label }: { label: string }) {
   return (
     <div aria-label={label} className="flex gap-4 overflow-hidden" role="status">
-      {Array.from({ length: 4 }, (_, index) => (
-        <div className="w-[9rem] shrink-0 space-y-2 sm:w-[11rem] lg:w-[calc((100%_-_3rem)/4)]" key={index}>
+      {Array.from({ length: 6 }, (_, index) => (
+        <div className="w-[8.5rem] shrink-0 space-y-2 sm:w-[10.5rem] lg:w-[14rem]" key={index}>
           <Skeleton className="aspect-[2/3] w-full rounded-xl" />
           <Skeleton className="h-4 w-3/4 rounded" />
         </div>

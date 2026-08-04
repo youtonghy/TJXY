@@ -160,6 +160,11 @@ it('shows filtered same-type recommendations after cast and crew', async () => {
   renderItem('series-1');
 
   const recommendations = await screen.findByRole('region', { name: 'Recommended for you' });
+  const carousel = within(recommendations).getByRole('region', { name: 'Recommended titles' });
+  expect(carousel).toHaveAttribute('aria-roledescription', 'carousel');
+  expect(within(carousel).getAllByRole('group')).toHaveLength(4);
+  expect(await within(carousel).findByRole('button', { name: 'Previous slide' })).toBeInTheDocument();
+  expect(await within(carousel).findByRole('button', { name: 'Next slide' })).toBeInTheDocument();
   expect(within(recommendations).getByRole('link', { name: /Arrival/ })).toHaveAttribute('href', '/app/items/movie-1');
   expect(within(recommendations).getByRole('link', { name: /Station Eleven/ })).toHaveAttribute('href', '/app/items/movie-2');
   expect(within(recommendations).queryByText('Watched')).not.toBeInTheDocument();
@@ -174,13 +179,13 @@ it('shows filtered same-type recommendations after cast and crew', async () => {
   expect(peopleHeading.compareDocumentPosition(recommendationHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
-it('renders four stable recommendation skeletons while the request is pending', async () => {
+it('renders six compact recommendation skeletons while the request is pending', async () => {
   api.getSimilarItems.mockReturnValueOnce(new Promise(() => undefined));
   renderItem('series-1');
 
   const recommendations = await screen.findByRole('region', { name: 'Recommended for you' });
   const loading = within(recommendations).getByRole('status', { name: 'Loading recommendations' });
-  expect(loading.children).toHaveLength(4);
+  expect(loading.children).toHaveLength(6);
 });
 
 it('distinguishes an empty recommendation result from an unavailable request', async () => {

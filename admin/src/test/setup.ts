@@ -42,6 +42,16 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   },
 });
 
+Object.defineProperty(globalThis, 'IntersectionObserver', {
+  configurable: true,
+  value: class IntersectionObserver {
+    disconnect = () => undefined;
+    observe = () => undefined;
+    unobserve = () => undefined;
+    takeRecords = () => [];
+  },
+});
+
 afterEach(() => {
   act(() => { Toast.toast.clear(); });
   document.querySelectorAll('[data-overlay-container="true"], [data-slot="toast-region"]')
