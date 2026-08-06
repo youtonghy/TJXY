@@ -1740,7 +1740,8 @@ fn conversation_error_response(error: &AiConversationRepositoryError) -> Respons
         | AiConversationRepositoryError::InvalidMetadata
         | AiConversationRepositoryError::InvalidLimit => StatusCode::BAD_REQUEST.into_response(),
         AiConversationRepositoryError::NotFound => StatusCode::NOT_FOUND.into_response(),
-        AiConversationRepositoryError::Database(_)
+        AiConversationRepositoryError::MessageSequenceExhausted
+        | AiConversationRepositoryError::Database(_)
         | AiConversationRepositoryError::RollbackFailed { .. } => {
             eprintln!("AI conversation operation failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
