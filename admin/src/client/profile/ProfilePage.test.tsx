@@ -79,8 +79,12 @@ it('reloads all statistic cards when the selected range changes', async () => {
   expect(screen.getByRole('img', { name: 'Genre watch time radar chart' })).toBeVisible();
   expect(screen.getByText('Drama: 30m')).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Movies and series' })).toBeVisible();
+  expect(screen.getByRole('img', { name: 'Movies and series pie chart' })).toBeVisible();
   expect(screen.getByLabelText('2 movies')).toBeVisible();
   expect(screen.getByLabelText('1 series')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Cumulative watch time' })).toBeVisible();
+  expect(screen.getByRole('img', { name: 'Cumulative watch time area chart' })).toBeVisible();
+  expect(screen.getByText('07-31: 30m')).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Viewing timeline' })).toBeVisible();
   expect(screen.getByRole('link', { name: /Arrival/ })).toHaveAttribute('href', '/app/items/movie-1');
 });

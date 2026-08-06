@@ -9,8 +9,10 @@ import {
   TextField,
 } from '@heroui/react';
 import { BarChart } from '@heroui-pro/react/bar-chart';
+import { AreaChart } from '@heroui-pro/react/area-chart';
 import { KPI } from '@heroui-pro/react/kpi';
 import { KPIGroup } from '@heroui-pro/react/kpi-group';
+import { PieChart } from '@heroui-pro/react/pie-chart';
 import { Timeline } from '@heroui-pro/react/timeline';
 import { CheckCircle2, Clock3, Film, Pencil, Play, Tags, Tv } from 'lucide-react';
 import { useEffect, useState, type SyntheticEvent } from 'react';
@@ -96,11 +98,9 @@ export function ProfilePage() {
           <Card><Card.Header><Card.Title>{tr('Genre mix', '类型分布')}</Card.Title><Card.Description>{tr('Genres receiving the most watch time.', '观看时间最多的内容类型。')}</Card.Description></Card.Header><Card.Content><GenreRadar insights={insights} /></Card.Content></Card>
           <Card>
             <Card.Header><Card.Title>{tr('Movies and series', '电影与剧集')}</Card.Title><Card.Description>{tr('Playback starts grouped by media type.', '按媒体类型统计播放次数。')}</Card.Description></Card.Header>
-            <Card.Content className="grid grid-cols-2 gap-3">
-              <MediaCount icon={Film} label={tr('movies', '电影')} value={insights?.Media.Movies ?? 0} />
-              <MediaCount icon={Tv} label={tr('series', '剧集')} value={insights?.Media.Series ?? 0} />
-            </Card.Content>
+            <Card.Content><MediaTypePieChart insights={insights} /></Card.Content>
           </Card>
+          <Card><Card.Header><Card.Title>{tr('Cumulative watch time', '累计观看时长')}</Card.Title><Card.Description>{tr('Watch time accumulated across the selected period.', '所选时间范围内累计的观看时长。')}</Card.Description></Card.Header><Card.Content><CumulativeWatchChart insights={insights} /></Card.Content></Card>
         </div>
         <ViewingTimeline events={insights?.Timeline ?? []} />
       </section>
@@ -111,10 +111,6 @@ export function ProfilePage() {
 
 function InsightKpi({ icon: Icon, label, value }: { icon: typeof Clock3; label: string; value: string }) {
   return <KPI><KPI.Header><KPI.Icon className="bg-accent/10 text-accent"><Icon aria-hidden="true" className="size-4" /></KPI.Icon><KPI.Title>{label}</KPI.Title></KPI.Header><KPI.Content><p className="truncate text-2xl font-semibold tabular-nums text-foreground">{value}</p></KPI.Content></KPI>;
-}
-
-function MediaCount({ icon: Icon, label, value }: { icon: typeof Film; label: string; value: number }) {
-  return <div aria-label={`${String(value)} ${label}`} className="rounded-xl bg-default p-4"><Icon aria-hidden="true" className="size-5 text-accent" /><p className="mt-3 text-2xl font-semibold">{value} <span className="text-sm font-normal text-muted">{label}</span></p></div>;
 }
 
 function DailyWatchChart({ insights }: { insights?: UserInsights }) {
@@ -131,6 +127,60 @@ function DailyWatchChart({ insights }: { insights?: UserInsights }) {
         <BarChart.Tooltip content={<BarChart.TooltipContent valueFormatter={(value) => tr(`${String(value)} min`, `${String(value)} 分钟`)} />} />
       </BarChart>
       <figcaption className="sr-only">{data.map((point) => tr(`${point.date}: ${String(point.minutes)} minutes`, `${point.date}：${String(point.minutes)} 分钟`)).join('; ')}</figcaption>
+    </figure>
+  );
+}
+
+function MediaTypePieChart({ insights }: { insights?: UserInsights }) {
+  const tr = useTranslate();
+  const data = [
+    { color: 'var(--color-accent)', label: tr('movies', '电影'), value: insights?.Media.Movies ?? 0 },
+    { color: 'var(--color-warning)', label: tr('series', '剧集'), value: insights?.Media.Series ?? 0 },
+  ];
+  const total = data.reduce((sum, item) => sum + item.value, 0);
+  return (
+    <figure aria-label={tr('Movies and series pie chart', '电影与剧集饼图')} className="min-w-0" role="img">
+      {total > 0 ? (
+        <PieChart height={220}>
+          <PieChart.Pie data={data} dataKey="value" innerRadius={54} nameKey="label" outerRadius={82} paddingAngle={3} stroke="var(--color-surface)" strokeWidth={3}>
+            {data.map((item) => <PieChart.Cell fill={item.color} key={item.label} />)}
+          </PieChart.Pie>
+          <PieChart.Tooltip content={<PieChart.TooltipContent valueFormatter={(value) => tr(`${String(value)} plays`, `${String(value)} 次播放`)} />} />
+        </PieChart>
+      ) : <p className="py-16 text-center text-sm text-muted">{tr('No media activity in this period.', '此时间范围内暂无媒体数据。')}</p>}
+      <figcaption className="mt-1 grid grid-cols-2 gap-3">
+        {data.map((item) => (
+          <div aria-label={`${String(item.value)} ${item.label}`} className="flex items-center gap-2 rounded-xl bg-default px-3 py-2" key={item.label}>
+            <span aria-hidden="true" className="size-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+            <span className="text-sm text-muted">{item.label}</span>
+            <strong className="ml-auto tabular-nums text-foreground">{item.value}</strong>
+          </div>
+        ))}
+      </figcaption>
+    </figure>
+  );
+}
+
+function CumulativeWatchChart({ insights }: { insights?: UserInsights }) {
+  const tr = useTranslate();
+  const { locale } = useSystemLocale();
+  const axisFormatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 1, notation: 'compact' });
+  const data = [...(insights?.Daily ?? [])].sort((left, right) => left.Date.localeCompare(right.Date)).reduce<{ date: string; minutes: number; ticks: number }[]>((points, point) => {
+    const cumulativeTicks = (points.at(-1)?.ticks ?? 0) + point.WatchedTicks;
+    points.push({ date: point.Date.slice(5), minutes: Math.round(cumulativeTicks / 600_000_000), ticks: cumulativeTicks });
+    return points;
+  }, []);
+  if (!data.length) return <p className="py-20 text-center text-sm text-muted">{tr('No activity in this period.', '此时间范围内暂无活动。')}</p>;
+  return (
+    <figure aria-label={tr('Cumulative watch time area chart', '累计观看时长面积图')} role="img">
+      <AreaChart data={data} height={220}>
+        <AreaChart.Grid vertical={false} />
+        <AreaChart.XAxis dataKey="date" tickMargin={8} />
+        <AreaChart.YAxis tickFormatter={(value) => axisFormatter.format(Number(value))} tickMargin={4} width={42} />
+        <AreaChart.Area dataKey="minutes" fill="var(--color-accent)" fillOpacity={0.18} name={tr('Cumulative minutes', '累计分钟数')} stroke="var(--color-accent)" strokeWidth={2} type="monotone" />
+        <AreaChart.Tooltip content={<AreaChart.TooltipContent valueFormatter={(value) => tr(`${String(value)} min`, `${String(value)} 分钟`)} />} />
+      </AreaChart>
+      <figcaption className="sr-only">{data.map((point) => `${point.date}: ${formatTicks(point.ticks, locale)}`).join('; ')}</figcaption>
     </figure>
   );
 }
