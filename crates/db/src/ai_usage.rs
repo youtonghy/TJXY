@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, QueryResult,
-    TransactionTrait,
+    RuntimeErr, SqlxError, TransactionTrait,
     sea_query::{Alias, Expr, JoinType, OnConflict, Order, Query},
 };
 use thiserror::Error;
@@ -249,9 +249,20 @@ impl<'a> AiUsageRepository<'a> {
             return Err(AiUsageRepositoryError::InvalidInput);
         }
         let day_key = usage_day.format("%Y-%m-%d").to_string();
-        let transaction = self.database.begin().await?;
-        let result = consume_daily_quota(&transaction, user_id, &day_key, i64::from(limit)).await;
-        finish(transaction, result).await
+        let backend = self.database.get_database_backend();
+        for attempt in 0..3 {
+            let transaction = self.database.begin().await?;
+            let result =
+                consume_daily_quota(&transaction, user_id, &day_key, i64::from(limit)).await;
+            match finish(transaction, result).await {
+                Err(error)
+                    if backend == DbBackend::MySql
+                        && attempt < 2
+                        && retryable_serialization_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded retry loop always returns")
     }
 
     /// Returns the number of AI requests recorded for a user on one UTC day.
@@ -310,7 +321,7 @@ impl<'a> AiUsageRepository<'a> {
     }
 
     async fn summary(&self, day: &str) -> Result<AiUsageSummary, AiUsageRepositoryError> {
-        let query = aggregate_query()
+        let query = aggregate_query(self.database.get_database_backend())
             .from(Alias::new("ai_execution_records"))
             .and_where(Expr::col(Alias::new("day_key")).eq(day))
             .to_owned();
@@ -327,7 +338,7 @@ impl<'a> AiUsageRepository<'a> {
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<Vec<AiUsageDaily>, AiUsageRepositoryError> {
-        let mut query = aggregate_query();
+        let mut query = aggregate_query(self.database.get_database_backend());
         query
             .column(Alias::new("day_key"))
             .from(Alias::new("ai_execution_records"))
@@ -378,7 +389,7 @@ impl<'a> AiUsageRepository<'a> {
     ) -> Result<Vec<AiUsageUser>, AiUsageRepositoryError> {
         let records = Alias::new("r");
         let users = Alias::new("u");
-        let mut query = aggregate_query_for(&records);
+        let mut query = aggregate_query_for(&records, self.database.get_database_backend());
         query
             .column((records.clone(), Alias::new("user_id")))
             .expr_as(
@@ -426,7 +437,7 @@ impl<'a> AiUsageRepository<'a> {
         day: &str,
         limit: u64,
     ) -> Result<Vec<AiUsageModel>, AiUsageRepositoryError> {
-        let mut query = aggregate_query();
+        let mut query = aggregate_query(self.database.get_database_backend());
         query
             .columns([
                 Alias::new("model_id"),
@@ -520,18 +531,21 @@ impl<'a> AiUsageRepository<'a> {
     }
 }
 
-fn aggregate_query() -> sea_orm::sea_query::SelectStatement {
-    aggregate_query_for(&Alias::new("ai_execution_records"))
+fn aggregate_query(backend: DbBackend) -> sea_orm::sea_query::SelectStatement {
+    aggregate_query_for(&Alias::new("ai_execution_records"), backend)
 }
 
-fn aggregate_query_for(table: &Alias) -> sea_orm::sea_query::SelectStatement {
+fn aggregate_query_for(table: &Alias, backend: DbBackend) -> sea_orm::sea_query::SelectStatement {
     Query::select()
         .expr_as(
             Expr::col((table.clone(), Alias::new("id"))).count(),
             Alias::new("total_requests"),
         )
         .expr_as(
-            Expr::cust("COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0)"),
+            integer_sum(
+                "COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0)",
+                backend,
+            ),
             Alias::new("successful_requests"),
         )
         .expr_as(
@@ -539,15 +553,15 @@ fn aggregate_query_for(table: &Alias) -> sea_orm::sea_query::SelectStatement {
             Alias::new("known_token_requests"),
         )
         .expr_as(
-            Expr::col((table.clone(), Alias::new("prompt_tokens"))).sum(),
+            integer_sum("SUM(prompt_tokens)", backend),
             Alias::new("prompt_tokens"),
         )
         .expr_as(
-            Expr::col((table.clone(), Alias::new("completion_tokens"))).sum(),
+            integer_sum("SUM(completion_tokens)", backend),
             Alias::new("completion_tokens"),
         )
         .expr_as(
-            Expr::col((table.clone(), Alias::new("total_tokens"))).sum(),
+            integer_sum("SUM(total_tokens)", backend),
             Alias::new("total_tokens"),
         )
         .expr_as(
@@ -555,6 +569,26 @@ fn aggregate_query_for(table: &Alias) -> sea_orm::sea_query::SelectStatement {
             Alias::new("active_users"),
         )
         .to_owned()
+}
+
+fn integer_sum(expression: &str, backend: DbBackend) -> sea_orm::sea_query::SimpleExpr {
+    let integer_type = match backend {
+        DbBackend::MySql => "SIGNED",
+        DbBackend::Postgres => "BIGINT",
+        DbBackend::Sqlite => "INTEGER",
+    };
+    Expr::cust(format!("CAST({expression} AS {integer_type})"))
+}
+
+fn retryable_serialization_failure(error: &AiUsageRepositoryError) -> bool {
+    let AiUsageRepositoryError::Database(
+        DbErr::Exec(RuntimeErr::SqlxError(SqlxError::Database(database)))
+        | DbErr::Query(RuntimeErr::SqlxError(SqlxError::Database(database))),
+    ) = error
+    else {
+        return false;
+    };
+    database.code().as_deref() == Some("40001")
 }
 
 fn aggregate_summary(
