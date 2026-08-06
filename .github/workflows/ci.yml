@@ -114,8 +114,7 @@ jobs:
       - name: Run Redis invalidation contract
         run: cargo test -p tjxy-cache --test redis_invalidation_contract --locked -- --ignored
 
-  mysql-smoke:
-    continue-on-error: true
+  mysql-contracts:
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -132,11 +131,18 @@ jobs:
           - 3306:3306
     env:
       TJXY_TEST_DATABASE_URL: mysql://root:tjxy@127.0.0.1:3306/tjxy_test
+      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
       - name: Select Rust toolchain
         run: rustup default 1.88.0
-      - name: Run MySQL database smoke
+      - name: Run MySQL database contracts
         run: cargo test -p tjxy-test-support -p tjxy-db --tests --locked
+      - name: Run MySQL application contracts
+        run: cargo test -p tjxy-application --tests --locked
+      - name: Run MySQL import contracts
+        run: cargo test -p tjxy-import --tests --locked
+      - name: Run MySQL server contracts
+        run: cargo test -p tjxy-server --tests --locked

@@ -35,7 +35,8 @@ impl ReconnectableTestDatabase {
 /// `SQLite` remains the zero-configuration default. `PostgreSQL` connections receive a fresh
 /// schema, while `MySQL` connections receive a fresh database, so independently running tests
 /// cannot observe each other's migrations or fixtures. External test databases are expected to
-/// be disposable; isolated schemas and databases are intentionally retained for inspection.
+/// be disposable and `MySQL` requires permission to raise its dynamic table-definition cache;
+/// isolated schemas and databases are intentionally retained for inspection.
 ///
 /// # Errors
 ///
@@ -131,6 +132,12 @@ async fn reconnectable_mysql_test_database(
 ) -> Result<ReconnectableTestDatabase, DbErr> {
     let database = mysql_test_database_name();
     let administration = Database::connect(&database_url).await?;
+    administration
+        .execute(Statement::from_string(
+            DbBackend::MySql,
+            "SET GLOBAL table_definition_cache = 65536",
+        ))
+        .await?;
     administration
         .execute(Statement::from_string(
             DbBackend::MySql,

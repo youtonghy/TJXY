@@ -755,13 +755,16 @@ TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
   cargo test -p tjxy-import --tests
 TJXY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/tjxy_test \
   cargo test -p tjxy-server --tests
+RUST_TEST_THREADS=1 \
 TJXY_TEST_DATABASE_URL=mysql://root:tjxy@127.0.0.1:3306/tjxy_test \
-  cargo test -p tjxy-test-support -p tjxy-db --tests
+  cargo test -p tjxy-test-support -p tjxy-db -p tjxy-application \
+    -p tjxy-import -p tjxy-server --tests --locked
 ```
 
 The `postgres-contracts` CI job runs all database, application, import, and
 server contracts on pinned PostgreSQL 17. This is the release gate for
 workspace tests that create a database fixture through `tjxy-test-support`.
-The independent `mysql-smoke` job runs only the test-support and database
-contracts on pinned MySQL 8.4, is allowed to fail, and is not a release gate or
-a production-support claim.
+The `mysql-contracts` job runs the same database, application, import, and server
+packages on pinned MySQL 8.4. It sets `RUST_TEST_THREADS=1` because MySQL can invalidate
+prepared statements while another isolated test database is applying DDL; every test
+still receives its own database and the full package contracts remain enabled.
