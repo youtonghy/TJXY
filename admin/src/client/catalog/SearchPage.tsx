@@ -33,7 +33,11 @@ export function SearchPage() {
 
   return (
     <div className="space-y-6">
-      <div><h1 className="text-3xl font-semibold">{tr('Search', '搜索')}</h1><p className="mt-1 text-muted">{tr('Find something to watch.', '寻找想看的内容。')}</p></div>
+      <div>
+        <p className="text-sm font-medium text-accent">{tr('Explore your library', '探索媒体库')}</p>
+        <h1 className="mt-1 text-3xl font-semibold">{tr('Search', '搜索')}</h1>
+        <p className="mt-1 text-muted">{tr('Find something to watch.', '寻找想看的内容。')}</p>
+      </div>
       <SearchField aria-label={tr('Search media', '搜索媒体')} value={value} onChange={(next) => { setValue(next); setParams(next ? { q: next } : {}); }}>
         <SearchField.Group><SearchField.SearchIcon /><SearchField.Input placeholder={tr('Search movies, series, and episodes', '搜索电影、剧集和单集')} /></SearchField.Group>
       </SearchField>

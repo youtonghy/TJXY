@@ -20,6 +20,14 @@ beforeEach(() => {
   api.searchHints.mockResolvedValue([]);
 });
 
+it('shows the same three-part page heading used by the other catalog pages', () => {
+  render(<MemoryRouter initialEntries={['/app/search']}><SearchPage /></MemoryRouter>);
+
+  expect(screen.getByText('Explore your library')).toBeVisible();
+  expect(screen.getByRole('heading', { level: 1, name: 'Search' })).toBeVisible();
+  expect(screen.getByText('Find something to watch.')).toBeVisible();
+});
+
 it('shows popular recommendations before a search is entered', async () => {
   render(<MemoryRouter initialEntries={['/app/search']}><SearchPage /></MemoryRouter>);
 
