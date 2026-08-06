@@ -1,4 +1,4 @@
-import { Alert, Button, Disclosure, Drawer, Label, Spinner, Tooltip } from '@heroui/react';
+import { Alert, Button, Disclosure, Drawer, ListBox, Select, Spinner, Tooltip } from '@heroui/react';
 import { ChatConversation } from '@heroui-pro/react/chat-conversation';
 import { ChatListView } from '@heroui-pro/react/chat-list-view';
 import { ChatLoader } from '@heroui-pro/react/chat-loader';
@@ -8,8 +8,7 @@ import { PromptInput, type ChatStatus } from '@heroui-pro/react/prompt-input';
 import { PromptSuggestion } from '@heroui-pro/react/prompt-suggestion';
 import { ChatSource } from '@heroui-pro/react/chat-source';
 import { ChatTool } from '@heroui-pro/react/chat-tool';
-import { NativeSelect } from '@heroui-pro/react/native-select';
-import { History, MessageSquarePlus, Sparkles, Trash2 } from 'lucide-react';
+import { Globe2, MessageCircle, MessageSquarePlus, PanelLeft, PanelLeftClose, PanelLeftOpen, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { validUuid } from '../../api/responseValidation';
@@ -42,6 +41,7 @@ export function AiChatPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [desktopHistoryOpen, setDesktopHistoryOpen] = useState(true);
   const [recovering, setRecovering] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const activeTurn = useRef<{ abort: AbortController; rollback: AiMessage[]; conversationId: string } | null>(null);
@@ -175,35 +175,36 @@ export function AiChatPage() {
   if (loading) return <div className="grid min-h-[60vh] place-items-center"><Spinner aria-label={tr('Loading AI assistant', '正在加载 AI 助手')} /></div>;
   if (error && models.length === 0) return <Alert status="danger"><Alert.Content><Alert.Title>{tr('The AI assistant could not be loaded', '无法加载 AI 助手')}</Alert.Title><Alert.Description>{tr('The server could not provide the assistant configuration.', '服务器暂时无法提供 AI 助手配置。')}</Alert.Description></Alert.Content></Alert>;
   if (models.length === 0) return <Alert status="warning"><Alert.Content><Alert.Title>{tr('AI assistant is not configured', 'AI 助手尚未配置')}</Alert.Title><Alert.Description>{tr('Ask an administrator to enable at least one model.', '请联系管理员启用至少一个模型。')}</Alert.Description></Alert.Content></Alert>;
+  const activeConversationTitle = conversations.find((item) => item.id === conversationId)?.title;
 
   return (
-    <div className="-my-6 min-h-[calc(100vh-4rem)] lg:grid lg:grid-cols-[17rem_minmax(0,1fr)]">
-      <aside className="hidden border-r border-border p-4 lg:block" aria-label={tr('Conversation history', '对话历史')}>
-        <ConversationHistory actions={{ onDelete: removeConversation, onNew: startNew, onOpen: openConversation }} conversations={conversations} tr={tr} />
-      </aside>
-      <section className="flex min-h-[calc(100vh-4rem)] min-w-0 flex-col" aria-labelledby="ai-heading">
-        <header className="flex flex-wrap items-center gap-3 border-b border-border px-1 py-4 sm:px-4">
+    <div className={`-my-6 h-[calc(100svh-4rem)] overflow-hidden lg:grid ${desktopHistoryOpen ? 'lg:grid-cols-[15.5rem_minmax(0,1fr)]' : 'lg:grid-cols-[minmax(0,1fr)]'}`}>
+      {desktopHistoryOpen ? <aside className="hidden min-h-0 border-r border-border bg-surface-secondary/35 p-3 lg:block" aria-label={tr('Conversation history', '对话历史')}>
+        <ConversationHistory activeConversationId={conversationId} actions={{ onDelete: removeConversation, onNew: startNew, onOpen: openConversation }} conversations={conversations} onCollapse={() => { setDesktopHistoryOpen(false); }} tr={tr} />
+      </aside> : null}
+      <section className="flex h-full min-h-0 min-w-0 flex-col" aria-labelledby="ai-heading">
+        <header className="flex min-h-16 shrink-0 items-center gap-3 border-b border-border px-1 py-2 sm:px-4">
+          {!desktopHistoryOpen ? <Tooltip delay={0}><Tooltip.Trigger><Button aria-label={tr('Show conversation history', '展开对话历史')} className="hidden lg:inline-flex" isIconOnly onPress={() => { setDesktopHistoryOpen(true); }} size="sm" variant="ghost"><PanelLeftOpen className="size-4" /></Button></Tooltip.Trigger><Tooltip.Content>{tr('Show conversation history', '展开对话历史')}</Tooltip.Content></Tooltip> : null}
           <Drawer isOpen={historyOpen} onOpenChange={setHistoryOpen}>
             <Drawer.Trigger aria-label={tr('Open conversation history', '打开对话历史')} className="inline-flex size-10 items-center justify-center rounded-md hover:bg-default lg:hidden">
-              <History className="size-4" />
+              <PanelLeft className="size-4" />
             </Drawer.Trigger>
             <Drawer.Backdrop>
-              <Drawer.Content className="max-w-[20rem]" placement="left">
+              <Drawer.Content className="w-80 max-w-[calc(100vw-3rem)]" placement="left">
                 <Drawer.Dialog>
                   <Drawer.Header><Drawer.Heading>{tr('Conversations', '对话')}</Drawer.Heading><Drawer.CloseTrigger aria-label={tr('Close conversation history', '关闭对话历史')} /></Drawer.Header>
-                  <Drawer.Body><ConversationHistory actions={{ onDelete: removeConversation, onNew: startNew, onOpen: openConversation }} conversations={conversations} hideHeading tr={tr} /></Drawer.Body>
+                  <Drawer.Body><ConversationHistory activeConversationId={conversationId} actions={{ onDelete: removeConversation, onNew: startNew, onOpen: openConversation }} conversations={conversations} hideHeading tr={tr} /></Drawer.Body>
                 </Drawer.Dialog>
               </Drawer.Content>
             </Drawer.Backdrop>
           </Drawer>
-          <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold" id="ai-heading">{tr('AI assistant', 'AI 助手')}</h1><p className="truncate text-sm text-muted">{tr('Movies, television, and your viewing context', '影视内容与个性化观影建议')}</p></div>
-          <NativeSelect className="w-48" variant="secondary"><Label htmlFor="ai-model">{tr('Model', '模型')}</Label><NativeSelect.Trigger disabled={conversationId !== null} id="ai-model" value={selectedModel} onChange={(event) => { setSelectedModel(event.currentTarget.value); }}>{models.map((model) => <NativeSelect.Option key={model.id} value={model.id}>{model.displayName}</NativeSelect.Option>)}<NativeSelect.Indicator /></NativeSelect.Trigger></NativeSelect>
+          <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-semibold sm:text-base" id="ai-heading">{activeConversationTitle ?? tr('AI assistant', 'AI 助手')}</h1><p className="truncate text-xs text-muted">{activeConversationTitle === undefined ? tr('Movies, television, and your viewing context', '影视内容与个性化观影建议') : tr('Conversation grounded in your media library', '基于你的媒体库进行对话')}</p></div>
         </header>
         {error && <Alert className="m-4" role="alert" status="danger"><Alert.Content><Alert.Title>{tr('The response could not be completed', '无法完成本次回复')}</Alert.Title><Alert.Description>{tr('Try again or start a new conversation.', '请重试或新建对话。')}</Alert.Description></Alert.Content></Alert>}
-        <ChatConversation className="min-h-0 flex-1"><ChatConversation.Content className="mx-auto w-full max-w-4xl px-2 py-6 sm:px-6">
+        <ChatConversation className="min-h-0 flex-1"><ChatConversation.Content className="mx-auto w-full max-w-[714px] px-4 py-8 sm:py-10">
           {messages.length === 0 ? <EmptyPrompts onSelect={setPrompt} tr={tr} /> : messages.map((message) => message.role === 'user' ? <ChatMessage.User key={message.id}><ChatMessage.Bubble><ChatMessage.Content>{message.content}</ChatMessage.Content></ChatMessage.Bubble></ChatMessage.User> : <ChatMessage.Assistant key={message.id}><ChatMessage.Body><ChatMessage.Content>{message.content.length > 0 ? <StreamMarkdown components={markdownComponents} isStreaming={status === 'streaming'}>{message.content}</StreamMarkdown> : (message === messages.at(-1) && (status === 'submitted' || status === 'streaming')) ? <ChatLoader.Dots label={tr('Generating response', '正在生成回复')} /> : null}<AssistantContextDisclosure isStreaming={message === messages.at(-1) && status === 'streaming'} sources={message.sources} toolLabels={message === messages.at(-1) ? toolLabels : []} tr={tr} /></ChatMessage.Content></ChatMessage.Body></ChatMessage.Assistant>)}
           <ChatConversation.ScrollAnchor /></ChatConversation.Content><ChatConversation.ScrollButton aria-label={tr('Scroll to latest message', '滚动到最新消息')} /></ChatConversation>
-        <div className="border-t border-border bg-background px-2 py-4 sm:px-6"><PromptInput className="mx-auto max-w-4xl" isDisabled={recovering} lockInputOnRun onStop={stop} onSubmit={() => { void send(); }} onValueChange={setPrompt} status={status} value={prompt}><PromptInput.Shell><PromptInput.Content><PromptInput.TextArea aria-label={tr('Message', '消息')} placeholder={tr('Ask about a film, series, or recommendation', '询问影视信息或个性化推荐')} /></PromptInput.Content><PromptInput.Toolbar><PromptInput.ToolbarStart><span className="text-xs text-muted">{sources.length > 0 ? tr(`${String(sources.length)} library sources`, `${String(sources.length)} 个媒体库来源`) : tr('Grounded in your TJXY library', '基于你的 TJXY 媒体库')}</span></PromptInput.ToolbarStart><PromptInput.ToolbarEnd><PromptInput.Send aria-label={status === 'submitted' || status === 'streaming' ? tr('Stop response', '停止回复') : tr('Send message', '发送消息')} isDisabled={recovering || ((status === 'ready' || status === 'error') && prompt.trim().length === 0)} status={status} /></PromptInput.ToolbarEnd></PromptInput.Toolbar></PromptInput.Shell></PromptInput></div>
+        <div className="shrink-0 bg-background px-2 pb-4 pt-3 sm:px-4"><PromptInput className="mx-auto max-w-[714px]" isDisabled={recovering} lockInputOnRun onStop={stop} onSubmit={() => { void send(); }} onValueChange={setPrompt} status={status} value={prompt}><PromptInput.Shell className="rounded-lg"><PromptInput.Content><PromptInput.TextArea aria-label={tr('Message', '消息')} placeholder={tr('Ask about a film, series, or recommendation', '询问影视信息或个性化推荐')} /></PromptInput.Content><PromptInput.Toolbar><PromptInput.ToolbarStart><Select aria-label={tr('Model', '模型')} className="w-44" isDisabled={conversationId !== null} onChange={(value) => { if (typeof value === 'string') setSelectedModel(value); }} value={selectedModel} variant="secondary"><Select.Trigger className="h-8 min-h-8 gap-2 rounded-lg px-2"><Globe2 aria-hidden="true" className="size-4 shrink-0" /><Select.Value /><Select.Indicator /></Select.Trigger><Select.Popover><ListBox>{models.map((model) => <ListBox.Item id={model.id} key={model.id} textValue={model.displayName}>{model.displayName}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover></Select></PromptInput.ToolbarStart><PromptInput.ToolbarEnd><PromptInput.Send aria-label={status === 'submitted' || status === 'streaming' ? tr('Stop response', '停止回复') : tr('Send message', '发送消息')} isDisabled={recovering || ((status === 'ready' || status === 'error') && prompt.trim().length === 0)} status={status} /></PromptInput.ToolbarEnd></PromptInput.Toolbar></PromptInput.Shell></PromptInput><p className="mx-auto mt-2 max-w-[714px] text-center text-xs text-muted">{sources.length > 0 ? tr(`${String(sources.length)} library sources`, `${String(sources.length)} 个媒体库来源`) : tr('AI can make mistakes. Check important information.', 'AI 可能会出错，请核实重要信息。')}</p></div>
       </section>
     </div>
   );
@@ -272,9 +273,10 @@ function isRecoverableConversationError(failure: unknown): boolean {
   return !(failure instanceof ClientApiError) || ['network', 'not-found', 'unavailable', 'invalid-response'].includes(failure.kind);
 }
 
-function EmptyPrompts({ onSelect, tr }: { onSelect: (value: string) => void; tr: ReturnType<typeof useTranslate> }) { return <div className="mx-auto flex min-h-[28rem] max-w-2xl flex-col justify-center py-8"><div className="mb-8"><span className="mb-4 grid size-11 place-items-center rounded-lg bg-accent text-accent-foreground"><Sparkles className="size-5" /></span><h2 className="text-2xl font-semibold">{tr('Start with your library', '从你的媒体库开始')}</h2><p className="mt-2 text-sm leading-6 text-muted">{tr('Ask for a recommendation, compare titles, or explore your viewing preferences.', '获取推荐、比较影片，或探索你的观影偏好。')}</p></div><PromptSuggestion><PromptSuggestion.Items>{suggestions.map(([english, chinese]) => <PromptSuggestion.Item key={english} onPress={() => { onSelect(tr(english, chinese)); }}>{tr(english, chinese)}</PromptSuggestion.Item>)}</PromptSuggestion.Items></PromptSuggestion></div>; }
+function EmptyPrompts({ onSelect, tr }: { onSelect: (value: string) => void; tr: ReturnType<typeof useTranslate> }) { return <div className="mx-auto flex min-h-[28rem] w-full flex-col justify-center py-8"><div className="mb-7"><span className="mb-4 grid size-11 place-items-center rounded-lg bg-accent text-accent-foreground"><Sparkles className="size-5" /></span><h2 className="text-2xl font-semibold">{tr('What would you like to watch?', '想看点什么？')}</h2><p className="mt-2 text-sm leading-6 text-muted">{tr('Start from your library and viewing history to find the right title for now.', '从你的媒体库与观看记录出发，找一部真正适合现在的影片。')}</p></div><PromptSuggestion><PromptSuggestion.Items className="grid grid-cols-1 gap-2 sm:grid-cols-2">{suggestions.map(([english, chinese]) => <PromptSuggestion.Item className="rounded-lg" key={english} onPress={() => { onSelect(tr(english, chinese)); }}>{tr(english, chinese)}</PromptSuggestion.Item>)}</PromptSuggestion.Items></PromptSuggestion></div>; }
 
-function ConversationHistory({ actions, conversations, hideHeading = false, tr }: {
+function ConversationHistory({ activeConversationId, actions, conversations, hideHeading = false, onCollapse, tr }: {
+  activeConversationId: string | null;
   actions: {
     onDelete: (id: string) => Promise<void>;
     onNew: () => void;
@@ -282,16 +284,17 @@ function ConversationHistory({ actions, conversations, hideHeading = false, tr }
   };
   conversations: AiConversationSummary[];
   hideHeading?: boolean;
+  onCollapse?: () => void;
   tr: ReturnType<typeof useTranslate>;
 }) {
   return (
-    <div className="flex min-h-0 flex-col">
-      <div className="mb-4 flex items-center justify-between">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="mb-3 flex items-center justify-between px-1">
         <h2 className={hideHeading ? 'sr-only' : 'text-sm font-semibold'}>{tr('Conversations', '对话')}</h2>
-        <Tooltip><Button aria-label={tr('New conversation', '新建对话')} isIconOnly onPress={actions.onNew} size="sm" variant="ghost"><MessageSquarePlus className="size-4" /></Button><Tooltip.Content>{tr('New conversation', '新建对话')}</Tooltip.Content></Tooltip>
+        <div className="flex items-center gap-1">{onCollapse ? <Tooltip delay={0}><Tooltip.Trigger><Button aria-label={tr('Collapse conversation history', '收起对话历史')} isIconOnly onPress={onCollapse} size="sm" variant="ghost"><PanelLeftClose className="size-4" /></Button></Tooltip.Trigger><Tooltip.Content>{tr('Collapse conversation history', '收起对话历史')}</Tooltip.Content></Tooltip> : null}<Tooltip delay={0}><Tooltip.Trigger><Button aria-label={tr('New conversation', '新建对话')} isIconOnly onPress={actions.onNew} size="sm" variant="ghost"><MessageSquarePlus className="size-4" /></Button></Tooltip.Trigger><Tooltip.Content>{tr('New conversation', '新建对话')}</Tooltip.Content></Tooltip></div>
       </div>
-      <ChatListView aria-label={tr('Saved conversations', '已保存对话')} className="min-h-0 overflow-y-auto" items={conversations} onAction={(key) => { void actions.onOpen(String(key)); }} renderEmptyState={() => <p className="px-3 py-8 text-center text-sm text-muted">{tr('No conversations yet', '还没有对话')}</p>}>
-        {(item) => <ChatListView.Item id={item.id} textValue={item.title}><ChatListView.ItemContent><ChatListView.Icon><Sparkles className="size-4" /></ChatListView.Icon><ChatListView.Text><ChatListView.Title>{item.title}</ChatListView.Title><ChatListView.Preview>{new Date(item.updatedAt).toLocaleDateString()}</ChatListView.Preview></ChatListView.Text></ChatListView.ItemContent><ChatListView.Meta><Button aria-label={tr(`Delete ${item.title}`, `删除 ${item.title}`)} isIconOnly onPress={() => { void actions.onDelete(item.id); }} size="sm" variant="ghost"><Trash2 className="size-4" /></Button></ChatListView.Meta></ChatListView.Item>}
+      <ChatListView aria-label={tr('Saved conversations', '已保存对话')} className="min-h-0 flex-1 overflow-y-auto" items={conversations} onAction={(key) => { void actions.onOpen(String(key)); }} renderEmptyState={() => <p className="px-3 py-8 text-center text-sm text-muted">{tr('No conversations yet', '还没有对话')}</p>}>
+        {(item) => <ChatListView.Item className={`group rounded-lg border-b-0 px-2 py-2 ${item.id === activeConversationId ? 'bg-default' : ''}`} id={item.id} textValue={item.title}><ChatListView.ItemContent className="gap-2"><ChatListView.Icon><MessageCircle className="size-4" /></ChatListView.Icon><ChatListView.Text><ChatListView.Title>{item.title}</ChatListView.Title><ChatListView.Preview>{new Date(item.updatedAt).toLocaleDateString()}</ChatListView.Preview></ChatListView.Text></ChatListView.ItemContent><ChatListView.Meta className="opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"><Button aria-label={tr(`Delete ${item.title}`, `删除 ${item.title}`)} isIconOnly onPress={() => { void actions.onDelete(item.id); }} size="sm" variant="ghost"><Trash2 className="size-4" /></Button></ChatListView.Meta></ChatListView.Item>}
       </ChatListView>
     </div>
   );

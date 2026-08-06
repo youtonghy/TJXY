@@ -27,9 +27,21 @@ beforeEach(() => {
 it('renders a focused media assistant empty state with model names and prompts', async () => {
   renderPage();
   expect(await screen.findByRole('heading', { name: 'AI assistant' })).toBeVisible();
-  expect(screen.getByText('Cinema Guide')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Cinema Guide Model' })).toBeVisible();
   expect(screen.getByRole('button', { name: /Recommend something for tonight/ })).toBeVisible();
   expect(screen.getByRole('textbox', { name: 'Message' })).toBeVisible();
+});
+
+it('collapses and restores the desktop conversation history', async () => {
+  renderPage();
+  const user = userEvent.setup();
+  expect(await screen.findByRole('complementary', { name: 'Conversation history' })).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: 'Collapse conversation history' }));
+  expect(screen.queryByRole('complementary', { name: 'Conversation history' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'Show conversation history' }));
+  expect(screen.getByRole('complementary', { name: 'Conversation history' })).toBeVisible();
 });
 
 it('sends a prompt, streams tool status and renders grounded sources', async () => {
