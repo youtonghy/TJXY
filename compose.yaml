@@ -1,9 +1,29 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TJXY_POSTGRES_DB:-tjxy}
+      POSTGRES_USER: ${TJXY_POSTGRES_USER:-tjxy}
+      POSTGRES_PASSWORD: ${TJXY_POSTGRES_PASSWORD:-tjxy-local-dev}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - tjxy-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   tjxy:
     build:
       context: .
     image: tjxy:local
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8096:8096"
     environment:
@@ -25,3 +45,4 @@ services:
 volumes:
   tjxy-config:
   tjxy-data:
+  tjxy-postgres:

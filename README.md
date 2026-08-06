@@ -706,13 +706,23 @@ cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
 
-For Docker, the included Compose file runs the same browser setup, persists the
-manifest under `/config` and all database/branding data under `/data`, and exposes
-port 8096:
+For Docker, the included Compose file starts an isolated PostgreSQL 18 instance
+alongside TJXY. PostgreSQL data is persisted in `tjxy-postgres` and is published
+only on `127.0.0.1:5433` for local tools; from the TJXY container use host
+`postgres` and port `5432`. The browser setup remains deliberately interactive:
+the manifest is persisted under `/config` and branding/application data under
+`/data`.
 
 ```bash
 docker compose up --build
 ```
+
+The default local database values are database `tjxy`, user `tjxy`, and password
+`tjxy-local-dev`. Override them before starting with `TJXY_POSTGRES_DB`,
+`TJXY_POSTGRES_USER`, and `TJXY_POSTGRES_PASSWORD` (for example in an untracked
+`.env` file). In the setup wizard choose **PostgreSQL**, enter `postgres` as the
+host, `5432` as the port, and test the connection before completing installation.
+To connect from the host after startup, use `postgresql://tjxy:tjxy-local-dev@127.0.0.1:5433/tjxy`.
 
 SQLite accepts a file under the configured data root. PostgreSQL and MySQL accept
 separate host, port, database, username, password, and TLS fields; connection URLs
