@@ -30,6 +30,7 @@ describe('AdminShell', () => {
       'Users',
       'Access',
       'Libraries',
+      'Announcements',
       'Tasks',
       'Google Drive',
       'OneDrive',

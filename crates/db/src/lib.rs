@@ -2,6 +2,7 @@
 
 mod ai;
 mod ai_usage;
+mod announcement;
 mod api_key;
 mod asset;
 mod auth;
@@ -55,6 +56,10 @@ pub use ai::{
 pub use ai_usage::{
     AiExecutionInput, AiExecutionOutcome, AiUsageAnalytics, AiUsageDaily, AiUsageFailure,
     AiUsageModel, AiUsageRepository, AiUsageRepositoryError, AiUsageSummary, AiUsageUser,
+};
+pub use announcement::{
+    AnnouncementDraftInput, AnnouncementKind, AnnouncementList, AnnouncementRecord,
+    AnnouncementRepository, AnnouncementRepositoryError, AnnouncementStatus, AnnouncementView,
 };
 pub use api_key::{ApiKeyDraft, ApiKeyRepository, ApiKeyRepositoryError, StoredApiKey};
 pub use asset::{AssetPublication, AssetPublicationReport, AssetRepository, AssetRepositoryError};

@@ -5,6 +5,7 @@ import { Home, Library, LogOut, Moon, Search, Sparkles, Sun, Trophy, UserRound }
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../ui/BrandMark';
+import { ClientAnnouncements } from '../../announcements/ClientAnnouncements';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { useClientTheme } from './clientTheme';
 import { useTranslate } from '../../settings/i18n';
@@ -53,6 +54,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
           </Navbar.Content>
           <Navbar.Spacer />
           <Navbar.Content>
+            <ClientAnnouncements />
             <Tooltip>
               <Tooltip.Trigger>
                 <Button

@@ -646,6 +646,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .with_startup_wizard_completed(has_enabled_admin),
     )
     .with_auth(auth.clone())
+    .with_announcements(database.clone())
     .with_ai_config(database.clone(), ai_settings_cipher, options.ai_admission)
     .with_catalog(catalog.clone())
     .with_libraries(libraries)

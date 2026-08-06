@@ -5,6 +5,7 @@ const enUS: Record<string, string> = {
   'admin.brand.title': '{title} Admin',
   'admin.navigation.access': 'Access',
   'admin.navigation.ai': 'AI assistant',
+  'admin.navigation.announcements': 'Announcements',
   'admin.navigation.close': 'Close navigation',
   'admin.navigation.dashboard': 'Dashboard',
   'admin.navigation.googleDrive': 'Google Drive',

@@ -5,6 +5,7 @@ mod ai;
 mod ai_admission;
 mod ai_provider;
 mod ai_settings;
+mod announcements;
 mod api_key;
 mod auth;
 mod browse;
@@ -134,6 +135,7 @@ pub struct AppState {
     auth: Option<Arc<AuthService<SystemClock>>>,
     ai: Option<Arc<ai::AiService>>,
     ai_encryption_available: bool,
+    announcements: Option<Arc<announcements::AnnouncementService>>,
     catalog: Option<Arc<CatalogQueryService>>,
     display_preferences: Option<Arc<DisplayPreferencesService>>,
     dashboard_admin: Option<Arc<dashboard_admin::DashboardAdminService>>,
@@ -168,6 +170,7 @@ impl AppState {
             auth: None,
             ai: None,
             ai_encryption_available: false,
+            announcements: None,
             catalog: None,
             display_preferences: None,
             dashboard_admin: None,
@@ -203,6 +206,12 @@ impl AppState {
     #[must_use]
     pub fn with_auth(mut self, auth: Arc<AuthService<SystemClock>>) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    #[must_use]
+    pub fn with_announcements(mut self, database: sea_orm::DatabaseConnection) -> Self {
+        self.announcements = Some(Arc::new(announcements::AnnouncementService::new(database)));
         self
     }
 
@@ -480,6 +489,12 @@ pub fn build_router(state: AppState) -> Router {
             get(ai::get_conversation).delete(ai::delete_conversation),
         )
         .route("/Ai/Chat", post(ai::chat))
+        .route("/Announcements", get(announcements::client_list))
+        .route("/Announcements/NextPopup", get(announcements::next_popup))
+        .route(
+            "/Announcements/{id}/Acknowledge",
+            post(announcements::acknowledge),
+        )
         .route("/Users/Me/Insights", get(client_portal::insights))
         .route(
             "/Users/Me/Profile",
@@ -653,6 +668,22 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/Admin/Ai/Settings/Test", post(ai_settings::test))
         .route("/Admin/Ai/Analytics", get(ai_settings::analytics))
+        .route(
+            "/Admin/Announcements",
+            get(announcements::admin_list).post(announcements::admin_create),
+        )
+        .route(
+            "/Admin/Announcements/{id}",
+            put(announcements::admin_update).delete(announcements::admin_delete),
+        )
+        .route(
+            "/Admin/Announcements/{id}/Publish",
+            post(announcements::admin_publish),
+        )
+        .route(
+            "/Admin/Announcements/{id}/Archive",
+            post(announcements::admin_archive),
+        )
         .route(
             "/Admin/Ai/Settings/Models",
             post(ai_settings::discover_models),

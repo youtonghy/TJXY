@@ -4,6 +4,7 @@ import {
   FolderKanban,
   ListTodo,
   LayoutDashboard,
+  Megaphone,
   ShieldCheck,
   Settings2,
   Sparkles,
@@ -28,6 +29,7 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
       { labelKey: 'admin.navigation.users', to: '/admin/users', icon: UsersRound },
       { labelKey: 'admin.navigation.access', to: '/admin/access', icon: ShieldCheck },
       { labelKey: 'admin.navigation.libraries', to: '/admin/libraries', icon: FolderKanban },
+      { labelKey: 'admin.navigation.announcements', to: '/admin/announcements', icon: Megaphone },
     ],
   },
   {

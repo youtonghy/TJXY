@@ -23,6 +23,7 @@ const zhCN: Record<string, string> = {
   'admin.brand.title': '{title} 管理后台',
   'admin.navigation.access': '访问控制',
   'admin.navigation.ai': 'AI 助手',
+  'admin.navigation.announcements': '公告管理',
   'admin.navigation.close': '关闭导航',
   'admin.navigation.dashboard': '仪表盘',
   'admin.navigation.googleDrive': 'Google Drive',
