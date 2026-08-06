@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+RELEASE_TUI="$SCRIPT_DIR/target/release/tjxy-tui"
+DEBUG_TUI="$SCRIPT_DIR/target/debug/tjxy-tui"
+
+if [ -x "$RELEASE_TUI" ]; then
+    exec "$RELEASE_TUI" "$@"
+fi
+
+if [ -x "$DEBUG_TUI" ]; then
+    exec "$DEBUG_TUI" "$@"
+fi
+
+printf '%s\n' \
+    'TJXY TUI has not been built yet.' \
+    'Run: cargo build --release --locked -p tjxy-tui' >&2
+exit 1

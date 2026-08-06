@@ -167,8 +167,13 @@ The repository includes a Rust terminal console for local service control,
 status, and backend log diagnostics:
 
 ```bash
-cargo run -p tjxy-tui
+./tjxy
 ```
+
+The root launcher uses `target/release/tjxy-tui` when available and falls back to
+`target/debug/tjxy-tui`. Build it once with
+`cargo build --release --locked -p tjxy-tui`; subsequent launches do not invoke
+Cargo.
 
 It discovers TJXY server processes from this workspace even when another launcher
 started them, and shows process, listener, HTTP, installation-config, frontend
