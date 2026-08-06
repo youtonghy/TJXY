@@ -52,6 +52,7 @@ mod m20260803_000051_ai_daily_quota;
 mod m20260803_000052_announcements;
 mod m20260804_000053_installation;
 mod m20260804_000054_similar_item_indexes;
+mod m20260806_000055_ai_message_sequence;
 
 use sea_orm_migration::prelude::*;
 use uuid::Uuid;
@@ -126,6 +127,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260803_000052_announcements::Migration),
             Box::new(m20260804_000053_installation::Migration),
             Box::new(m20260804_000054_similar_item_indexes::Migration),
+            Box::new(m20260806_000055_ai_message_sequence::Migration),
         ]
     }
 }

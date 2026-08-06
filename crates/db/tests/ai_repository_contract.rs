@@ -170,6 +170,7 @@ async fn settings_require_one_visible_default_and_unique_model_identifiers() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One ownership contract also verifies ordering across exchanges.
 async fn conversations_are_user_scoped_and_exchanges_are_ordered() {
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
@@ -227,6 +228,35 @@ async fn conversations_are_user_scoped_and_exchanges_are_ordered() {
     assert_eq!(
         loaded.messages()[1].metadata()["sources"][0]["id"],
         "arrival"
+    );
+
+    repository
+        .append_exchange(
+            alice.id(),
+            conversation_id,
+            "再来一部",
+            "也可以看看《银翼杀手2049》。",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    let loaded = repository
+        .get(alice.id(), conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded
+            .messages()
+            .iter()
+            .map(tjxy_db::AiMessageRecord::role)
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "user", "assistant"]
+    );
+    assert_eq!(loaded.messages()[2].content(), "再来一部");
+    assert_eq!(
+        loaded.messages()[3].content(),
+        "也可以看看《银翼杀手2049》。"
     );
 
     assert!(

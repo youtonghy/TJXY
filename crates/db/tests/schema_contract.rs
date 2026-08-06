@@ -1,11 +1,115 @@
 use sea_orm::{
     ConnectionTrait, DbBackend, Statement,
-    sea_query::{Alias, Expr, Query},
+    sea_query::{Alias, Expr, Order, Query},
 };
 use sea_orm_migration::{MigratorTrait, SchemaManager};
 use tjxy_common::Username;
 use tjxy_db::{AuthRepository, Migrator};
 use tjxy_test_support::test_database;
+
+const AI_MESSAGE_SEQUENCE_MIGRATION_POSITION: u32 = 55;
+
+#[tokio::test]
+async fn ai_message_sequence_migration_backfills_existing_conversations() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(AI_MESSAGE_SEQUENCE_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+    let backend = database.get_database_backend();
+    let auth = AuthRepository::new(&database);
+    let user = auth
+        .create_user(
+            &Username::parse("sequence-migration").unwrap(),
+            "test-only",
+            false,
+            false,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let conversation_id = uuid::Uuid::new_v4();
+    let timestamp = chrono::Utc::now();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("ai_conversations"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("user_id"),
+                        Alias::new("model_id"),
+                        Alias::new("title"),
+                        Alias::new("created_at"),
+                        Alias::new("updated_at"),
+                    ])
+                    .values_panic([
+                        conversation_id.into(),
+                        user.id().as_uuid().into(),
+                        uuid::Uuid::new_v4().into(),
+                        "Existing conversation".into(),
+                        timestamp.into(),
+                        timestamp.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let first_id = uuid::Uuid::from_u128(1);
+    let second_id = uuid::Uuid::from_u128(2);
+    for (id, role) in [(second_id, "assistant"), (first_id, "user")] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("ai_messages"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("conversation_id"),
+                            Alias::new("role"),
+                            Alias::new("content"),
+                            Alias::new("metadata_json"),
+                            Alias::new("created_at"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            conversation_id.into(),
+                            role.into(),
+                            role.into(),
+                            "{}".into(),
+                            timestamp.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    Migrator::up(&database, Some(1)).await.unwrap();
+
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("id"), Alias::new("sequence_number")])
+                    .from(Alias::new("ai_messages"))
+                    .order_by(Alias::new("sequence_number"), Order::Asc),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].try_get::<uuid::Uuid>("", "id").unwrap(), first_id);
+    assert_eq!(rows[0].try_get::<i64>("", "sequence_number").unwrap(), 0);
+    assert_eq!(rows[1].try_get::<uuid::Uuid>("", "id").unwrap(), second_id);
+    assert_eq!(rows[1].try_get::<i64>("", "sequence_number").unwrap(), 1);
+    let schema = SchemaManager::new(&database);
+    assert!(
+        schema
+            .has_index("ai_messages", "uq_ai_messages_conversation_sequence")
+            .await
+            .unwrap()
+    );
+}
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One contract enumerates the complete foundational schema boundary.

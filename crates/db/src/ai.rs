@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Expr, Order, Query},
+    sea_query::{Alias, Expr, LockType, Order, Query, SelectStatement},
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -600,6 +600,8 @@ pub enum AiConversationRepositoryError {
     InvalidLimit,
     #[error("AI conversation was not found for this user")]
     NotFound,
+    #[error("AI conversation message sequence is exhausted")]
+    MessageSequenceExhausted,
     #[error("AI conversation database operation failed: {0}")]
     Database(#[from] DbErr),
     #[error("AI conversation rollback failed after {original}: {rollback}")]
@@ -889,13 +891,7 @@ async fn append_exchange(
     assistant_content: &str,
     metadata_json: &str,
 ) -> Result<(), AiConversationRepositoryError> {
-    let owned = Query::select()
-        .expr(Expr::val(1_i32))
-        .from(Alias::new("ai_conversations"))
-        .and_where(Expr::col(Alias::new("id")).eq(conversation_id))
-        .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
-        .limit(1)
-        .to_owned();
+    let owned = locked_conversation_query(user_id, conversation_id);
     if transaction
         .query_one(transaction.get_database_backend().build(&owned))
         .await?
@@ -903,14 +899,18 @@ async fn append_exchange(
     {
         return Err(AiConversationRepositoryError::NotFound);
     }
+    let first_sequence = next_message_sequence(transaction, conversation_id).await?;
+    let assistant_sequence = first_sequence
+        .checked_add(1)
+        .ok_or(AiConversationRepositoryError::MessageSequenceExhausted)?;
     let now = Utc::now();
-    for (role, content, metadata, created_at) in [
-        ("user", user_content, "{}", now),
+    for (role, content, metadata, sequence_number) in [
+        ("user", user_content, "{}", first_sequence),
         (
             "assistant",
             assistant_content,
             metadata_json,
-            now + Duration::microseconds(1),
+            assistant_sequence,
         ),
     ] {
         let statement = Query::insert()
@@ -922,6 +922,7 @@ async fn append_exchange(
                 Alias::new("content"),
                 Alias::new("metadata_json"),
                 Alias::new("created_at"),
+                Alias::new("sequence_number"),
             ])
             .values_panic([
                 Uuid::new_v4().into(),
@@ -929,7 +930,8 @@ async fn append_exchange(
                 role.into(),
                 content.into(),
                 metadata.into(),
-                created_at.into(),
+                now.into(),
+                sequence_number.into(),
             ])
             .to_owned();
         transaction
@@ -953,6 +955,41 @@ async fn append_exchange(
     Ok(())
 }
 
+fn locked_conversation_query(user_id: UserId, conversation_id: Uuid) -> SelectStatement {
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("ai_conversations"))
+        .and_where(Expr::col(Alias::new("id")).eq(conversation_id))
+        .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+        .limit(1)
+        .lock(LockType::Update)
+        .to_owned()
+}
+
+async fn next_message_sequence(
+    transaction: &DatabaseTransaction,
+    conversation_id: Uuid,
+) -> Result<i64, AiConversationRepositoryError> {
+    let statement = Query::select()
+        .expr_as(
+            Expr::col(Alias::new("sequence_number")).max(),
+            Alias::new("max_sequence"),
+        )
+        .from(Alias::new("ai_messages"))
+        .and_where(Expr::col(Alias::new("conversation_id")).eq(conversation_id))
+        .to_owned();
+    let row = transaction
+        .query_one(transaction.get_database_backend().build(&statement))
+        .await?
+        .ok_or(AiConversationRepositoryError::MessageSequenceExhausted)?;
+    let maximum: Option<i64> = row.try_get("", "max_sequence")?;
+    maximum.map_or(Ok(0), |value| {
+        value
+            .checked_add(1)
+            .ok_or(AiConversationRepositoryError::MessageSequenceExhausted)
+    })
+}
+
 async fn load_messages<C: ConnectionTrait>(
     connection: &C,
     conversation_id: Uuid,
@@ -967,7 +1004,7 @@ async fn load_messages<C: ConnectionTrait>(
         ])
         .from(Alias::new("ai_messages"))
         .and_where(Expr::col(Alias::new("conversation_id")).eq(conversation_id))
-        .order_by(Alias::new("created_at"), Order::Desc)
+        .order_by(Alias::new("sequence_number"), Order::Desc)
         .limit(MAX_CONVERSATION_MESSAGES)
         .to_owned();
     let mut messages = connection
@@ -1049,5 +1086,27 @@ async fn finish_conversation<T>(
                 rollback,
             }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::sea_query::{MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder};
+    use tjxy_common::UserId;
+    use uuid::Uuid;
+
+    use super::locked_conversation_query;
+
+    #[test]
+    fn appending_messages_locks_the_conversation_on_locking_backends() {
+        let query = locked_conversation_query(UserId::new(), Uuid::new_v4());
+
+        assert!(
+            query
+                .to_string(PostgresQueryBuilder)
+                .ends_with("FOR UPDATE")
+        );
+        assert!(query.to_string(MysqlQueryBuilder).ends_with("FOR UPDATE"));
+        assert!(!query.to_string(SqliteQueryBuilder).contains("FOR UPDATE"));
     }
 }
