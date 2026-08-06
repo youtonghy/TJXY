@@ -280,27 +280,14 @@ impl ClientPortalService {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<InsightTimelineEventDto>, DbErr> {
+        let candidates = self.completed_series_candidates(user_id, from, to).await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
         let episode = Alias::new("episode");
         let parent = Alias::new("episode_parent");
         let series = Alias::new("series");
         let user_data = Alias::new("ud");
-        let series_join = Condition::any()
-            .add(
-                Condition::all()
-                    .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Series"))
-                    .add(
-                        Expr::col((series.clone(), Alias::new("id")))
-                            .equals((parent.clone(), Alias::new("id"))),
-                    ),
-            )
-            .add(
-                Condition::all()
-                    .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Season"))
-                    .add(
-                        Expr::col((series.clone(), Alias::new("id")))
-                            .equals((parent.clone(), Alias::new("parent_id"))),
-                    ),
-            );
         let query = Query::select()
             .expr_as(
                 Expr::col((series.clone(), Alias::new("id"))),
@@ -326,7 +313,7 @@ impl ClientPortalService {
                 JoinType::InnerJoin,
                 Alias::new("catalog_items"),
                 series.clone(),
-                series_join,
+                series_parent_join(&parent, &series),
             )
             .join_as(
                 JoinType::LeftJoin,
@@ -340,6 +327,9 @@ impl ClientPortalService {
                     .add(Expr::col((user_data.clone(), Alias::new("user_id"))).eq(user_id)),
             )
             .and_where(Expr::col((episode.clone(), Alias::new("item_type"))).eq("Episode"))
+            .and_where(
+                Expr::col((series.clone(), Alias::new("id"))).is_in(candidates.iter().copied()),
+            )
             .cond_where(catalog_item_visibility_condition(&episode))
             .cond_where(catalog_item_visibility_condition(&series))
             .group_by_col((series.clone(), Alias::new("id")))
@@ -367,6 +357,56 @@ impl ClientPortalService {
             })
             .collect::<Vec<_>>();
         Ok(events)
+    }
+
+    async fn completed_series_candidates(
+        &self,
+        user_id: Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>, DbErr> {
+        let user_data = Alias::new("candidate_ud");
+        let episode = Alias::new("candidate_episode");
+        let parent = Alias::new("candidate_parent");
+        let series = Alias::new("candidate_series");
+        let query = Query::select()
+            .expr_as(
+                Expr::col((series.clone(), Alias::new("id"))),
+                Alias::new("series_id"),
+            )
+            .from_as(Alias::new("user_data"), user_data.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                episode.clone(),
+                Expr::col((episode.clone(), Alias::new("id")))
+                    .equals((user_data.clone(), Alias::new("catalog_item_id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                parent.clone(),
+                Expr::col((parent.clone(), Alias::new("id")))
+                    .equals((episode.clone(), Alias::new("parent_id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("catalog_items"),
+                series.clone(),
+                series_parent_join(&parent, &series),
+            )
+            .and_where(Expr::col((user_data.clone(), Alias::new("user_id"))).eq(user_id))
+            .and_where(Expr::col((user_data.clone(), Alias::new("updated_at"))).gte(from))
+            .and_where(Expr::col((user_data, Alias::new("updated_at"))).lt(to))
+            .and_where(Expr::col((episode, Alias::new("item_type"))).eq("Episode"))
+            .distinct()
+            .to_owned();
+        self.database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .map(|row| row.try_get("", "series_id"))
+            .collect()
     }
 
     async fn user_genres(
@@ -644,6 +684,26 @@ impl ClientPortalService {
                 TmdbMediaType::Series => cache.series.clone(),
             })
     }
+}
+
+fn series_parent_join(parent: &Alias, series: &Alias) -> Condition {
+    Condition::any()
+        .add(
+            Condition::all()
+                .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Series"))
+                .add(
+                    Expr::col((series.clone(), Alias::new("id")))
+                        .equals((parent.clone(), Alias::new("id"))),
+                ),
+        )
+        .add(
+            Condition::all()
+                .add(Expr::col((parent.clone(), Alias::new("item_type"))).eq("Season"))
+                .add(
+                    Expr::col((series.clone(), Alias::new("id")))
+                        .equals((parent.clone(), Alias::new("parent_id"))),
+                ),
+        )
 }
 
 pub(crate) async fn insights(

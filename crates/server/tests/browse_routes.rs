@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, Statement,
+    ConnectionTrait, DatabaseConnection, DbBackend, Statement,
     sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
@@ -7080,6 +7080,109 @@ async fn client_portal_reports_personal_insights_and_discover_rankings() {
         .await
         .unwrap();
     assert_visibility_sensitive_routes_hide_item(&app.router, &token, &dashboard_path).await;
+}
+
+#[tokio::test]
+async fn personal_insights_do_not_scan_unrelated_episode_catalog() {
+    let app = test_app().await;
+    if app.database.get_database_backend() != DbBackend::Sqlite {
+        return;
+    }
+    let library = seed_library(&app.database, "Large series catalog", true).await;
+    let series = seed_item(&app.database, library, "Unwatched series", "Series").await;
+    let season = seed_item(&app.database, library, "Season 1", "Season").await;
+    app.database
+        .execute(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "UPDATE catalog_items SET parent_id = X'{series}' WHERE id = X'{season}';\
+                 WITH RECURSIVE sequence(number) AS (\
+                   SELECT 1 UNION ALL SELECT number + 1 FROM sequence WHERE number < 100000\
+                 )\
+                 INSERT INTO catalog_items (\
+                   id, item_type, name, sort_name, sort_key, classification_state, metadata_state,\
+                   structure_state, source_state, structure_expansion_revision, source_index_revision,\
+                   is_present, parent_id\
+                 )\
+                 SELECT unhex(printf('%032x', number)), 'Episode',\
+                   printf('Episode %d', number), printf('episode %d', number), x'01', 'Matched',\
+                   'Ready', 'NotApplicable', 'Indexed', 0, 0, 1, X'{season}'\
+                 FROM sequence;\
+                 WITH RECURSIVE sequence(number) AS (\
+                   SELECT 1 UNION ALL SELECT number + 1 FROM sequence WHERE number < 100000\
+                 )\
+                 INSERT INTO library_catalog_items (id, library_id, catalog_item_id)\
+                 SELECT unhex(printf('20%030x', number)), X'{library}', unhex(printf('%032x', number))\
+                 FROM sequence;",
+                series = series.as_uuid().simple(),
+                season = season.as_uuid().simple(),
+                library = library.simple(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let (_, _, token) = login(&app.router).await;
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        get(&app.router, "/Users/Me/Insights?range=30d", Some(&token)),
+    )
+    .await
+    .expect("unrelated catalog entries must not delay personal insights");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let insights: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(insights["PlayCount"], 0);
+    assert_eq!(insights["Timeline"], json!([]));
+}
+
+#[tokio::test]
+async fn personal_insights_keep_series_completion_events() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Series", true).await;
+    let series = seed_item(&app.database, library, "Completed series", "Series").await;
+    let first = seed_item(&app.database, library, "Episode 1", "Episode").await;
+    let second = seed_item(&app.database, library, "Episode 2", "Episode").await;
+    let backend = app.database.get_database_backend();
+    for episode in [first, second] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("parent_id"), series.as_uuid())
+                        .and_where(Expr::col(Alias::new("id")).eq(episode.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (user_id, _, token) = login(&app.router).await;
+    for episode in [first, second] {
+        let response = post_empty(
+            &app.router,
+            &format!("/Users/{user_id}/PlayedItems/{episode}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = get(&app.router, "/Users/Me/Insights?range=today", Some(&token)).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let insights: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        insights["Timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["Kind"] == "SeriesCompleted" && event["Name"] == "Completed series"
+            })
+    );
 }
 
 async fn assert_visibility_sensitive_routes_hide_item(
