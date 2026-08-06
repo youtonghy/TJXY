@@ -2,11 +2,12 @@
 import { Avatar, Button, Dropdown, Tooltip } from '@heroui/react';
 import { Navbar } from '@heroui-pro/react/navbar';
 import { Home, Library, LogOut, Moon, Search, Sparkles, Sun, Trophy, UserRound } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../ui/BrandMark';
 import { ClientAnnouncements } from '../../announcements/ClientAnnouncements';
 import { useClientAuth } from '../auth/ClientAuthContext';
+import { getAiModels } from '../ai/aiApi';
 import { useClientTheme } from './clientTheme';
 import { useTranslate } from '../../settings/i18n';
 
@@ -24,7 +25,15 @@ export function ClientShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const { theme, toggleTheme } = useClientTheme();
   const [open, setOpen] = useState(false);
+  const [aiAvailable, setAiAvailable] = useState(false);
   const tr = useTranslate();
+  useEffect(() => {
+    let active = true;
+    void getAiModels()
+      .then((models) => { if (active) setAiAvailable(models.length > 0); })
+      .catch(() => { if (active) setAiAvailable(false); });
+    return () => { active = false; };
+  }, []);
   return (
     <div className="min-h-screen bg-background">
       <Navbar
@@ -50,7 +59,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
             </Link>
           </Navbar.Brand>
           <Navbar.Content className="hidden lg:flex">
-            <ClientNavigation pathname={pathname} />
+            <ClientNavigation aiAvailable={aiAvailable} pathname={pathname} />
           </Navbar.Content>
           <Navbar.Spacer />
           <Navbar.Content>
@@ -92,7 +101,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
           </Navbar.Content>
         </Navbar.Header>
         <Navbar.Menu aria-label={tr('Mobile navigation', '移动端导航')} role="navigation">
-          <ClientNavigation mobile pathname={pathname} />
+          <ClientNavigation aiAvailable={aiAvailable} mobile pathname={pathname} />
         </Navbar.Menu>
       </Navbar>
       <main className="mx-auto w-full max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">{children}</main>
@@ -100,10 +109,10 @@ export function ClientShell({ children }: { children: ReactNode }) {
   );
 }
 
-function ClientNavigation({ mobile = false, pathname }: { mobile?: boolean; pathname: string }) {
+function ClientNavigation({ aiAvailable, mobile = false, pathname }: { aiAvailable: boolean; mobile?: boolean; pathname: string }) {
   const tr = useTranslate();
   return (
-    links.map(({ to, label, icon: Icon }) => {
+    links.filter(({ to }) => to !== '/app/ai' || aiAvailable).map(({ to, label, icon: Icon }) => {
       const Item = mobile ? Navbar.MenuItem : Navbar.Item;
       return (
         <Item

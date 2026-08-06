@@ -2,6 +2,11 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ClientShell } from './ClientShell';
+import { getAiModels } from '../ai/aiApi';
+
+vi.mock('../ai/aiApi', () => ({ getAiModels: vi.fn() }));
+
+const getAiModelsMock = vi.mocked(getAiModels);
 
 vi.mock('../auth/ClientAuthContext', () => ({
   useClientAuth: () => ({
@@ -11,6 +16,8 @@ vi.mock('../auth/ClientAuthContext', () => ({
 }));
 
 beforeEach(() => {
+  getAiModelsMock.mockReset();
+  getAiModelsMock.mockResolvedValue([{ id: '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11', displayName: 'Cinema Guide', isDefault: true }]);
   localStorage.clear();
   document.documentElement.classList.remove('dark', 'light');
   document.documentElement.removeAttribute('data-theme');
@@ -45,20 +52,28 @@ it('presents the same primary destinations in the top bar and mobile navigation'
   expect(mobileNavigation).toHaveTextContent('Home');
   expect(mobileNavigation).toHaveTextContent('Libraries');
   expect(mobileNavigation).toHaveTextContent('Search');
-  expect(mobileNavigation).toHaveTextContent('AI assistant');
+  expect(await within(mobileNavigation).findByRole('link', { name: 'AI assistant' })).toBeVisible();
   expect(within(mobileNavigation).getByRole('link', { name: 'Libraries' })).toHaveAttribute('aria-current', 'page');
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-it('exposes rankings and a profile destination from the account menu', async () => {
+it('exposes configured AI, rankings, and a profile destination from the account menu', async () => {
   const user = userEvent.setup();
   renderShell('/app/');
 
   expect(screen.getByRole('link', { name: 'Rankings' })).toHaveAttribute('href', '/app/rankings');
-  expect(screen.getByRole('link', { name: 'AI assistant' })).toHaveAttribute('href', '/app/ai');
+  expect(await screen.findByRole('link', { name: 'AI assistant' })).toHaveAttribute('href', '/app/ai');
   await user.click(screen.getByRole('button', { name: 'Open account menu for Admin' }));
 
   expect(await screen.findByRole('menuitem', { name: 'Profile & stats' })).toBeVisible();
+});
+
+it('hides the AI assistant destination when no model is configured', async () => {
+  getAiModelsMock.mockResolvedValue([]);
+  renderShell('/app/');
+
+  expect(await screen.findByRole('link', { name: 'Rankings' })).toBeVisible();
+  expect(screen.queryByRole('link', { name: 'AI assistant' })).not.toBeInTheDocument();
 });
 
 it('uses the shared system mark for the home brand link', () => {
