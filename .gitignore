@@ -15,3 +15,7 @@
 /.superpowers/
 __pycache__/
 *.pyc
+/data/
+/output/
+/.pi/
+/docs/
