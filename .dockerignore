@@ -1,0 +1,11 @@
+.git
+.env
+.DS_Store
+target
+data
+admin/node_modules
+admin/dist
+admin/output
+node_modules
+output
+*.log

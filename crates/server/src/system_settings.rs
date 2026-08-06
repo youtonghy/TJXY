@@ -23,7 +23,7 @@ use tokio::sync::watch;
 
 use crate::{AppState, auth};
 
-const MAX_BRAND_ASSET_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_BRAND_ASSET_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -358,25 +358,7 @@ impl SystemSettingsService {
         content_type: Option<&str>,
         bytes: &[u8],
     ) -> Result<String, AssetUploadError> {
-        if !matches!(kind, "logo" | "icon") || bytes.is_empty() {
-            return Err(AssetUploadError::Invalid);
-        }
-        if bytes.len() > MAX_BRAND_ASSET_BYTES {
-            return Err(AssetUploadError::TooLarge);
-        }
-        let (mime, extension) =
-            validated_image(content_type, bytes).ok_or(AssetUploadError::Invalid)?;
-        let digest = Sha256::digest(bytes);
-        let filename = format!("{kind}-{digest:x}.{extension}");
-        tokio::fs::create_dir_all(&self.asset_dir).await?;
-        let path = self.asset_dir.join(&filename);
-        if !path.exists() {
-            let temporary = self.asset_dir.join(format!(".{filename}.tmp"));
-            tokio::fs::write(&temporary, bytes).await?;
-            tokio::fs::rename(temporary, &path).await?;
-        }
-        let _ = mime;
-        Ok(format!("/Branding/Assets/{filename}"))
+        store_brand_asset(&self.asset_dir, kind, content_type, bytes).await
     }
     fn asset_path(&self, file: &str) -> Option<(&'static str, PathBuf)> {
         if file.contains('/') || file.contains('\\') || file.starts_with('.') {
@@ -422,13 +404,38 @@ impl RestartController {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum AssetUploadError {
+pub(crate) enum AssetUploadError {
     #[error("invalid brand asset")]
     Invalid,
     #[error("brand asset is too large")]
     TooLarge,
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+pub(crate) async fn store_brand_asset(
+    asset_dir: &Path,
+    kind: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<String, AssetUploadError> {
+    if !matches!(kind, "logo" | "icon") || bytes.is_empty() {
+        return Err(AssetUploadError::Invalid);
+    }
+    if bytes.len() > MAX_BRAND_ASSET_BYTES {
+        return Err(AssetUploadError::TooLarge);
+    }
+    let (_, extension) = validated_image(content_type, bytes).ok_or(AssetUploadError::Invalid)?;
+    let digest = Sha256::digest(bytes);
+    let filename = format!("{kind}-{digest:x}.{extension}");
+    tokio::fs::create_dir_all(asset_dir).await?;
+    let path = asset_dir.join(&filename);
+    if !path.exists() {
+        let temporary = asset_dir.join(format!(".{filename}.tmp"));
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(temporary, &path).await?;
+    }
+    Ok(format!("/Branding/Assets/{filename}"))
 }
 
 fn validated_image(

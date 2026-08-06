@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{Duration, TimeZone, Utc};
 use sea_orm::{
     ConnectionTrait,
-    sea_query::{Alias, Expr, JoinType, Query},
+    sea_query::{Alias, Asterisk, Expr, JoinType, Query},
 };
 use sea_orm_migration::MigratorTrait;
 use tjxy_application::{
@@ -157,6 +157,36 @@ async fn unknown_user_and_wrong_password_share_the_same_external_error() {
 
     assert_eq!(wrong, AuthError::InvalidCredentials);
     assert_eq!(unknown, AuthError::InvalidCredentials);
+}
+
+#[tokio::test]
+async fn credential_verification_returns_the_user_without_creating_a_session() {
+    let (service, _clock, database) = service().await;
+    let created = service
+        .create_user("setup-admin", "correct horse battery staple", true)
+        .await
+        .unwrap();
+
+    let verified = service
+        .verify_credentials("setup-admin", "correct horse battery staple")
+        .await
+        .unwrap();
+
+    assert_eq!(verified.id(), created.id());
+    let backend = database.get_database_backend();
+    let row = database
+        .query_one(
+            backend.build(
+                &Query::select()
+                    .expr_as(Expr::col(Asterisk).count(), Alias::new("count"))
+                    .from(Alias::new("auth_sessions"))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
 }
 
 #[tokio::test]

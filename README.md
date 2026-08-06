@@ -686,6 +686,48 @@ scope. It applies fixed Full command semantics without changing the Library's
 persisted Manual policy. Validate may share the physical root inventory, while
 Discover and target selection remain isolated to the selected binding.
 
+## First-run setup
+
+TJXY starts in a database-independent setup mode until a completed local
+installation manifest exists. Open `http://127.0.0.1:8096/setup/` and complete the
+four configuration steps: branding, database, network, and the initial administrator.
+The setup router is limited to loopback/private source addresses and does not expose
+login, media, client, or administrator APIs.
+
+Native builds use the platform configuration directory by default. Operators can
+select an explicit location with `TJXY_CONFIG_FILE`; setup data and SQLite files are
+confined to `TJXY_SETUP_DATA_DIR` (default `./data`). A minimal native first run is:
+
+```bash
+npm --prefix admin ci
+npm --prefix admin run build
+cargo build --release --locked -p tjxy-server --bin tjxy-server
+TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
+```
+
+For Docker, the included Compose file runs the same browser setup, persists the
+manifest under `/config` and all database/branding data under `/data`, and exposes
+port 8096:
+
+```bash
+docker compose up --build
+```
+
+SQLite accepts a file under the configured data root. PostgreSQL and MySQL accept
+separate host, port, database, username, password, and TLS fields; connection URLs
+and passwords are never echoed by the setup API. Uploaded PNG, JPEG, WebP, and icon
+branding assets are limited to 2 MiB and become durable application assets.
+
+If the process stops after database mutation but before the local manifest is
+completed, the next launch enters recovery mode. Recovery requires the same
+installation ID, administrator username, and password, verifies the existing
+administrator, and never resets a password or adopts a different database.
+
+Environment variables take precedence over the completed manifest. In particular,
+`TJXY_DATABASE_URL`, `TJXY_SERVER_ID`, `TJXY_CREDENTIAL_KEYRING`, `TJXY_BIND`, and
+`TJXY_PUBLIC_ADDRESS` remain operator overrides. A completed installation whose
+database is unavailable fails startup and never falls back to setup mode.
+
 ## Development
 
 The workspace requires Rust 1.88 or newer.

@@ -112,7 +112,10 @@ impl fmt::Debug for StartupOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StartupOptions")
-            .field("database_url", &self.database_url)
+            .field(
+                "database_backend",
+                &database_backend_label(&self.database_url),
+            )
             .field("identity", &self.identity)
             .field("bootstrap_admin", &self.bootstrap_admin)
             .field("legacy_auth_enabled", &self.legacy_auth_enabled)
@@ -152,6 +155,15 @@ impl fmt::Debug for StartupOptions {
             .field("media_refresh_interval", &self.media_refresh_interval)
             .field("ai_admission", &self.ai_admission)
             .finish_non_exhaustive()
+    }
+}
+
+fn database_backend_label(database_url: &str) -> &'static str {
+    match database_url.split(':').next() {
+        Some("sqlite") => "sqlite",
+        Some("postgres" | "postgresql") => "postgresql",
+        Some("mysql") => "mysql",
+        _ => "unknown",
     }
 }
 
@@ -435,7 +447,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     let musicbrainz_environment_fallback = options.musicbrainz_environment_fallback.clone();
     let musicbrainz_provider_factory = Arc::clone(&options.musicbrainz_provider_factory);
     validate_storage_backends(&options.storage_backends)?;
-    let database = Database::connect(&options.database_url).await?;
+    let mut database = Database::connect(&options.database_url).await?;
     if database.get_database_backend() == DbBackend::Sqlite {
         database
             .execute(Statement::from_string(
@@ -445,6 +457,10 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             .await?;
     }
     tjxy_db::Migrator::up(&database, None).await?;
+    if database.get_database_backend() == DbBackend::MySql {
+        database.close().await?;
+        database = Database::connect(&options.database_url).await?;
+    }
     let filesystem_browser_roots = match options.filesystem_browser_roots.clone() {
         Some(roots) => roots,
         None => SystemSettingsRepository::new(&database)

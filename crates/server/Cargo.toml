@@ -12,8 +12,11 @@ axum = { version = "0.8.9", features = ["ws"] }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+directories.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 reqwest.workspace = true
+rustix.workspace = true
 md-5.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
@@ -34,6 +37,7 @@ tjxy-storage-filesystem = { path = "../storage-filesystem" }
 tjxy-storage-google-drive = { path = "../storage-google-drive" }
 tjxy-storage-onedrive = { path = "../storage-onedrive" }
 tokio.workspace = true
+toml.workspace = true
 tower-http = { version = "0.7.0", features = ["fs"] }
 url.workspace = true
 uuid.workspace = true

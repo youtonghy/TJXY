@@ -47,7 +47,8 @@
     "shiki": "^4.4.1",
     "streamdown": "^2.5.0",
     "tailwind-merge": "^3.6.0",
-    "tailwind-variants": "3.2.2"
+    "tailwind-variants": "3.2.2",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
@@ -60,6 +61,7 @@
     "@types/node": "22.20.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
+    "@types/three": "^0.185.4",
     "@vitejs/plugin-react": "6.0.3",
     "eslint": "10.7.0",
     "eslint-plugin-react-hooks": "7.1.1",

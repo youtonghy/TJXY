@@ -39,6 +39,7 @@ export default defineConfig(({ mode }) => {
         '/UserItems': target,
         '/Shows': target,
         '/Search': target,
+        '/Setup': target,
         '/UserViews': target,
         '/Sessions': target,
         '/Videos': target,

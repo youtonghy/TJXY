@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, path::Path};
 
 use axum::{
     Router,
@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, get_service},
 };
-use bytes::Bytes;
 use thiserror::Error;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -22,18 +21,9 @@ pub enum AdminAssetsError {
 }
 
 pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
-    if !dist_dir.is_dir() {
-        return Err(AdminAssetsError::MissingDistribution);
-    }
-    let index_path = dist_dir.join("index.html");
-    if !index_path.is_file() {
-        return Err(AdminAssetsError::MissingIndex);
-    }
-    let index = Arc::new(Bytes::from(
-        fs::read(&index_path).map_err(|_| AdminAssetsError::UnreadableIndex)?,
-    ));
-    let fallback_index = Arc::clone(&index);
-    let app_fallback_index = Arc::clone(&index);
+    let index_path = distribution(dist_dir)?;
+    let fallback_index_path = index_path.clone();
+    let app_fallback_index_path = index_path.clone();
 
     Ok(Router::new()
         .route("/", get(|| async { Redirect::permanent("/app/") }))
@@ -46,27 +36,60 @@ pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
         .route(
             "/app/{*path}",
             get(move |headers: HeaderMap| {
-                let index = Arc::clone(&app_fallback_index);
-                async move { spa_fallback(&headers, &index) }
+                let index_path = app_fallback_index_path.clone();
+                async move { spa_fallback(&headers, &index_path).await }
             }),
         )
         .route(
             "/admin/{*path}",
             get(move |headers: HeaderMap| {
-                let index = Arc::clone(&fallback_index);
-                async move { spa_fallback(&headers, &index) }
+                let index_path = fallback_index_path.clone();
+                async move { spa_fallback(&headers, &index_path).await }
             }),
         ))
 }
 
-fn spa_fallback(headers: &HeaderMap, index: &Bytes) -> Response {
+pub(super) fn setup_router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
+    let index_path = distribution(dist_dir)?;
+    let fallback_index_path = index_path.clone();
+    Ok(Router::new()
+        .route("/", get(|| async { Redirect::temporary("/setup/") }))
+        .route("/setup", get(|| async { Redirect::temporary("/setup/") }))
+        .route_service("/setup/", get_service(ServeFile::new(index_path)))
+        .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
+        .nest_service("/brand", ServeDir::new(dist_dir.join("brand")))
+        .route(
+            "/setup/{*path}",
+            get(move |headers: HeaderMap| {
+                let index_path = fallback_index_path.clone();
+                async move { spa_fallback(&headers, &index_path).await }
+            }),
+        ))
+}
+
+fn distribution(dist_dir: &Path) -> Result<std::path::PathBuf, AdminAssetsError> {
+    if !dist_dir.is_dir() {
+        return Err(AdminAssetsError::MissingDistribution);
+    }
+    let index_path = dist_dir.join("index.html");
+    if !index_path.is_file() {
+        return Err(AdminAssetsError::MissingIndex);
+    }
+    fs::read(&index_path).map_err(|_| AdminAssetsError::UnreadableIndex)?;
+    Ok(index_path)
+}
+
+async fn spa_fallback(headers: &HeaderMap, index_path: &Path) -> Response {
     if !accepts_html(headers) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let Ok(index) = tokio::fs::read(index_path).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(Body::from(index.clone()))
+        .body(Body::from(index))
         .expect("static response headers are valid")
 }
 

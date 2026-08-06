@@ -21,6 +21,7 @@ mod hybrid_candidate;
 mod import;
 mod import_publication;
 mod import_runtime;
+mod installation;
 mod library;
 mod manual_probe;
 mod media_collection;
@@ -115,6 +116,9 @@ pub use import_publication::{
 pub use import_runtime::{
     CreatedImportRuntime, ImportRuntimeDraft, ImportRuntimeRepository,
     ImportRuntimeRepositoryError, ImportSourceRecord,
+};
+pub use installation::{
+    InstallationRecord, InstallationRepository, InstallationRepositoryError, InstallationStatus,
 };
 pub use library::{
     CreatedFilesystemLibrary, DisabledStorageRuntime, FilesystemRootConfiguration,

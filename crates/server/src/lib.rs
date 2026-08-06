@@ -18,6 +18,7 @@ mod filesystem_admin;
 mod hybrid_admin;
 mod image;
 mod import_admin;
+mod installation_config;
 mod library;
 mod media_collection;
 mod metadata_admin;
@@ -27,6 +28,7 @@ mod playstate;
 mod relink_admin;
 mod runtime_storage;
 mod session;
+mod setup;
 mod socket;
 mod source_admin;
 mod startup;
@@ -70,7 +72,17 @@ pub use ai_provider::{
     ProviderMethod, ProviderResponse, SafeReqwestTransport,
 };
 pub use configuration::{CredentialKeyringError, parse_credential_keyring};
+pub use installation_config::{
+    CompletedInstallation, DatabaseConfiguration, DatabaseTlsMode, InstallationConfigError,
+    InstallationConfigStore, InstallationProfile, InstallationState, NetworkConfiguration,
+    PendingInstallation, SecretString,
+};
 pub use runtime_storage::RuntimeStorageError;
+pub use setup::{
+    CompleteSetupInput, DatabaseBackend, DatabaseDraft, DatabaseTestResult, SetupCompletion,
+    SetupCoordinator, SetupError, SetupErrorCode, SetupProgress, SetupProgressStage, SetupState,
+    SetupStatus, SetupValidator, build_setup_router, build_setup_router_with_asset_dir,
+};
 pub use startup::{
     ApiKeyValidationError, BootstrapAdmin, InitializationError, MetadataSettingsValidationError,
     StartupOptions, initialize,
@@ -779,6 +791,37 @@ pub fn build_router_with_admin_dist(
     dist_dir: impl AsRef<std::path::Path>,
 ) -> Result<Router, AdminAssetsError> {
     Ok(build_router(state).merge(admin_assets::router(dist_dir.as_ref())?))
+}
+
+/// Builds the database-independent first-run router and setup-only static application.
+///
+/// # Errors
+///
+/// Returns [`AdminAssetsError`] when the distribution entry document is unavailable.
+pub fn build_setup_router_with_admin_dist(
+    coordinator: SetupCoordinator,
+    validator: SetupValidator,
+    dist_dir: impl AsRef<std::path::Path>,
+) -> Result<Router, AdminAssetsError> {
+    Ok(build_setup_router(coordinator, validator)
+        .merge(admin_assets::setup_router(dist_dir.as_ref())?))
+}
+
+/// Builds the first-run router with explicit durable branding storage.
+///
+/// # Errors
+///
+/// Returns [`AdminAssetsError`] when the distribution entry document is unavailable.
+pub fn build_setup_router_with_admin_dist_and_assets(
+    coordinator: SetupCoordinator,
+    validator: SetupValidator,
+    dist_dir: impl AsRef<std::path::Path>,
+    branding_asset_dir: impl Into<std::path::PathBuf>,
+) -> Result<Router, AdminAssetsError> {
+    Ok(
+        build_setup_router_with_asset_dir(coordinator, validator, branding_asset_dir)
+            .merge(admin_assets::setup_router(dist_dir.as_ref())?),
+    )
 }
 
 fn library_routes() -> Router<AppState> {

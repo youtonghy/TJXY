@@ -1,8 +1,9 @@
 import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
 import { lazy, Suspense } from 'react';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 import { AccessPage } from './access/AccessPage';
+import { AnnouncementsPage } from './announcements/AnnouncementsPage';
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
 import { LoginPage } from './auth/LoginPage';
@@ -15,6 +16,7 @@ import { SystemLocaleProvider } from './settings/SystemLocaleProvider';
 import { SystemSettingsPage } from './settings/SystemSettingsPage';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
+import { SetupApp } from './setup/SetupApp';
 import { TasksPage } from './tasks/TasksPage';
 import {
   AccessDeniedPage,
@@ -36,7 +38,20 @@ const DashboardPage = lazy(async () => {
 
 export function App() {
   return (
-    <SystemLocaleProvider><BrowserRouter>
+    <BrowserRouter><RouteBoundary /></BrowserRouter>
+  );
+}
+
+function RouteBoundary() {
+  const location = useLocation();
+  if (location.pathname === '/setup' || location.pathname.startsWith('/setup/')) {
+    return <Routes><Route element={<SetupApp />} path="/setup/*" /></Routes>;
+  }
+  return <SystemLocaleProvider><ApplicationRoutes /></SystemLocaleProvider>;
+}
+
+function ApplicationRoutes() {
+  return (
       <Routes>
         <Route element={<ClientApp />} path="/app/*" />
         <Route
@@ -69,6 +84,7 @@ export function App() {
                   path="/"
                 />
                 <Route element={<AccessPage />} path="/access" />
+                <Route element={<AnnouncementsPage />} path="/announcements" />
                 <Route element={<TasksPage />} path="/tasks" />
                 <Route element={<LibrariesPage />} path="/libraries" />
                 <Route element={<LibraryEditPage />} path="/libraries/:id" />
@@ -82,6 +98,5 @@ export function App() {
           )}
         />
       </Routes>
-    </BrowserRouter></SystemLocaleProvider>
   );
 }

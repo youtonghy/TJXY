@@ -564,27 +564,7 @@ where
         password: &str,
         client: ClientIdentity,
     ) -> Result<IssuedAuthentication, AuthError> {
-        validate_password(password).map_err(|_| AuthError::InvalidCredentials)?;
-        let parsed_username =
-            Username::parse(username).map_err(|_| AuthError::InvalidCredentials)?;
-        let credential = AuthRepository::new(&self.database)
-            .find_credential(&parsed_username)
-            .await?;
-        let candidate_hash = credential.as_ref().map_or(
-            self.dummy_password_hash.as_str(),
-            CredentialSnapshot::password_hash,
-        );
-        let password_matches =
-            verify_password(self.password_slots.clone(), password, candidate_hash).await?;
-        let Some(credential) = credential else {
-            return Err(AuthError::InvalidCredentials);
-        };
-        if !password_matches {
-            return Err(AuthError::InvalidCredentials);
-        }
-        if credential.user().is_disabled() {
-            return Err(AuthError::Forbidden);
-        }
+        let credential = self.verified_credential(username, password).await?;
 
         let now = self.clock.now();
         let expires_at = match self.session_lifetime {
@@ -620,6 +600,51 @@ where
             access_token,
             expires_at: issued.expires_at(),
         })
+    }
+
+    /// Verifies local credentials without creating a durable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same credential errors as [`Self::authenticate`] while leaving
+    /// session state unchanged.
+    pub async fn verify_credentials(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError> {
+        self.verified_credential(username, password)
+            .await
+            .map(|credential| credential.user().clone())
+    }
+
+    async fn verified_credential(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<CredentialSnapshot, AuthError> {
+        validate_password(password).map_err(|_| AuthError::InvalidCredentials)?;
+        let parsed_username =
+            Username::parse(username).map_err(|_| AuthError::InvalidCredentials)?;
+        let credential = AuthRepository::new(&self.database)
+            .find_credential(&parsed_username)
+            .await?;
+        let candidate_hash = credential.as_ref().map_or(
+            self.dummy_password_hash.as_str(),
+            CredentialSnapshot::password_hash,
+        );
+        let password_matches =
+            verify_password(self.password_slots.clone(), password, candidate_hash).await?;
+        let Some(credential) = credential else {
+            return Err(AuthError::InvalidCredentials);
+        };
+        if !password_matches {
+            return Err(AuthError::InvalidCredentials);
+        }
+        if credential.user().is_disabled() {
+            return Err(AuthError::Forbidden);
+        }
+        Ok(credential)
     }
 
     /// Resolves a raw session or API-key token to its current principal.

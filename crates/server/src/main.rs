@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, path::PathBuf, process::Command, sync::Arc, time::Duration};
+use std::{env, fs, net::SocketAddr, path::PathBuf, process::Command, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tjxy_cache::{CacheConfigurationError, RedisCacheConfig, RedisMode};
@@ -7,8 +7,10 @@ use tjxy_metadata::{
 };
 use tjxy_server::{
     AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin,
-    GoogleDriveOAuthConfiguration, InitializationError, MicrosoftOneDriveOAuthConfiguration,
-    ServerIdentity, StartupOptions, build_router_with_admin_dist, initialize,
+    GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
+    InstallationConfigStore, InstallationState, MicrosoftOneDriveOAuthConfiguration,
+    ServerIdentity, SetupCoordinator, SetupError, SetupValidator, StartupOptions,
+    build_router_with_admin_dist, build_setup_router_with_admin_dist_and_assets, initialize,
     parse_credential_keyring,
 };
 use uuid::Uuid;
@@ -22,6 +24,12 @@ enum StartupError {
     InvalidServerId(#[source] uuid::Error),
     #[error("TJXY_BIND is not a valid socket address: {0}")]
     InvalidBindAddress(#[source] std::net::AddrParseError),
+    #[error("TJXY_SETUP_BIND is not a valid socket address: {0}")]
+    InvalidSetupBindAddress(#[source] std::net::AddrParseError),
+    #[error("installation configuration is unavailable: {0}")]
+    InstallationConfig(#[from] InstallationConfigError),
+    #[error("setup validation failed: {0}")]
+    Setup(#[from] SetupError),
     #[error("system settings could not be read: {0}")]
     SystemSettings(#[from] tjxy_db::SystemSettingsRepositoryError),
     #[error("the current TJXY executable could not be resolved: {0}")]
@@ -81,16 +89,40 @@ enum StartupError {
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // Environment-backed startup intentionally composes one service instance.
 async fn main() -> Result<(), StartupError> {
+    let config_store = InstallationConfigStore::discover()?;
+    let installation_state = config_store.load()?;
+    if !matches!(installation_state, InstallationState::Completed(_)) {
+        return serve_setup(config_store).await;
+    }
+    let completed = match &installation_state {
+        InstallationState::Completed(completed) => Some(completed),
+        InstallationState::Unconfigured | InstallationState::Pending(_) => None,
+    };
     let server_id = env::var("TJXY_SERVER_ID")
-        .map_err(|_| StartupError::MissingServerId)
+        .ok()
+        .or_else(|| completed.map(|value| value.server_id().to_string()))
+        .ok_or(StartupError::MissingServerId)
         .and_then(|value| Uuid::parse_str(&value).map_err(StartupError::InvalidServerId))?;
     let server_name = env::var("TJXY_SERVER_NAME").unwrap_or_else(|_| "TJXY".to_owned());
     let mut identity = ServerIdentity::new(server_id, server_name, env::consts::OS);
-    if let Ok(local_address) = env::var("TJXY_PUBLIC_ADDRESS") {
+    if let Some(local_address) = env::var("TJXY_PUBLIC_ADDRESS")
+        .ok()
+        .or_else(|| completed.and_then(|value| value.network().public_url().map(str::to_owned)))
+    {
         identity = identity.with_local_address(local_address);
     }
-    let database_url =
-        env::var("TJXY_DATABASE_URL").unwrap_or_else(|_| "sqlite://tjxy.db?mode=rwc".to_owned());
+    let database_url = match env::var("TJXY_DATABASE_URL") {
+        Ok(value) => value,
+        Err(_) => completed.map_or_else(
+            || Ok("sqlite://tjxy.db?mode=rwc".to_owned()),
+            |value| {
+                value
+                    .database()
+                    .connection_url()
+                    .map(|url| url.as_str().to_owned())
+            },
+        )?,
+    };
     let tmdb = Arc::new(ReloadableMetadataProvider::new("Tmdb"));
     let the_audio_db = Arc::new(ReloadableMetadataProvider::new("TheAudioDB"));
     let musicbrainz = Arc::new(ReloadableMetadataProvider::new("MusicBrainz"));
@@ -118,7 +150,10 @@ async fn main() -> Result<(), StartupError> {
             ),
             musicbrainz_user_agent,
         );
-    if let Ok(encoded) = env::var("TJXY_CREDENTIAL_KEYRING") {
+    let configured_keyring = env::var("TJXY_CREDENTIAL_KEYRING")
+        .ok()
+        .or_else(|| completed.map(|value| value.credential_keyring().to_owned()));
+    if let Some(encoded) = configured_keyring {
         let encoded = Zeroizing::new(encoded);
         startup = startup.with_credential_cipher(Arc::new(
             parse_credential_keyring(&encoded)
@@ -223,11 +258,14 @@ async fn main() -> Result<(), StartupError> {
         Ok(value) => value
             .parse::<SocketAddr>()
             .map_err(StartupError::InvalidBindAddress)?,
-        Err(_) => state.persisted_bind_address().await?.unwrap_or_else(|| {
-            "127.0.0.1:8096"
-                .parse()
-                .expect("default bind address is valid")
-        }),
+        Err(_) => match completed {
+            Some(completed) => completed.network().socket_address()?,
+            None => state.persisted_bind_address().await?.unwrap_or_else(|| {
+                "127.0.0.1:8096"
+                    .parse()
+                    .expect("default bind address is valid")
+            }),
+        },
     };
     let restart = state.restart_controller();
     let shutdown = restart.clone();
@@ -241,6 +279,44 @@ async fn main() -> Result<(), StartupError> {
     .with_graceful_shutdown(async move { shutdown.requested().await })
     .await?;
     if restart.is_requested() {
+        let executable = env::current_exe().map_err(StartupError::CurrentExecutable)?;
+        Command::new(executable)
+            .args(env::args_os().skip(1))
+            .spawn()
+            .map_err(StartupError::Restart)?;
+    }
+    Ok(())
+}
+
+async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), StartupError> {
+    let data_dir =
+        env::var("TJXY_SETUP_DATA_DIR").map_or_else(|_| PathBuf::from("./data"), PathBuf::from);
+    fs::create_dir_all(&data_dir)?;
+    let validator = SetupValidator::new(vec![data_dir.clone()])?;
+    let coordinator = SetupCoordinator::new(config_store, validator.clone());
+    let shutdown = coordinator.clone();
+    let bind_address = env::var("TJXY_SETUP_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8096".to_owned())
+        .parse::<SocketAddr>()
+        .map_err(StartupError::InvalidSetupBindAddress)?;
+    let admin_dist = admin_dist_dir(|| env::var("TJXY_ADMIN_DIST_DIR"));
+    let branding_asset_dir = env::var("TJXY_ASSETS_DIR")
+        .map_or_else(|_| data_dir.join("assets"), PathBuf::from)
+        .join("branding");
+    let router = build_setup_router_with_admin_dist_and_assets(
+        coordinator,
+        validator,
+        admin_dist,
+        branding_asset_dir,
+    )?;
+    let listener = tokio::net::TcpListener::bind(bind_address).await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.wait_until_completed().await })
+    .await?;
+    if env::var("TJXY_CONTAINER").as_deref() != Ok("true") {
         let executable = env::current_exe().map_err(StartupError::CurrentExecutable)?;
         Command::new(executable)
             .args(env::args_os().skip(1))

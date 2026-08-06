@@ -50,6 +50,7 @@ mod m20260803_000049_ai_model_reasoning_effort;
 mod m20260803_000050_ai_usage_analytics;
 mod m20260803_000051_ai_daily_quota;
 mod m20260803_000052_announcements;
+mod m20260804_000053_installation;
 mod m20260804_000054_similar_item_indexes;
 
 use sea_orm_migration::prelude::*;
@@ -123,6 +124,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260803_000050_ai_usage_analytics::Migration),
             Box::new(m20260803_000051_ai_daily_quota::Migration),
             Box::new(m20260803_000052_announcements::Migration),
+            Box::new(m20260804_000053_installation::Migration),
             Box::new(m20260804_000054_similar_item_indexes::Migration),
         ]
     }

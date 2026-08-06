@@ -127,6 +127,63 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
             "ai_daily_usage missing {index}"
         );
     }
+    for table in ["announcements", "user_announcement_receipts"] {
+        assert!(
+            schema.has_table(table).await.unwrap(),
+            "missing table {table}"
+        );
+    }
+    assert!(schema.has_table("installation_records").await.unwrap());
+    for column in [
+        "id",
+        "title",
+        "body_markdown",
+        "kind",
+        "status",
+        "content_version",
+        "revision",
+        "published_at",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            schema.has_column("announcements", column).await.unwrap(),
+            "announcements missing {column}"
+        );
+    }
+    for column in [
+        "id",
+        "announcement_id",
+        "user_id",
+        "acknowledged_version",
+        "acknowledged_at",
+    ] {
+        assert!(
+            schema
+                .has_column("user_announcement_receipts", column)
+                .await
+                .unwrap(),
+            "user_announcement_receipts missing {column}"
+        );
+    }
+    assert!(
+        schema
+            .has_index("announcements", "ix_announcements_status_published")
+            .await
+            .unwrap()
+    );
+    for index in [
+        "uq_announcement_receipt_pair",
+        "ix_announcement_receipts_user",
+    ] {
+        assert!(
+            schema
+                .has_index("user_announcement_receipts", index)
+                .await
+                .unwrap(),
+            "user_announcement_receipts missing {index}"
+        );
+    }
     let daily_usage_definitions = unique_definitions(&database, "ai_daily_usage").await;
     assert!(
         daily_usage_definitions.contains("unique")

@@ -108,6 +108,21 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
 }
 
 #[tokio::test]
+async fn spa_fallback_reads_the_current_distribution_index() {
+    let distribution = distribution();
+    let app = build_router_with_admin_dist(state(), distribution.path()).unwrap();
+    std::fs::write(
+        distribution.path().join("index.html"),
+        "<!doctype html><script src=\"/assets/current-build.js\"></script>",
+    )
+    .unwrap();
+
+    let response = request(&app, Method::GET, "/app/ai").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("current-build.js"));
+}
+
+#[tokio::test]
 async fn does_not_rewrite_assets_methods_or_api_misses() {
     let distribution = distribution();
     let app = build_router_with_admin_dist(state(), distribution.path()).unwrap();
