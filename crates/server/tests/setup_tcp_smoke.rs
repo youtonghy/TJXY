@@ -70,7 +70,7 @@ async fn unconfigured_binary_serves_only_the_setup_runtime() {
 }
 
 #[tokio::test]
-async fn completed_setup_restarts_into_application_without_setup_routes() {
+async fn completed_setup_transitions_into_application_without_exiting() {
     let directory = tempdir().unwrap();
     let dist = directory.path().join("dist");
     fs::create_dir_all(dist.join("assets")).unwrap();
@@ -83,7 +83,7 @@ async fn completed_setup_restarts_into_application_without_setup_routes() {
     let port = unused_port();
     let config = directory.path().join("config/tjxy.toml");
     let data = directory.path().join("data");
-    let mut setup = server_command(&dist, &config, &data, port).spawn().unwrap();
+    let mut server = server_command(&dist, &config, &data, port).spawn().unwrap();
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
     let status = wait_for(&client, &format!("{base}/Setup/Status")).await;
@@ -96,6 +96,16 @@ async fn completed_setup_restarts_into_application_without_setup_routes() {
         .to_owned();
     let status_body: Value = status.json().await.unwrap();
     let csrf = status_body["CsrfToken"].as_str().unwrap();
+    let database = json!({ "Backend": "sqlite", "Path": data.join("tjxy.db") });
+    let database_test = client
+        .post(format!("{base}/Setup/Database/Test"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header("x-tjxy-setup-csrf", csrf)
+        .json(&database)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(database_test.status(), reqwest::StatusCode::OK);
     let completion = client
         .post(format!("{base}/Setup/Complete"))
         .header(reqwest::header::COOKIE, cookie)
@@ -106,7 +116,7 @@ async fn completed_setup_restarts_into_application_without_setup_routes() {
             "Locale": "en-US",
             "LogoUrl": "/brand/tjxy-mark.webp",
             "IconUrl": "/brand/favicon.svg",
-            "Database": { "Backend": "sqlite", "Path": data.join("tjxy.db") },
+            "Database": database,
             "Network": { "ListenHost": "127.0.0.1", "Port": port, "PublicUrl": null },
             "AdministratorUsername": "admin",
             "AdministratorPassword": "correct horse battery staple"
@@ -114,12 +124,16 @@ async fn completed_setup_restarts_into_application_without_setup_routes() {
         .send()
         .await
         .unwrap();
-    assert_eq!(completion.status(), reqwest::StatusCode::OK);
-    assert!(setup.wait().unwrap().success());
-
-    let mut application = server_command(&dist, &config, &data, port).spawn().unwrap();
+    let completion_status = completion.status();
+    let completion_body = completion.text().await.unwrap();
+    assert_eq!(
+        completion_status,
+        reqwest::StatusCode::OK,
+        "setup completion failed: {completion_body}"
+    );
     let ready = wait_for(&client, &format!("{base}/health/ready")).await;
     assert_eq!(ready.status(), reqwest::StatusCode::OK);
+    assert!(server.try_wait().unwrap().is_none());
     assert_eq!(
         client
             .get(format!("{base}/Setup/Status"))
@@ -129,8 +143,8 @@ async fn completed_setup_restarts_into_application_without_setup_routes() {
             .status(),
         reqwest::StatusCode::NOT_FOUND
     );
-    application.kill().unwrap();
-    application.wait().unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
 }
 
 fn unused_port() -> u16 {
@@ -170,7 +184,9 @@ fn server_command(
 
 async fn wait_for(client: &reqwest::Client, url: &str) -> reqwest::Response {
     for _ in 0..100 {
-        if let Ok(response) = client.get(url).send().await {
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+        {
             return response;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

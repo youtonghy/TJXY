@@ -92,8 +92,14 @@ async fn main() -> Result<(), StartupError> {
     let config_store = InstallationConfigStore::discover()?;
     let installation_state = config_store.load()?;
     if !matches!(installation_state, InstallationState::Completed(_)) {
-        return serve_setup(config_store).await;
+        serve_setup(config_store.clone()).await?;
     }
+    serve_application(config_store).await
+}
+
+#[allow(clippy::too_many_lines)] // Environment-backed startup intentionally composes one service instance.
+async fn serve_application(config_store: InstallationConfigStore) -> Result<(), StartupError> {
+    let installation_state = config_store.load()?;
     let completed = match &installation_state {
         InstallationState::Completed(completed) => Some(completed),
         InstallationState::Unconfigured | InstallationState::Pending(_) => None,
@@ -316,13 +322,6 @@ async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), Startu
     )
     .with_graceful_shutdown(async move { shutdown.wait_until_completed().await })
     .await?;
-    if env::var("TJXY_CONTAINER").as_deref() != Ok("true") {
-        let executable = env::current_exe().map_err(StartupError::CurrentExecutable)?;
-        Command::new(executable)
-            .args(env::args_os().skip(1))
-            .spawn()
-            .map_err(StartupError::Restart)?;
-    }
     Ok(())
 }
 
