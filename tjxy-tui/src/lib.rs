@@ -2,33 +2,21 @@ use std::{
     collections::BTreeMap,
     env,
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    process::{ChildStderr, ChildStdout, Command, Output, Stdio},
-    sync::{Arc, OnceLock},
+    process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use url::Url;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuildMode {
-    Release,
-    Debug,
-    None,
-}
+use directories::ProjectDirs;
 
-impl BuildMode {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Release => "release",
-            Self::Debug => "debug",
-            Self::None => "none",
-        }
-    }
-}
+const DEFAULT_BIND: &str = "127.0.0.1:8096";
+const DEFAULT_LOG_PATH: &str = "data/server.log";
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+const STARTUP_CONFIRM_ATTEMPTS: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {
@@ -38,103 +26,91 @@ pub struct ProcessInfo {
     pub cpu: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct StatusSnapshot {
-    pub server: Option<ProcessInfo>,
-    pub server_managed: bool,
-    pub server_instances: usize,
-    pub server_listeners: Vec<String>,
-    pub server_bind: String,
-    pub server_port_open: bool,
-    pub admin_port_open: bool,
-    pub database: DatabaseStatus,
-    pub build_mode: BuildMode,
-    pub binary_size: String,
-    pub rust_version: String,
-    pub node_version: String,
-    pub npm_version: String,
-    pub admin_deps: bool,
-    pub admin_dist: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigState {
+    Missing,
+    Pending,
+    Completed,
+    Invalid,
+    Unreadable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatabaseBackend {
-    SQLite,
-    PostgreSql,
-    Unknown,
+pub enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
 }
 
-impl DatabaseBackend {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SQLite => "SQLite",
-            Self::PostgreSql => "PostgreSQL",
-            Self::Unknown => "Unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DatabaseStatus {
-    pub backend: DatabaseBackend,
-    pub target: String,
-    pub connected: bool,
-    pub exists: bool,
-    pub size: String,
-    sqlite_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ObservedServer {
-    process: ProcessInfo,
-    listeners: Vec<String>,
-    database_connections: Vec<String>,
-}
-
-#[derive(Debug)]
-struct ToolVersions {
-    rust: String,
-    node: String,
-    npm: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMessage {
+    Started,
+    Stopped,
+    Restarted,
+    AlreadyRunning,
+    NotRunning,
+    MultipleInstances,
+    BinaryMissing,
+    LogUnavailable,
+    StartFailed,
+    StopFailed,
+    StopTimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionReport {
     pub ok: bool,
-    pub message: String,
+    pub message: ActionMessage,
+    pub pid: Option<u32>,
+    pub detail: Option<String>,
 }
 
 impl ActionReport {
-    pub fn ok(message: impl Into<String>) -> Self {
+    fn success(message: ActionMessage, pid: u32, detail: Option<String>) -> Self {
         Self {
             ok: true,
-            message: message.into(),
+            message,
+            pid: Some(pid),
+            detail,
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    fn error(message: ActionMessage, pid: Option<u32>, detail: Option<String>) -> Self {
         Self {
             ok: false,
-            message: message.into(),
+            message,
+            pid,
+            detail,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    StartServer,
-    StopServer,
-    RestartServer,
-    BuildDebug,
-    BuildRelease,
-    BuildAdmin,
-    BuildAll,
-    CheckProject,
-    BackupDatabase,
-    IntegrityCheck,
-    VacuumDatabase,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStatus {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub size: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigStatus {
+    pub path: PathBuf,
+    pub state: ConfigState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct StatusSnapshot {
+    pub server: Option<ProcessInfo>,
+    pub server_instances: usize,
+    pub server_listeners: Vec<String>,
+    pub server_bind: String,
+    pub server_port_open: bool,
+    pub configuration: ConfigStatus,
+    pub admin_dist: FileStatus,
+    pub log: FileStatus,
+    pub recent_log_lines: Vec<String>,
+    pub log_error: Option<String>,
 }
 
 #[must_use]
@@ -152,25 +128,6 @@ pub fn format_bytes(bytes: u64) -> String {
         let whole = bytes / divisor;
         let decimal = (bytes % divisor) * 10 / divisor;
         format!("{whole}.{decimal} {}", units[index])
-    }
-}
-
-#[must_use]
-pub fn mask_env_value(key: &str, value: &str) -> String {
-    if key == "TJXY_DATABASE_URL" {
-        return redact_database_url(value);
-    }
-    if sensitive_name(key) {
-        if value.is_empty() {
-            "(empty)".to_owned()
-        } else {
-            "****".to_owned()
-        }
-    } else if value.chars().count() > 72 {
-        let shortened: String = value.chars().take(69).collect();
-        format!("{shortened}...")
-    } else {
-        value.to_owned()
     }
 }
 
@@ -193,14 +150,7 @@ pub fn parse_env_lines(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn merge_environment(
-    mut values: BTreeMap<String, String>,
-    overrides: impl IntoIterator<Item = (String, String)>,
-) -> BTreeMap<String, String> {
-    values.extend(overrides);
-    values
-}
-
+#[must_use]
 pub fn tail_lines(text: &str, count: usize) -> Vec<String> {
     if count == 0 {
         return Vec::new();
@@ -215,30 +165,11 @@ pub fn tail_lines(text: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
-#[must_use]
-pub fn detect_build_mode(
-    release_path: &Path,
-    debug_path: &Path,
-    release_exists: bool,
-    debug_exists: bool,
-) -> BuildMode {
-    if release_exists && !release_path.as_os_str().is_empty() {
-        BuildMode::Release
-    } else if debug_exists && !debug_path.as_os_str().is_empty() {
-        BuildMode::Debug
-    } else {
-        BuildMode::None
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Project {
     pub root: PathBuf,
     target_dir: PathBuf,
-    admin_dir: PathBuf,
-    log_path: PathBuf,
     pid_path: PathBuf,
-    tool_versions: Arc<OnceLock<ToolVersions>>,
 }
 
 impl Project {
@@ -253,876 +184,392 @@ impl Project {
     pub fn new(root: PathBuf) -> Self {
         Self {
             target_dir: root.join("target"),
-            admin_dir: root.join("admin"),
-            log_path: root.join("data/server.log"),
             pid_path: root.join("target/tjxy-server.pid"),
-            tool_versions: Arc::new(OnceLock::new()),
             root,
         }
     }
 
     #[must_use]
-    pub fn server_binary(&self, mode: BuildMode) -> PathBuf {
-        self.target_dir.join(mode.label()).join("tjxy-server")
-    }
-
-    #[must_use]
     pub fn snapshot(&self) -> StatusSnapshot {
-        let release = self.server_binary(BuildMode::Release);
-        let debug = self.server_binary(BuildMode::Debug);
-        let mode = detect_build_mode(&release, &debug, release.is_file(), debug.is_file());
-
         let environment = self.runtime_environment();
-        let server_bind = environment
+        let configured_bind = environment
             .get("TJXY_BIND")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1:8096".to_owned());
-        let configured_port = server_bind
+            .unwrap_or_else(|| DEFAULT_BIND.to_owned());
+        let configured_port = configured_bind
             .parse::<SocketAddr>()
             .map_or(8096, |address| address.port());
-        let observed_servers = self.observed_servers();
-        let managed_pid = self
-            .read_pid()
-            .filter(|pid| process_alive(*pid) && self.pid_matches_server(*pid));
-        let primary = select_primary_server(&observed_servers, managed_pid, configured_port);
-        let server = primary.map(|(server, _)| server.process.clone());
-        let server_managed = primary.is_some_and(|(_, managed)| managed);
-        let server_listeners =
-            primary.map_or_else(Vec::new, |(server, _)| server.listeners.clone());
-        let actual_bind = server_listeners
+        let observed_servers = discover_observed_servers(self);
+        let primary = select_primary_server(&observed_servers, configured_port);
+        let server = primary.map(|server| server.process.clone());
+        let server_listeners = primary.map_or_else(Vec::new, |server| server.listeners.clone());
+        let server_bind = server_listeners
             .iter()
             .find(|listener| endpoint_port(listener) == Some(configured_port))
             .or_else(|| server_listeners.first())
             .cloned()
-            .unwrap_or(server_bind);
+            .unwrap_or(configured_bind);
         let server_port_open = server_listeners
             .iter()
             .any(|listener| endpoint_port(listener) == Some(configured_port))
-            || actual_bind
+            || server_bind
                 .parse::<SocketAddr>()
                 .ok()
                 .is_some_and(|address| port_open(probe_address(address)));
-        let database = database_status_from_sources(
+        let configuration = configuration_status(&self.root, &environment);
+        let admin_dist_path = resolve_path(
             &self.root,
-            environment.get("TJXY_DATABASE_URL").map(String::as_str),
-            &observed_servers,
-        );
-        let tool_versions = self.tool_versions.get_or_init(|| ToolVersions {
-            rust: command_version("rustc", &["--version"], &self.root),
-            node: command_version("node", &["--version"], &self.root),
-            npm: command_version("npm", &["--version"], &self.root),
-        });
+            environment
+                .get("TJXY_ADMIN_DIST_DIR")
+                .map_or("admin/dist", String::as_str),
+        )
+        .join("index.html");
+        let log_path = self.log_path(&environment);
+
+        let (recent_log_lines, log_error) = match read_log_tail(&log_path, 100) {
+            Ok(lines) => (lines, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+
         StatusSnapshot {
             server,
-            server_managed,
             server_instances: observed_servers.len(),
             server_listeners,
-            server_bind: actual_bind,
+            server_bind,
             server_port_open,
-            admin_port_open: port_open(SocketAddr::from((Ipv4Addr::LOCALHOST, 5173))),
-            database,
-            build_mode: mode,
-            binary_size: file_size(&self.server_binary(mode)),
-            rust_version: tool_versions.rust.clone(),
-            node_version: tool_versions.node.clone(),
-            npm_version: tool_versions.npm.clone(),
-            admin_deps: self.admin_dir.join("node_modules").is_dir(),
-            admin_dist: self.admin_dir.join("dist/index.html").is_file(),
+            configuration,
+            admin_dist: file_status(admin_dist_path),
+            log: file_status(log_path),
+            recent_log_lines,
+            log_error,
         }
     }
 
     #[must_use]
-    pub fn environment_rows(&self) -> Vec<(String, String)> {
-        let dotenv = fs::read_to_string(self.root.join(".env"))
-            .map_or_else(|_| BTreeMap::new(), |contents| parse_env_lines(&contents));
-        let values = merge_environment(dotenv, env::vars());
-        values
-            .into_iter()
-            .filter(|(key, _)| key.starts_with("TJXY_"))
-            .map(|(key, value)| {
-                let masked = mask_env_value(&key, &value);
-                (key, masked)
-            })
-            .collect()
-    }
-
-    #[must_use]
-    pub fn log_lines(&self, count: usize) -> Vec<String> {
-        let mut contents = String::new();
-        if let Ok(mut file) = File::open(&self.log_path) {
-            let _ = file.read_to_string(&mut contents);
-        }
-        tail_lines(&contents, count)
-    }
-
-    #[must_use]
-    pub fn log_path(&self) -> &Path {
-        &self.log_path
-    }
-
-    /// Resolves the configured `SQLite` file against the project root.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed, non-SQLite, in-memory, or pathless URLs.
-    pub fn database_path(&self) -> Result<PathBuf, String> {
-        let environment = self.runtime_environment();
-        let observed_servers = self.observed_servers();
-        let status = database_status_from_sources(
-            &self.root,
-            environment.get("TJXY_DATABASE_URL").map(String::as_str),
-            &observed_servers,
-        );
-        status.sqlite_path.ok_or_else(|| {
-            format!(
-                "{} is in use; SQLite-only actions are unavailable",
-                status.backend.label()
-            )
-        })
-    }
-
-    #[must_use]
-    pub fn run_action(&self, action: Action) -> ActionReport {
+    pub fn run_action(&self, action: ServiceAction) -> ActionReport {
         match action {
-            Action::StartServer => self.start_server(),
-            Action::StopServer => self.stop_server(),
-            Action::RestartServer => {
-                let stop = self.stop_server();
-                if !stop.ok {
-                    return stop;
+            ServiceAction::Start => self.start_server(ActionMessage::Started),
+            ServiceAction::Stop => self.stop_server(),
+            ServiceAction::Restart => {
+                let stopped = self.stop_server();
+                if !stopped.ok {
+                    return stopped;
                 }
-                let start = self.start_server();
-                ActionReport::new(
-                    start.ok,
-                    format!("restart: {}; {}", stop.message, start.message),
-                )
+                let started = self.start_server(ActionMessage::Restarted);
+                if started.ok {
+                    started
+                } else {
+                    ActionReport {
+                        detail: Some(format!(
+                            "server stopped, but restart failed: {}",
+                            started.detail.as_deref().unwrap_or("unknown error")
+                        )),
+                        ..started
+                    }
+                }
             }
-            Action::BuildDebug => self.build_server(false),
-            Action::BuildRelease => self.build_server(true),
-            Action::BuildAdmin => self.build_admin(),
-            Action::BuildAll => self.build_all(),
-            Action::CheckProject => self.check_project(),
-            Action::BackupDatabase => self.backup_database(),
-            Action::IntegrityCheck => self.integrity_check(),
-            Action::VacuumDatabase => self.sqlite_command("VACUUM;"),
         }
     }
 
-    fn start_server(&self) -> ActionReport {
-        let observed_servers = self.observed_servers();
-        if !observed_servers.is_empty() {
-            let pids = observed_servers
-                .iter()
-                .map(|server| server.process.pid.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return ActionReport::error(format!("server already running (PID {pids})"));
-        }
-        let mode = self.snapshot().build_mode;
-        if mode == BuildMode::None {
+    fn start_server(&self, success_message: ActionMessage) -> ActionReport {
+        let servers = discover_observed_servers(self);
+        if !servers.is_empty() {
             return ActionReport::error(
-                "server binary not found; run Build Debug or Build Release first",
+                ActionMessage::AlreadyRunning,
+                servers.first().map(|server| server.process.pid),
+                Some(pid_list(&servers)),
             );
         }
-        if let Err(error) = fs::create_dir_all(self.log_path.parent().unwrap_or(&self.root)) {
-            return ActionReport::error(format!("create log directory: {error}"));
-        }
-        if let Err(error) = fs::create_dir_all(&self.target_dir) {
-            return ActionReport::error(format!("create target directory: {error}"));
-        }
-
-        let log_file = match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
+        let environment = self.runtime_environment();
+        let configured_bind = environment
+            .get("TJXY_BIND")
+            .map_or(DEFAULT_BIND, String::as_str);
+        if configured_bind
+            .parse::<SocketAddr>()
+            .ok()
+            .is_some_and(|address| port_open(probe_address(address)))
         {
-            Ok(file) => file,
-            Err(error) => return ActionReport::error(format!("open server log: {error}")),
+            return ActionReport::error(
+                ActionMessage::AlreadyRunning,
+                None,
+                Some(format!(
+                    "configured endpoint {configured_bind} is already open"
+                )),
+            );
+        }
+        let Some(binary) = self.preferred_server_binary() else {
+            return ActionReport::error(ActionMessage::BinaryMissing, None, None);
         };
-        let mut command = Command::new(self.server_binary(mode));
+        let log_path = self.log_path(&environment);
+        let mut log_file = match open_log_for_append(&log_path) {
+            Ok(file) => file,
+            Err(error) => {
+                return ActionReport::error(
+                    ActionMessage::LogUnavailable,
+                    None,
+                    Some(error.to_string()),
+                );
+            }
+        };
+        if let Err(error) = write_lifecycle_event(&mut log_file, "start requested") {
+            return ActionReport::error(
+                ActionMessage::LogUnavailable,
+                None,
+                Some(error.to_string()),
+            );
+        }
+        let stdout = match log_file.try_clone() {
+            Ok(file) => file,
+            Err(error) => {
+                return ActionReport::error(
+                    ActionMessage::LogUnavailable,
+                    None,
+                    Some(error.to_string()),
+                );
+            }
+        };
+        self.spawn_server(
+            &binary,
+            environment,
+            log_path,
+            stdout,
+            log_file,
+            success_message,
+        )
+    }
+
+    fn spawn_server(
+        &self,
+        binary: &Path,
+        environment: BTreeMap<String, String>,
+        log_path: PathBuf,
+        stdout: File,
+        log_file: File,
+        success_message: ActionMessage,
+    ) -> ActionReport {
+        let mut command = Command::new(binary);
         command
             .current_dir(&self.root)
-            .envs(self.runtime_environment())
+            .envs(environment)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(match log_file.try_clone() {
-                Ok(file) => file,
-                Err(error) => return ActionReport::error(format!("clone server log: {error}")),
-            }))
+            .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(log_file));
         configure_process_group(&mut command);
 
         match command.spawn() {
             Ok(mut child) => {
-                if let Err(error) = fs::write(&self.pid_path, child.id().to_string()) {
+                let pid = child.id();
+                if let Err(error) = fs::write(&self.pid_path, pid.to_string()) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return ActionReport::error(format!(
-                        "write managed PID file for server PID {}: {error}",
-                        child.id()
-                    ));
+                    return ActionReport::error(
+                        ActionMessage::StartFailed,
+                        Some(pid),
+                        Some(format!("write PID file: {error}")),
+                    );
                 }
-                let pid = child.id();
+                for _ in 0..STARTUP_CONFIRM_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(100));
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            remove_owned_pid_file(&self.pid_path, pid);
+                            let event =
+                                format!("server PID {pid} exited during startup with {status}");
+                            let _ = append_lifecycle_event(&log_path, &event);
+                            return ActionReport::error(
+                                ActionMessage::StartFailed,
+                                Some(pid),
+                                Some(format!("server exited with {status}")),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            remove_owned_pid_file(&self.pid_path, pid);
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return ActionReport::error(
+                                ActionMessage::StartFailed,
+                                Some(pid),
+                                Some(format!("confirm server startup: {error}")),
+                            );
+                        }
+                    }
+                }
                 let pid_path = self.pid_path.clone();
                 thread::spawn(move || {
-                    let _ = child.wait();
-                    let owns_pid_file = fs::read_to_string(&pid_path)
-                        .ok()
-                        .is_some_and(|contents| contents.trim() == pid.to_string());
-                    if owns_pid_file {
-                        let _ = fs::remove_file(pid_path);
+                    let status = child.wait();
+                    remove_owned_pid_file(&pid_path, pid);
+                    if let Ok(mut log) = open_log_for_append(&log_path) {
+                        let event = status.map_or_else(
+                            |error| format!("server wait failed for PID {pid}: {error}"),
+                            |status| format!("server PID {pid} exited with {status}"),
+                        );
+                        let _ = write_lifecycle_event(&mut log, &event);
                     }
                 });
-                ActionReport::ok(format!("server started (PID {pid})"))
+                ActionReport::success(success_message, pid, None)
             }
-            Err(error) => ActionReport::error(format!("start server: {error}")),
+            Err(error) => {
+                ActionReport::error(ActionMessage::StartFailed, None, Some(error.to_string()))
+            }
         }
     }
 
     fn stop_server(&self) -> ActionReport {
-        let Some(pid) = self.read_pid() else {
-            return ActionReport::error("server is not running or has no managed PID");
+        let servers = discover_observed_servers(self);
+        let pid = match servers.as_slice() {
+            [server] => server.process.pid,
+            [] => match self
+                .managed_pid()
+                .filter(|pid| self.pid_matches_server(*pid))
+            {
+                Some(pid) => pid,
+                None => return ActionReport::error(ActionMessage::NotRunning, None, None),
+            },
+            _ => {
+                return ActionReport::error(
+                    ActionMessage::MultipleInstances,
+                    None,
+                    Some(pid_list(&servers)),
+                );
+            }
         };
-        if !process_alive(pid) {
-            let _ = fs::remove_file(&self.pid_path);
-            return ActionReport::error("managed server PID is stale");
-        }
-        if !self.pid_matches_server(pid) {
-            let _ = fs::remove_file(&self.pid_path);
-            return ActionReport::error(format!(
-                "managed PID {pid} no longer belongs to this project's tjxy-server"
-            ));
-        }
-        if let Err(error) =
-            terminate_process_group(pid, false).or_else(|_| signal_process(pid, false))
-        {
-            return ActionReport::error(format!("stop server PID {pid}: {error}"));
+        let environment = self.runtime_environment();
+        let log_path = self.log_path(&environment);
+        let log_warning =
+            append_lifecycle_event(&log_path, &format!("stop requested for PID {pid}"))
+                .err()
+                .map(|error| format!("lifecycle log: {error}"));
+
+        if let Err(error) = signal_process(pid) {
+            return ActionReport::error(
+                ActionMessage::StopFailed,
+                Some(pid),
+                Some(error.to_string()),
+            );
         }
         for _ in 0..30 {
             if !process_alive(pid) {
-                let _ = fs::remove_file(&self.pid_path);
-                return ActionReport::ok(format!("server stopped (PID {pid})"));
+                remove_owned_pid_file(&self.pid_path, pid);
+                let event_warning =
+                    append_lifecycle_event(&log_path, &format!("server PID {pid} stopped"))
+                        .err()
+                        .map(|error| format!("lifecycle log: {error}"));
+                return ActionReport::success(
+                    ActionMessage::Stopped,
+                    pid,
+                    event_warning.or(log_warning),
+                );
             }
             thread::sleep(Duration::from_millis(100));
         }
-        if let Err(error) =
-            terminate_process_group(pid, true).or_else(|_| signal_process(pid, true))
-        {
-            return ActionReport::error(format!("server did not stop; force stop failed: {error}"));
-        }
-        let _ = fs::remove_file(&self.pid_path);
-        ActionReport::ok(format!("server force-stopped (PID {pid})"))
-    }
-
-    fn build_server(&self, release: bool) -> ActionReport {
-        let mut args = vec!["build", "-p", "tjxy-server", "--bin", "tjxy-server"];
-        if release {
-            args.insert(1, "--release");
-        }
-        self.run_command("cargo", &args, Duration::from_secs(300), "server build")
-    }
-
-    fn build_admin(&self) -> ActionReport {
-        self.run_admin_command(&["run", "build"], Duration::from_secs(180), "admin build")
-    }
-
-    fn build_all(&self) -> ActionReport {
-        let server = self.build_server(false);
-        if !server.ok {
-            return server;
-        }
-        let admin = self.build_admin();
-        ActionReport::new(
-            admin.ok,
-            format!(
-                "server build: {}; admin build: {}",
-                server.message, admin.message
-            ),
-        )
-    }
-
-    fn check_project(&self) -> ActionReport {
-        let cargo = self.run_command(
-            "cargo",
-            &["check", "-p", "tjxy-tui"],
-            Duration::from_secs(180),
-            "TUI check",
-        );
-        if !cargo.ok {
-            return cargo;
-        }
-        let admin = self.run_admin_command(
-            &["run", "typecheck"],
-            Duration::from_secs(90),
-            "admin typecheck",
-        );
-        ActionReport::new(
-            admin.ok,
-            format!(
-                "TUI check: {}; admin typecheck: {}",
-                cargo.message, admin.message
-            ),
-        )
-    }
-
-    fn backup_database(&self) -> ActionReport {
-        let database_path = match self.database_path() {
-            Ok(path) => path,
-            Err(error) => return ActionReport::error(error),
-        };
-        if !database_path.is_file() {
-            return ActionReport::error(format!(
-                "database not found at {}",
-                database_path.display()
-            ));
-        }
-        let backup = PathBuf::from(format!("{}.bak", database_path.display()));
-        let backup_command = format!(".backup {}", quote_sqlite_cli_argument(&backup));
-        let database = database_path.to_string_lossy();
-        match run_output_with_timeout(
-            "sqlite3",
-            &[database.as_ref(), &backup_command],
-            &self.root,
-            Duration::from_secs(120),
-        ) {
-            Ok(output) if output.status.success() => ActionReport::ok(format!(
-                "database backup written to {} ({})",
-                backup.display(),
-                file_size(&backup)
-            )),
-            Ok(output) => ActionReport::error(format!(
-                "database backup failed: {}",
-                first_line_or_ok(&summarize_output(&output.stdout, &output.stderr))
-            )),
-            Err(error) => ActionReport::error(format!("database backup: {error}")),
-        }
-    }
-
-    fn sqlite_command(&self, sql: &str) -> ActionReport {
-        let database_path = match self.database_path() {
-            Ok(path) => path,
-            Err(error) => return ActionReport::error(error),
-        };
-        if !database_path.is_file() {
-            return ActionReport::error("database file does not exist");
-        }
-        let database = database_path.to_string_lossy();
-        let result = self.run_command(
-            "sqlite3",
-            &[database.as_ref(), sql],
-            Duration::from_secs(120),
-            "sqlite",
-        );
-        if result.ok && !result.message.contains("failed") {
-            result
-        } else {
-            ActionReport::error(result.message)
-        }
-    }
-
-    fn integrity_check(&self) -> ActionReport {
-        let database_path = match self.database_path() {
-            Ok(path) => path,
-            Err(error) => return ActionReport::error(error),
-        };
-        if !database_path.is_file() {
-            return ActionReport::error("database file does not exist");
-        }
-        let database = database_path.to_string_lossy();
-        match run_output_with_timeout(
-            "sqlite3",
-            &[database.as_ref(), "PRAGMA integrity_check;"],
-            &self.root,
-            Duration::from_secs(120),
-        ) {
-            Ok(output) if output.status.success() && integrity_output_is_ok(&output.stdout) => {
-                ActionReport::ok("SQLite integrity check: ok")
-            }
-            Ok(output) => ActionReport::error(format!(
-                "SQLite integrity check failed: {}",
-                first_line_or_ok(&summarize_output(&output.stdout, &output.stderr))
-            )),
-            Err(error) => ActionReport::error(format!("SQLite integrity check: {error}")),
-        }
-    }
-
-    fn run_command(
-        &self,
-        program: &str,
-        args: &[&str],
-        timeout: Duration,
-        label: &str,
-    ) -> ActionReport {
-        match run_output_with_timeout(program, args, &self.root, timeout) {
-            Ok(output) => report_from_output(label, &output),
-            Err(error) => ActionReport::error(format!("{label}: {error}")),
-        }
-    }
-
-    fn run_admin_command(&self, args: &[&str], timeout: Duration, label: &str) -> ActionReport {
-        match run_output_with_timeout("npm", args, &self.admin_dir, timeout) {
-            Ok(output) => report_from_output(label, &output),
-            Err(error) => ActionReport::error(format!("{label}: {error}")),
-        }
+        ActionReport::error(ActionMessage::StopTimedOut, Some(pid), log_warning)
     }
 
     fn runtime_environment(&self) -> BTreeMap<String, String> {
         let dotenv = fs::read_to_string(self.root.join(".env"))
             .map_or_else(|_| BTreeMap::new(), |contents| parse_env_lines(&contents));
-        merge_environment(dotenv, env::vars())
+        let mut values = dotenv;
+        values.extend(env::vars());
+        values
     }
 
-    fn read_pid(&self) -> Option<u32> {
+    fn log_path(&self, environment: &BTreeMap<String, String>) -> PathBuf {
+        resolve_path(
+            &self.root,
+            environment
+                .get("TJXY_LOG_FILE")
+                .map_or(DEFAULT_LOG_PATH, String::as_str),
+        )
+    }
+
+    fn preferred_server_binary(&self) -> Option<PathBuf> {
+        [self.server_binary("release"), self.server_binary("debug")]
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
+    fn managed_pid(&self) -> Option<u32> {
         fs::read_to_string(&self.pid_path).ok()?.trim().parse().ok()
-    }
-
-    fn observed_servers(&self) -> Vec<ObservedServer> {
-        discover_observed_servers(self)
     }
 
     fn pid_matches_server(&self, pid: u32) -> bool {
         let Some(command_line) = process_command_line(pid) else {
             return false;
         };
-        [BuildMode::Release, BuildMode::Debug]
+        [self.server_binary("release"), self.server_binary("debug")]
             .into_iter()
-            .map(|mode| self.server_binary(mode))
             .any(|binary| command_line_matches_binary(&command_line, &binary))
     }
-}
 
-impl ActionReport {
-    fn new(ok: bool, message: String) -> Self {
-        Self { ok, message }
+    fn server_binary(&self, profile: &str) -> PathBuf {
+        self.target_dir.join(profile).join("tjxy-server")
     }
 }
 
-fn file_size(path: &Path) -> String {
-    path.metadata().map_or_else(
-        |_| "missing".to_owned(),
-        |metadata| format_bytes(metadata.len()),
-    )
-}
-
-fn command_version(program: &str, args: &[&str], current_dir: &Path) -> String {
-    run_output_with_timeout(program, args, current_dir, Duration::from_secs(2))
-        .ok()
-        .filter(|output| output.status.success())
-        .map_or_else(
-            || "missing".to_owned(),
-            |output| first_line_or_ok(&String::from_utf8_lossy(&output.stdout)),
-        )
-}
-
-fn run_output_with_timeout(
-    program: &str,
-    args: &[&str],
-    current_dir: &Path,
-    timeout: Duration,
-) -> io::Result<Output> {
-    let mut command = Command::new(program);
-    command
-        .current_dir(current_dir)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_process_group(&mut command);
-    let mut child = command.spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("child stdout pipe is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("child stderr pipe is unavailable"))?;
-    let stdout_reader = thread::spawn(move || read_child_stdout(stdout));
-    let stderr_reader = thread::spawn(move || read_child_stderr(stderr));
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Output {
-                status,
-                stdout: join_output_reader(stdout_reader, "stdout")?,
-                stderr: join_output_reader(stderr_reader, "stderr")?,
-            });
-        }
-        if started.elapsed() >= timeout {
-            let _ = terminate_process_group(child.id(), false);
-            for _ in 0..5 {
-                if child.try_wait()?.is_some() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            if child.try_wait()?.is_none() {
-                let _ = terminate_process_group(child.id(), true);
-                let _ = child.kill();
-            }
-            let status = child.wait()?;
-            let output = Output {
-                status,
-                stdout: join_output_reader(stdout_reader, "stdout")?,
-                stderr: join_output_reader(stderr_reader, "stderr")?,
-            };
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "timed out after {}s; {}",
-                    timeout.as_secs(),
-                    first_line_or_ok(&summarize_output(&output.stdout, &output.stderr))
-                ),
-            ));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn read_child_stdout(mut stdout: ChildStdout) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    stdout.read_to_end(&mut output)?;
-    Ok(output)
-}
-
-fn read_child_stderr(mut stderr: ChildStderr) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    stderr.read_to_end(&mut output)?;
-    Ok(output)
-}
-
-fn join_output_reader(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream: &str,
-) -> io::Result<Vec<u8>> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other(format!("child {stream} reader panicked")))?
-}
-
-fn report_from_output(label: &str, output: &Output) -> ActionReport {
-    let message = summarize_output(&output.stdout, &output.stderr);
-    if output.status.success() {
-        ActionReport::ok(format!("{label}: {}", first_line_or_ok(&message)))
-    } else {
-        ActionReport::error(format!("{label} failed: {}", first_line_or_ok(&message)))
-    }
-}
-
-fn first_line_or_ok(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("ok")
-        .chars()
-        .take(160)
-        .collect()
-}
-
-fn summarize_output(stdout: &[u8], stderr: &[u8]) -> String {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    if stderr.trim().is_empty() {
-        first_line_or_ok(&stdout)
-    } else {
-        first_line_or_ok(&stderr)
-    }
-}
-
-fn probe_address(address: SocketAddr) -> SocketAddr {
-    match address.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => {
-            SocketAddr::from((Ipv4Addr::LOCALHOST, address.port()))
-        }
-        IpAddr::V6(ip) if ip.is_unspecified() => {
-            SocketAddr::from((Ipv6Addr::LOCALHOST, address.port()))
-        }
-        _ => address,
-    }
-}
-
-fn port_open(address: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&address, Duration::from_millis(80)).is_ok()
-}
-
-fn discover_observed_servers(project: &Project) -> Vec<ObservedServer> {
-    let Ok(output) = run_output_with_timeout(
-        "lsof",
-        &["-a", "-c", "tjxy-serv", "-d", "txt", "-Fpn"],
-        &project.root,
-        Duration::from_secs(2),
-    ) else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    let expected = [
-        project.server_binary(BuildMode::Debug),
-        project.server_binary(BuildMode::Release),
-    ]
-    .map(|path| fs::canonicalize(&path).unwrap_or(path));
-    let mut servers = parse_lsof_process_executables(&String::from_utf8_lossy(&output.stdout))
-        .into_iter()
-        .filter(|(_, executables)| {
-            executables
-                .iter()
-                .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
-                .any(|path| expected.contains(&path))
-        })
-        .map(|(pid, _)| {
-            let process = process_info(pid).unwrap_or(ProcessInfo {
-                pid,
-                elapsed: "-".to_owned(),
-                rss: "-".to_owned(),
-                cpu: "-".to_owned(),
-            });
-            let (listeners, database_connections) = process_network(pid, &project.root);
-            ObservedServer {
-                process,
-                listeners,
-                database_connections,
-            }
-        })
-        .collect::<Vec<_>>();
-    servers.sort_by_key(|server| server.process.pid);
-    servers
-}
-
-fn parse_lsof_process_executables(output: &str) -> BTreeMap<u32, Vec<PathBuf>> {
-    let mut processes = BTreeMap::new();
-    let mut pid = None;
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix('p') {
-            pid = value.parse::<u32>().ok();
-        } else if let (Some(pid), Some(path)) = (pid, line.strip_prefix('n')) {
-            processes
-                .entry(pid)
-                .or_insert_with(Vec::new)
-                .push(PathBuf::from(path));
-        }
-    }
-    processes
-}
-
-fn process_network(pid: u32, root: &Path) -> (Vec<String>, Vec<String>) {
-    let pid = pid.to_string();
-    let Ok(output) = run_output_with_timeout(
-        "lsof",
-        &["-a", "-p", &pid, "-nP", "-iTCP", "-FpnT"],
-        root,
-        Duration::from_secs(2),
-    ) else {
-        return (Vec::new(), Vec::new());
-    };
-    if !output.status.success() {
-        return (Vec::new(), Vec::new());
-    }
-    parse_lsof_network(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_lsof_network(output: &str) -> (Vec<String>, Vec<String>) {
-    let mut listeners = Vec::new();
-    let mut connections = Vec::new();
-    let mut name = None;
-
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix('n') {
-            name = Some(value.to_owned());
-        } else if line == "TST=LISTEN" {
-            if let Some(value) = name.take() {
-                listeners.push(value);
-            }
-        } else if line == "TST=ESTABLISHED"
-            && let Some(remote) = name
-                .take()
-                .and_then(|value| value.split_once("->").map(|(_, remote)| remote.to_owned()))
-        {
-            connections.push(remote);
-        }
-    }
-    listeners.sort();
-    listeners.dedup();
-    connections.sort();
-    connections.dedup();
-    (listeners, connections)
-}
-
-fn select_primary_server(
-    servers: &[ObservedServer],
-    managed_pid: Option<u32>,
-    configured_port: u16,
-) -> Option<(&ObservedServer, bool)> {
-    if let Some(pid) = managed_pid
-        && let Some(server) = servers.iter().find(|server| server.process.pid == pid)
-    {
-        return Some((server, true));
-    }
-    servers
-        .iter()
-        .find(|server| {
-            server
-                .listeners
-                .iter()
-                .any(|listener| endpoint_port(listener) == Some(configured_port))
-        })
-        .or_else(|| servers.first())
-        .map(|server| (server, false))
-}
-
-fn endpoint_port(endpoint: &str) -> Option<u16> {
-    endpoint.rsplit_once(':')?.1.parse().ok()
-}
-
-fn database_status_from_sources(
-    root: &Path,
-    configured_url: Option<&str>,
-    servers: &[ObservedServer],
-) -> DatabaseStatus {
-    if let Some(database_url) = configured_url {
-        let Ok(parsed) = Url::parse(database_url) else {
-            return DatabaseStatus {
-                backend: DatabaseBackend::Unknown,
-                target: "invalid TJXY_DATABASE_URL".to_owned(),
-                connected: false,
-                exists: false,
-                size: "n/a".to_owned(),
-                sqlite_path: None,
-            };
-        };
-        return match parsed.scheme() {
-            "sqlite" => sqlite_database_status(root, database_url),
-            "postgres" | "postgresql" => {
-                let port = parsed.port().unwrap_or(5432);
-                let connection = servers
-                    .iter()
-                    .flat_map(|server| &server.database_connections)
-                    .find(|endpoint| endpoint_port(endpoint) == Some(port));
-                DatabaseStatus {
-                    backend: DatabaseBackend::PostgreSql,
-                    target: redact_database_url(database_url),
-                    connected: connection.is_some(),
-                    exists: false,
-                    size: "n/a".to_owned(),
-                    sqlite_path: None,
-                }
-            }
-            _ => DatabaseStatus {
-                backend: DatabaseBackend::Unknown,
-                target: redact_database_url(database_url),
-                connected: false,
-                exists: false,
-                size: "n/a".to_owned(),
-                sqlite_path: None,
-            },
-        };
-    }
-
-    if let Some(endpoint) = servers
-        .iter()
-        .flat_map(|server| &server.database_connections)
-        .find(|endpoint| endpoint_port(endpoint) == Some(5432))
-    {
-        return DatabaseStatus {
-            backend: DatabaseBackend::PostgreSql,
-            target: endpoint.clone(),
-            connected: true,
-            exists: false,
-            size: "n/a".to_owned(),
-            sqlite_path: None,
-        };
-    }
-
-    sqlite_database_status(root, "sqlite://tjxy.db?mode=rwc")
-}
-
-fn sqlite_database_status(root: &Path, database_url: &str) -> DatabaseStatus {
-    match resolve_sqlite_database_path(root, database_url) {
-        Ok(path) => DatabaseStatus {
-            backend: DatabaseBackend::SQLite,
-            target: path.display().to_string(),
-            connected: path.is_file(),
-            exists: path.is_file(),
-            size: file_size(&path),
-            sqlite_path: Some(path),
-        },
-        Err(error) => DatabaseStatus {
-            backend: DatabaseBackend::Unknown,
-            target: error,
-            connected: false,
-            exists: false,
-            size: "n/a".to_owned(),
-            sqlite_path: None,
-        },
-    }
-}
-
-fn redact_database_url(value: &str) -> String {
-    let Ok(mut parsed) = Url::parse(value) else {
-        return "****".to_owned();
-    };
-    if parsed.password().is_some() && parsed.set_password(Some("****")).is_err() {
-        return "****".to_owned();
-    }
-    let query = parsed
-        .query_pairs()
-        .map(|(key, value)| {
-            let value = if sensitive_name(&key) {
-                "****".to_owned()
-            } else {
-                value.into_owned()
-            };
-            (key.into_owned(), value)
-        })
-        .collect::<Vec<_>>();
-    if parsed.query().is_some() {
-        parsed.query_pairs_mut().clear().extend_pairs(query);
-    }
-    parsed.to_string()
-}
-
-fn sensitive_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    ["password", "secret", "token", "credential", "key"]
-        .iter()
-        .any(|needle| name.contains(needle))
-}
-
-fn resolve_sqlite_database_path(root: &Path, database_url: &str) -> Result<PathBuf, String> {
-    let parsed =
-        Url::parse(database_url).map_err(|error| format!("invalid TJXY_DATABASE_URL: {error}"))?;
-    if parsed.scheme() != "sqlite" {
-        return Err("database actions are available only for SQLite URLs".to_owned());
-    }
-    if database_url == "sqlite::memory:" || parsed.path() == ":memory:" {
-        return Err("database actions are unavailable for in-memory SQLite".to_owned());
-    }
-
-    let path = if let Some(host) = parsed.host_str() {
-        let mut path = PathBuf::from(host);
-        let suffix = parsed.path().trim_start_matches('/');
-        if !suffix.is_empty() {
-            path.push(suffix);
-        }
+fn resolve_path(root: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
         path
     } else {
-        PathBuf::from(parsed.path())
-    };
-    if path.as_os_str().is_empty() {
-        return Err("TJXY_DATABASE_URL does not contain a SQLite file path".to_owned());
-    }
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(root.join(path))
+        root.join(path)
     }
 }
 
-fn quote_sqlite_cli_argument(path: &Path) -> String {
-    let escaped = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    format!("\"{escaped}\"")
+fn open_log_for_append(path: &Path) -> io::Result<File> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log path is not a regular file",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn append_lifecycle_event(path: &Path, event: &str) -> io::Result<()> {
+    let mut log = open_log_for_append(path)?;
+    write_lifecycle_event(&mut log, event)
+}
+
+fn write_lifecycle_event(log: &mut File, event: &str) -> io::Result<()> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    writeln!(log, "[tjxy-tui {timestamp}] {event}")?;
+    log.flush()
+}
+
+fn pid_list(servers: &[ObservedServer]) -> String {
+    servers
+        .iter()
+        .map(|server| server.process.pid.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn remove_owned_pid_file(path: &Path, pid: u32) {
+    if fs::read_to_string(path)
+        .ok()
+        .is_some_and(|contents| contents.trim() == pid.to_string())
+    {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn command_line_matches_binary(command_line: &str, binary: &Path) -> bool {
@@ -1146,16 +593,26 @@ fn process_command_line(pid: u32) -> Option<String> {
     (!command_line.is_empty()).then_some(command_line)
 }
 
-fn integrity_output_is_ok(output: &[u8]) -> bool {
-    let output = String::from_utf8_lossy(output);
-    let mut lines = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let Some(first) = lines.next() else {
-        return false;
-    };
-    first == "ok" && lines.all(|line| line == "ok")
+fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn signal_process(pid: u32) -> io::Result<()> {
+    let status = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("kill exited with {status}")))
+    }
 }
 
 fn configure_process_group(command: &mut Command) {
@@ -1166,48 +623,211 @@ fn configure_process_group(command: &mut Command) {
     }
 }
 
-fn terminate_process_group(pid: u32, force: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let signal = if force { "-KILL" } else { "-TERM" };
-        let process_group = format!("-{pid}");
-        let status = Command::new("kill")
-            .args([signal, &process_group])
-            .status()?;
-        if status.success() {
-            return Ok(());
+fn file_status(path: PathBuf) -> FileStatus {
+    let metadata = fs::symlink_metadata(&path)
+        .ok()
+        .filter(std::fs::Metadata::is_file);
+    FileStatus {
+        exists: metadata.is_some(),
+        size: metadata.map_or_else(|| "-".to_owned(), |value| format_bytes(value.len())),
+        path,
+    }
+}
+
+fn configuration_status(root: &Path, environment: &BTreeMap<String, String>) -> ConfigStatus {
+    let path = environment.get("TJXY_CONFIG_FILE").map_or_else(
+        || {
+            ProjectDirs::from("com", "TJXY", "TJXY").map_or_else(
+                || root.join("tjxy.toml"),
+                |directories| directories.config_dir().join("tjxy.toml"),
+            )
+        },
+        |value| resolve_path(root, value),
+    );
+    let state = inspect_configuration(&path);
+    ConfigStatus { path, state }
+}
+
+fn inspect_configuration(path: &Path) -> ConfigState {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return ConfigState::Invalid;
         }
-        Err(io::Error::other(format!(
-            "kill process group exited with {status}"
-        )))
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return ConfigState::Missing,
+        Err(_) => return ConfigState::Unreadable,
+    };
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return ConfigState::Invalid;
     }
-    #[cfg(not(unix))]
+    let Ok(contents) = fs::read_to_string(path) else {
+        return ConfigState::Unreadable;
+    };
+    let Ok(config) = contents.parse::<toml::Table>() else {
+        return ConfigState::Invalid;
+    };
+    if config
+        .get("format_version")
+        .and_then(toml::Value::as_integer)
+        != Some(1)
     {
-        let _ = (pid, force);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "process-group termination requires Unix",
-        ))
+        return ConfigState::Invalid;
+    }
+    match config.get("state").and_then(toml::Value::as_str) {
+        Some("pending") => ConfigState::Pending,
+        Some("completed") => ConfigState::Completed,
+        _ => ConfigState::Invalid,
     }
 }
 
-fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success())
+fn read_log_tail(path: &Path, count: usize) -> io::Result<Vec<String>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log path is not a regular file",
+        ));
+    }
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(MAX_LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let mut contents = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0
+        && let Some(first_newline) = contents.find('\n')
+    {
+        contents.drain(..=first_newline);
+    }
+    Ok(tail_lines(&contents, count))
 }
 
-fn signal_process(pid: u32, force: bool) -> io::Result<()> {
-    let signal = if force { "-KILL" } else { "-TERM" };
-    let status = Command::new("kill")
-        .args([signal, &pid.to_string()])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("kill exited with {status}")))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedServer {
+    process: ProcessInfo,
+    listeners: Vec<String>,
+}
+
+fn discover_observed_servers(project: &Project) -> Vec<ObservedServer> {
+    let Ok(output) = Command::new("lsof")
+        .args(["-a", "-c", "tjxy-serv", "-d", "txt", "-Fpn"])
+        .current_dir(&project.root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
     }
+
+    let expected = [
+        project.server_binary("debug"),
+        project.server_binary("release"),
+    ]
+    .map(|path| fs::canonicalize(&path).unwrap_or(path));
+    let mut servers = parse_lsof_process_executables(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .filter(|(_, executables)| {
+            executables
+                .iter()
+                .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+                .any(|path| expected.contains(&path))
+        })
+        .map(|(pid, _)| ObservedServer {
+            process: process_info(pid).unwrap_or(ProcessInfo {
+                pid,
+                elapsed: "-".to_owned(),
+                rss: "-".to_owned(),
+                cpu: "-".to_owned(),
+            }),
+            listeners: process_listeners(pid, &project.root),
+        })
+        .collect::<Vec<_>>();
+    servers.sort_by_key(|server| server.process.pid);
+    servers
+}
+
+fn parse_lsof_process_executables(output: &str) -> BTreeMap<u32, Vec<PathBuf>> {
+    let mut processes = BTreeMap::new();
+    let mut pid = None;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value.parse::<u32>().ok();
+        } else if let (Some(pid), Some(path)) = (pid, line.strip_prefix('n')) {
+            processes
+                .entry(pid)
+                .or_insert_with(Vec::new)
+                .push(PathBuf::from(path));
+        }
+    }
+    processes
+}
+
+fn process_listeners(pid: u32, root: &Path) -> Vec<String> {
+    let output = Command::new("lsof")
+        .args([
+            "-a",
+            "-p",
+            &pid.to_string(),
+            "-nP",
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-Fpn",
+        ])
+        .current_dir(root)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut listeners = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n').map(str::to_owned))
+        .collect::<Vec<_>>();
+    listeners.sort();
+    listeners.dedup();
+    listeners
+}
+
+fn select_primary_server(
+    servers: &[ObservedServer],
+    configured_port: u16,
+) -> Option<&ObservedServer> {
+    servers
+        .iter()
+        .find(|server| {
+            server
+                .listeners
+                .iter()
+                .any(|listener| endpoint_port(listener) == Some(configured_port))
+        })
+        .or_else(|| servers.first())
+}
+
+fn endpoint_port(endpoint: &str) -> Option<u16> {
+    endpoint.rsplit_once(':')?.1.parse().ok()
+}
+
+fn probe_address(address: SocketAddr) -> SocketAddr {
+    match address.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv4Addr::LOCALHOST, address.port()))
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv6Addr::LOCALHOST, address.port()))
+        }
+        _ => address,
+    }
+}
+
+fn port_open(address: SocketAddr) -> bool {
+    TcpStream::connect_timeout(&address, Duration::from_millis(80)).is_ok()
 }
 
 fn process_info(pid: u32) -> Option<ProcessInfo> {
@@ -1218,10 +838,10 @@ fn process_info(pid: u32) -> Option<ProcessInfo> {
     if !output.status.success() {
         return None;
     }
-    let fields: Vec<_> = String::from_utf8_lossy(&output.stdout)
+    let fields = String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .map(str::to_owned)
-        .collect();
+        .collect::<Vec<_>>();
     Some(ProcessInfo {
         pid,
         elapsed: fields.first().cloned().unwrap_or_else(|| "-".to_owned()),
@@ -1253,41 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn masks_sensitive_environment_values() {
-        assert_eq!(
-            mask_env_value("TJXY_SERVER_NAME", "Living Room"),
-            "Living Room"
-        );
-        assert_eq!(
-            mask_env_value("TJXY_BOOTSTRAP_ADMIN_PASSWORD", "secret"),
-            "****"
-        );
-        assert_eq!(mask_env_value("TJXY_TMDB_ACCESS_TOKEN", "token"), "****");
-        let database_url = mask_env_value(
-            "TJXY_DATABASE_URL",
-            "postgres://reader:super-secret@db.example/tjxy?sslmode=require&token=query-secret",
-        );
-        assert!(!database_url.contains("super-secret"));
-        assert!(!database_url.contains("query-secret"));
-        assert!(database_url.contains("reader"));
-        assert!(database_url.contains("sslmode=require"));
-    }
-
-    #[test]
     fn parses_dotenv_lines() {
         let parsed = parse_env_lines(
-            r#"
-            # comment
-            TJXY_BIND="127.0.0.1:8096"
-            TJXY_SERVER_NAME='Living Room'
-            INVALID
-        "#,
+            "# comment\nTJXY_BIND=\"127.0.0.1:8096\"\nTJXY_LOG_FILE='logs/tjxy.log'\nINVALID\n",
         );
-
         assert_eq!(parsed.get("TJXY_BIND"), Some(&"127.0.0.1:8096".to_owned()));
         assert_eq!(
-            parsed.get("TJXY_SERVER_NAME"),
-            Some(&"Living Room".to_owned())
+            parsed.get("TJXY_LOG_FILE"),
+            Some(&"logs/tjxy.log".to_owned())
         );
         assert!(!parsed.contains_key("INVALID"));
     }
@@ -1299,113 +892,92 @@ mod tests {
     }
 
     #[test]
-    fn captures_large_command_output_without_blocking_on_full_pipes() {
-        let output = run_output_with_timeout(
-            "sh",
-            &["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null"],
-            Path::new("."),
-            Duration::from_secs(2),
-        )
-        .unwrap();
+    fn reads_only_a_bounded_log_tail() {
+        let project = temporary_project("log-tail");
+        let log_path = project.root.join(DEFAULT_LOG_PATH);
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let prefix = "x".repeat(usize::try_from(MAX_LOG_TAIL_BYTES).unwrap());
+        fs::write(&log_path, format!("{prefix}\nfirst\nsecond\nthird\n")).unwrap();
 
-        assert!(output.status.success());
-        assert_eq!(output.stdout.len(), 256 * 1024);
-    }
-
-    #[test]
-    fn environment_status_only_exposes_tjxy_configuration() {
-        let project = temporary_project("environment-filter");
-        fs::write(
-            project.root.join(".env"),
-            "TJXY_SERVER_NAME=Living Room\nUNRELATED_SECRET=do-not-display\n",
-        )
-        .unwrap();
-
-        let rows = project.environment_rows();
-
-        assert!(
-            rows.iter()
-                .any(|(key, value)| { key == "TJXY_SERVER_NAME" && value == "Living Room" })
+        assert_eq!(
+            read_log_tail(&log_path, 2).unwrap(),
+            vec!["second", "third"]
         );
-        assert!(!rows.iter().any(|(key, _)| key == "UNRELATED_SECRET"));
         fs::remove_dir_all(&project.root).unwrap();
     }
 
     #[test]
-    fn live_environment_overrides_dotenv_values() {
-        let dotenv = parse_env_lines("TJXY_BIND=127.0.0.1:8096\nTJXY_SERVER_NAME=File\n");
-
-        let merged = merge_environment(
-            dotenv,
-            [("TJXY_SERVER_NAME".to_owned(), "Process".to_owned())],
-        );
-
-        assert_eq!(merged.get("TJXY_BIND"), Some(&"127.0.0.1:8096".to_owned()));
-        assert_eq!(merged.get("TJXY_SERVER_NAME"), Some(&"Process".to_owned()));
-    }
-
-    #[test]
-    fn resolves_the_configured_sqlite_database_path() {
-        let root = Path::new("/tmp/tjxy-project");
-
-        assert_eq!(
-            resolve_sqlite_database_path(root, "sqlite://data/catalog.db?mode=rwc").unwrap(),
-            root.join("data/catalog.db")
-        );
-        assert_eq!(
-            resolve_sqlite_database_path(root, "sqlite:///tmp/catalog.db?mode=rwc").unwrap(),
-            PathBuf::from("/tmp/catalog.db")
-        );
-        assert!(resolve_sqlite_database_path(root, "postgres://localhost/tjxy").is_err());
-        assert!(resolve_sqlite_database_path(root, "sqlite::memory:").is_err());
-    }
-
-    #[test]
-    fn managed_pid_must_match_a_server_binary_from_this_project() {
-        let project = temporary_project("pid-owner");
-        let debug = project.server_binary(BuildMode::Debug);
-
-        assert!(command_line_matches_binary(
-            &debug.display().to_string(),
-            &debug
-        ));
-        assert!(command_line_matches_binary(
-            &format!("{} --flag", debug.display()),
-            &debug
-        ));
-        assert!(!command_line_matches_binary(
-            "/usr/bin/unrelated-worker",
-            &debug
-        ));
-        assert!(!command_line_matches_binary(
-            &format!("{}-helper", debug.display()),
-            &debug
-        ));
-
+    fn release_binary_is_preferred_over_debug() {
+        let project = temporary_project("binary-preference");
+        let debug = project.server_binary("debug");
+        let release = project.server_binary("release");
+        fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        fs::create_dir_all(release.parent().unwrap()).unwrap();
+        fs::write(&debug, "debug").unwrap();
+        assert_eq!(project.preferred_server_binary(), Some(debug));
+        fs::write(&release, "release").unwrap();
+        assert_eq!(project.preferred_server_binary(), Some(release));
         fs::remove_dir_all(&project.root).unwrap();
     }
 
     #[test]
-    fn integrity_check_requires_every_result_row_to_be_ok() {
-        assert!(integrity_output_is_ok(b"ok\n"));
-        assert!(integrity_output_is_ok(b"ok\nok\n"));
-        assert!(!integrity_output_is_ok(b""));
-        assert!(!integrity_output_is_ok(b"row 12 missing from index\n"));
-        assert!(!integrity_output_is_ok(b"ok\nrow 4 malformed\n"));
+    fn lifecycle_events_are_appended_without_overwriting_server_logs() {
+        let project = temporary_project("lifecycle-log");
+        let log_path = project.root.join(DEFAULT_LOG_PATH);
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(&log_path, "existing server output\n").unwrap();
+
+        append_lifecycle_event(&log_path, "start requested").unwrap();
+        let contents = fs::read_to_string(&log_path).unwrap();
+
+        assert!(contents.starts_with("existing server output\n"));
+        assert!(contents.contains("] start requested\n"));
+        fs::remove_dir_all(&project.root).unwrap();
     }
 
     #[test]
-    fn command_timeout_terminates_descendants_holding_output_pipes() {
-        let started = std::time::Instant::now();
-        let result = run_output_with_timeout(
-            "sh",
-            &["-c", "sleep 5 & wait"],
-            Path::new("."),
-            Duration::from_millis(100),
-        );
+    fn command_line_matching_does_not_accept_similarly_named_programs() {
+        let binary = Path::new("/repo/target/release/tjxy-server");
+        assert!(command_line_matches_binary(
+            "/repo/target/release/tjxy-server",
+            binary
+        ));
+        assert!(command_line_matches_binary(
+            "/repo/target/release/tjxy-server --flag",
+            binary
+        ));
+        assert!(!command_line_matches_binary(
+            "/repo/target/release/tjxy-server-helper",
+            binary
+        ));
+    }
 
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(2));
+    #[cfg(unix)]
+    #[test]
+    fn termination_signal_stops_a_child_process() {
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        let pid = child.id();
+
+        signal_process(pid).unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(!status.success());
+        assert!(!process_alive(pid));
+    }
+
+    #[test]
+    fn configuration_status_is_read_only_and_recognizes_state() {
+        let project = temporary_project("configuration");
+        let path = project.root.join("tjxy.toml");
+        assert_eq!(inspect_configuration(&path), ConfigState::Missing);
+
+        fs::write(&path, "format_version = 1\nstate = \"pending\"\n").unwrap();
+        assert_eq!(inspect_configuration(&path), ConfigState::Pending);
+        fs::write(&path, "format_version = 1\nstate = \"completed\"\n").unwrap();
+        assert_eq!(inspect_configuration(&path), ConfigState::Completed);
+        fs::write(&path, "not valid toml = [").unwrap();
+        assert_eq!(inspect_configuration(&path), ConfigState::Invalid);
+        fs::remove_dir_all(&project.root).unwrap();
     }
 
     #[test]
@@ -1420,82 +992,10 @@ mod tests {
         );
     }
 
-    fn observed_server(
-        pid: u32,
-        listeners: &[&str],
-        database_connections: &[&str],
-    ) -> ObservedServer {
-        ObservedServer {
-            process: ProcessInfo {
-                pid,
-                elapsed: "1:00".to_owned(),
-                rss: "1024 KB".to_owned(),
-                cpu: "0.1%".to_owned(),
-            },
-            listeners: listeners.iter().map(ToString::to_string).collect(),
-            database_connections: database_connections
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn running_server_is_observed_without_a_managed_pid_file() {
-        let servers = vec![
-            observed_server(41, &["127.0.0.1:8097"], &[]),
-            observed_server(42, &["127.0.0.1:8096"], &["[::1]:5432"]),
-        ];
-
-        let (server, managed) = select_primary_server(&servers, None, 8096).unwrap();
-
-        assert_eq!(server.process.pid, 42);
-        assert!(!managed);
-    }
-
-    #[test]
-    fn postgres_is_inferred_from_a_running_servers_connections() {
-        let root = Path::new("/tmp/tjxy-project");
-        let servers = vec![observed_server(42, &["127.0.0.1:8096"], &["[::1]:5432"])];
-
-        let status = database_status_from_sources(root, None, &servers);
-
-        assert_eq!(status.backend, DatabaseBackend::PostgreSql);
-        assert_eq!(status.target, "[::1]:5432");
-        assert!(status.connected);
-        assert_eq!(status.size, "n/a");
-    }
-
-    #[test]
-    fn parses_listener_and_database_connection_records_from_lsof() {
-        let output = "\
-p42\n\
-f8\n\
-n[::1]:56567->[::1]:5432\n\
-TST=ESTABLISHED\n\
-f21\n\
-n127.0.0.1:8096\n\
-TST=LISTEN\n";
-
-        let (listeners, connections) = parse_lsof_network(output);
-
-        assert_eq!(listeners, vec!["127.0.0.1:8096"]);
-        assert_eq!(connections, vec!["[::1]:5432"]);
-    }
-
     #[test]
     fn parses_server_pids_and_executables_without_pgrep() {
-        let output = "\
-p41\n\
-ftxt\n\
-n/repo/target/debug/tjxy-server\n\
-n/usr/lib/dyld\n\
-p42\n\
-ftxt\n\
-n/repo/target/release/tjxy-server\n";
-
+        let output = "p41\nftxt\nn/repo/target/debug/tjxy-server\nn/usr/lib/dyld\np42\nftxt\nn/repo/target/release/tjxy-server\n";
         let processes = parse_lsof_process_executables(output);
-
         assert_eq!(
             processes.get(&41),
             Some(&vec![

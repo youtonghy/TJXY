@@ -1,28 +1,16 @@
-use std::path::Path;
-
-use tjxy_tui::{BuildMode, detect_build_mode};
+use tjxy_tui::{format_bytes, parse_env_lines, tail_lines};
 
 #[test]
-fn detects_release_before_debug_when_both_binaries_exist() {
-    let mode = detect_build_mode(
-        Path::new("/repo/target/release/tjxy-server"),
-        Path::new("/repo/target/debug/tjxy-server"),
-        true,
-        true,
-    );
-
-    assert_eq!(mode, BuildMode::Release);
+fn public_helpers_support_service_diagnostics() {
+    assert_eq!(format_bytes(1_536), "1.5 KB");
+    assert_eq!(tail_lines("one\ntwo\nthree\n", 2), vec!["two", "three"]);
 }
 
 #[test]
-fn detects_no_build_when_neither_binary_exists() {
+fn dotenv_parser_finds_diagnostic_overrides() {
+    let values = parse_env_lines("TJXY_BIND=127.0.0.1:8096\nTJXY_LOG_FILE=logs/server.log\n");
     assert_eq!(
-        detect_build_mode(
-            Path::new("/repo/target/release/tjxy-server"),
-            Path::new("/repo/target/debug/tjxy-server"),
-            false,
-            false,
-        ),
-        BuildMode::None
+        values.get("TJXY_LOG_FILE"),
+        Some(&"logs/server.log".to_owned())
     );
 }

@@ -161,29 +161,30 @@ It does not yet provide embeddings, a vector index, or semantic similarity searc
 Deployments should still restrict outbound network access so the configured
 provider URL can reach only approved AI endpoints as a defense-in-depth control.
 
-## Run the management TUI
+## Run the diagnostic TUI
 
-The repository includes a Rust terminal console for local service management and
-status checks:
+The repository includes a Rust terminal console for local service control,
+status, and backend log diagnostics:
 
 ```bash
 cargo run -p tjxy-tui
 ```
 
-It discovers TJXY server processes from this workspace even when they were
-started outside the TUI, and shows their PID/port state, build artifacts,
-database backend, masked `TJXY_*` configuration, and recent server logs. Actions
-include starting or stopping a server process launched by the TUI, building the
-server or Admin application, and running focused checks.
+It discovers TJXY server processes from this workspace even when another launcher
+started them, and shows process, listener, HTTP, installation-config, frontend
+artifact, and log-file status. Use `1` to start, `2` to stop, and `3` to restart
+the single server instance that belongs to this workspace. Ambiguous multi-instance
+operations are refused. The TUI does not perform setup, connect to the database,
+build artifacts, or perform database maintenance. Process control currently targets
+local macOS and Linux environments and requires `ps`, `lsof`, and `kill`.
 
-The database view follows `TJXY_DATABASE_URL` when it is available. Otherwise,
-it infers PostgreSQL on its default port from a running server's live database
-connections and falls back to the server's default SQLite configuration. SQLite
-maintenance actions
-require the `sqlite3` CLI and are hidden for PostgreSQL and in-memory databases.
-The TUI only stops a server that it started and recorded in
-`target/tjxy-server.pid`. Process inspection and signalling currently target
-local macOS and Linux environments and require `ps` and `lsof`.
+Use `g` to switch between Chinese and English. Set `TJXY_TUI_LANGUAGE=en-US` to
+start in English; Chinese is the default. Backend logs are read from
+`TJXY_LOG_FILE`, or `data/server.log` when it is unset. The process launcher must
+redirect backend stdout and stderr to that file for logs to appear in the TUI.
+Before installation is complete, the TUI exposes only service startup and a prompt
+to finish setup in the desktop application; status and log content unlock after the
+installation manifest reaches the completed state.
 
 The default bind address is `127.0.0.1:8096`; override it with `TJXY_BIND`.
 The default database is `sqlite://tjxy.db?mode=rwc`; override it with

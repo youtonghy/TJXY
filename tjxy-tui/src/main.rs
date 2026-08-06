@@ -1,4 +1,6 @@
 use std::{
+    env,
+    fmt::Write as _,
     io,
     sync::mpsc,
     thread,
@@ -13,16 +15,41 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Tabs, Wrap},
 };
-use tjxy_tui::{Action, ActionReport, DatabaseBackend, Project, StatusSnapshot};
+use tjxy_tui::{ActionMessage, ActionReport, ConfigState, Project, ServiceAction, StatusSnapshot};
 
-const TABS: [&str; 5] = ["Overview", "Service", "Build", "Database", "Logs / Config"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Language {
+    Chinese,
+    English,
+}
+
+impl Language {
+    fn from_environment() -> Self {
+        match env::var("TJXY_TUI_LANGUAGE").as_deref() {
+            Ok("en-US" | "en") => Self::English,
+            _ => Self::Chinese,
+        }
+    }
+
+    const fn toggle(self) -> Self {
+        match self {
+            Self::Chinese => Self::English,
+            Self::English => Self::Chinese,
+        }
+    }
+
+    const fn text(self, chinese: &'static str, english: &'static str) -> &'static str {
+        match self {
+            Self::Chinese => chinese,
+            Self::English => english,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Overview,
-    Service,
-    Build,
-    Database,
+    Diagnostics,
     Logs,
 }
 
@@ -30,30 +57,24 @@ impl View {
     const fn index(self) -> usize {
         match self {
             Self::Overview => 0,
-            Self::Service => 1,
-            Self::Build => 2,
-            Self::Database => 3,
-            Self::Logs => 4,
+            Self::Diagnostics => 1,
+            Self::Logs => 2,
         }
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
-            Self::Overview => Self::Service,
-            Self::Service => Self::Build,
-            Self::Build => Self::Database,
-            Self::Database => Self::Logs,
+            Self::Overview => Self::Diagnostics,
+            Self::Diagnostics => Self::Logs,
             Self::Logs => Self::Overview,
         }
     }
 
-    fn previous(self) -> Self {
+    const fn previous(self) -> Self {
         match self {
             Self::Overview => Self::Logs,
-            Self::Service => Self::Overview,
-            Self::Build => Self::Service,
-            Self::Database => Self::Build,
-            Self::Logs => Self::Database,
+            Self::Diagnostics => Self::Overview,
+            Self::Logs => Self::Diagnostics,
         }
     }
 }
@@ -61,35 +82,37 @@ impl View {
 #[derive(Debug)]
 struct UiState {
     view: View,
-    status: Option<ActionReport>,
+    language: Language,
     log_lines: usize,
-    pending: Option<Action>,
+    pending: Option<ServiceAction>,
+    report: Option<ActionReport>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
             view: View::Overview,
-            status: None,
+            language: Language::from_environment(),
             log_lines: 30,
             pending: None,
+            report: None,
         }
     }
 }
 
 impl UiState {
-    fn begin_action(&mut self, action: Action) -> bool {
+    fn begin_action(&mut self, action: ServiceAction) -> bool {
         if self.pending.is_some() {
             return false;
         }
         self.pending = Some(action);
-        self.status = Some(ActionReport::ok(format!("{action:?} is running")));
+        self.report = None;
         true
     }
 
     fn complete_action(&mut self, report: ActionReport) {
         self.pending = None;
-        self.status = Some(report);
+        self.report = Some(report);
     }
 }
 
@@ -129,54 +152,26 @@ fn run(terminal: &mut DefaultTerminal, project: &Project) -> io::Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
-
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if state.pending.is_some() {
-                    state.status = Some(ActionReport::error(
-                        "wait for the running management action before quitting",
-                    ));
-                } else {
-                    break;
-                }
-            }
+            KeyCode::Char('q') | KeyCode::Esc if state.pending.is_none() => break,
             KeyCode::Left | KeyCode::Char('h') => state.view = state.view.previous(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => state.view = state.view.next(),
             KeyCode::Char('r') => {
                 snapshot = project.snapshot();
                 last_refresh = Instant::now();
-                state.status = Some(ActionReport::ok("status refreshed"));
             }
-            KeyCode::Char(key) => {
-                if let Some(action) = action_for_key(state.view, key, snapshot.database.backend) {
-                    if state.begin_action(action) {
-                        let worker_project = project.clone();
-                        let worker_sender = action_sender.clone();
-                        if let Err(error) = thread::Builder::new()
-                            .name("tjxy-tui-action".to_owned())
-                            .spawn(move || {
-                                let report =
-                                    std::panic::catch_unwind(|| worker_project.run_action(action))
-                                        .unwrap_or_else(|_| {
-                                            ActionReport::error(format!(
-                                                "{action:?} worker panicked"
-                                            ))
-                                        });
-                                let _ = worker_sender.send(report);
-                            })
-                        {
-                            state.complete_action(ActionReport::error(format!(
-                                "start management action: {error}"
-                            )));
-                        }
-                    } else {
-                        state.status = Some(ActionReport::error(
-                            "another management action is already running",
-                        ));
-                    }
-                } else if state.view == View::Logs && key == '+' {
-                    state.log_lines = if state.log_lines == 30 { 100 } else { 30 };
-                }
+            KeyCode::Char('g') => state.language = state.language.toggle(),
+            KeyCode::Char('+') if state.view == View::Logs => {
+                state.log_lines = if state.log_lines == 30 { 100 } else { 30 };
+            }
+            KeyCode::Char('1') => {
+                dispatch_action(ServiceAction::Start, project, &mut state, &action_sender);
+            }
+            KeyCode::Char('2') => {
+                dispatch_action(ServiceAction::Stop, project, &mut state, &action_sender);
+            }
+            KeyCode::Char('3') => {
+                dispatch_action(ServiceAction::Restart, project, &mut state, &action_sender);
             }
             _ => {}
         }
@@ -184,43 +179,54 @@ fn run(terminal: &mut DefaultTerminal, project: &Project) -> io::Result<()> {
     Ok(())
 }
 
-fn action_for_key(view: View, key: char, database_backend: DatabaseBackend) -> Option<Action> {
-    match view {
-        View::Overview | View::Service => match key {
-            '1' => Some(Action::StartServer),
-            '2' => Some(Action::StopServer),
-            '3' => Some(Action::RestartServer),
-            'b' => Some(Action::BuildDebug),
-            'a' => Some(Action::BuildAdmin),
-            'c' => Some(Action::CheckProject),
-            _ => None,
-        },
-        View::Build => match key {
-            'd' => Some(Action::BuildDebug),
-            'R' => Some(Action::BuildRelease),
-            'a' => Some(Action::BuildAdmin),
-            'A' => Some(Action::BuildAll),
-            'c' => Some(Action::CheckProject),
-            _ => None,
-        },
-        View::Database if database_backend == DatabaseBackend::SQLite => match key {
-            'b' => Some(Action::BackupDatabase),
-            'i' => Some(Action::IntegrityCheck),
-            'v' => Some(Action::VacuumDatabase),
-            _ => None,
-        },
-        View::Database | View::Logs => None,
+fn dispatch_action(
+    action: ServiceAction,
+    project: &Project,
+    state: &mut UiState,
+    sender: &mpsc::Sender<ActionReport>,
+) {
+    if !state.begin_action(action) {
+        return;
+    }
+    let project = project.clone();
+    let sender = sender.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("tjxy-tui-service-action".to_owned())
+        .spawn(move || {
+            let report =
+                std::panic::catch_unwind(|| project.run_action(action)).unwrap_or(ActionReport {
+                    ok: false,
+                    message: ActionMessage::StartFailed,
+                    pid: None,
+                    detail: Some("service action worker panicked".to_owned()),
+                });
+            let _ = sender.send(report);
+        })
+    {
+        state.complete_action(ActionReport {
+            ok: false,
+            message: ActionMessage::StartFailed,
+            pid: None,
+            detail: Some(format!("start action worker: {error}")),
+        });
     }
 }
 
 fn render(frame: &mut Frame<'_>, project: &Project, snapshot: &StatusSnapshot, state: &UiState) {
+    let language = state.language;
     let area = frame.area();
-    if area.width < 78 || area.height < 20 {
-        let message = Paragraph::new("Terminal too small. Minimum size: 78 x 20")
-            .block(Block::default().borders(Borders::ALL).title("TJXY TUI"))
-            .style(Style::default().fg(Color::Yellow))
-            .alignment(ratatui::layout::Alignment::Center);
-        frame.render_widget(message, area);
+    if area.width < 72 || area.height < 18 {
+        let message = language.text(
+            "终端窗口过小，最小尺寸为 72 x 18",
+            "Terminal too small. Minimum size: 72 x 18",
+        );
+        frame.render_widget(
+            Paragraph::new(message)
+                .block(Block::default().borders(Borders::ALL).title("TJXY TUI"))
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
         return;
     }
 
@@ -233,7 +239,6 @@ fn render(frame: &mut Frame<'_>, project: &Project, snapshot: &StatusSnapshot, s
             Constraint::Length(2),
         ])
         .split(area);
-
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " TJXY ",
@@ -242,7 +247,7 @@ fn render(frame: &mut Frame<'_>, project: &Project, snapshot: &StatusSnapshot, s
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" server management console"),
+        Span::raw(language.text(" 服务诊断控制台", " service diagnostic console")),
         Span::styled(
             format!("  {}", project.root.display()),
             Style::default().fg(Color::DarkGray),
@@ -251,266 +256,309 @@ fn render(frame: &mut Frame<'_>, project: &Project, snapshot: &StatusSnapshot, s
     .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(title, root[0]);
 
-    let tabs = Tabs::new(TABS)
-        .select(state.view.index())
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider("|")
-        .block(Block::default().borders(Borders::BOTTOM));
+    let tabs = Tabs::new(vec![
+        language.text("概览", "Overview"),
+        language.text("诊断", "Diagnostics"),
+        language.text("日志", "Logs"),
+    ])
+    .select(state.view.index())
+    .highlight_style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+    .divider("|")
+    .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(tabs, root[1]);
 
-    match state.view {
-        View::Overview => render_overview(frame, root[2], snapshot),
-        View::Service => render_service(frame, root[2], project, snapshot),
-        View::Build => render_build(frame, root[2], snapshot),
-        View::Database => render_database(frame, root[2], snapshot),
-        View::Logs => render_logs(frame, root[2], project, state),
+    if diagnostics_unlocked(snapshot.configuration.state) {
+        match state.view {
+            View::Overview => render_overview(frame, root[2], snapshot, language),
+            View::Diagnostics => render_diagnostics(frame, root[2], snapshot, language),
+            View::Logs => render_logs(frame, root[2], snapshot, state),
+        }
+    } else {
+        render_installation_gate(frame, root[2], snapshot, language);
     }
-
-    let footer = footer_line(state, snapshot);
     frame.render_widget(
-        Paragraph::new(footer)
+        Paragraph::new(footer_line(state, snapshot))
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP)),
         root[3],
     );
 }
 
-fn render_overview(frame: &mut Frame<'_>, area: Rect, snapshot: &StatusSnapshot) {
+const fn diagnostics_unlocked(state: ConfigState) -> bool {
+    matches!(state, ConfigState::Completed)
+}
+
+fn render_installation_gate(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &StatusSnapshot,
+    language: Language,
+) {
+    let (title, message) = match snapshot.configuration.state {
+        ConfigState::Missing => (
+            language.text("尚未安装", "Not installed"),
+            language.text(
+                "请按 1 启动服务，然后在桌面端完成安装。安装完成后即可查看状态和日志。",
+                "Press 1 to start the service, then complete installation in the desktop app. Status and logs unlock after installation.",
+            ),
+        ),
+        ConfigState::Pending => (
+            language.text("安装待恢复", "Installation pending"),
+            language.text(
+                "请启动服务并在桌面端继续安装恢复。完成后即可查看状态和日志。",
+                "Start the service and resume installation in the desktop app. Status and logs unlock after completion.",
+            ),
+        ),
+        ConfigState::Invalid | ConfigState::Unreadable => (
+            language.text("安装配置异常", "Installation config issue"),
+            language.text(
+                "安装配置无效或无法读取，请先在桌面端修复安装后再查看。",
+                "The installation config is invalid or unreadable. Repair the installation in the desktop app before viewing status or logs.",
+            ),
+        ),
+        ConfigState::Completed => return,
+    };
+    let content = vec![
+        Line::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::from(message),
+        Line::from(""),
+        Line::styled(
+            format!(
+                "{}: {}",
+                language.text("配置位置", "Config path"),
+                snapshot.configuration.path.display()
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(panel(language.text("安装要求", "Installation required")))
+            .wrap(Wrap { trim: true })
+            .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
+fn render_overview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &StatusSnapshot,
+    language: Language,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
-
+    let process = snapshot.server.as_ref();
     let service_rows = vec![
-        kv_line("Server", server_state_label(snapshot)),
-        kv_line(&snapshot.server_bind, open_label(snapshot.server_port_open)),
-        kv_line("Admin port 5173", open_label(snapshot.admin_port_open)),
         kv_line(
-            "PID",
-            snapshot
-                .server
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), |process| process.pid.to_string()),
+            language.text("后端", "Backend"),
+            server_state(snapshot, language),
         ),
         kv_line(
-            "Uptime",
-            snapshot
-                .server
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), |process| process.elapsed.clone()),
+            language.text("监听地址", "Listen address"),
+            snapshot.server_bind.clone(),
+        ),
+        kv_line(
+            language.text("HTTP 端口", "HTTP port"),
+            open_label(snapshot.server_port_open, language),
+        ),
+        kv_line(
+            language.text("进程 ID", "Process ID"),
+            process.map_or_else(|| "-".to_owned(), |value| value.pid.to_string()),
+        ),
+        kv_line(
+            language.text("运行时间", "Uptime"),
+            process.map_or_else(|| "-".to_owned(), |value| value.elapsed.clone()),
+        ),
+        kv_line(
+            language.text("实例数", "Instances"),
+            snapshot.server_instances.to_string(),
         ),
     ];
     frame.render_widget(
-        List::new(service_rows)
-            .block(panel("Service status"))
-            .highlight_style(Style::default().fg(Color::Cyan)),
+        List::new(service_rows).block(panel(language.text("服务状态", "Service status"))),
         columns[0],
     );
 
-    let build_rows = vec![
-        kv_line("Server binary", snapshot.build_mode.label().to_owned()),
-        kv_line("Binary size", snapshot.binary_size.clone()),
+    let runtime_rows = vec![
         kv_line(
-            "Database",
-            format!(
-                "{} {}",
-                snapshot.database.backend.label(),
-                connection_label(snapshot.database.connected)
-            ),
+            language.text("CPU", "CPU"),
+            process.map_or_else(|| "-".to_owned(), |value| value.cpu.clone()),
         ),
-        kv_line("Admin deps", yes_no(snapshot.admin_deps)),
-        kv_line("Admin dist", yes_no(snapshot.admin_dist)),
-        kv_line("Rust", snapshot.rust_version.clone()),
-        kv_line("Node", snapshot.node_version.clone()),
+        kv_line(
+            language.text("内存", "Memory"),
+            process.map_or_else(|| "-".to_owned(), |value| value.rss.clone()),
+        ),
+        kv_line(
+            language.text("配置", "Configuration"),
+            config_label(snapshot.configuration.state, language).to_owned(),
+        ),
+        kv_line(
+            language.text("前端资源", "Frontend assets"),
+            present_label(snapshot.admin_dist.exists, language),
+        ),
+        kv_line(
+            language.text("日志文件", "Log file"),
+            present_label(snapshot.log.exists, language),
+        ),
+        kv_line(
+            language.text("日志大小", "Log size"),
+            snapshot.log.size.clone(),
+        ),
     ];
     frame.render_widget(
-        List::new(build_rows).block(panel("Build and toolchain")),
+        List::new(runtime_rows).block(panel(language.text("运行诊断", "Runtime diagnostics"))),
         columns[1],
     );
 }
 
-fn render_service(frame: &mut Frame<'_>, area: Rect, project: &Project, snapshot: &StatusSnapshot) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(5)])
-        .split(area);
-
+fn render_diagnostics(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &StatusSnapshot,
+    language: Language,
+) {
     let rows = vec![
+        diagnostic_row(
+            language.text("后端进程", "Backend process"),
+            snapshot.server.is_some(),
+            server_state(snapshot, language),
+            language,
+        ),
+        diagnostic_row(
+            language.text("HTTP 端口", "HTTP port"),
+            snapshot.server_port_open,
+            snapshot.server_bind.clone(),
+            language,
+        ),
         Row::new(vec![
-            Cell::from("Server"),
-            Cell::from(server_state_label(snapshot)),
-            Cell::from(format!("PID {}", pid_label(snapshot))),
-        ]),
-        Row::new(vec![
-            Cell::from("HTTP"),
-            Cell::from(open_label(snapshot.server_port_open)),
-            Cell::from(snapshot.server_bind.clone()),
-        ]),
-        Row::new(vec![
-            Cell::from("Admin dev"),
-            Cell::from(open_label(snapshot.admin_port_open)),
-            Cell::from("127.0.0.1:5173"),
-        ]),
-        Row::new(vec![
-            Cell::from("Instances"),
-            Cell::from(snapshot.server_instances.to_string()),
-            Cell::from(snapshot.server_listeners.join(", ")),
-        ]),
+            Cell::from(language.text("安装配置", "Installation config")),
+            Cell::from(config_label(snapshot.configuration.state, language)),
+            Cell::from(snapshot.configuration.path.display().to_string()),
+        ])
+        .style(Style::default().fg(config_color(snapshot.configuration.state))),
+        diagnostic_row(
+            language.text("前端静态资源", "Frontend assets"),
+            snapshot.admin_dist.exists,
+            snapshot.admin_dist.path.display().to_string(),
+            language,
+        ),
+        diagnostic_row(
+            language.text("后端日志", "Backend log"),
+            snapshot.log.exists,
+            snapshot.log.path.display().to_string(),
+            language,
+        ),
     ];
     frame.render_widget(
         Table::new(
             rows,
             [
-                Constraint::Length(14),
                 Constraint::Length(20),
-                Constraint::Min(20),
+                Constraint::Length(18),
+                Constraint::Min(24),
             ],
         )
-        .header(Row::new(vec!["Component", "State", "Details"]))
-        .block(panel("Managed services"))
+        .header(
+            Row::new(vec![
+                language.text("检查项", "Check"),
+                language.text("状态", "State"),
+                language.text("详情", "Details"),
+            ])
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(panel(language.text("诊断检查", "Diagnostic checks")))
         .column_spacing(2),
-        sections[0],
-    );
-
-    let config = project
-        .environment_rows()
-        .into_iter()
-        .take(8)
-        .map(|(key, value)| ListItem::new(format!("{key} = {value}")))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(config).block(panel("Runtime configuration (secrets masked)")),
-        sections[1],
+        area,
     );
 }
 
-fn render_build(frame: &mut Frame<'_>, area: Rect, snapshot: &StatusSnapshot) {
-    let sections = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let actions = [
-        "[d] Build server debug",
-        "[R] Build server release",
-        "[a] Build admin production",
-        "[A] Build all",
-        "[c] Run checks",
-    ]
-    .into_iter()
-    .map(ListItem::new)
-    .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(actions).block(panel("Build actions")),
-        sections[0],
-    );
-
-    let artifacts = vec![
-        kv_line("Server", snapshot.build_mode.label().to_owned()),
-        kv_line("Binary", snapshot.binary_size.clone()),
-        kv_line("Admin deps", yes_no(snapshot.admin_deps)),
-        kv_line("Admin dist", yes_no(snapshot.admin_dist)),
-        kv_line("Rust", snapshot.rust_version.clone()),
-        kv_line(
-            "Node / npm",
-            format!("{} / {}", snapshot.node_version, snapshot.npm_version),
-        ),
-    ];
-    frame.render_widget(
-        List::new(artifacts).block(panel("Current artifacts")),
-        sections[1],
-    );
-}
-
-fn render_database(frame: &mut Frame<'_>, area: Rect, snapshot: &StatusSnapshot) {
-    let sections = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let status = vec![
-        kv_line("Backend", snapshot.database.backend.label().to_owned()),
-        kv_line("Target", snapshot.database.target.clone()),
-        kv_line("Connection", connection_label(snapshot.database.connected)),
-        kv_line("Size", snapshot.database.size.clone()),
-    ];
-    frame.render_widget(
-        List::new(status).block(panel("Database status")),
-        sections[0],
-    );
-
-    let actions = if snapshot.database.backend == DatabaseBackend::SQLite {
-        vec![
-            ListItem::new("[b] Backup database"),
-            ListItem::new("[i] PRAGMA integrity_check"),
-            ListItem::new("[v] VACUUM"),
-        ]
-    } else {
-        vec![
-            ListItem::new("Status monitoring only"),
-            ListItem::new("Maintenance: external database tooling"),
-        ]
-    };
-    frame.render_widget(
-        List::new(actions).block(panel("Database actions")),
-        sections[1],
-    );
-}
-
-fn render_logs(frame: &mut Frame<'_>, area: Rect, project: &Project, state: &UiState) {
+fn render_logs(frame: &mut Frame<'_>, area: Rect, snapshot: &StatusSnapshot, state: &UiState) {
+    let language = state.language;
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(4)])
         .split(area);
-
-    let header = Paragraph::new(format!(
-        "{}  |  showing last {} lines  |  [+] toggle 30/100",
-        project.log_path().display(),
-        state.log_lines
-    ))
-    .block(panel("Log file"));
-    frame.render_widget(header, sections[0]);
+    let header = format!(
+        "{}  |  {} {}  |  [+] {}",
+        snapshot.log.path.display(),
+        language.text("末尾", "last"),
+        state.log_lines,
+        language.text("切换 30/100 行", "toggle 30/100 lines"),
+    );
+    frame.render_widget(
+        Paragraph::new(header).block(panel(language.text("日志文件", "Log file"))),
+        sections[0],
+    );
 
     let visible_lines = sections[1].height.saturating_sub(2) as usize;
-    let lines = project
-        .log_lines(state.log_lines)
-        .into_iter()
-        .rev()
-        .take(visible_lines)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|line| {
-            let style = if line.to_ascii_lowercase().contains("error")
-                || line.to_ascii_lowercase().contains("fail")
-            {
-                Style::default().fg(Color::Red)
-            } else if line.to_ascii_lowercase().contains("warn") {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::from(Span::styled(line, style))
-        })
-        .collect::<Vec<_>>();
-    let content = if lines.is_empty() {
-        vec![Line::from(Span::styled(
-            "(no log content)",
+    let content = if let Some(error) = &snapshot.log_error {
+        vec![Line::styled(
+            format!(
+                "{}: {error}",
+                language.text("无法读取日志", "Cannot read log")
+            ),
+            Style::default().fg(Color::Red),
+        )]
+    } else if snapshot.recent_log_lines.is_empty() {
+        vec![Line::styled(
+            language.text("（日志文件为空）", "(log file is empty)"),
             Style::default().fg(Color::DarkGray),
-        ))]
+        )]
     } else {
-        lines
+        let limit = state.log_lines.min(visible_lines);
+        snapshot
+            .recent_log_lines
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|line| Line::styled(line.clone(), log_style(&line)))
+            .collect()
     };
     frame.render_widget(
         Paragraph::new(content)
-            .block(panel("Recent output"))
+            .block(panel(language.text("最近输出", "Recent output")))
             .wrap(Wrap { trim: false }),
         sections[1],
     );
+}
+
+fn diagnostic_row(
+    component: &'static str,
+    healthy: bool,
+    details: String,
+    language: Language,
+) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(component),
+        Cell::from(if healthy {
+            language.text("正常", "OK")
+        } else {
+            language.text("异常", "ISSUE")
+        }),
+        Cell::from(details),
+    ])
+    .style(Style::default().fg(if healthy { Color::Green } else { Color::Red }))
 }
 
 fn panel(title: &'static str) -> Block<'static> {
@@ -525,95 +573,155 @@ fn kv_line(key: &str, value: String) -> ListItem<'static> {
 }
 
 fn footer_line(state: &UiState, snapshot: &StatusSnapshot) -> Line<'static> {
+    let language = state.language;
     let mut spans = vec![
-        Span::styled(
-            " q ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" quit  "),
-        Span::styled(
-            " ←/→ ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" tabs  "),
-        Span::styled(
-            " r ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" refresh"),
+        key_hint(" q "),
+        Span::raw(language.text(" 退出  ", " quit  ")),
+        key_hint(" ←/→ "),
+        Span::raw(language.text(" 切页  ", " tabs  ")),
+        key_hint(" r "),
+        Span::raw(language.text(" 刷新  ", " refresh  ")),
+        key_hint(" g "),
+        Span::raw(language.text(" English", " 中文")),
     ];
-    let action_hint = match state.view {
-        View::Overview | View::Service if snapshot.server.is_some() && !snapshot.server_managed => {
-            "  observed server; management disabled"
-        }
-        View::Overview | View::Service => "  1/2/3 server  b build  a admin  c check",
-        View::Build => "  d debug  R release  a admin  A all  c check",
-        View::Database if snapshot.database.backend == DatabaseBackend::SQLite => {
-            "  b backup  i integrity  v vacuum"
-        }
-        View::Database => "  database status",
-        View::Logs => "  + more/less logs",
-    };
-    spans.push(Span::styled(
-        action_hint,
-        Style::default().fg(Color::DarkGray),
-    ));
-    if let Some(status) = &state.status {
-        spans.push(Span::raw("  |  "));
+    spans.push(Span::raw("  |  "));
+    if let Some(action) = state.pending {
         spans.push(Span::styled(
-            status.message.clone(),
-            Style::default().fg(if status.ok { Color::Green } else { Color::Red }),
+            pending_label(action, language),
+            Style::default().fg(Color::Yellow),
+        ));
+    } else {
+        if snapshot.server.is_some() {
+            spans.push(key_hint(" 2 "));
+            spans.push(Span::raw(language.text(" 关闭  ", " stop  ")));
+            spans.push(key_hint(" 3 "));
+            spans.push(Span::raw(language.text(" 重启", " restart")));
+        } else {
+            spans.push(key_hint(" 1 "));
+            spans.push(Span::raw(language.text(" 启动", " start")));
+        }
+        if let Some(report) = &state.report {
+            spans.push(Span::raw("  |  "));
+            spans.push(Span::styled(
+                action_report_label(report, language),
+                Style::default().fg(if report.ok { Color::Green } else { Color::Red }),
+            ));
+        }
+    }
+    if state.view == View::Logs {
+        spans.push(Span::raw(
+            language.text("  |  + 更多/更少日志", "  |  + more/less logs"),
         ));
     }
     Line::from(spans)
 }
 
-fn server_state_label(snapshot: &StatusSnapshot) -> String {
-    match (&snapshot.server, snapshot.server_managed) {
-        (Some(_), true) => "RUNNING (managed)".to_owned(),
-        (Some(_), false) => "RUNNING (observed)".to_owned(),
-        (None, _) => "STOPPED".to_owned(),
+fn pending_label(action: ServiceAction, language: Language) -> &'static str {
+    match action {
+        ServiceAction::Start => language.text("正在启动…", "starting..."),
+        ServiceAction::Stop => language.text("正在关闭…", "stopping..."),
+        ServiceAction::Restart => language.text("正在重启…", "restarting..."),
     }
 }
 
-fn open_label(open: bool) -> String {
+fn action_report_label(report: &ActionReport, language: Language) -> String {
+    let message = match report.message {
+        ActionMessage::Started => language.text("服务已启动", "service started"),
+        ActionMessage::Stopped => language.text("服务已关闭", "service stopped"),
+        ActionMessage::Restarted => language.text("服务已重启", "service restarted"),
+        ActionMessage::AlreadyRunning => language.text("服务已经运行", "service already running"),
+        ActionMessage::NotRunning => language.text("服务未运行", "service is not running"),
+        ActionMessage::MultipleInstances => language.text(
+            "发现多个实例，操作已拒绝",
+            "multiple instances found; action refused",
+        ),
+        ActionMessage::BinaryMissing => language.text(
+            "服务程序不存在，请先安装",
+            "server binary missing; install it first",
+        ),
+        ActionMessage::LogUnavailable => language.text("日志文件不可用", "log file unavailable"),
+        ActionMessage::StartFailed => language.text("启动失败", "start failed"),
+        ActionMessage::StopFailed => language.text("关闭失败", "stop failed"),
+        ActionMessage::StopTimedOut => language.text(
+            "关闭超时，未强制终止",
+            "stop timed out; process was not killed",
+        ),
+    };
+    let mut value = message.to_owned();
+    if let Some(pid) = report.pid {
+        let _ = write!(value, " (PID {pid})");
+    }
+    if let Some(detail) = &report.detail {
+        value.push_str(": ");
+        value.push_str(detail);
+    }
+    value
+}
+
+fn key_hint(value: &'static str) -> Span<'static> {
+    Span::styled(
+        value,
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn server_state(snapshot: &StatusSnapshot, language: Language) -> String {
+    if snapshot.server.is_some() {
+        language.text("运行中", "RUNNING").to_owned()
+    } else {
+        language.text("未运行", "STOPPED").to_owned()
+    }
+}
+
+fn open_label(open: bool, language: Language) -> String {
     if open {
-        "OPEN".to_owned()
+        language.text("开放", "OPEN").to_owned()
     } else {
-        "CLOSED".to_owned()
+        language.text("关闭", "CLOSED").to_owned()
     }
 }
 
-fn yes_no(value: bool) -> String {
-    if value {
-        "yes".to_owned()
+fn present_label(present: bool, language: Language) -> String {
+    if present {
+        language.text("存在", "PRESENT").to_owned()
     } else {
-        "no".to_owned()
+        language.text("缺失", "MISSING").to_owned()
     }
 }
 
-fn connection_label(connected: bool) -> String {
-    if connected {
-        "CONNECTED".to_owned()
-    } else {
-        "NOT CONNECTED".to_owned()
+const fn config_label(state: ConfigState, language: Language) -> &'static str {
+    match state {
+        ConfigState::Missing => language.text("未配置", "MISSING"),
+        ConfigState::Pending => language.text("待恢复", "PENDING"),
+        ConfigState::Completed => language.text("已完成", "COMPLETED"),
+        ConfigState::Invalid => language.text("无效", "INVALID"),
+        ConfigState::Unreadable => language.text("不可读取", "UNREADABLE"),
     }
 }
 
-fn pid_label(snapshot: &StatusSnapshot) -> String {
-    snapshot
-        .server
-        .as_ref()
-        .map_or_else(|| "-".to_owned(), |process| process.pid.to_string())
+const fn config_color(state: ConfigState) -> Color {
+    match state {
+        ConfigState::Completed => Color::Green,
+        ConfigState::Missing | ConfigState::Pending => Color::Yellow,
+        ConfigState::Invalid | ConfigState::Unreadable => Color::Red,
+    }
+}
+
+fn log_style(line: &str) -> Style {
+    let lower = line.to_lowercase();
+    if ["error", "fail", "fatal", "panic", "错误", "失败"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        Style::default().fg(Color::Red)
+    } else if lower.contains("warn") || lower.contains("警告") {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
 }
 
 #[cfg(test)]
@@ -621,22 +729,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ui_state_allows_only_one_management_action_at_a_time() {
-        let mut state = UiState::default();
-
-        assert!(state.begin_action(Action::BuildDebug));
-        assert!(!state.begin_action(Action::BuildAdmin));
-        assert_eq!(state.pending, Some(Action::BuildDebug));
+    fn language_toggle_is_reversible() {
+        assert_eq!(Language::Chinese.toggle(), Language::English);
+        assert_eq!(Language::English.toggle(), Language::Chinese);
     }
 
     #[test]
-    fn completing_an_action_clears_pending_state_and_keeps_the_report() {
-        let mut state = UiState::default();
-        assert!(state.begin_action(Action::IntegrityCheck));
+    fn views_cycle_in_both_directions() {
+        assert_eq!(View::Overview.next(), View::Diagnostics);
+        assert_eq!(View::Overview.previous(), View::Logs);
+        assert_eq!(View::Logs.next(), View::Overview);
+    }
 
-        state.complete_action(ActionReport::ok("integrity: ok"));
+    #[test]
+    fn errors_and_warnings_receive_diagnostic_colors() {
+        assert_eq!(log_style("ERROR backend failed").fg, Some(Color::Red));
+        assert_eq!(log_style("警告: retrying").fg, Some(Color::Yellow));
+        assert_eq!(log_style("request completed").fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn ui_allows_only_one_service_action_at_a_time() {
+        let mut state = UiState::default();
+        assert!(state.begin_action(ServiceAction::Start));
+        assert!(!state.begin_action(ServiceAction::Restart));
+
+        state.complete_action(ActionReport {
+            ok: true,
+            message: ActionMessage::Started,
+            pid: Some(42),
+            detail: None,
+        });
 
         assert_eq!(state.pending, None);
-        assert_eq!(state.status, Some(ActionReport::ok("integrity: ok")));
+        assert!(state.report.as_ref().is_some_and(|report| report.ok));
+    }
+
+    #[test]
+    fn action_reports_are_localized() {
+        let report = ActionReport {
+            ok: false,
+            message: ActionMessage::BinaryMissing,
+            pid: None,
+            detail: None,
+        };
+        assert!(action_report_label(&report, Language::Chinese).contains("请先安装"));
+        assert!(action_report_label(&report, Language::English).contains("install it first"));
+    }
+
+    #[test]
+    fn diagnostics_unlock_only_after_installation_is_completed() {
+        assert!(diagnostics_unlocked(ConfigState::Completed));
+        for state in [
+            ConfigState::Missing,
+            ConfigState::Pending,
+            ConfigState::Invalid,
+            ConfigState::Unreadable,
+        ] {
+            assert!(!diagnostics_unlocked(state));
+        }
     }
 }
