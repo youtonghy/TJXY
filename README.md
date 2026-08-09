@@ -744,6 +744,39 @@ Environment variables take precedence over the completed manifest. In particular
 `TJXY_PUBLIC_ADDRESS` remain operator overrides. A completed installation whose
 database is unavailable fails startup and never falls back to setup mode.
 
+## Linux release
+
+Each GitHub Release provides portable `linux-x86_64-gnu` and
+`linux-aarch64-gnu` archives for systems with glibc 2.35 or newer. They contain
+the server, the TUI launcher, and the required `admin/dist` assets; Rust,
+Node.js, Docker, and this source repository are not required on the host. Alpine
+and other musl-based distributions are not supported by these GNU/Linux assets.
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf tjxy-v0.1.0-linux-x86_64-gnu.tar.gz
+cd tjxy-v0.1.0-linux-x86_64-gnu
+./tjxy
+```
+
+The TUI starts and manages the sibling `tjxy-server`; use `1` to start, `2` to
+stop, and `3` to restart it. It writes its PID and log under `data/`. The server
+defaults to the bundled `admin/dist`, `./data` for setup data, and the platform
+configuration directory for `tjxy.toml`. Copy `.env.example` to `.env` only when
+runtime overrides are needed; do not commit credentials or database URLs.
+
+Maintainers publish a release by pushing a matching version tag:
+
+```bash
+git tag -a v0.1.0 -m 'v0.1.0'
+git push origin v0.1.0
+```
+
+The `Release` workflow verifies the frontend and Rust workspace, packages both
+Linux architectures, generates `SHA256SUMS`, and creates or updates the GitHub
+Release. To rerun an existing tag from the Actions UI, choose **Release**, select
+**Run workflow**, and enter that tag.
+
 ## Development
 
 The workspace requires Rust 1.88 or newer.

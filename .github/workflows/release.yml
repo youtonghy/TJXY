@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: 1.88.0
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      - name: Confirm version tag
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "RELEASE_TAG must be a semantic version tag like v0.1.0" >&2; exit 1 ;;
+          esac
+          version="$(awk '
+            /^\[workspace.package\]$/ { in_package = 1; next }
+            in_package && /^\[/ { exit }
+            in_package && /^version = / {
+              gsub(/^[^\"]*\"|\".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)"
+          test -n "$version"
+          test "$RELEASE_TAG" = "v${version}"
+          git rev-parse --verify "refs/tags/$RELEASE_TAG"
+
+  frontend:
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix admin ci
+      - name: Verify and build frontend
+        run: |
+          npm --prefix admin run typecheck
+          npm --prefix admin run lint
+          npm --prefix admin test -- --run
+          npm --prefix admin run build
+      - name: Upload frontend distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: admin-dist
+          path: admin/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  rust:
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default "$RUST_VERSION"
+      - name: Verify Rust workspace
+        run: |
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo fmt --all -- --check
+
+  package:
+    needs: [frontend, rust]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset_suffix: linux-x86_64-gnu
+          - target: aarch64-unknown-linux-gnu
+            asset_suffix: linux-aarch64-gnu
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+          rustup target add "${{ matrix.target }}"
+      - name: Install ARM64 cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu
+      - name: Download frontend distribution
+        uses: actions/download-artifact@v5
+        with:
+          name: admin-dist
+          path: admin/dist
+      - name: Build Linux binaries
+        run: |
+          if [ "${{ matrix.target }}" = 'aarch64-unknown-linux-gnu' ]; then
+            export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --profile dist --locked --target "${{ matrix.target }}" -p tjxy-server --bin tjxy-server
+          cargo build --profile dist --locked --target "${{ matrix.target }}" -p tjxy-tui --bin tjxy-tui
+      - name: Package portable release
+        run: scripts/package-release.sh "$RELEASE_TAG" "${{ matrix.target }}" "${{ matrix.asset_suffix }}"
+      - name: Upload release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: dist/release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Download release archives
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist/release
+        run: sha256sum tjxy-*.tar.gz > SHA256SUMS
+      - name: Create or update GitHub Release
+        working-directory: dist/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --generate-notes
+          fi

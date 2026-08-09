@@ -67,3 +67,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

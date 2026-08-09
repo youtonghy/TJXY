@@ -175,8 +175,16 @@ pub struct Project {
 impl Project {
     #[must_use]
     pub fn discover() -> Self {
+        if let Some(home) = env::var_os("TJXY_HOME") {
+            return Self::new(PathBuf::from(home));
+        }
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest_dir.parent().unwrap_or(&manifest_dir).to_path_buf();
+        let development_root = manifest_dir.parent().unwrap_or(&manifest_dir);
+        let root = env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .filter(|path| !is_cargo_target_directory(path))
+            .unwrap_or_else(|| development_root.to_path_buf());
         Self::new(root)
     }
 
@@ -184,7 +192,7 @@ impl Project {
     pub fn new(root: PathBuf) -> Self {
         Self {
             target_dir: root.join("target"),
-            pid_path: root.join("target/tjxy-server.pid"),
+            pid_path: root.join("data/tjxy-server.pid"),
             root,
         }
     }
@@ -484,9 +492,13 @@ impl Project {
     }
 
     fn preferred_server_binary(&self) -> Option<PathBuf> {
-        [self.server_binary("release"), self.server_binary("debug")]
-            .into_iter()
-            .find(|path| path.is_file())
+        [
+            self.root.join("tjxy-server"),
+            self.server_binary("release"),
+            self.server_binary("debug"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
     }
 
     fn managed_pid(&self) -> Option<u32> {
@@ -497,14 +509,30 @@ impl Project {
         let Some(command_line) = process_command_line(pid) else {
             return false;
         };
-        [self.server_binary("release"), self.server_binary("debug")]
-            .into_iter()
-            .any(|binary| command_line_matches_binary(&command_line, &binary))
+        [
+            self.root.join("tjxy-server"),
+            self.server_binary("release"),
+            self.server_binary("debug"),
+        ]
+        .into_iter()
+        .any(|binary| command_line_matches_binary(&command_line, &binary))
     }
 
     fn server_binary(&self, profile: &str) -> PathBuf {
         self.target_dir.join(profile).join("tjxy-server")
     }
+}
+
+fn is_cargo_target_directory(path: &Path) -> bool {
+    matches!(
+        (
+            path.file_name().and_then(|value| value.to_str()),
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str())
+        ),
+        (Some("debug" | "release" | "dist"), Some("target"))
+    )
 }
 
 fn resolve_path(root: &Path, value: &str) -> PathBuf {
@@ -725,6 +753,7 @@ fn discover_observed_servers(project: &Project) -> Vec<ObservedServer> {
     }
 
     let expected = [
+        project.root.join("tjxy-server"),
         project.server_binary("debug"),
         project.server_binary("release"),
     ]
@@ -917,7 +946,18 @@ mod tests {
         assert_eq!(project.preferred_server_binary(), Some(debug));
         fs::write(&release, "release").unwrap();
         assert_eq!(project.preferred_server_binary(), Some(release));
+        let packaged = project.root.join("tjxy-server");
+        fs::write(&packaged, "packaged").unwrap();
+        assert_eq!(project.preferred_server_binary(), Some(packaged));
         fs::remove_dir_all(&project.root).unwrap();
+    }
+
+    #[test]
+    fn identifies_cargo_output_directories() {
+        assert!(is_cargo_target_directory(Path::new("/repo/target/debug")));
+        assert!(is_cargo_target_directory(Path::new("/repo/target/release")));
+        assert!(is_cargo_target_directory(Path::new("/repo/target/dist")));
+        assert!(!is_cargo_target_directory(Path::new("/opt/tjxy")));
     }
 
     #[test]
