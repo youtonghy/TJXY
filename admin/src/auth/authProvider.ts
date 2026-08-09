@@ -1,11 +1,13 @@
 import type { AuthProvider, UserIdentity } from 'ra-core';
 
 import { ApiError, apiRequest } from '../api/httpClient';
-import type { AuthenticationResult, TjxyUser } from '../api/types';
-import { clearSession, getAccessToken, setAccessToken } from './session';
+import type { TjxyUser } from '../api/types';
+import { clearSession, getAccessToken } from './session';
 
 export const authProvider: AuthProvider = {
-  login,
+  async login() {
+    await requireAdministrator();
+  },
 
   logout() {
     clearSession();
@@ -55,30 +57,6 @@ class AccessDeniedAuthError extends Error {
   }
 }
 
-async function login(parameters: unknown): Promise<void> {
-  if (!isRecord(parameters)
-    || typeof parameters.username !== 'string'
-    || typeof parameters.password !== 'string') {
-    throw new ApiError(400, 'validation', 'A username and password are required.');
-  }
-  clearSession();
-  const authentication = await apiRequest<unknown>('/Users/AuthenticateByName', {
-    auth: 'identity',
-    method: 'POST',
-    body: JSON.stringify({ Username: parameters.username, Pw: parameters.password }),
-  });
-  if (!isAuthenticationResult(authentication)) {
-    throw new ApiError(200, 'invalid-response', 'The server returned an invalid response.');
-  }
-  setAccessToken(authentication.AccessToken);
-  try {
-    await requireAdministrator();
-  } catch (error) {
-    clearSession();
-    throw error;
-  }
-}
-
 async function requireAdministrator(): Promise<TjxyUser> {
   if (getAccessToken() === null) {
     throw new ApiError(401, 'authentication', 'Your session is not valid.');
@@ -91,12 +69,6 @@ async function requireAdministrator(): Promise<TjxyUser> {
     throw new ApiError(403, 'authorization', 'Administrator access is required.');
   }
   return user;
-}
-
-function isAuthenticationResult(value: unknown): value is AuthenticationResult {
-  return isRecord(value)
-    && typeof value.AccessToken === 'string'
-    && value.AccessToken.length > 0;
 }
 
 function isUser(value: unknown): value is TjxyUser {

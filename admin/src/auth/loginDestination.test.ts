@@ -6,6 +6,10 @@ it('falls back to Dashboard for direct login without router state', () => {
   expect(loginDestination(null, origin)).toBe('/admin');
 });
 
+it('accepts the admin root as a safe deep link', () => {
+  expect(loginDestination({ nextPathname: '/admin' }, origin)).toBe('/admin');
+});
+
 it('restores a validated admin pathname and search', () => {
   expect(loginDestination({
     nextPathname: '/admin/tasks',

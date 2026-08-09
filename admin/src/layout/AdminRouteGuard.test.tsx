@@ -79,7 +79,7 @@ describe('AdminRouteGuard', () => {
       );
     });
     expect(logout).toHaveBeenCalledOnce();
-    expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
+    expect(sessionStorage.getItem('tjxy.web.token')).toBeNull();
   });
 
   it('preserves a stored session on 403 until explicit sign out', async () => {
@@ -98,12 +98,12 @@ describe('AdminRouteGuard', () => {
 
     expect(await screen.findByRole('heading', { name: 'Access denied' })).toBeVisible();
     expect(logout).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem('tjxy.admin.token')).toBe('stored-token');
+    expect(sessionStorage.getItem('tjxy.web.token')).toBe('stored-token');
 
     await user.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => {
       expect(logout).toHaveBeenCalledOnce();
     });
-    expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
+    expect(sessionStorage.getItem('tjxy.web.token')).toBeNull();
   });
 });

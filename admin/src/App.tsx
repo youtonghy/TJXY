@@ -6,7 +6,7 @@ import { AccessPage } from './access/AccessPage';
 import { AnnouncementsPage } from './announcements/AnnouncementsPage';
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
-import { LoginPage } from './auth/LoginPage';
+import { AdminLoginRedirect } from './auth/AdminLoginRedirect';
 import { AdminLayout } from './layout/AdminLayout';
 import { LibraryEditPage } from './libraries/LibraryEditPage';
 import { LibrariesPage } from './libraries/LibrariesPage';
@@ -68,7 +68,7 @@ function ApplicationRoutes() {
               error={ApplicationError}
               layout={AdminLayout}
               loading={LoadingPage}
-              loginPage={LoginPage}
+              loginPage={AdminLoginRedirect}
               title="TJXY Admin"
             >
               <Resource

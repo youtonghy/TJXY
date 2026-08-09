@@ -55,7 +55,7 @@ test('failed password submission exposes only safe feedback', async ({ page }) =
   const submittedPassword = 'password-that-must-not-appear-outside-the-field';
   const consoleMessages: string[] = [];
   page.on('console', (message) => { consoleMessages.push(message.text()); });
-  await page.goto('/admin/login');
+  await page.goto('/app/login');
   await login(page, 'Admin', submittedPassword);
   const alert = page.getByRole('alert');
   await expect(alert).toContainText('Sign in failed');

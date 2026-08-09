@@ -1,5 +1,5 @@
 import { ApiError, apiRequest } from '../api/httpClient';
-import type { AuthenticationResult, TjxyUser } from '../api/types';
+import type { TjxyUser } from '../api/types';
 import { authProvider } from './authProvider';
 
 vi.mock('../api/httpClient', async (importOriginal) => {
@@ -31,73 +31,30 @@ function user(overrides: Partial<TjxyUser> = {}): TjxyUser {
   };
 }
 
-function authentication(authenticatedUser = user()): AuthenticationResult {
-  return {
-    User: authenticatedUser,
-    SessionInfo: {
-      Id: 'session-id',
-      UserId: authenticatedUser.Id,
-      UserName: authenticatedUser.Name,
-      Client: 'TJXY Admin',
-      DeviceId: 'device-id',
-      DeviceName: 'Browser',
-      ApplicationVersion: '0.1.0',
-      ServerId: 'server-id',
-      IsActive: true,
-      PlayableMediaTypes: [],
-      SupportedCommands: [],
-    },
-    AccessToken: 'issued-token',
-    ServerId: 'server-id',
-  };
-}
-
 beforeEach(() => {
   requestMock.mockReset();
 });
 
-it('logs in and retains a token only after current-user administrator verification', async () => {
-  requestMock
-    .mockResolvedValueOnce(authentication())
-    .mockResolvedValueOnce(user());
+it('reuses the shared client session for administrator verification', async () => {
+  sessionStorage.setItem('tjxy.web.token', 'issued-token');
+  requestMock.mockResolvedValueOnce(user());
 
-  await authProvider.login({ username: 'Admin', password: 'correct horse' });
+  await authProvider.login({});
 
-  expect(requestMock).toHaveBeenNthCalledWith(1, '/Users/AuthenticateByName', {
-    auth: 'identity',
-    method: 'POST',
-    body: JSON.stringify({ Username: 'Admin', Pw: 'correct horse' }),
-  });
-  expect(requestMock).toHaveBeenNthCalledWith(2, '/Users/Me');
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBe('issued-token');
+  expect(requestMock).toHaveBeenCalledWith('/Users/Me');
+  expect(sessionStorage.getItem('tjxy.web.token')).toBe('issued-token');
 });
 
-it.each([
-  ['non-administrator', user({ Policy: { ...user().Policy, IsAdministrator: false } })],
-  ['disabled administrator', user({ Policy: { ...user().Policy, IsDisabled: true } })],
-])('rejects a %s and clears the temporary token', async (_label, currentUser) => {
-  requestMock
-    .mockResolvedValueOnce(authentication(currentUser))
-    .mockResolvedValueOnce(currentUser);
-
-  await expect(authProvider.login({ username: currentUser.Name, password: 'password' }))
-    .rejects.toMatchObject({ status: 403, category: 'authorization' });
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
-});
-
-it('clears a temporary token when current-user verification fails', async () => {
-  requestMock
-    .mockResolvedValueOnce(authentication())
-    .mockRejectedValueOnce(new ApiError(401, 'authentication', 'Session invalid.'));
-
-  await expect(authProvider.login({ username: 'Admin', password: 'wrong' })).rejects.toMatchObject({
+it('does not authenticate credentials from the administrator provider', async () => {
+  await expect(authProvider.login({ username: 'Admin', password: 'password' })).rejects.toMatchObject({
     status: 401,
+    category: 'authentication',
   });
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
+  expect(requestMock).not.toHaveBeenCalled();
 });
 
 it('validates a persisted session through current-user on reload', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'persisted-token');
+  sessionStorage.setItem('tjxy.web.token', 'persisted-token');
   requestMock.mockResolvedValueOnce(user());
 
   await expect(authProvider.checkAuth({})).resolves.toBeUndefined();
@@ -112,8 +69,21 @@ it('rejects checkAuth without a token before making a request', async () => {
   expect(requestMock).not.toHaveBeenCalled();
 });
 
+it('rejects a signed-in non-administrator without clearing the shared session', async () => {
+  sessionStorage.setItem('tjxy.web.token', 'viewer-token');
+  requestMock.mockResolvedValueOnce(user({
+    Policy: { ...user().Policy, IsAdministrator: false },
+  }));
+
+  await expect(authProvider.checkAuth({})).rejects.toMatchObject({
+    status: 403,
+    category: 'authorization',
+  });
+  expect(sessionStorage.getItem('tjxy.web.token')).toBe('viewer-token');
+});
+
 it('preserves authentication and requests access-denied routing on 403', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   await expect(authProvider.checkError(new ApiError(403, 'authorization', 'Forbidden.')))
     .rejects.toMatchObject({
       status: 403,
@@ -121,18 +91,18 @@ it('preserves authentication and requests access-denied routing on 403', async (
       redirectTo: '/admin/access-denied',
       message: false,
     });
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBe('token');
+  expect(sessionStorage.getItem('tjxy.web.token')).toBe('token');
 });
 
 it('clears authentication on 401', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   await expect(authProvider.checkError(new ApiError(401, 'authentication', 'Invalid.')))
     .rejects.toMatchObject({ status: 401 });
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
+  expect(sessionStorage.getItem('tjxy.web.token')).toBeNull();
 });
 
 it('returns administrator identity and permissions from current server state', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   requestMock.mockResolvedValue(user());
 
   await expect(authProvider.getIdentity?.()).resolves.toEqual({
@@ -142,13 +112,13 @@ it('returns administrator identity and permissions from current server state', a
   await expect(authProvider.getPermissions?.({})).resolves.toBe('administrator');
 });
 
-it('logout clears token and device identity without a server request', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
-  sessionStorage.setItem('tjxy.admin.deviceId', 'device-id');
+it('logout clears the shared token and retains the stable device identity', async () => {
+  sessionStorage.setItem('tjxy.web.token', 'token');
+  localStorage.setItem('tjxy.web.deviceId', 'device-id');
 
   await expect(authProvider.logout({})).resolves.toBeUndefined();
 
-  expect(sessionStorage.getItem('tjxy.admin.token')).toBeNull();
-  expect(sessionStorage.getItem('tjxy.admin.deviceId')).toBeNull();
+  expect(sessionStorage.getItem('tjxy.web.token')).toBeNull();
+  expect(localStorage.getItem('tjxy.web.deviceId')).toBe('device-id');
   expect(requestMock).not.toHaveBeenCalled();
 });

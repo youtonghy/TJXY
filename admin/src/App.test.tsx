@@ -2,7 +2,6 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { App } from './App';
-import { checkServerReadiness } from './api/readiness';
 
 const authControl = vi.hoisted(() => {
   const state = { authenticated: true };
@@ -34,10 +33,6 @@ vi.mock('./auth/authProvider', () => ({
     getIdentity: () => Promise.resolve({ id: 'admin-id', fullName: 'Admin' }),
     getPermissions: () => Promise.resolve('administrator'),
   },
-}));
-
-vi.mock('./api/readiness', () => ({
-  checkServerReadiness: vi.fn(),
 }));
 
 vi.mock('./users/UserList', async () => {
@@ -98,8 +93,6 @@ vi.mock('./dashboard/DashboardPage', async () => {
   return { DashboardPage: () => React.createElement('h1', null, 'Dashboard page') };
 });
 
-const readinessMock = vi.mocked(checkServerReadiness);
-
 beforeEach(() => {
   window.localStorage.setItem('tjxy-system-locale', 'en-US');
   authControl.state.authenticated = true;
@@ -107,8 +100,6 @@ beforeEach(() => {
   authControl.logout.mockClear();
   authControl.checkAuth.mockClear();
   pageControl.throwUsers = false;
-  readinessMock.mockReset();
-  readinessMock.mockResolvedValue(true);
   window.history.pushState({}, '', '/admin/users');
 });
 
@@ -119,28 +110,18 @@ function renderRoute(path: string, authenticated = true) {
 }
 
 it('restores an anonymous deep link including search after login', async () => {
-  const user = userEvent.setup();
   renderRoute('/admin/tasks?view=recent', false);
 
-  expect(await screen.findByRole('heading', { name: 'Administrator sign in' })).toBeVisible();
-  expect(window.location.pathname).toBe('/admin/login');
-  await user.type(screen.getByRole('textbox', { name: 'Username' }), 'Admin');
-  await user.type(screen.getByLabelText('Password'), 'password');
-  await user.click(screen.getByRole('button', { name: 'Sign in' }));
-
-  expect(await screen.findByRole('heading', { name: 'Tasks page' })).toBeVisible();
-  expect(`${window.location.pathname}${window.location.search}`).toBe('/admin/tasks?view=recent');
+  expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  expect(`${window.location.pathname}${window.location.search}`).toBe('/app/login?redirect=%2Fadmin%2Ftasks%3Fview%3Drecent');
 });
 
-it('uses Dashboard as the direct-login fallback', async () => {
-  const user = userEvent.setup();
+it('redirects the legacy administrator login URL to the shared login', async () => {
   renderRoute('/admin/login', false);
-  await user.type(await screen.findByRole('textbox', { name: 'Username' }), 'Admin');
-  await user.type(screen.getByLabelText('Password'), 'password');
-  await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-  expect(await screen.findByRole('heading', { name: 'Dashboard page' })).toBeVisible();
-  expect(window.location.pathname).toBe('/admin');
+  expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  expect(window.location.pathname).toBe('/app/login');
+  expect(window.location.search).toBe('?redirect=%2Fadmin');
 });
 
 it('renders the ordinary HeroUI client without mounting the administrator shell', async () => {
@@ -166,7 +147,7 @@ it.each([
   renderRoute(path);
 
   const main = await screen.findByRole('main');
-  expect(within(main).getByRole('heading', { name: heading })).toBeVisible();
+  expect(await within(main).findByRole('heading', { name: heading })).toBeVisible();
   expect(screen.getByRole('navigation', { name: 'Primary' })).toBeVisible();
 });
 

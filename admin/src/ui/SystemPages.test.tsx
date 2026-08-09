@@ -73,7 +73,7 @@ describe('system pages', () => {
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute(
       'href',
-      '/admin/login',
+      '/app/login?redirect=%2Fadmin',
     );
 
     rerender(

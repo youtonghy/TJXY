@@ -192,6 +192,8 @@ to finish setup in the desktop application; status and log content unlock after 
 installation manifest reaches the completed state.
 
 The default bind address is `127.0.0.1:8096`; override it with `TJXY_BIND`.
+During first-run setup, `TJXY_SETUP_BIND` takes precedence when set, otherwise
+setup inherits `TJXY_BIND`.
 The default database is `sqlite://tjxy.db?mode=rwc`; override it with
 `TJXY_DATABASE_URL`. Original image assets default to `./data/assets`; override
 that root with `TJXY_ASSETS_DIR`. The asset store validates actual image format,
@@ -700,9 +702,11 @@ four configuration steps: branding, database, network, and the initial administr
 The setup router is limited to loopback/private source addresses and does not expose
 login, media, client, or administrator APIs.
 
-Native builds use the platform configuration directory by default. Operators can
-select an explicit location with `TJXY_CONFIG_FILE`; setup data and SQLite files are
-confined to `TJXY_SETUP_DATA_DIR` (default `./data`). A minimal native first run is:
+Native builds always read and write the installation manifest at
+`~/.config/tjxy/tjxy.toml`, creating the parent directory during setup.
+`TJXY_CONFIG_FILE` explicitly overrides the manifest path. `TJXY_SETUP_DATA_DIR`
+only controls setup data and SQLite files (default `./data`); it does not change the
+manifest path. A minimal native first run is:
 
 ```bash
 npm --prefix admin ci
