@@ -23,7 +23,10 @@ export function loginDestination(state: unknown, origin: string): string {
   try {
     const pathnameWithoutFragment = state.nextPathname.split('#', 1)[0] ?? '';
     const destination = new URL(`${pathnameWithoutFragment}${search ?? ''}`, origin);
-    if (destination.origin !== origin || !destination.pathname.startsWith('/admin/')) {
+    if (
+      destination.origin !== origin
+      || (destination.pathname !== '/admin' && !destination.pathname.startsWith('/admin/'))
+    ) {
       return FALLBACK_DESTINATION;
     }
     if (BLOCKED_DESTINATIONS.some((blocked) => (

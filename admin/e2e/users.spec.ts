@@ -111,7 +111,7 @@ test.describe.serial('administrator user lifecycle', () => {
     const diagnostics = monitorPage(page);
 
     await page.goto('/admin/users');
-    await expect(page.getByRole('heading', { level: 1, name: 'Administrator sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: /Welcome back|欢迎回来/u })).toBeVisible();
     diagnostics.expectHttpConsoleError(/^\/Users\/AuthenticateByName$/);
     diagnostics.expectHttpErrorResponse(401, /^\/Users\/AuthenticateByName$/);
     await login(page, 'Admin', 'wrong-password');

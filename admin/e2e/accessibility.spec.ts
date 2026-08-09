@@ -26,9 +26,8 @@ const authenticatedRoutes = [
 
 test('login has no WCAG A or AA violations', async ({ context, page }) => {
   const fixtures = await installLoginFixtures(context);
-  await page.goto('/admin/login');
-  await expect(page.getByRole('heading', { level: 1, name: 'Administrator sign in' })).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('Server ready');
+  await page.goto('/app/login');
+  await expect(page.getByRole('heading', { level: 1, name: /Welcome back|欢迎回来/u })).toBeVisible();
   await assertAxe(page);
   fixtures.assertComplete();
 });

@@ -61,7 +61,7 @@ async fn setup_completion_creates_the_database_admin_settings_and_completed_conf
 
     assert_eq!(
         completion.destination_url(),
-        "http://127.0.0.1:18096/admin/login"
+        "http://127.0.0.1:18096/app/login?redirect=%2Fadmin"
     );
     let completed = match config.load().unwrap() {
         InstallationState::Completed(completed) => completed,
@@ -195,7 +195,7 @@ async fn pending_installation_recovers_only_with_the_same_administrator_credenti
         .unwrap();
     assert_eq!(
         completion.destination_url(),
-        "http://127.0.0.1:18097/admin/login"
+        "http://127.0.0.1:18097/app/login?redirect=%2Fadmin"
     );
     assert!(matches!(
         config.load().unwrap(),

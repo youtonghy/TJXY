@@ -42,9 +42,8 @@ for (const viewport of viewports) {
   test(`login visual at ${viewport.label}px`, async ({ context, page }) => {
     const fixtures = await installLoginFixtures(context);
     await page.setViewportSize(viewport);
-    await page.goto('/admin/login');
-    await expect(page.getByRole('heading', { level: 1, name: 'Administrator sign in' })).toBeVisible();
-    await expect(page.getByRole('status')).toContainText('Server ready');
+    await page.goto('/app/login');
+    await expect(page.getByRole('heading', { level: 1, name: /Welcome back|欢迎回来/u })).toBeVisible();
     await assertPageLayout(page);
     await expect(page).toHaveScreenshot(`login-${viewport.label}.png`, screenshotOptions);
     fixtures.assertComplete();

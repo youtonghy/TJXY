@@ -1,9 +1,9 @@
 import { expect, type Page } from '@playwright/test';
 
 export async function login(page: Page, username: string, password: string) {
-  await page.getByRole('textbox', { name: 'Username' }).fill(username);
+  await page.locator('input[name="username"]').fill(username);
   await page.locator('input[name="password"]').fill(password);
-  await page.getByRole('button', { name: /sign in/i }).click();
+  await page.locator('button[type="submit"]').click();
 }
 
 export function safeRequestPath(url: string): string {

@@ -1,12 +1,13 @@
 use std::{
-    env, fmt, fs,
+    env,
+    ffi::OsString,
+    fmt, fs,
     fs::OpenOptions,
     io,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use url::Url;
@@ -15,6 +16,8 @@ use zeroize::Zeroizing;
 
 const CURRENT_FORMAT_VERSION: u16 = 1;
 const CONFIG_FILE_ENVIRONMENT: &str = "TJXY_CONFIG_FILE";
+const HOME_ENVIRONMENT: &str = "HOME";
+const DEFAULT_CONFIG_SUFFIX: &str = ".config/tjxy/tjxy.toml";
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,18 +137,16 @@ impl InstallationConfigStore {
         Self { path: path.into() }
     }
 
-    /// Resolves the environment override or the platform-native TJXY configuration file.
+    /// Resolves `TJXY_CONFIG_FILE` or the native `~/.config/tjxy/tjxy.toml` default.
     ///
     /// # Errors
     ///
-    /// Returns an error when this platform has no user configuration directory.
+    /// Returns an error when no override is set and the home directory is unavailable.
     pub fn discover() -> Result<Self, InstallationConfigError> {
-        if let Some(path) = env::var_os(CONFIG_FILE_ENVIRONMENT) {
-            return Ok(Self::at(path));
-        }
-        let directories = ProjectDirs::from("com", "TJXY", "TJXY")
-            .ok_or(InstallationConfigError::ConfigurationDirectoryUnavailable)?;
-        Ok(Self::at(directories.config_dir().join("tjxy.toml")))
+        Ok(Self::at(config_path(
+            env::var_os(CONFIG_FILE_ENVIRONMENT),
+            env::var_os(HOME_ENVIRONMENT),
+        )?))
     }
 
     #[must_use]
@@ -162,9 +163,7 @@ impl InstallationConfigStore {
             };
             candidate = parent;
         }
-        candidate
-            .metadata()
-            .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+        directory_is_writable(candidate)
     }
 
     /// Loads the durable installation state without exposing configuration contents in errors.
@@ -274,6 +273,60 @@ impl InstallationConfigStore {
             let _ = fs::remove_file(&temporary);
         }
         result
+    }
+}
+
+fn config_path(
+    override_path: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, InstallationConfigError> {
+    if let Some(path) = override_path {
+        return Ok(PathBuf::from(path));
+    }
+    home.map(|path| PathBuf::from(path).join(DEFAULT_CONFIG_SUFFIX))
+        .ok_or(InstallationConfigError::ConfigurationDirectoryUnavailable)
+}
+
+#[cfg(unix)]
+fn directory_is_writable(path: &Path) -> bool {
+    use rustix::fs::{Access, access};
+
+    path.is_dir() && access(path, Access::WRITE_OK | Access::EXEC_OK).is_ok()
+}
+
+#[cfg(not(unix))]
+fn directory_is_writable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+}
+
+#[cfg(test)]
+mod config_path_tests {
+    use super::{InstallationConfigError, config_path};
+    use std::{ffi::OsString, path::PathBuf};
+
+    #[test]
+    fn uses_system_default_without_an_override() {
+        assert_eq!(
+            config_path(None, Some(OsString::from("/home/media"))).unwrap(),
+            PathBuf::from("/home/media/.config/tjxy/tjxy.toml")
+        );
+        assert_eq!(
+            config_path(None, None),
+            Err(InstallationConfigError::ConfigurationDirectoryUnavailable)
+        );
+    }
+
+    #[test]
+    fn uses_the_explicit_override_verbatim() {
+        assert_eq!(
+            config_path(Some(OsString::from("relative/tjxy.toml")), None,).unwrap(),
+            PathBuf::from("relative/tjxy.toml")
+        );
+        assert_eq!(
+            config_path(Some(OsString::from("/config/tjxy.toml")), None).unwrap(),
+            PathBuf::from("/config/tjxy.toml")
+        );
     }
 }
 
@@ -745,7 +798,7 @@ impl NetworkConfiguration {
                 &self.listen_host
             };
             format!("http://{host}:{}", self.port)
-        }) + "/admin/login"
+        }) + "/app/login?redirect=%2Fadmin"
     }
 
     /// Resolves the configured listener.
@@ -811,7 +864,7 @@ impl TryFrom<StoredInstallationConfig> for InstallationState {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum InstallationConfigError {
-    #[error("the platform configuration directory is unavailable")]
+    #[error("the home configuration directory is unavailable")]
     ConfigurationDirectoryUnavailable,
     #[error("the installation configuration could not be read")]
     Read,

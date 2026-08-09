@@ -10,9 +10,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use directories::ProjectDirs;
-
 const DEFAULT_BIND: &str = "127.0.0.1:8096";
+const DEFAULT_CONFIG_SUFFIX: &str = ".config/tjxy/tjxy.toml";
 const DEFAULT_LOG_PATH: &str = "data/server.log";
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
@@ -663,17 +662,23 @@ fn file_status(path: PathBuf) -> FileStatus {
 }
 
 fn configuration_status(root: &Path, environment: &BTreeMap<String, String>) -> ConfigStatus {
-    let path = environment.get("TJXY_CONFIG_FILE").map_or_else(
-        || {
-            ProjectDirs::from("com", "TJXY", "TJXY").map_or_else(
-                || root.join("tjxy.toml"),
-                |directories| directories.config_dir().join("tjxy.toml"),
-            )
-        },
-        |value| resolve_path(root, value),
+    let path = configuration_path(
+        root,
+        environment.get("TJXY_CONFIG_FILE").map(String::as_str),
+        environment.get("HOME").map(String::as_str),
     );
     let state = inspect_configuration(&path);
     ConfigStatus { path, state }
+}
+
+fn configuration_path(root: &Path, override_path: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(value) = override_path {
+        return resolve_path(root, value);
+    }
+    home.map_or_else(
+        || root.join(DEFAULT_CONFIG_SUFFIX),
+        |path| Path::new(path).join(DEFAULT_CONFIG_SUFFIX),
+    )
 }
 
 fn inspect_configuration(path: &Path) -> ConfigState {
@@ -1018,6 +1023,24 @@ mod tests {
         fs::write(&path, "not valid toml = [").unwrap();
         assert_eq!(inspect_configuration(&path), ConfigState::Invalid);
         fs::remove_dir_all(&project.root).unwrap();
+    }
+
+    #[test]
+    fn configuration_path_uses_system_default_and_resolves_explicit_overrides() {
+        let root = Path::new("/srv/tjxy");
+
+        assert_eq!(
+            configuration_path(root, None, Some("/home/media")),
+            PathBuf::from("/home/media/.config/tjxy/tjxy.toml")
+        );
+        assert_eq!(
+            configuration_path(root, Some("config/tjxy.toml"), None),
+            root.join("config/tjxy.toml")
+        );
+        assert_eq!(
+            configuration_path(root, Some("/config/tjxy.toml"), None),
+            PathBuf::from("/config/tjxy.toml")
+        );
     }
 
     #[test]

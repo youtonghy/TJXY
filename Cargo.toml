@@ -34,7 +34,6 @@ argon2 = "0.5.3"
 bytes = "1.10.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 crossterm = "0.29.0"
-directories = "6.0.0"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 getrandom = "0.3.4"

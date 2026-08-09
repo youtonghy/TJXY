@@ -12,7 +12,6 @@ axum = { version = "0.8.9", features = ["ws"] }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-directories.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 reqwest.workspace = true

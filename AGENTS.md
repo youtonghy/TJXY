@@ -12,8 +12,12 @@
   non-interactive invocation is:
 
   ```sh
-  HEROUI_KEY=<key> npx -y hpsetup@latest react --auto
+  HEROUI_KEY=<key> npx -y hpsetup@latest --auto
   ```
+
+  When `HEROUI_KEY` is set, omit the positional `react` argument. In
+  `hpsetup@4.7.0`, the first positional argument is parsed as the key; the
+  package is detected automatically from `package.json`.
 
 - Never place `HEROUI_KEY` or an `hp_...` key in source files, tracked config,
   shell history examples containing a real value, logs, or command output.

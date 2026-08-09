@@ -302,6 +302,7 @@ async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), Startu
     let coordinator = SetupCoordinator::new(config_store, validator.clone());
     let shutdown = coordinator.clone();
     let bind_address = env::var("TJXY_SETUP_BIND")
+        .or_else(|_| env::var("TJXY_BIND"))
         .unwrap_or_else(|_| "127.0.0.1:8096".to_owned())
         .parse::<SocketAddr>()
         .map_err(StartupError::InvalidSetupBindAddress)?;

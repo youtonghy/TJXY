@@ -15,7 +15,7 @@ vi.mock('../../settings/systemLanguageApi', () => ({
 }));
 
 vi.mock('./ClientAuthContext', () => ({
-  useClientAuth: () => ({ signIn: vi.fn() }),
+  useClientAuth: () => ({ isLoading: false, signIn: vi.fn(), user: null }),
 }));
 
 beforeEach(() => {

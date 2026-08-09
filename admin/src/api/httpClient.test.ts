@@ -33,7 +33,7 @@ it('sends canonical identity headers for login without query credentials', async
 });
 
 it('sends the session token in a canonical header', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'secret-token');
+  sessionStorage.setItem('tjxy.web.token', 'secret-token');
   fetchMock.mockResolvedValue(new Response(JSON.stringify({ Id: 'u1' }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
@@ -48,7 +48,7 @@ it('sends the session token in a canonical header', async () => {
 });
 
 it.each([204, 205])('returns undefined for an empty %s response', async (status) => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockResolvedValue(new Response(null, { status }));
 
   await expect(apiRequest('/Users/u1/Policy', { method: 'POST' })).resolves.toBeUndefined();
@@ -63,7 +63,7 @@ it('rejects absolute and non-root-relative request paths', async () => {
 });
 
 it('maps network failure without exposing the original message', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockRejectedValue(new Error('socket secret'));
 
   const error = await apiRequest('/Users').catch((caught: unknown) => caught);
@@ -72,7 +72,7 @@ it('maps network failure without exposing the original message', async () => {
 });
 
 it('rejects malformed successful JSON', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockResolvedValue(new Response('{', {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
@@ -85,7 +85,7 @@ it('rejects malformed successful JSON', async () => {
 });
 
 it('rejects an unexpected successful content type', async () => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockResolvedValue(new Response('<html></html>', {
     status: 200,
     headers: { 'Content-Type': 'text/html' },
@@ -106,7 +106,7 @@ it.each([
   [503, 'unavailable'],
   [418, 'unexpected'],
 ] as const)('maps HTTP %s to %s without echoing the response body', async (status, category) => {
-  sessionStorage.setItem('tjxy.admin.token', 'token');
+  sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockResolvedValue(new Response('database detail', { status }));
 
   const error = await apiRequest('/Users/u1').catch((caught: unknown) => caught);

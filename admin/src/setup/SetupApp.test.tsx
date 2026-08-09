@@ -43,11 +43,11 @@ beforeEach(() => {
     listenHost: '127.0.0.1',
     port: 8096,
     publicUrl: null,
-    destinationUrl: 'http://127.0.0.1:8096/admin/login',
+    destinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin',
   });
   brandingMock.mockReset().mockResolvedValue(`/Branding/Assets/logo-${'a'.repeat(64)}.png`);
-  completeMock.mockReset().mockResolvedValue('http://127.0.0.1:8096/admin/login');
-  recoverMock.mockReset().mockResolvedValue('http://127.0.0.1:8096/admin/login');
+  completeMock.mockReset().mockResolvedValue('http://127.0.0.1:8096/app/login?redirect=%2Fadmin');
+  recoverMock.mockReset().mockResolvedValue('http://127.0.0.1:8096/app/login?redirect=%2Fadmin');
 });
 
 it('shows recovery instead of a new wizard for a pending installation', async () => {
@@ -137,7 +137,7 @@ it('requires a successful network preflight for the unchanged draft', async () =
   expect(screen.getByRole('heading', { name: 'Network' })).toBeVisible();
   expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   await user.click(screen.getByRole('button', { name: 'Validate network' }));
-  expect(await screen.findByText('http://127.0.0.1:8096/admin/login')).toBeVisible();
+  expect(await screen.findByText('http://127.0.0.1:8096/app/login?redirect=%2Fadmin')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
 
   await user.clear(screen.getByLabelText('Port'));

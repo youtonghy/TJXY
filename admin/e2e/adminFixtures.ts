@@ -22,12 +22,12 @@ export async function installAdminFixtures(
 
   if (options.authenticated !== false) {
     await context.addInitScript((token) => {
-      window.sessionStorage.setItem('tjxy.admin.token', token);
+      window.sessionStorage.setItem('tjxy.web.token', token);
     }, fixtureSession);
   } else {
     await context.addInitScript(() => {
-      window.sessionStorage.removeItem('tjxy.admin.token');
-      window.sessionStorage.removeItem('tjxy.admin.deviceId');
+      window.sessionStorage.removeItem('tjxy.web.token');
+      window.localStorage.removeItem('tjxy.web.deviceId');
     });
   }
 
