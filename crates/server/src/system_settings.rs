@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tjxy_application::FilesystemBrowser;
 use tjxy_db::{
-    DEFAULT_SYSTEM_LOCALE, SystemSettingsInput, SystemSettingsRecord, SystemSettingsRepository,
-    SystemSettingsRepositoryError,
+    DEFAULT_SITE_THEME_ID, DEFAULT_SITE_THEME_SCHEMA_VERSION, DEFAULT_SYSTEM_LOCALE,
+    SiteThemeSelectionInput, SiteThemeSettingsRecord, SiteThemeSettingsRepository,
+    SiteThemeSettingsRepositoryError, SystemSettingsInput, SystemSettingsRecord,
+    SystemSettingsRepository, SystemSettingsRepositoryError,
 };
 use tokio::sync::watch;
 
@@ -43,6 +45,16 @@ struct PublicSystemSettingsDto {
     icon_url: String,
     revision: i64,
     supported_locales: [&'static str; 2],
+    theme: PublicThemeSettingsDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct PublicThemeSettingsDto {
+    id: String,
+    schema_version: u32,
+    options: serde_json::Value,
+    revision: i64,
 }
 
 #[derive(Serialize)]
@@ -102,6 +114,31 @@ struct UpdateSystemSettingsRequest {
     revision: Option<i64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct AdminThemeSettingsDto {
+    active_theme_id: String,
+    configurations: Vec<ThemeConfigurationDto>,
+    revision: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ThemeConfigurationDto {
+    theme_id: String,
+    schema_version: u32,
+    options: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct UpdateThemeSettingsRequest {
+    theme_id: String,
+    schema_version: u32,
+    options: serde_json::Value,
+    revision: Option<i64>,
+}
+
 pub(crate) async fn get_public_language(State(state): State<AppState>) -> Response {
     let Some(service) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -116,9 +153,11 @@ pub(crate) async fn get_public_settings(State(state): State<AppState>) -> Respon
     let Some(service) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match service.get().await {
-        Ok(record) => Json(public_dto(record.as_ref())).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    match (service.get().await, service.get_theme().await) {
+        (Ok(record), Ok(theme)) => {
+            Json(public_dto(record.as_ref(), theme.as_ref())).into_response()
+        }
+        (Err(_), _) | (_, Err(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -141,6 +180,53 @@ pub(crate) async fn get_admin(
             Json(admin_dto(record.as_ref(), false, invalid_root_indexes)).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub(crate) async fn get_admin_theme(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_administrator(&state, &headers, query.as_deref()).await
+    {
+        return response;
+    }
+    let Some(service) = state.system_settings.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match service.get_theme().await {
+        Ok(record) => Json(admin_theme_dto(record.as_ref())).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub(crate) async fn put_admin_theme(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_administrator(&state, &headers, query.as_deref()).await
+    {
+        return response;
+    }
+    let Ok(request) = serde_json::from_slice::<UpdateThemeSettingsRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(service) = state.system_settings.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let input = SiteThemeSelectionInput {
+        theme_id: request.theme_id,
+        schema_version: request.schema_version,
+        options: request.options,
+    };
+    match service.put_theme(&input, request.revision).await {
+        Ok(record) => Json(admin_theme_dto(Some(&record))).into_response(),
+        Err(error) => theme_repository_error(&error),
     }
 }
 
@@ -338,6 +424,20 @@ impl SystemSettingsService {
     ) -> Result<Option<SystemSettingsRecord>, SystemSettingsRepositoryError> {
         SystemSettingsRepository::new(&self.database).get().await
     }
+    async fn get_theme(
+        &self,
+    ) -> Result<Option<SiteThemeSettingsRecord>, SiteThemeSettingsRepositoryError> {
+        SiteThemeSettingsRepository::new(&self.database).get().await
+    }
+    async fn put_theme(
+        &self,
+        input: &SiteThemeSelectionInput,
+        revision: Option<i64>,
+    ) -> Result<SiteThemeSettingsRecord, SiteThemeSettingsRepositoryError> {
+        SiteThemeSettingsRepository::new(&self.database)
+            .put(input, revision)
+            .await
+    }
     async fn put_locale(
         &self,
         locale: &str,
@@ -473,7 +573,10 @@ fn language_dto(record: Option<&SystemSettingsRecord>) -> SystemLanguageDto {
     }
 }
 
-fn public_dto(record: Option<&SystemSettingsRecord>) -> PublicSystemSettingsDto {
+fn public_dto(
+    record: Option<&SystemSettingsRecord>,
+    theme: Option<&SiteThemeSettingsRecord>,
+) -> PublicSystemSettingsDto {
     let fallback = defaults();
     PublicSystemSettingsDto {
         locale: record.map_or(fallback.locale, |value| value.locale().to_owned()),
@@ -485,7 +588,55 @@ fn public_dto(record: Option<&SystemSettingsRecord>) -> PublicSystemSettingsDto 
         icon_url: record.map_or(fallback.icon_url, |value| value.icon_url().to_owned()),
         revision: record.map_or(0, SystemSettingsRecord::revision),
         supported_locales: ["zh-CN", "en-US"],
+        theme: public_theme_dto(theme),
     }
+}
+
+fn public_theme_dto(record: Option<&SiteThemeSettingsRecord>) -> PublicThemeSettingsDto {
+    record.map_or_else(
+        || PublicThemeSettingsDto {
+            id: DEFAULT_SITE_THEME_ID.to_owned(),
+            schema_version: DEFAULT_SITE_THEME_SCHEMA_VERSION,
+            options: serde_json::json!({}),
+            revision: 0,
+        },
+        |record| {
+            let configuration = record.active_configuration();
+            PublicThemeSettingsDto {
+                id: record.active_theme_id().to_owned(),
+                schema_version: configuration.schema_version(),
+                options: configuration.options().clone(),
+                revision: record.revision(),
+            }
+        },
+    )
+}
+
+fn admin_theme_dto(record: Option<&SiteThemeSettingsRecord>) -> AdminThemeSettingsDto {
+    record.map_or_else(
+        || AdminThemeSettingsDto {
+            active_theme_id: DEFAULT_SITE_THEME_ID.to_owned(),
+            configurations: vec![ThemeConfigurationDto {
+                theme_id: DEFAULT_SITE_THEME_ID.to_owned(),
+                schema_version: DEFAULT_SITE_THEME_SCHEMA_VERSION,
+                options: serde_json::json!({}),
+            }],
+            revision: 0,
+        },
+        |record| AdminThemeSettingsDto {
+            active_theme_id: record.active_theme_id().to_owned(),
+            configurations: record
+                .configurations()
+                .iter()
+                .map(|(theme_id, configuration)| ThemeConfigurationDto {
+                    theme_id: theme_id.clone(),
+                    schema_version: configuration.schema_version(),
+                    options: configuration.options().clone(),
+                })
+                .collect(),
+            revision: record.revision(),
+        },
+    )
 }
 
 fn admin_dto(
@@ -551,6 +702,25 @@ fn repository_error(error: &SystemSettingsRepositoryError) -> Response {
         SystemSettingsRepositoryError::Database(_)
         | SystemSettingsRepositoryError::MissingPersistedSettings
         | SystemSettingsRepositoryError::RollbackFailed { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn theme_repository_error(error: &SiteThemeSettingsRepositoryError) -> Response {
+    match error {
+        SiteThemeSettingsRepositoryError::Conflict => StatusCode::CONFLICT.into_response(),
+        SiteThemeSettingsRepositoryError::InvalidThemeId
+        | SiteThemeSettingsRepositoryError::InvalidSchemaVersion
+        | SiteThemeSettingsRepositoryError::InvalidOptions
+        | SiteThemeSettingsRepositoryError::InvalidConfigurations
+        | SiteThemeSettingsRepositoryError::InvalidRevision => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        SiteThemeSettingsRepositoryError::Database(_)
+        | SiteThemeSettingsRepositoryError::InvalidPersistedSettings
+        | SiteThemeSettingsRepositoryError::MissingPersistedSettings
+        | SiteThemeSettingsRepositoryError::RollbackFailed { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

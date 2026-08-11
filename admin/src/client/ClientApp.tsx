@@ -14,9 +14,10 @@ import { ProfilePage } from './profile/ProfilePage';
 import { RankingsPage } from './rankings/RankingsPage';
 import { useTranslate } from '../settings/i18n';
 import { AiChatPage } from './ai/AiChatPage';
+import { ClientThemeRuntime } from './themes/ThemeRuntime';
 
 export function ClientApp() {
-  return <ClientAuthProvider><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<RankingsPage />} path="rankings" /><Route element={<AiChatPage />} path="ai" /><Route element={<ProfilePage />} path="profile" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></ClientAuthProvider>;
+  return <ClientThemeRuntime><ClientAuthProvider><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<RankingsPage />} path="rankings" /><Route element={<AiChatPage />} path="ai" /><Route element={<ProfilePage />} path="profile" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></ClientAuthProvider></ClientThemeRuntime>;
 }
 
 function ClientShellLayout() { return <ClientShell><Outlet /></ClientShell>; }

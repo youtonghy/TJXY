@@ -55,6 +55,7 @@ mod m20260804_000054_similar_item_indexes;
 mod m20260806_000055_ai_message_sequence;
 mod m20260811_000056_remove_hybrid_scan_profile;
 mod m20260811_000057_normalize_legacy_title_year;
+mod m20260811_000058_site_theme_settings;
 
 use std::collections::HashSet;
 
@@ -163,6 +164,7 @@ async fn validate_current_schema(
         "playback_tickets",
         "metadata_provider_settings",
         "system_settings",
+        "site_theme_settings",
         "ai_provider_settings",
         "ai_models",
         "ai_conversations",
@@ -180,6 +182,9 @@ async fn validate_current_schema(
     for (table, column) in [
         ("libraries", "metadata_source_mode"),
         ("system_settings", "media_browser_roots"),
+        ("site_theme_settings", "active_theme_id"),
+        ("site_theme_settings", "configurations"),
+        ("site_theme_settings", "revision"),
         ("ai_models", "reasoning_effort"),
         ("ai_messages", "sequence_number"),
     ] {
@@ -262,6 +267,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260806_000055_ai_message_sequence::Migration),
             Box::new(m20260811_000056_remove_hybrid_scan_profile::Migration),
             Box::new(m20260811_000057_normalize_legacy_title_year::Migration),
+            Box::new(m20260811_000058_site_theme_settings::Migration),
         ]
     }
 }

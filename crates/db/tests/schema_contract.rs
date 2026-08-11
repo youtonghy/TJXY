@@ -13,6 +13,7 @@ use tjxy_test_support::test_database;
 const AI_MESSAGE_SEQUENCE_MIGRATION_POSITION: u32 = 55;
 const HYBRID_REMOVAL_MIGRATION_POSITION: u32 = 56;
 const LEGACY_TITLE_YEAR_MIGRATION_POSITION: u32 = 57;
+const SITE_THEME_SETTINGS_MIGRATION_POSITION: u32 = 58;
 
 #[tokio::test]
 async fn older_database_is_upgraded_by_the_shared_schema_entrypoint() {
@@ -30,6 +31,35 @@ async fn older_database_is_upgraded_by_the_shared_schema_entrypoint() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn site_theme_settings_are_added_by_their_migration() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(SITE_THEME_SETTINGS_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+    let schema = SchemaManager::new(&database);
+    assert!(!schema.has_table("site_theme_settings").await.unwrap());
+
+    Migrator::up(&database, Some(1)).await.unwrap();
+
+    assert!(schema.has_table("site_theme_settings").await.unwrap());
+    for column in [
+        "id",
+        "active_theme_id",
+        "configurations",
+        "revision",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            schema
+                .has_column("site_theme_settings", column)
+                .await
+                .unwrap()
+        );
+    }
 }
 
 #[tokio::test]
@@ -281,6 +311,33 @@ async fn applied_migration_with_missing_schema_object_is_reported_as_drift() {
 
     let error = migrate_database(&database).await.unwrap_err();
     assert!(matches!(error, SchemaMigrationError::SchemaDrift { .. }));
+}
+
+#[tokio::test]
+async fn missing_site_theme_settings_table_is_reported_as_drift() {
+    let database = test_database().await.unwrap();
+    migrate_database(&database).await.unwrap();
+    let manager = SchemaManager::new(&database);
+    manager
+        .drop_table(
+            sea_orm::sea_query::Table::drop()
+                .table(Alias::new("site_theme_settings"))
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+
+    let error = migrate_database(&database).await.unwrap_err();
+    match error {
+        SchemaMigrationError::SchemaDrift { missing } => {
+            assert!(
+                missing
+                    .iter()
+                    .any(|item| item == "table site_theme_settings")
+            );
+        }
+        other => panic!("expected schema drift, got {other:?}"),
+    }
 }
 
 #[test]

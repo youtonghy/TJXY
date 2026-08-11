@@ -707,6 +707,10 @@ pub fn build_router(state: AppState) -> Router {
             get(system_settings::get_admin).put(system_settings::put_admin),
         )
         .route(
+            "/Admin/System/Theme",
+            get(system_settings::get_admin_theme).put(system_settings::put_admin_theme),
+        )
+        .route(
             "/Admin/System/Branding/{kind}",
             put(system_settings::upload_asset),
         )

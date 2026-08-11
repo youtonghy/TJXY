@@ -57,6 +57,7 @@ const initialSettings: SystemSettings = {
     listenAddress: false,
     mediaBrowserRoots: false,
   },
+  theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
 };
 
 export function SystemSettingsPage() {

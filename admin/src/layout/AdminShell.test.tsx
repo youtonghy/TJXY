@@ -36,6 +36,7 @@ describe('AdminShell', () => {
       'OneDrive',
       'Metadata',
       'AI assistant',
+      'Themes',
       'System settings',
     ]);
     expect(within(navigation).getByRole('link', { name: 'Tasks' })).toHaveAttribute(

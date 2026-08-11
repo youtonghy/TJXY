@@ -7114,6 +7114,147 @@ async fn administrator_can_manage_complete_system_settings() {
     let public: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(public.get("MediaBrowserRoots").is_none());
+    assert_eq!(
+        public["Theme"],
+        json!({
+            "Id": "classic",
+            "SchemaVersion": 1,
+            "Options": {},
+            "Revision": 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn administrator_can_switch_site_themes_and_preserve_each_configuration() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(&app.router, "/Admin/System/Theme", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let initial: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(initial["ActiveThemeId"], "classic");
+    assert_eq!(initial["Revision"], 0);
+
+    let response = put(
+        &app.router,
+        "/Admin/System/Theme",
+        &token,
+        json!({
+            "ThemeId": "cinema",
+            "SchemaVersion": 1,
+            "Options": {"Density": "compact", "Accent": "crimson"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cinema: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(cinema["ActiveThemeId"], "cinema");
+    assert_eq!(cinema["Revision"], 1);
+
+    let response = put(
+        &app.router,
+        "/Admin/System/Theme",
+        &token,
+        json!({
+            "ThemeId": "classic",
+            "SchemaVersion": 1,
+            "Options": {"ContentWidth": "wide"},
+            "Revision": 1
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(saved["ActiveThemeId"], "classic");
+    assert_eq!(saved["Configurations"].as_array().unwrap().len(), 2);
+
+    let response = get(&app.router, "/System/Settings", None).await;
+    let public: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(public["Theme"]["Id"], "classic");
+    assert_eq!(public["Theme"]["Options"], json!({"ContentWidth": "wide"}));
+    assert_eq!(public["Theme"]["Revision"], 2);
+}
+
+#[tokio::test]
+async fn site_theme_settings_enforce_admin_revision_and_input_validation() {
+    let app = test_app().await;
+    AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap()
+    .create_user("Bob", "ordinary password", false)
+    .await
+    .unwrap();
+    let (_, _, admin_token) = login(&app.router).await;
+    let (_, _, user_token) = login_as(&app.router, "bob", "ordinary password").await;
+
+    assert_eq!(
+        get(&app.router, "/Admin/System/Theme", None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get(&app.router, "/Admin/System/Theme", Some(&user_token))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = put(
+        &app.router,
+        "/Admin/System/Theme",
+        &admin_token,
+        json!({"ThemeId": "cinema", "SchemaVersion": 1, "Options": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for (body, expected) in [
+        (
+            json!({"ThemeId": "cinema", "SchemaVersion": 1, "Options": {}, "Revision": 1}),
+            StatusCode::OK,
+        ),
+        (
+            json!({"ThemeId": "classic", "SchemaVersion": 1, "Options": {}, "Revision": 1}),
+            StatusCode::CONFLICT,
+        ),
+        (
+            json!({"ThemeId": "Invalid Theme", "SchemaVersion": 1, "Options": {}, "Revision": 2}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"ThemeId": "classic", "SchemaVersion": 1, "Options": [], "Revision": 2}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            put(
+                &app.router,
+                "/Admin/System/Theme",
+                &admin_token,
+                body.to_string(),
+            )
+            .await
+            .status(),
+            expected
+        );
+    }
+
+    let response = get(&app.router, "/Admin/System/Theme", Some(&admin_token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let persisted: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(persisted["ActiveThemeId"], "cinema");
+    assert_eq!(persisted["Revision"], 2);
 }
 
 #[tokio::test]

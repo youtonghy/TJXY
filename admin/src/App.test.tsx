@@ -88,6 +88,22 @@ vi.mock('./settings/AiSettingsPage', async () => {
   const React = await import('react');
   return { AiSettingsPage: () => React.createElement('h1', null, 'AI settings page') };
 });
+vi.mock('./settings/ThemeSettingsPage', async () => {
+  const React = await import('react');
+  return { ThemeSettingsPage: () => React.createElement('h1', null, 'Themes page') };
+});
+vi.mock('./client/themes/ThemeRuntime', async () => {
+  const React = await import('react');
+  const Frame = ({ actions, children, siteSubtitle }: { actions: React.ReactNode; children: React.ReactNode; siteSubtitle: string }) => React.createElement('main', null, actions, React.createElement('p', null, siteSubtitle), children);
+  const Shell = ({ children }: { children: React.ReactNode }) => React.createElement('div', null, children);
+  return {
+    ClientThemeRuntime: ({ children }: { children: React.ReactNode }) => children,
+    useActiveClientTheme: () => ({
+      definition: { LoginFrame: Frame, Shell },
+      options: {}, colorMode: 'light', toggleColorMode: vi.fn(),
+    }),
+  };
+});
 vi.mock('./dashboard/DashboardPage', async () => {
   const React = await import('react');
   return { DashboardPage: () => React.createElement('h1', null, 'Dashboard page') };
@@ -143,6 +159,7 @@ it.each([
   ['/admin/storage/onedrive', 'OneDrive page'],
   ['/admin/settings/metadata', 'Metadata page'],
   ['/admin/settings/ai', 'AI settings page'],
+  ['/admin/settings/theme', 'Themes page'],
 ])('renders %s inside the guarded shell', async (path, heading) => {
   renderRoute(path);
 

@@ -1,0 +1,52 @@
+html[data-tjxy-surface='client'][data-client-theme='cinema'] {
+  --client-cinema-rail: oklch(17% 0.018 25);
+  --client-cinema-feature: oklch(21% 0.055 28);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent='crimson'] {
+  --accent: oklch(57% 0.19 25);
+  --accent-foreground: oklch(98% 0.005 25);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent='gold'] {
+  --accent: oklch(68% 0.13 78);
+  --accent-foreground: oklch(20% 0.03 78);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent='teal'] {
+  --accent: oklch(57% 0.11 180);
+  --accent-foreground: oklch(98% 0.004 180);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-rail,
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-mobile-header {
+  background: color-mix(in oklch, var(--client-cinema-rail) 92%, var(--surface));
+  color: oklch(96% 0.006 30);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__feature {
+  background: var(--client-cinema-feature);
+  color: white;
+}
+
+.theme-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+
+.theme-preview--classic .theme-preview__topbar { height: 18%; background: var(--surface); border-bottom: 1px solid var(--border); }
+.theme-preview--classic .theme-preview__content { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6%; margin: 12% auto 0; }
+.theme-preview--classic .theme-preview__content span { aspect-ratio: 2 / 3; background: var(--surface-secondary); }
+.theme-preview--cinema { display: grid; grid-template-columns: 22% 1fr; background: oklch(14% 0.016 25); }
+.theme-preview__rail { background: oklch(20% 0.025 25); border-right: 1px solid oklch(35% 0.025 25); }
+.theme-preview__stage { padding: 7%; }
+.theme-preview__hero { height: 42%; background: oklch(32% 0.05 25); }
+.theme-preview__posters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5%; margin-top: 7%; }
+.theme-preview__posters span { aspect-ratio: 2 / 3; background: oklch(26% 0.03 25); }
+.theme-preview--crimson .theme-preview__hero { border-left: 5px solid oklch(62% 0.2 25); }
+.theme-preview--gold .theme-preview__hero { border-left: 5px solid oklch(75% 0.14 78); }
+.theme-preview--teal .theme-preview__hero { border-left: 5px solid oklch(70% 0.12 180); }

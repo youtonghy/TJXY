@@ -42,6 +42,10 @@ the compatibility matrix in
 [`docs/api-parity.md`](docs/api-parity.md) remains the authoritative record of
 implemented behavior.
 
+The ordinary React client supports administrator-selected, compiled themes with
+per-theme options. See [`docs/themes.md`](docs/themes.md) for the registry contract,
+versioning rules, HTTP API, fallback behavior, and the steps for adding a theme.
+
 ## Build the Admin application
 
 The Admin application requires Node.js 22.12 or newer; CI pins Node.js 22.22.3.
@@ -417,6 +421,7 @@ Available compatibility routes now include `GET /System/Info/Public`,
 `GET /System/Language`, setup-time `PUT /System/Language` before the first user,
 and administrator-only `GET/PUT /Admin/System/Language` for the persisted interface locale,
 the public branding document `GET /System/Settings`, administrator `GET/PUT /Admin/System/Settings`,
+administrator `GET/PUT /Admin/System/Theme` for the ordinary React client theme,
 administrator image uploads at `PUT /Admin/System/Branding/{logo|icon}`, and
 administrator self-restart at `POST /Admin/System/Restart`.
 System settings keep the PostgreSQL database as the source of truth; listen

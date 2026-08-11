@@ -42,6 +42,7 @@ const settings = {
     listenAddress: false,
     mediaBrowserRoots: false,
   },
+  theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
 };
 
 const getMock = vi.mocked(getSystemSettings);

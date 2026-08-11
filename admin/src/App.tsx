@@ -14,6 +14,7 @@ import { MetadataSettingsPage } from './settings/MetadataSettingsPage';
 import { AiSettingsPage } from './settings/AiSettingsPage';
 import { SystemLocaleProvider } from './settings/SystemLocaleProvider';
 import { SystemSettingsPage } from './settings/SystemSettingsPage';
+import { ThemeSettingsPage } from './settings/ThemeSettingsPage';
 import { GoogleDrivePage } from './storage/GoogleDrivePage';
 import { OneDrivePage } from './storage/OneDrivePage';
 import { SetupApp } from './setup/SetupApp';
@@ -91,6 +92,7 @@ function ApplicationRoutes() {
                 <Route element={<MetadataSettingsPage />} path="/settings/metadata" />
                 <Route element={<AiSettingsPage />} path="/settings/ai" />
                 <Route element={<SystemSettingsPage />} path="/settings/system" />
+                <Route element={<ThemeSettingsPage />} path="/settings/theme" />
                 <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
                 <Route element={<OneDrivePage />} path="/storage/onedrive" />
               </CustomRoutes>

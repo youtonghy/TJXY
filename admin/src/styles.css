@@ -2,6 +2,7 @@
 @import "@heroui/styles";
 @import "@heroui-pro/react/css";
 @import "./theme.css";
+@import "./client/themes/clientThemes.css";
 
 @layer base {
   *,

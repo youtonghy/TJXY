@@ -35,6 +35,7 @@ mod playback_ticket;
 mod playstate;
 mod probe;
 mod series_expand;
+mod site_theme_settings;
 mod source_index;
 mod source_publication;
 mod storage_account;
@@ -155,6 +156,11 @@ pub use playstate::{PlaybackSessionCommit, PlaystateRepository, PlaystateReposit
 pub use probe::{ProbeCandidate, ProbeRepository, ProbeRepositoryError, ProbeResult, ProbedStream};
 pub use series_expand::{
     SeriesExpandRepository, SeriesExpandRepositoryError, SeriesExpandSnapshot, SeriesStorageObject,
+};
+pub use site_theme_settings::{
+    DEFAULT_SITE_THEME_ID, DEFAULT_SITE_THEME_SCHEMA_VERSION, SiteThemeConfiguration,
+    SiteThemeSelectionInput, SiteThemeSettingsRecord, SiteThemeSettingsRepository,
+    SiteThemeSettingsRepositoryError,
 };
 pub use source_index::{
     SourceIndexObject, SourceIndexRepository, SourceIndexRepositoryError, SourceIndexSnapshot,

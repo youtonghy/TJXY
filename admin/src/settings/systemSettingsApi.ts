@@ -8,6 +8,13 @@ export interface EnvironmentOverrides {
   mediaBrowserRoots: boolean;
 }
 
+export interface PublicSiteThemeSettings {
+  id: string;
+  schemaVersion: number;
+  options: Record<string, unknown>;
+  revision: number;
+}
+
 export interface SystemSettings {
   locale: SystemLocale;
   siteTitle: string;
@@ -22,11 +29,12 @@ export interface SystemSettings {
   revision: number;
   restartRequired: boolean;
   environmentOverrides: EnvironmentOverrides;
+  theme: PublicSiteThemeSettings;
 }
 
 export type SaveSystemSettings = Omit<
   SystemSettings,
-  'restartRequired' | 'environmentOverrides' | 'invalidMediaBrowserRootIndexes'
+  'restartRequired' | 'environmentOverrides' | 'invalidMediaBrowserRootIndexes' | 'theme'
 >;
 type SettingsResponse = Record<string, unknown>;
 
@@ -91,6 +99,7 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     throw new Error('Invalid system settings response');
   }
   const overrides = value.EnvironmentOverrides;
+  const theme = parseTheme(value.Theme);
   return {
     locale,
     siteTitle,
@@ -114,7 +123,36 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
         listenAddress: false,
         mediaBrowserRoots: false,
       },
+    theme,
   };
+}
+
+function parseTheme(value: unknown): PublicSiteThemeSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaultTheme();
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.Id !== 'string'
+    || !/^[a-z][a-z0-9-]{0,63}$/u.test(candidate.Id)
+    || !Number.isSafeInteger(candidate.SchemaVersion)
+    || typeof candidate.SchemaVersion !== 'number'
+    || candidate.SchemaVersion <= 0
+    || typeof candidate.Options !== 'object'
+    || candidate.Options === null
+    || Array.isArray(candidate.Options)
+    || !Number.isSafeInteger(candidate.Revision)
+    || typeof candidate.Revision !== 'number'
+    || candidate.Revision < 0
+  ) throw new Error('Invalid site theme settings response');
+  return {
+    id: candidate.Id,
+    schemaVersion: candidate.SchemaVersion,
+    options: candidate.Options as Record<string, unknown>,
+    revision: candidate.Revision,
+  };
+}
+
+function defaultTheme(): PublicSiteThemeSettings {
+  return { id: 'classic', schemaVersion: 1, options: {}, revision: 0 };
 }
 
 function stringValue(value: unknown): string | null { return typeof value === 'string' ? value : null; }
