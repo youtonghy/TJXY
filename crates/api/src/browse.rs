@@ -146,6 +146,8 @@ pub struct BaseItemDto {
     media_sources: Option<Vec<MediaSourceInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     media_streams: Option<Vec<MediaStream>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_state: Option<String>,
 }
 
 impl BaseItemDto {
@@ -193,6 +195,7 @@ impl BaseItemDto {
             primary_image_aspect_ratio: None,
             media_sources: None,
             media_streams: None,
+            metadata_state: None,
         }
     }
 
@@ -245,6 +248,7 @@ impl BaseItemDto {
             primary_image_aspect_ratio: None,
             media_sources: None,
             media_streams: None,
+            metadata_state: None,
         }
     }
 
@@ -270,6 +274,12 @@ impl BaseItemDto {
     #[must_use]
     pub const fn with_runtime_ticks(mut self, runtime_ticks: Option<i64>) -> Self {
         self.run_time_ticks = runtime_ticks;
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata_state(mut self, metadata_state: impl Into<String>) -> Self {
+        self.metadata_state = Some(metadata_state.into());
         self
     }
 

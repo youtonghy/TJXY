@@ -106,9 +106,6 @@ function fixtureResponse(method: string, url: URL): FixtureResponse | null {
     && (pathname === '/Admin/Dashboard/LoginHistory' || pathname === '/Admin/Dashboard/WatchHistory')
   ) return { body: emptyDashboardPage };
   if (method === 'GET' && pathname === '/Library/VirtualFolders') return { body: librariesResponse };
-  if (method === 'GET' && /^\/Admin\/Libraries\/[^/]+\/HybridCandidates$/u.test(pathname)) {
-    return { body: hybridCandidatesResponse };
-  }
   if (method === 'POST' && pathname === '/Admin/Storage/OAuth/GoogleDrive/Start') {
     return { body: oauthStart(url, 'google-fixture-state') };
   }
@@ -289,23 +286,11 @@ const librariesResponse = [{
   Locations: [`tjxy://storage-root/${rootId}`],
   LibraryOptions: {
     Enabled: true,
-    ScanProfile: 'Hybrid',
+    ScanProfile: 'Lazy',
     ProfileVersion: 4,
     ObjectSelectionScope: 'all_synced_objects',
     MetadataPolicy: 'full',
-    ExpansionPolicy: 'background',
+    ExpansionPolicy: 'on_browse',
     ProbePolicy: 'on_playback',
   },
 }];
-
-const hybridCandidatesResponse = {
-  Items: [{
-    Id: '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f51',
-    Name: 'A Very Long Candidate Title For Mobile Wrapping Verification',
-    ProductionYear: 2026,
-    StructureState: 'title_complete',
-    SelectedAt: '2026-07-28T08:15:00Z',
-  }],
-  StartIndex: 0,
-  TotalRecordCount: 1,
-};

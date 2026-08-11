@@ -769,6 +769,15 @@ impl CatalogQueryService {
     ) -> Result<Option<CatalogItemDetailRecord>, CatalogServiceError> {
         authorize_user(principal, requested_user)?;
         let repository = CatalogQueryRepository::new(&self.database);
+        if let Some(target) = repository.lazy_work_target(principal, item_id).await?
+            && matches!(
+                target.item_type(),
+                CatalogItemType::Movie | CatalogItemType::Series
+            )
+            && target.should_retry_metadata()
+        {
+            self.retry_metadata_and_wait(target, item_id).await?;
+        }
         let Some(cache) = &self.cache else {
             return self
                 .read_item_detail_with_lazy(&repository, principal, item_id)
@@ -1071,6 +1080,62 @@ impl CatalogQueryService {
             }
             .with_storage_root_affinity(scope.storage_root_id())?;
         let Some(submission) = jobs.enqueue_lazy_or_join(&media_spec).await? else {
+            return Ok(());
+        };
+        self.wait_for_job(&jobs, submission.job().id(), deadline)
+            .await
+    }
+
+    async fn retry_metadata_and_wait(
+        &self,
+        target: LazyCatalogWorkTarget,
+        item_id: CatalogItemId,
+    ) -> Result<(), CatalogServiceError> {
+        let Some(requirement) = target.metadata_requirement() else {
+            return Ok(());
+        };
+        let Some(scope) = target.storage_scope() else {
+            return Ok(());
+        };
+        let jobs = WorkJobRepository::new(&self.database);
+        let deadline = Instant::now() + self.lazy_wait_timeout;
+        let mut spec = if scope.is_ready() {
+            WorkJobSpec::new(
+                WorkTaskKind::ResolveMetadata,
+                WorkScope::CatalogItem(item_id),
+                target.metadata_revision(),
+                100,
+            )?
+            .with_input_sync_revision(scope.metadata_input_revision())?
+        } else {
+            let sync = jobs
+                .enqueue_or_join(
+                    &WorkJobSpec::new(
+                        WorkTaskKind::ScopedStorageSync,
+                        WorkScope::StorageObject(scope.storage_object_id()),
+                        scope.children_revision(),
+                        100,
+                    )?
+                    .with_storage_root_affinity(scope.storage_root_id())?,
+                )
+                .await?;
+            self.wait_for_job(&jobs, sync.job().id(), deadline).await?;
+            let Some(sync_revision) = jobs.completed_sync_revision(sync.job().id()).await? else {
+                return Ok(());
+            };
+            WorkJobSpec::new(
+                WorkTaskKind::ResolveMetadata,
+                WorkScope::CatalogItem(item_id),
+                target.metadata_revision(),
+                100,
+            )?
+            .with_required_sync(sync.job().id(), sync_revision)
+        };
+        spec = spec
+            .with_metadata_requirement(requirement)?
+            .with_metadata_source_mode(target.metadata_source_mode())?
+            .with_storage_root_affinity(scope.storage_root_id())?;
+        let Some(submission) = jobs.enqueue_metadata_retry_or_join(&spec).await? else {
             return Ok(());
         };
         self.wait_for_job(&jobs, submission.job().id(), deadline)

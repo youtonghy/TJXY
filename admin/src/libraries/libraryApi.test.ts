@@ -69,6 +69,32 @@ it('defaults a missing metadata source mode from an older server to automatic sc
   ]);
 });
 
+it('parses unavailable storage locations while remaining compatible with older servers', async () => {
+  requestMock.mockResolvedValueOnce([{
+    ItemId: 'library-1',
+    Name: 'Movies',
+    CollectionType: 'movies',
+    Locations: ['tjxy://storage-root/root-1'],
+    UnavailableLocations: ['tjxy://storage-root/root-1'],
+    LibraryOptions: {
+      Enabled: true,
+      ScanProfile: 'Lazy',
+      ProfileVersion: 1,
+      ObjectSelectionScope: 'title_layer',
+      MetadataPolicy: 'basic',
+      MetadataSourceMode: 'automatic_scrape',
+      ExpansionPolicy: 'on_browse',
+      ProbePolicy: 'on_playback',
+    },
+  }]);
+
+  await expect(listLibraries()).resolves.toEqual([
+    expect.objectContaining({
+      unavailableLocations: ['tjxy://storage-root/root-1'],
+    }),
+  ]);
+});
+
 it('renames a library through the exact current-name command', async () => {
   requestMock.mockResolvedValue(undefined);
 
@@ -86,13 +112,13 @@ it('updates the complete effective policy with the current profile version', asy
   await updateLibraryPolicy({
     id: 'library-1',
     enabled: false,
-    scanProfile: 'Hybrid',
+    scanProfile: 'Full',
     profileVersion: 3,
     metadataSourceMode: 'automatic_scrape',
     effectivePolicy: {
       objectSelectionScope: 'title_layer',
       metadataPolicy: 'full',
-      expansionPolicy: 'background',
+      expansionPolicy: 'eager',
       probePolicy: 'on_playback',
     },
   });
@@ -103,12 +129,12 @@ it('updates the complete effective policy with the current profile version', asy
       Id: 'library-1',
       LibraryOptions: {
         Enabled: false,
-        ScanProfile: 'Hybrid',
+        ScanProfile: 'Full',
         ProfileVersion: 3,
         MetadataSourceMode: 'automatic_scrape',
         ObjectSelectionScope: 'title_layer',
         MetadataPolicy: 'full',
-        ExpansionPolicy: 'background',
+        ExpansionPolicy: 'eager',
         ProbePolicy: 'on_playback',
       },
     }),

@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  FieldError,
   Input,
   Label,
   ListBox,
@@ -20,6 +21,7 @@ import {
   Save,
   Server,
   Trash2,
+  TriangleAlert,
   Upload,
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
@@ -46,6 +48,7 @@ const initialSettings: SystemSettings = {
   listenHost: '127.0.0.1',
   port: 8096,
   mediaBrowserRoots: [],
+  invalidMediaBrowserRootIndexes: [],
   revision: 0,
   restartRequired: false,
   environmentOverrides: {
@@ -69,7 +72,15 @@ export function SystemSettingsPage() {
   const load = useCallback(() => {
     setLoading(true);
     void getSystemSettings()
-      .then(setSettings)
+      .then((loaded) => {
+        setSettings(loaded);
+        if (loaded.invalidMediaBrowserRootIndexes.length > 0) {
+          notify(tr('admin.system.mediaBrowserRootsUnavailable'), {
+            type: 'warning',
+            autoHideDuration: 8000,
+          });
+        }
+      })
       .catch(() => { notify(tr('admin.system.saveFailed'), { type: 'error' }); })
       .finally(() => { setLoading(false); });
   }, [notify, tr]);
@@ -92,7 +103,14 @@ export function SystemSettingsPage() {
         setSettings(saved);
         setLocale(saved.locale);
         window.dispatchEvent(new CustomEvent('tjxy-system-settings', { detail: saved }));
-        notify(tr('admin.system.saved'), { type: 'success' });
+        if (saved.restartRequired) {
+          notify(tr('admin.system.restartReminder'), {
+            type: 'warning',
+            autoHideDuration: 8000,
+          });
+        } else {
+          notify(tr('admin.system.saved'), { type: 'success' });
+        }
       })
       .catch(() => { notify(tr('admin.system.saveFailed'), { type: 'error' }); })
       .finally(() => { setSaving(false); });
@@ -138,7 +156,10 @@ export function SystemSettingsPage() {
       {settings.restartRequired && (
         <Alert status="warning">
           <Alert.Indicator><RotateCcw className="size-4" /></Alert.Indicator>
-          <Alert.Content><Alert.Title>{tr('admin.system.restartRequired')}</Alert.Title></Alert.Content>
+          <Alert.Content>
+            <Alert.Title>{tr('admin.system.restartRequired')}</Alert.Title>
+            <Alert.Description>{tr('admin.system.restartRequiredDescription')}</Alert.Description>
+          </Alert.Content>
         </Alert>
       )}
 
@@ -223,12 +244,22 @@ export function SystemSettingsPage() {
           </div>
         </Card.Header>
         <Card.Content className="space-y-3">
+          {settings.invalidMediaBrowserRootIndexes.length > 0 && (
+            <Alert role="alert" status="warning">
+              <Alert.Indicator><TriangleAlert className="size-4" /></Alert.Indicator>
+              <Alert.Content>
+                <Alert.Title>{tr('admin.system.mediaBrowserRootsUnavailable')}</Alert.Title>
+                <Alert.Description>{tr('admin.system.mediaBrowserRootsUnavailableDescription')}</Alert.Description>
+              </Alert.Content>
+            </Alert>
+          )}
           {settings.mediaBrowserRoots.map((root, index) => (
             <div className="flex items-end gap-2" key={`media-browser-root-${String(index)}`}>
               <TextField
                 className="min-w-0 flex-1"
                 fullWidth
                 isDisabled={settings.environmentOverrides.mediaBrowserRoots}
+                isInvalid={settings.invalidMediaBrowserRootIndexes.includes(index)}
               >
                 <Label>{interpolate(tr('admin.system.mediaBrowserRoot'), { index: String(index + 1) })}</Label>
                 <Input
@@ -240,6 +271,9 @@ export function SystemSettingsPage() {
                     patch('mediaBrowserRoots', next);
                   }}
                 />
+                {settings.invalidMediaBrowserRootIndexes.includes(index) && (
+                  <FieldError>{tr('admin.system.mediaBrowserRootUnavailable')}</FieldError>
+                )}
               </TextField>
               <Button
                 aria-label={interpolate(tr('admin.system.removeMediaBrowserRoot'), { index: String(index + 1) })}

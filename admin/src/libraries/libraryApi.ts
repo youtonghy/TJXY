@@ -1,12 +1,12 @@
 import { ApiError, apiRequest } from '../api/httpClient';
 import type { FilesystemSelection } from './filesystemApi';
 
-export type ScanProfile = 'Full' | 'Lazy' | 'Hybrid' | 'Manual';
+export type ScanProfile = 'Full' | 'Lazy' | 'Manual';
 export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | 'homevideos';
 export type ObjectSelectionScope = 'all_synced_objects' | 'title_layer' | 'library_roots';
 export type MetadataPolicy = 'full' | 'basic' | 'none';
 export type MetadataSourceMode = 'automatic_scrape' | 'local_only';
-export type ExpansionPolicy = 'eager' | 'on_browse' | 'background' | 'manual';
+export type ExpansionPolicy = 'eager' | 'on_browse' | 'manual';
 export type ProbePolicy = 'eager' | 'on_playback' | 'manual';
 
 export interface CreateLibraryRequest {
@@ -39,6 +39,7 @@ export interface LibraryOption {
   name: string;
   collectionType: string;
   locations: string[];
+  unavailableLocations?: string[];
   enabled: boolean;
   scanProfile: ScanProfile;
   profileVersion: number;
@@ -157,6 +158,7 @@ function toLibrary(value: unknown): LibraryOption {
     name: value.Name,
     collectionType: value.CollectionType,
     locations: value.Locations,
+    unavailableLocations: optionalStringArray(value.UnavailableLocations),
     enabled: value.LibraryOptions.Enabled,
     scanProfile: value.LibraryOptions.ScanProfile,
     profileVersion: value.LibraryOptions.ProfileVersion,
@@ -168,8 +170,14 @@ function toLibrary(value: unknown): LibraryOption {
   };
 }
 
+function optionalStringArray(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!validLocations(value)) throw invalidResponse('library storage status');
+  return value;
+}
+
 function isScanProfile(value: unknown): value is ScanProfile {
-  return value === 'Full' || value === 'Lazy' || value === 'Hybrid' || value === 'Manual';
+  return value === 'Full' || value === 'Lazy' || value === 'Manual';
 }
 
 function isPositiveVersion(value: unknown): value is number {
@@ -189,7 +197,7 @@ function isMetadataSourceMode(value: unknown): value is MetadataSourceMode {
 }
 
 function isExpansionPolicy(value: unknown): value is ExpansionPolicy {
-  return value === 'eager' || value === 'on_browse' || value === 'background' || value === 'manual';
+  return value === 'eager' || value === 'on_browse' || value === 'manual';
 }
 
 function isProbePolicy(value: unknown): value is ProbePolicy {

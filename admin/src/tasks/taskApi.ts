@@ -3,6 +3,7 @@ import { listLibraries } from '../libraries/libraryApi';
 
 export type ScheduledTaskState = 'Idle' | 'Running';
 export type TaskJobStatus = 'Pending' | 'Retrying' | 'Running' | 'Completed' | 'Cancelled' | 'Failed';
+export type TaskJobOutcome = 'NoMetadataMatch' | 'CompletedWithWarnings';
 
 export interface ScheduledTask {
   id: string;
@@ -24,6 +25,7 @@ export interface TaskJob {
   createdAt: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  outcome: TaskJobOutcome | null;
 }
 
 export interface StorageRootOption {
@@ -43,14 +45,13 @@ export async function getTaskSnapshot(signal?: AbortSignal): Promise<TaskSnapsho
   const options = signal === undefined ? {} : { signal };
   const [scheduled, jobs, libraries] = await Promise.all([
     apiRequest<unknown>('/ScheduledTasks', options),
-    apiRequest<unknown>('/Admin/Tasks/Jobs?Limit=50', options),
+    listRecentTaskJobs(signal),
     listLibraries(signal),
   ]);
   if (!Array.isArray(scheduled)) throw invalidResponse('scheduled task list');
-  if (!Array.isArray(jobs)) throw invalidResponse('recent task list');
   return {
     scheduled: scheduled.map(toScheduledTask),
-    jobs: jobs.map(toTaskJob),
+    jobs,
     roots: libraries.flatMap((library) => library.locations.map((location, index) => {
       const rootId = storageRootId(location);
       return {
@@ -61,6 +62,13 @@ export async function getTaskSnapshot(signal?: AbortSignal): Promise<TaskSnapsho
       };
     })),
   };
+}
+
+export async function listRecentTaskJobs(signal?: AbortSignal): Promise<TaskJob[]> {
+  const options = signal === undefined ? {} : { signal };
+  const jobs = await apiRequest<unknown>('/Admin/Tasks/Jobs?Limit=50', options);
+  if (!Array.isArray(jobs)) throw invalidResponse('recent task list');
+  return jobs.map(toTaskJob);
 }
 
 export async function startScheduledTask(id: string): Promise<void> {
@@ -148,6 +156,7 @@ function toTaskJob(value: unknown): TaskJob {
     || !validDate(value.CreatedAt)
     || !validDate(value.StartedAt)
     || !validDate(value.CompletedAt)
+    || !validTaskJobOutcome(value.Outcome)
   ) throw invalidResponse('recent task');
   return {
     id: value.Id,
@@ -160,6 +169,7 @@ function toTaskJob(value: unknown): TaskJob {
     createdAt: value.CreatedAt,
     startedAt: value.StartedAt,
     completedAt: value.CompletedAt,
+    outcome: value.Outcome ?? null,
   };
 }
 
@@ -195,6 +205,13 @@ function isTaskJobStatus(value: unknown): value is TaskJobStatus {
     || value === 'Completed'
     || value === 'Cancelled'
     || value === 'Failed';
+}
+
+function validTaskJobOutcome(value: unknown): value is TaskJobOutcome | null | undefined {
+  return value === undefined
+    || value === null
+    || value === 'NoMetadataMatch'
+    || value === 'CompletedWithWarnings';
 }
 
 function invalidResponse(subject: string): ApiError {

@@ -116,8 +116,7 @@ async function assertAuthenticatedRouteReady(page: Page, path: string) {
     return;
   }
   if (path.startsWith('/admin/libraries/')) {
-    await expect(page.getByRole('grid', { name: 'Pinned background candidates' }).getByRole('rowheader').first())
-      .toBeVisible();
+    await expect(page.getByRole('region', { name: 'Scanning policy' })).toBeVisible();
     return;
   }
   if (path.startsWith('/admin/storage/')) {

@@ -23,6 +23,7 @@ const MAX_STAGING_KEY_CHARS: usize = 512;
 const MAX_ERROR_CHARS: usize = 4096;
 pub const ADMIN_CANCELLED_ERROR: &str = "cancelled by administrator";
 const MAX_OBSERVED_JOBS: u64 = 100;
+const METADATA_RETRY_COOLDOWN: Duration = Duration::seconds(5);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WorkTaskKind {
@@ -388,6 +389,13 @@ pub struct WorkJobAdminRecord {
     created_at: Option<DateTime<Utc>>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+    outcome: Option<WorkJobAdminOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkJobAdminOutcome {
+    NoMetadataMatch,
+    CompletedWithWarnings,
 }
 
 impl WorkJobAdminRecord {
@@ -414,6 +422,11 @@ impl WorkJobAdminRecord {
     #[must_use]
     pub const fn completed_at(&self) -> Option<DateTime<Utc>> {
         self.completed_at
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> Option<WorkJobAdminOutcome> {
+        self.outcome
     }
 }
 
@@ -740,6 +753,22 @@ where
                 Alias::new(column),
             );
         }
+        let results = Alias::new("job_results");
+        query.join_as(
+            JoinType::LeftJoin,
+            Alias::new("work_results"),
+            results.clone(),
+            Expr::col((results.clone(), Alias::new("job_id")))
+                .equals((table.clone(), Alias::new("id"))),
+        );
+        query.expr_as(
+            Expr::col((results.clone(), Alias::new("counters"))),
+            Alias::new("result_counters"),
+        );
+        query.expr_as(
+            Expr::col((results, Alias::new("warnings"))),
+            Alias::new("result_warnings"),
+        );
         let backend = self.database.get_database_backend();
         self.database
             .query_all(backend.build(&query))
@@ -787,6 +816,68 @@ where
                 .map(Some),
             Err(error) => Err(error),
         };
+        finish(transaction, result).await
+    }
+
+    /// Retries Partial automatic metadata resolution with a short cooldown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkJobRepositoryError`] for invalid metadata work or database failures.
+    pub async fn enqueue_metadata_retry_or_join(
+        &self,
+        spec: &WorkJobSpec,
+    ) -> Result<Option<WorkJobSubmission>, WorkJobRepositoryError> {
+        if spec.task_kind != WorkTaskKind::ResolveMetadata
+            || spec.metadata_source_mode != Some(MetadataSourceMode::AutomaticScrape)
+        {
+            return Err(WorkJobRepositoryError::InvalidMetadataWork);
+        }
+        let WorkScope::CatalogItem(item_id) = spec.scope else {
+            return Err(WorkJobRepositoryError::InvalidMetadataWork);
+        };
+        let transaction = self.database.begin().await?;
+        let backend = transaction.get_database_backend();
+        let partial = Query::select()
+            .expr(Expr::val(1_i32))
+            .from(Alias::new("catalog_items"))
+            .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
+            .and_where(Expr::col(Alias::new("metadata_revision")).eq(spec.expected_revision))
+            .and_where(Expr::col(Alias::new("metadata_state")).eq("Partial"))
+            .limit(1)
+            .to_owned();
+        if transaction
+            .query_one(backend.build(&partial))
+            .await?
+            .is_none()
+        {
+            return finish(transaction, Ok(None)).await;
+        }
+        let recent = Query::select()
+            .expr(Expr::val(1_i32))
+            .from(Alias::new("work_jobs"))
+            .and_where(
+                Expr::col(Alias::new("task_kind")).eq(WorkTaskKind::ResolveMetadata.as_str()),
+            )
+            .and_where(Expr::col(Alias::new("scope_type")).eq("CatalogItem"))
+            .and_where(Expr::col(Alias::new("scope_id")).eq(item_id.as_uuid()))
+            .and_where(Expr::col(Alias::new("expected_revision")).eq(spec.expected_revision))
+            .and_where(Expr::col(Alias::new("state")).eq(STATE_COMPLETED))
+            .and_where(
+                Expr::col(Alias::new("created_at")).gte(self.now() - METADATA_RETRY_COOLDOWN),
+            )
+            .limit(1)
+            .to_owned();
+        if transaction
+            .query_one(backend.build(&recent))
+            .await?
+            .is_some()
+        {
+            return finish(transaction, Ok(None)).await;
+        }
+        let result = enqueue_or_join(&transaction, spec, self.now())
+            .await
+            .map(Some);
         finish(transaction, result).await
     }
 
@@ -2740,12 +2831,40 @@ fn admin_job_from_row(row: &QueryResult) -> Result<WorkJobAdminRecord, WorkJobRe
         }
         WorkJobState::Failed => WorkJobAdminStatus::Failed,
     };
+    let counters: Option<Value> = row.try_get("", "result_counters")?;
+    let warnings: Option<Value> = row.try_get("", "result_warnings")?;
+    let has_warnings = warnings
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty());
+    let matched = counters
+        .as_ref()
+        .and_then(|value| value.get("matched"))
+        .and_then(Value::as_bool);
+    let partial = counters
+        .as_ref()
+        .and_then(|value| value.get("state"))
+        .and_then(Value::as_str)
+        == Some("Partial");
+    let outcome = if admin_status == WorkJobAdminStatus::Completed && has_warnings {
+        Some(WorkJobAdminOutcome::CompletedWithWarnings)
+    } else if admin_status == WorkJobAdminStatus::Completed
+        && job.task_kind() == WorkTaskKind::ResolveMetadata
+        && job.metadata_source_mode() == Some(MetadataSourceMode::AutomaticScrape)
+        && matched != Some(true)
+        && partial
+    {
+        Some(WorkJobAdminOutcome::NoMetadataMatch)
+    } else {
+        None
+    };
     Ok(WorkJobAdminRecord {
         job,
         admin_status,
         created_at: row.try_get("", "created_at")?,
         started_at: row.try_get("", "started_at")?,
         completed_at: row.try_get("", "completed_at")?,
+        outcome,
     })
 }
 

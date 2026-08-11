@@ -51,12 +51,24 @@ pub(crate) async fn virtual_folders(
     let Some(libraries) = state.libraries.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let storage_runtime = state.storage_runtime.as_ref();
     match libraries.virtual_folders().await {
         Ok(folders) => Json(
             folders
                 .into_iter()
                 .map(|folder| {
                     let locations = folder.roots().iter().map(|root| root.location()).collect();
+                    let unavailable_locations = folder
+                        .roots()
+                        .iter()
+                        .filter(|root| {
+                            root.storage_account_id().is_some_and(|account_id| {
+                                storage_runtime
+                                    .is_some_and(|runtime| !runtime.is_active(account_id))
+                            })
+                        })
+                        .map(|root| root.location())
+                        .collect();
                     VirtualFolderInfo::new(
                         folder.name(),
                         locations,
@@ -73,6 +85,7 @@ pub(crate) async fn virtual_folders(
                         ),
                         folder.id().as_uuid(),
                     )
+                    .with_unavailable_locations(unavailable_locations)
                 })
                 .collect::<Vec<_>>(),
         )

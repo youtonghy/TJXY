@@ -187,12 +187,6 @@ function responsiveCollection(name: string) {
       return { desktop: 'API Keys', mobile: 'API Keys mobile', region: 'API keys collection' };
     case 'libraries':
       return { desktop: 'Libraries', mobile: 'Libraries mobile', region: 'Libraries collection' };
-    case 'library-edit':
-      return {
-        desktop: 'Pinned background candidates',
-        mobile: 'Pinned background candidates mobile',
-        region: 'Pinned background candidates collection',
-      };
     default:
       return null;
   }

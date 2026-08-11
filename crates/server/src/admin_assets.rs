@@ -28,6 +28,12 @@ pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
     Ok(Router::new()
         .route("/", get(|| async { Redirect::permanent("/app/") }))
         .route("/admin", get(|| async { Redirect::permanent("/admin/") }))
+        .route("/setup", get(|| async { Redirect::temporary("/app/") }))
+        .route("/setup/", get(|| async { Redirect::temporary("/app/") }))
+        .route(
+            "/setup/{*path}",
+            get(|| async { Redirect::temporary("/app/") }),
+        )
         .route_service("/app/", get_service(ServeFile::new(index_path.clone())))
         .route_service("/admin/", get_service(ServeFile::new(index_path)))
         .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
@@ -55,6 +61,18 @@ pub(super) fn setup_router(dist_dir: &Path) -> Result<Router, AdminAssetsError> 
     Ok(Router::new()
         .route("/", get(|| async { Redirect::temporary("/setup/") }))
         .route("/setup", get(|| async { Redirect::temporary("/setup/") }))
+        .route("/app", get(|| async { Redirect::temporary("/setup/") }))
+        .route("/app/", get(|| async { Redirect::temporary("/setup/") }))
+        .route(
+            "/app/{*path}",
+            get(|| async { Redirect::temporary("/setup/") }),
+        )
+        .route("/admin", get(|| async { Redirect::temporary("/setup/") }))
+        .route("/admin/", get(|| async { Redirect::temporary("/setup/") }))
+        .route(
+            "/admin/{*path}",
+            get(|| async { Redirect::temporary("/setup/") }),
+        )
         .route_service("/setup/", get_service(ServeFile::new(index_path)))
         .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
         .nest_service("/brand", ServeDir::new(dist_dir.join("brand")))

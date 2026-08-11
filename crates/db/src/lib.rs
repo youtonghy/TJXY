@@ -46,6 +46,7 @@ mod storage_path_authorization;
 mod storage_relink;
 mod storage_sync;
 mod system_settings;
+mod title_year;
 mod user_data;
 mod work_job;
 
@@ -141,7 +142,7 @@ pub use metadata_work::{
     MetadataImageCandidate, MetadataSidecarCandidate, MetadataWorkError, MetadataWorkRepository,
     MetadataWorkSnapshot,
 };
-pub use migration::Migrator;
+pub use migration::{Migrator, SchemaMigrationError, migrate_database};
 pub use outbox::{
     BackloggedStorageRoot, ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason,
     OutboxRepository, OutboxRepositoryError, SystemClock,
@@ -200,7 +201,7 @@ pub use user_data::{
 };
 pub use work_job::{
     ADMIN_CANCELLED_ERROR, ClaimedWorkJob, FullScanChildSubmission, MetadataRequirement,
-    WorkJobAdminRecord, WorkJobAdminStatus, WorkJobClock, WorkJobRecord, WorkJobRepository,
-    WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState, WorkJobSubmission,
-    WorkJobSystemClock, WorkScope, WorkStagingRow, WorkTaskKind,
+    WorkJobAdminOutcome, WorkJobAdminRecord, WorkJobAdminStatus, WorkJobClock, WorkJobRecord,
+    WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState,
+    WorkJobSubmission, WorkJobSystemClock, WorkScope, WorkStagingRow, WorkTaskKind,
 };

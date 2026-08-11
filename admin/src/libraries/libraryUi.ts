@@ -18,7 +18,6 @@ export const collectionOptions: readonly { value: LibraryCollectionType; label: 
 export const scanProfileOptions: readonly { value: ScanProfile; label: string }[] = [
   { value: 'Full', label: 'Full' },
   { value: 'Lazy', label: 'Lazy' },
-  { value: 'Hybrid', label: 'Hybrid' },
   { value: 'Manual', label: 'Manual' },
 ];
 
@@ -37,7 +36,6 @@ export const metadataPolicyOptions: readonly { value: MetadataPolicy; label: str
 export const expansionPolicyOptions: readonly { value: ExpansionPolicy; label: string }[] = [
   { value: 'eager', label: 'Eager' },
   { value: 'on_browse', label: 'On browse' },
-  { value: 'background', label: 'Background' },
   { value: 'manual', label: 'Manual' },
 ];
 

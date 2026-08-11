@@ -57,6 +57,7 @@ struct AdminSystemSettingsDto {
     listen_host: String,
     port: u16,
     media_browser_roots: Vec<String>,
+    invalid_media_browser_root_indexes: Vec<usize>,
     revision: i64,
     restart_required: bool,
     environment_overrides: EnvironmentOverridesDto,
@@ -135,7 +136,10 @@ pub(crate) async fn get_admin(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match service.get().await {
-        Ok(record) => Json(admin_dto(record.as_ref(), false)).into_response(),
+        Ok(record) => {
+            let invalid_root_indexes = invalid_media_browser_root_indexes(record.as_ref()).await;
+            Json(admin_dto(record.as_ref(), false, invalid_root_indexes)).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -247,7 +251,7 @@ pub(crate) async fn put_admin(
                     || value.port() != record.port()
                     || value.media_browser_roots() != record.media_browser_roots()
             });
-            Json(admin_dto(Some(&record), restart_required)).into_response()
+            Json(admin_dto(Some(&record), restart_required, Vec::new())).into_response()
         }
         Err(error) => repository_error(&error),
     }
@@ -487,6 +491,7 @@ fn public_dto(record: Option<&SystemSettingsRecord>) -> PublicSystemSettingsDto 
 fn admin_dto(
     record: Option<&SystemSettingsRecord>,
     restart_required: bool,
+    invalid_media_browser_root_indexes: Vec<usize>,
 ) -> AdminSystemSettingsDto {
     let fallback = defaults();
     AdminSystemSettingsDto {
@@ -511,6 +516,7 @@ fn admin_dto(
                 value.media_browser_roots().to_vec()
             })
         }),
+        invalid_media_browser_root_indexes,
         revision: record.map_or(0, SystemSettingsRecord::revision),
         restart_required,
         environment_overrides: EnvironmentOverridesDto {
@@ -521,6 +527,15 @@ fn admin_dto(
         },
         supported_locales: ["zh-CN", "en-US"],
     }
+}
+
+async fn invalid_media_browser_root_indexes(record: Option<&SystemSettingsRecord>) -> Vec<usize> {
+    let roots = environment_media_browser_roots().unwrap_or_else(|| {
+        record.map_or_else(Vec::new, |value| value.media_browser_roots().to_vec())
+    });
+    let roots = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    let (_, invalid_root_indexes) = FilesystemBrowser::from_available_roots(roots).await;
+    invalid_root_indexes
 }
 
 fn repository_error(error: &SystemSettingsRepositoryError) -> Response {

@@ -2,11 +2,12 @@
 import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
 import { Rating } from '@heroui-pro/react/rating';
 import { Carousel } from '@heroui-pro/react/carousel';
-import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, Play } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, LoaderCircle, Play, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 import { useTranslate } from '../../settings/i18n';
+import { listRecentTaskJobs } from '../../tasks/taskApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getChildren, getItem, getLibraries, getSimilarItems, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
 import { MediaImage } from '../ui/MediaImage';
@@ -24,21 +25,29 @@ interface RecommendationResult {
   items?: MediaItem[];
 }
 
+const METADATA_REFRESH_DELAYS_MS = [2_500, 5_000, 10_000] as const;
+type MetadataRefreshState = 'idle' | 'no-match' | 'exhausted';
+
 export function ItemPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useClientAuth();
+  const isAdministrator = user?.Policy?.IsAdministrator === true;
   const tr = useTranslate();
   const [item, setItem] = useState<MediaItem>();
   const [children, setChildren] = useState<MediaItem[]>([]);
   const [recommendationResult, setRecommendationResult] = useState<RecommendationResult>();
   const [breadcrumbContext, setBreadcrumbContext] = useState<ItemBreadcrumbContext>({ ancestors: [] });
   const [failed, setFailed] = useState(false);
+  const [metadataRefreshKey, setMetadataRefreshKey] = useState(0);
+  const [metadataRefreshState, setMetadataRefreshState] = useState<MetadataRefreshState>('idle');
   const breadcrumbItemId = item?.Id;
   const breadcrumbParentId = item?.ParentId;
   const breadcrumbItemType = item?.Type;
   const recommendationItemId = item?.Type === 'Movie' || item?.Type === 'Series' ? item.Id : undefined;
   const recommendationItemType = item?.Type === 'Movie' || item?.Type === 'Series' ? item.Type : undefined;
+  const isMetadataPartial = item?.MetadataState === 'Partial'
+    && (item.Type === 'Movie' || item.Type === 'Series');
 
   useEffect(() => {
     if (!id) return;
@@ -47,6 +56,7 @@ export function ItemPage() {
         setFailed(false);
         setItem(undefined);
         setChildren([]);
+        setMetadataRefreshState('idle');
         return getItem(id);
       })
       .then((nextItem) => {
@@ -58,6 +68,48 @@ export function ItemPage() {
         setFailed(true);
       });
   }, [id]);
+
+  useEffect(() => {
+    if (
+      !id
+      || item?.Id !== id
+      || item.MetadataState !== 'Partial'
+      || (item.Type !== 'Movie' && item.Type !== 'Series')
+    ) return;
+    const controller = new AbortController();
+    void (async () => {
+      for (const delay of METADATA_REFRESH_DELAYS_MS) {
+        await new Promise((resolve) => { setTimeout(resolve, delay); });
+        if (controller.signal.aborted) return;
+        try {
+          const refreshed = await getItem(id);
+          controller.signal.throwIfAborted();
+          setItem(refreshed);
+          if (refreshed.MetadataState !== 'Partial') {
+            setMetadataRefreshState('idle');
+            return;
+          }
+          if (isAdministrator) {
+            const jobs = await listRecentTaskJobs(controller.signal);
+            controller.signal.throwIfAborted();
+            const latestMetadataJob = jobs.find((job) => job.taskKind === 'ResolveMetadata'
+              && job.scopeType === 'CatalogItem'
+              && job.scopeId === id);
+            if (latestMetadataJob?.outcome === 'NoMetadataMatch') {
+              setMetadataRefreshState('no-match');
+              return;
+            }
+          }
+        } catch {
+          // A later bounded attempt may recover from a transient provider failure.
+        }
+      }
+      if (!controller.signal.aborted) setMetadataRefreshState('exhausted');
+    })();
+    return () => {
+      controller.abort();
+    };
+  }, [id, isAdministrator, item?.Id, item?.MetadataState, item?.Type, metadataRefreshKey]);
 
   useEffect(() => {
     if (!breadcrumbItemId) return;
@@ -119,6 +171,48 @@ export function ItemPage() {
   return (
     <article className="space-y-8">
       <ItemBreadcrumb context={breadcrumbContext} item={item} onNavigate={navigate} />
+
+      {isAdministrator && isMetadataPartial && metadataRefreshState === 'idle' && (
+        <Alert status="accent" role="status">
+          <Alert.Indicator><LoaderCircle className="size-4 animate-spin" /></Alert.Indicator>
+          <Alert.Content>
+            <Alert.Title>{tr('Metadata scan in progress', '正在扫描元数据')}</Alert.Title>
+            <Alert.Description>{tr('This title has not been scanned yet. Scanning has started and the page will update automatically.', '暂未扫描本影片的元数据，扫描已开始，完成后页面会自动更新。')}</Alert.Description>
+          </Alert.Content>
+        </Alert>
+      )}
+
+      {isAdministrator && metadataRefreshState === 'no-match' && (
+        <Alert status="warning" role="alert">
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>{tr('No metadata match', '未匹配到元数据')}</Alert.Title>
+            <Alert.Description>
+              {tr('No provider result matched this title. Check the title and year, then retry.', '元数据提供方没有找到匹配结果，请检查影片名称和年份后重试。')}
+            </Alert.Description>
+          </Alert.Content>
+          <MetadataRetryButton onRetry={() => {
+            setMetadataRefreshState('idle');
+            setMetadataRefreshKey((value) => value + 1);
+          }} tr={tr} />
+        </Alert>
+      )}
+
+      {isAdministrator && metadataRefreshState === 'exhausted' && (
+        <Alert status="warning" role="alert">
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>{tr('Metadata is still unavailable', '元数据仍不可用')}</Alert.Title>
+            <Alert.Description>
+              {tr('No match was found or the metadata service could not be reached.', '可能没有匹配结果，或当前无法连接元数据服务。')}
+            </Alert.Description>
+          </Alert.Content>
+          <MetadataRetryButton onRetry={() => {
+            setMetadataRefreshState('idle');
+            setMetadataRefreshKey((value) => value + 1);
+          }} tr={tr} />
+        </Alert>
+      )}
 
       <div className="grid gap-8 lg:grid-cols-[15rem_minmax(0,1fr)]">
         <div className={`mx-auto ${artworkRatio} w-full max-w-[15rem] overflow-hidden rounded-2xl bg-default shadow-sm lg:mx-0`}>
@@ -208,6 +302,15 @@ export function ItemPage() {
         ? <RecommendationRail failed={activeRecommendationResult?.failed === true} items={activeRecommendationResult?.items} />
         : null}
     </article>
+  );
+}
+
+function MetadataRetryButton({ onRetry, tr }: { onRetry: () => void; tr: ReturnType<typeof useTranslate> }) {
+  return (
+    <Button size="sm" variant="secondary" onPress={onRetry}>
+      <RefreshCw className="size-4" />
+      {tr('Retry', '重试')}
+    </Button>
   );
 }
 

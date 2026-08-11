@@ -45,7 +45,8 @@ fn virtual_folder_uses_jellyfin_fields_and_tjxy_effective_policy_extensions() {
             "ItemId": id,
             "PrimaryImageItemId": null,
             "RefreshProgress": null,
-            "RefreshStatus": null
+            "RefreshStatus": null,
+            "UnavailableLocations": []
         })
     );
 }
@@ -56,7 +57,7 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
         "Id": "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11",
         "LibraryOptions": {
             "Enabled": false,
-            "ScanProfile": "Hybrid",
+            "ScanProfile": "Lazy",
             "ProfileVersion": 3,
             "MetadataSourceMode": "local_only",
             "EnableRealtimeMonitor": true
@@ -64,7 +65,7 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
     }))
     .unwrap();
 
-    assert_eq!(payload.library_options().scan_profile(), "Hybrid");
+    assert_eq!(payload.library_options().scan_profile(), "Lazy");
     assert_eq!(payload.library_options().profile_version(), 3);
     assert!(!payload.library_options().enabled());
     assert_eq!(

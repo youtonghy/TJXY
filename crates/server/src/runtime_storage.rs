@@ -145,6 +145,10 @@ impl RuntimeStorageManager {
         }
         Ok(removed.is_some() || revoked)
     }
+
+    pub(crate) fn is_active(&self, account_id: Uuid) -> bool {
+        self.backends.backend(account_id).is_some()
+    }
 }
 
 impl Drop for RuntimeStorageManager {
@@ -205,9 +209,11 @@ mod tests {
                 .activate_filesystem(account_id, Arc::clone(&backend))
                 .unwrap()
         );
+        assert!(manager.is_active(account_id));
         assert!(!manager.activate_filesystem(account_id, backend).unwrap());
         assert!(registry.backend_for_drive(account_id, "local").is_some());
         assert!(manager.deactivate(account_id, "local").unwrap());
+        assert!(!manager.is_active(account_id));
         assert!(registry.backend(account_id).is_none());
         assert!(!manager.deactivate(account_id, "local").unwrap());
     }

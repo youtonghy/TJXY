@@ -227,7 +227,6 @@ fn parse_profile(value: &str) -> Result<ScanProfile, LibraryServiceError> {
     match value {
         "Full" => Ok(ScanProfile::Full),
         "Lazy" => Ok(ScanProfile::Lazy),
-        "Hybrid" => Ok(ScanProfile::Hybrid),
         "Manual" => Ok(ScanProfile::Manual),
         _ => Err(LibraryServiceError::InvalidProfile),
     }
@@ -237,7 +236,6 @@ const fn profile_name(value: ScanProfile) -> &'static str {
     match value {
         ScanProfile::Full => "Full",
         ScanProfile::Lazy => "Lazy",
-        ScanProfile::Hybrid => "Hybrid",
         ScanProfile::Manual => "Manual",
     }
 }

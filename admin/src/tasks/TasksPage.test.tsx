@@ -70,7 +70,18 @@ const completedJob: TaskJob = {
   createdAt: '2026-07-24T01:02:03Z',
   startedAt: '2026-07-24T01:02:04Z',
   completedAt: '2026-07-24T01:02:05Z',
+  outcome: null,
 };
+
+it('renders a visible safe outcome for metadata jobs without a remote match', async () => {
+  snapshotMock.mockResolvedValue({
+    ...snapshot,
+    jobs: [{ ...completedJob, taskKind: 'ResolveMetadata', outcome: 'NoMetadataMatch' }],
+  });
+  renderTasks();
+
+  expect(await screen.findByText('No remote metadata match')).toBeVisible();
+});
 
 const snapshot: TaskSnapshot = {
   scheduled: [idleTask],

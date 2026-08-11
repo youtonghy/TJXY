@@ -25,6 +25,7 @@ use tjxy_application::{
     TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
+use tjxy_db::{SystemSettingsInput, SystemSettingsRepository};
 use tjxy_server::{AppState, ServerIdentity, build_router};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
@@ -1061,24 +1062,6 @@ async fn effective_source_publication(
     )
 }
 
-async fn seed_hybrid_series(database: &DatabaseConnection) -> (Uuid, CatalogItemId) {
-    let library = seed_library(database, "Hybrid Shows", true).await;
-    database
-        .execute(
-            database.get_database_backend().build(
-                Query::update()
-                    .table(Alias::new("libraries"))
-                    .value(Alias::new("scan_profile"), "Hybrid")
-                    .value(Alias::new("expansion_policy"), "background")
-                    .and_where(Expr::col(Alias::new("id")).eq(library)),
-            ),
-        )
-        .await
-        .unwrap();
-    let series = seed_item(database, library, "Pinned Series", "Series").await;
-    (library, series)
-}
-
 #[allow(clippy::too_many_lines)] // Mirrors the normalized lazy CatalogItem-to-root scope.
 async fn seed_manual_storage_scope(
     database: &DatabaseConnection,
@@ -1857,25 +1840,6 @@ async fn delete_empty(
     token: Option<&str>,
 ) -> axum::response::Response {
     let mut request = Request::builder().method("DELETE").uri(uri);
-    if let Some(token) = token {
-        request = request.header(
-            header::AUTHORIZATION,
-            format!(r#"MediaBrowser Token="{token}""#),
-        );
-    }
-    router
-        .clone()
-        .oneshot(request.body(Body::empty()).unwrap())
-        .await
-        .unwrap()
-}
-
-async fn put_empty(
-    router: &axum::Router,
-    uri: &str,
-    token: Option<&str>,
-) -> axum::response::Response {
-    let mut request = Request::builder().method("PUT").uri(uri);
     if let Some(token) = token {
         request = request.header(
             header::AUTHORIZATION,
@@ -5481,124 +5445,6 @@ async fn manual_media_tasks_require_admin_and_reject_unknown_scopes() {
 }
 
 #[tokio::test]
-async fn administrators_manage_library_scoped_hybrid_candidates_idempotently() {
-    let app = test_app().await;
-    let (hybrid, series) = seed_hybrid_series(&app.database).await;
-    let path = format!("/Admin/Libraries/{hybrid}/HybridCandidates/{series}");
-    let list = format!("/Admin/Libraries/{hybrid}/HybridCandidates?StartIndex=0&Limit=50");
-
-    let (_, _, token) = login(&app.router).await;
-    assert_eq!(
-        put_empty(&app.router, &path, Some(&token)).await.status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        put_empty(&app.router, &path, Some(&token)).await.status(),
-        StatusCode::NO_CONTENT
-    );
-    let response = get(&app.router, &list, Some(&token)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["TotalRecordCount"], 1);
-    assert_eq!(body["StartIndex"], 0);
-    assert_eq!(body["Items"][0]["Id"], series.to_string());
-    assert_eq!(body["Items"][0]["Name"], "Pinned Series");
-    assert!(body["Items"][0].get("Path").is_none());
-
-    assert_eq!(
-        delete_empty(&app.router, &path, Some(&token))
-            .await
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        delete_empty(&app.router, &path, Some(&token))
-            .await
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    let body = get(&app.router, &list, Some(&token)).await;
-    let body = body.into_body().collect().await.unwrap().to_bytes();
-    let body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["TotalRecordCount"], 0);
-}
-
-#[tokio::test]
-async fn hybrid_candidate_routes_enforce_admin_policy_membership_and_page_boundaries() {
-    let app = test_app().await;
-    let (hybrid, series) = seed_hybrid_series(&app.database).await;
-    let path = format!("/Admin/Libraries/{hybrid}/HybridCandidates/{series}");
-    let list = format!("/Admin/Libraries/{hybrid}/HybridCandidates?StartIndex=0&Limit=50");
-
-    assert_eq!(
-        get(&app.router, &list, None).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        put_empty(&app.router, &path, None).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-
-    let auth = AuthService::new(
-        app.database.clone(),
-        SystemClock,
-        Some(Duration::days(30)),
-        2,
-    )
-    .await
-    .unwrap();
-    auth.create_user("Bob", "ordinary password", false)
-        .await
-        .unwrap();
-    let (_, _, user_token) = login_as(&app.router, "bob", "ordinary password").await;
-    assert_eq!(
-        put_empty(&app.router, &path, Some(&user_token))
-            .await
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-
-    let (_, _, token) = login(&app.router).await;
-
-    let lazy = seed_library(&app.database, "Lazy Shows", true).await;
-    let lazy_series = seed_item(&app.database, lazy, "Lazy Series", "Series").await;
-    assert_eq!(
-        put_empty(
-            &app.router,
-            &format!("/Admin/Libraries/{lazy}/HybridCandidates/{lazy_series}"),
-            Some(&token),
-        )
-        .await
-        .status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        put_empty(
-            &app.router,
-            &format!(
-                "/Admin/Libraries/{hybrid}/HybridCandidates/{}",
-                Uuid::new_v4()
-            ),
-            Some(&token),
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get(
-            &app.router,
-            &format!("/Admin/Libraries/{hybrid}/HybridCandidates?Limit=0"),
-            Some(&token),
-        )
-        .await
-        .status(),
-        StatusCode::BAD_REQUEST
-    );
-}
-
-#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keeps the final-job, retry, and type-boundary HTTP contract together.
 async fn manual_expand_and_index_return_the_final_durable_media_jobs() {
     let app = test_app().await;
@@ -6249,7 +6095,7 @@ async fn virtual_folders_require_admin_and_return_sql_effective_policy_without_b
         "Id": library,
         "LibraryOptions": {
             "Enabled": false,
-            "ScanProfile": "Hybrid",
+            "ScanProfile": "Full",
             "ProfileVersion": 1,
             "ObjectSelectionScope": "all_synced_objects",
             "MetadataPolicy": "full",
@@ -6284,7 +6130,7 @@ async fn virtual_folders_require_admin_and_return_sql_effective_policy_without_b
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let folders: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(folders[0]["LibraryOptions"]["Enabled"], false);
-    assert_eq!(folders[0]["LibraryOptions"]["ScanProfile"], "Hybrid");
+    assert_eq!(folders[0]["LibraryOptions"]["ScanProfile"], "Full");
     assert_eq!(folders[0]["LibraryOptions"]["ProfileVersion"], 2);
     assert_eq!(
         folders[0]["LibraryOptions"]["ObjectSelectionScope"],
@@ -7300,6 +7146,28 @@ async fn system_settings_reject_missing_media_browser_roots_without_advancing_re
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(settings["Revision"], 0);
     assert_eq!(settings["MediaBrowserRoots"], json!([]));
+}
+
+#[tokio::test]
+async fn system_settings_report_unavailable_persisted_media_browser_roots() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let missing = app.media.path().join("missing");
+    let settings = SystemSettingsInput {
+        media_browser_roots: vec![missing.to_string_lossy().into_owned()],
+        ..SystemSettingsInput::default()
+    };
+    SystemSettingsRepository::new(&app.database)
+        .put(&settings, None)
+        .await
+        .unwrap();
+
+    let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let settings: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(settings["InvalidMediaBrowserRootIndexes"], json!([0]));
 }
 
 #[tokio::test]

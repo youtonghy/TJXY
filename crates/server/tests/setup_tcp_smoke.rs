@@ -46,15 +46,9 @@ async fn unconfigured_binary_serves_only_the_setup_runtime() {
     let base = format!("http://127.0.0.1:{port}");
     let status = wait_for(&client, &format!("{base}/Setup/Status")).await;
     assert_eq!(status.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        client
-            .get(format!("{base}/app/"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::NOT_FOUND
-    );
+    let redirected_application = client.get(format!("{base}/app/")).send().await.unwrap();
+    assert_eq!(redirected_application.status(), reqwest::StatusCode::OK);
+    assert_eq!(redirected_application.url().path(), "/setup/");
     assert_eq!(
         client
             .get(format!("{base}/setup/"))

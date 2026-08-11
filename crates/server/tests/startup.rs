@@ -22,8 +22,9 @@ use tjxy_common::{CatalogItemId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
     CatalogPublicationRepository, FilesystemRootDraft, LibraryPolicyUpdate, LibraryRepository,
-    MetadataProviderSettingsRepository, SystemSettingsInput, SystemSettingsRepository,
-    WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
+    MetadataProviderSettingsRepository, SchemaMigrationError, SystemSettingsInput,
+    SystemSettingsRepository, WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope,
+    WorkTaskKind,
 };
 use tjxy_metadata::{
     MetadataItemKind, MetadataLookup, MetadataProvider, MetadataProviderError,
@@ -437,7 +438,7 @@ async fn api_key_startup_rejects_persisted_keys_without_a_keyring() {
 }
 
 #[tokio::test]
-async fn api_key_startup_classifies_persistence_failures_without_sql_details() {
+async fn startup_classifies_schema_drift_without_sql_details() {
     let fixture = reconnectable_test_database().await.unwrap();
     tjxy_db::Migrator::up(fixture.connection(), None)
         .await
@@ -459,10 +460,17 @@ async fn api_key_startup_classifies_persistence_failures_without_sql_details() {
     let assets = TempDir::new().unwrap();
 
     let Err(error) = initialize(api_key_startup_options(&fixture, &assets)).await else {
-        panic!("startup unexpectedly ignored unavailable API key persistence");
+        panic!("startup unexpectedly ignored schema drift");
     };
 
-    assert_api_key_validation_error(&error, ApiKeyValidationError::PersistenceUnavailable);
+    let message = error.to_string();
+    assert!(!message.contains("DROP TABLE"));
+    assert!(!message.contains("SELECT "));
+    let InitializationError::DatabaseSchema(SchemaMigrationError::SchemaDrift { missing }) = error
+    else {
+        panic!("expected schema drift error, got {error:?}");
+    };
+    assert_eq!(missing, vec!["table api_keys"]);
 }
 
 #[tokio::test]
@@ -895,6 +903,16 @@ async fn media_browser_roots_load_from_database_unless_startup_explicitly_overri
     )
     .await
     .expect("explicit startup roots take precedence over the database value");
+
+    initialize(
+        StartupOptions::new(
+            database.database_url(),
+            ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"),
+        )
+        .with_assets_dir(assets.path()),
+    )
+    .await
+    .expect("unavailable persisted roots must not prevent startup");
 }
 
 #[tokio::test]
@@ -956,7 +974,7 @@ async fn a_new_database_cannot_report_ready_without_an_initial_administrator() {
 }
 
 #[tokio::test]
-async fn persisted_filesystem_root_is_loaded_and_invalid_root_blocks_readiness() {
+async fn persisted_filesystem_root_is_loaded_and_invalid_root_is_reported_offline() {
     let database = reconnectable_test_database().await.unwrap();
     tjxy_db::Migrator::up(database.connection(), None)
         .await
@@ -977,19 +995,57 @@ async fn persisted_filesystem_root_is_loaded_and_invalid_root_blocks_readiness()
         .create_with_filesystem_root("Movies", "movies", &policy, &root)
         .await
         .unwrap();
+    let assets = TempDir::new().unwrap();
 
-    let result = initialize(
+    let state = initialize(
         StartupOptions::new(
             database.database_url(),
             ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"),
         )
+        .with_assets_dir(assets.path())
         .with_bootstrap_admin(BootstrapAdmin::new("Admin", "first password")),
     )
-    .await;
-    let Err(error) = result else {
-        panic!("persisted invalid filesystem root unexpectedly allowed readiness");
-    };
-    assert!(error.to_string().contains("filesystem storage backend"));
+    .await
+    .expect("persisted invalid filesystem root must not block readiness");
+    let app = build_router(state);
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header(
+                    header::AUTHORIZATION,
+                    r#"MediaBrowser Client="Test", Device="Browser", DeviceId="offline-root", Version="1""#,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": "Admin", "Pw": "first password"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let login: Value =
+        serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let token = login["AccessToken"].as_str().unwrap();
+    let folders = app
+        .oneshot(
+            Request::builder()
+                .uri("/Library/VirtualFolders")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(folders.status(), StatusCode::OK);
+    let folders: Value =
+        serde_json::from_slice(&folders.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(folders[0]["UnavailableLocations"], folders[0]["Locations"]);
 }
 
 #[tokio::test]

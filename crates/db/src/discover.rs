@@ -1124,14 +1124,8 @@ fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError
     if trimmed.is_empty() || trimmed.chars().count() > 512 {
         return Err(DiscoverTitlesError::InvalidTitle);
     }
-    if let Some(prefix) = trimmed.strip_suffix(')')
-        && let Some((name, year)) = prefix.rsplit_once(" (")
-        && year.len() == 4
-        && let Ok(year) = year.parse::<i32>()
-        && (1..=9999).contains(&year)
-        && !name.trim().is_empty()
-    {
-        return Ok((name.trim().to_owned(), Some(year)));
+    if let Some((name, year)) = crate::title_year::split_title_year(trimmed) {
+        return Ok((name.to_owned(), Some(year)));
     }
     Ok((trimmed.to_owned(), None))
 }

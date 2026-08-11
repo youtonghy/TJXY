@@ -195,12 +195,18 @@ impl VirtualFolderRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualFolderRoot {
     id: Uuid,
+    storage_account_id: Option<Uuid>,
 }
 
 impl VirtualFolderRoot {
     #[must_use]
     pub fn location(self) -> String {
         format!("tjxy://storage-root/{}", self.id)
+    }
+
+    #[must_use]
+    pub const fn storage_account_id(self) -> Option<Uuid> {
+        self.storage_account_id
     }
 }
 
@@ -585,6 +591,7 @@ impl<'connection> LibraryRepository<'connection> {
         let library = Alias::new("virtual_folder_library");
         let mapping = Alias::new("virtual_folder_root_mapping");
         let root = Alias::new("virtual_folder_root");
+        let account = Alias::new("virtual_folder_storage_account");
         let query = Query::select()
             .columns([
                 (library.clone(), Alias::new("id")),
@@ -603,6 +610,10 @@ impl<'connection> LibraryRepository<'connection> {
                 Expr::col((root.clone(), Alias::new("id"))),
                 Alias::new("storage_root_id"),
             )
+            .expr_as(
+                Expr::col((account.clone(), Alias::new("id"))),
+                Alias::new("storage_account_id"),
+            )
             .from_as(Alias::new("libraries"), library.clone())
             .join_as(
                 JoinType::LeftJoin,
@@ -617,6 +628,13 @@ impl<'connection> LibraryRepository<'connection> {
                 root.clone(),
                 Expr::col((root.clone(), Alias::new("id")))
                     .equals((mapping, Alias::new("storage_root_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("storage_accounts"),
+                account.clone(),
+                Expr::col((account.clone(), Alias::new("id")))
+                    .equals((root.clone(), Alias::new("storage_account_id"))),
             )
             .order_by((library.clone(), Alias::new("sort_key")), Order::Asc)
             .order_by((library, Alias::new("id")), Order::Asc)
@@ -1217,11 +1235,15 @@ fn aggregate_folders(
             folders.push(folder_from_row(row, id)?);
         }
         if let Some(root_id) = row.try_get::<Option<Uuid>>("", "storage_root_id")? {
+            let storage_account_id = row.try_get::<Option<Uuid>>("", "storage_account_id")?;
             folders
                 .last_mut()
                 .expect("the current folder was inserted above")
                 .roots
-                .push(VirtualFolderRoot { id: root_id });
+                .push(VirtualFolderRoot {
+                    id: root_id,
+                    storage_account_id,
+                });
         }
     }
     Ok(folders)
@@ -1276,7 +1298,7 @@ fn validate_policy_values(
     expansion_policy: &str,
     probe_policy: &str,
 ) -> Result<(), LibraryRepositoryError> {
-    if !matches!(scan_profile, "Full" | "Lazy" | "Hybrid" | "Manual") {
+    if !matches!(scan_profile, "Full" | "Lazy" | "Manual") {
         return Err(LibraryRepositoryError::InvalidStoredPolicy);
     }
     validate_effective_policy_values(
@@ -1297,10 +1319,7 @@ pub(crate) fn validate_effective_policy_values(
         object_selection_scope,
         "all_synced_objects" | "title_layer" | "library_roots"
     ) && matches!(metadata_policy, "full" | "basic" | "none")
-        && matches!(
-            expansion_policy,
-            "eager" | "on_browse" | "background" | "manual"
-        )
+        && matches!(expansion_policy, "eager" | "on_browse" | "manual")
         && matches!(probe_policy, "eager" | "on_playback" | "manual")
     {
         Ok(())

@@ -1538,6 +1538,7 @@ fn item_dto(
             item.playback_position_ticks(),
         )),
     )
+    .with_metadata_state(item.metadata_state())
     .with_list_metadata(
         item.original_title().map(str::to_owned),
         item.community_rating(),

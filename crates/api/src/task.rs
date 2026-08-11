@@ -2,58 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct AdminHybridCandidateInfo {
-    id: Uuid,
-    name: String,
-    production_year: Option<i32>,
-    structure_state: String,
-    selected_at: DateTime<Utc>,
-}
-
-impl AdminHybridCandidateInfo {
-    #[must_use]
-    pub fn new(
-        id: Uuid,
-        name: impl Into<String>,
-        production_year: Option<i32>,
-        structure_state: impl Into<String>,
-        selected_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            id,
-            name: name.into(),
-            production_year,
-            structure_state: structure_state.into(),
-            selected_at,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct AdminHybridCandidatePage {
-    items: Vec<AdminHybridCandidateInfo>,
-    total_record_count: u64,
-    start_index: u64,
-}
-
-impl AdminHybridCandidatePage {
-    #[must_use]
-    pub const fn new(
-        items: Vec<AdminHybridCandidateInfo>,
-        total_record_count: u64,
-        start_index: u64,
-    ) -> Self {
-        Self {
-            items,
-            total_record_count,
-            start_index,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum ScheduledTaskState {
     Idle,
@@ -106,6 +54,12 @@ pub enum AdminTaskJobStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum AdminTaskJobOutcome {
+    NoMetadataMatch,
+    CompletedWithWarnings,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AdminTaskJobInfo {
@@ -119,6 +73,7 @@ pub struct AdminTaskJobInfo {
     created_at: Option<DateTime<Utc>>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+    outcome: Option<AdminTaskJobOutcome>,
 }
 
 impl AdminTaskJobInfo {
@@ -135,6 +90,7 @@ impl AdminTaskJobInfo {
         created_at: Option<DateTime<Utc>>,
         started_at: Option<DateTime<Utc>>,
         completed_at: Option<DateTime<Utc>>,
+        outcome: Option<AdminTaskJobOutcome>,
     ) -> Self {
         Self {
             id,
@@ -147,6 +103,7 @@ impl AdminTaskJobInfo {
             created_at,
             started_at,
             completed_at,
+            outcome,
         }
     }
 }

@@ -31,6 +31,7 @@ export interface MediaItem {
   People?: MediaPerson[];
   ProviderIds?: Record<string, string>;
   HasMediaSources?: boolean;
+  MetadataState?: 'Partial' | 'Complete';
   PrimaryImageTag?: string;
   ImageTags?: Record<string, string>;
   UserData?: MediaUserData;

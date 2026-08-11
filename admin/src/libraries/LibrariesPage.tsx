@@ -1,5 +1,5 @@
 import { Button, Skeleton, Table, Tooltip } from '@heroui/react';
-import { FolderKanban, Pencil, Plus, RefreshCw } from 'lucide-react';
+import { FolderKanban, Pencil, Plus, RefreshCw, TriangleAlert } from 'lucide-react';
 import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
 import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
@@ -44,6 +44,12 @@ export function LibrariesPage() {
     if ('records' in result) {
       return () => {
         setLibraries(result.records);
+        if (result.records.some((library) => library.enabled && (library.unavailableLocations?.length ?? 0) > 0)) {
+          notify('Some library storage roots are offline. Restore the volumes and restart TJXY.', {
+            type: 'warning',
+            autoHideDuration: 8000,
+          });
+        }
         setHasLoaded(true);
         setLoadError(null);
         setAuthRedirecting(false);
@@ -53,7 +59,7 @@ export function LibrariesPage() {
       return () => { setAuthRedirecting(true); };
     }
     return () => { setLoadError(result.error ?? new Error('Library loading failed.')); };
-  }, [logoutIfAccessDenied]);
+  }, [logoutIfAccessDenied, notify]);
 
   const { isMounted, loading, reload } = useAuthoritativeLoad(fetchLibraries, prepareLoadResult);
 
@@ -107,7 +113,7 @@ export function LibrariesPage() {
             </Button>
           </>
         )}
-        description="Configure catalog sources, scanning behavior, and background expansion preferences."
+        description="Configure catalog sources and scanning behavior."
         title="Libraries"
       />
 
@@ -160,7 +166,7 @@ function LibrariesTable({ libraries }: { libraries: LibraryOption[] }) {
               <Table.Row id={library.id} key={library.id}>
                 <Table.Cell><LibraryName library={library} /></Table.Cell>
                 <Table.Cell>{collectionLabel(library.collectionType)}</Table.Cell>
-                <Table.Cell><LibraryStatus enabled={library.enabled} /></Table.Cell>
+                <Table.Cell><LibraryStatus library={library} /></Table.Cell>
                 <Table.Cell>{library.scanProfile}</Table.Cell>
                 <Table.Cell><PolicySummary library={library} /></Table.Cell>
                 <Table.Cell><span className="block text-right tabular-nums">{library.locations.length}</span></Table.Cell>
@@ -182,7 +188,7 @@ function LibrariesMobileList({ libraries }: { libraries: LibraryOption[] }) {
           <LibraryName library={library} />
           <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
             <MobileField label="Type">{collectionLabel(library.collectionType)}</MobileField>
-            <MobileField label="Status"><LibraryStatus enabled={library.enabled} /></MobileField>
+            <MobileField label="Status"><LibraryStatus library={library} /></MobileField>
             <MobileField label="Scan profile">{library.scanProfile}</MobileField>
             <MobileField label="Policy"><PolicySummary library={library} /></MobileField>
             <MobileField label="Storage roots">{library.locations.length}</MobileField>
@@ -203,8 +209,15 @@ function LibraryName({ library }: { library: LibraryOption }) {
   );
 }
 
-function LibraryStatus({ enabled }: { enabled: boolean }) {
-  return <StatusChip tone={enabled ? 'success' : 'neutral'}>{enabled ? 'Enabled' : 'Disabled'}</StatusChip>;
+function LibraryStatus({ library }: { library: LibraryOption }) {
+  if (!library.enabled) {
+    return <StatusChip tone="neutral">Disabled</StatusChip>;
+  }
+  const offline = (library.unavailableLocations?.length ?? 0) > 0;
+  if (offline) {
+    return <StatusChip tone="warning"><span className="inline-flex items-center gap-1"><TriangleAlert aria-hidden="true" className="size-3.5" />Offline</span></StatusChip>;
+  }
+  return <StatusChip tone="success">Enabled</StatusChip>;
 }
 
 function PolicySummary({ library }: { library: LibraryOption }) {

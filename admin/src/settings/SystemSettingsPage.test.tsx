@@ -1,7 +1,9 @@
+import { Toast } from '@heroui/react';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { renderWithAdmin } from '../test/renderWithAdmin';
+import { AdminNotifications } from '../ui/AdminNotifications';
 import { SystemSettingsPage } from './SystemSettingsPage';
 import {
   getSystemSettings,
@@ -31,6 +33,7 @@ const settings = {
   listenHost: '127.0.0.1',
   port: 8096,
   mediaBrowserRoots: ['/media/movies'],
+  invalidMediaBrowserRootIndexes: [],
   revision: 2,
   restartRequired: false,
   environmentOverrides: {
@@ -71,6 +74,25 @@ it('edits branding and network settings through one save action', async () => {
     }));
   });
   expect(await screen.findByText('Restart required')).toBeVisible();
+  expect(screen.getByText('Restart TJXY to apply the pending system settings.')).toBeVisible();
+});
+
+it('reminds the administrator to restart after saving restart-sensitive settings', async () => {
+  const restartWarning = vi.spyOn(Toast.toast, 'warning').mockReturnValue('restart-warning');
+  renderWithAdmin(
+    <><SystemSettingsPage /><AdminNotifications /></>,
+    { initialEntries: ['/admin/settings/system'] },
+  );
+  const user = userEvent.setup();
+
+  await user.click(await screen.findByRole('button', { name: 'Save settings' }));
+
+  await waitFor(() => {
+    expect(restartWarning).toHaveBeenCalledWith(
+      'System settings saved. Restart TJXY for the changes to take effect.',
+      { timeout: 8000 },
+    );
+  });
 });
 
 it('uploads a local logo and keeps a URL field as the advanced option', async () => {
@@ -108,5 +130,28 @@ it('manages multiple media browser roots through the shared save action', async 
     expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({
       mediaBrowserRoots: ['/media/music', '/media/concerts'],
     }));
+  });
+});
+
+it('warns without blocking settings when persisted media browser roots are unavailable', async () => {
+  const warningToast = vi.spyOn(Toast.toast, 'warning').mockReturnValue('root-warning');
+  getMock.mockResolvedValue({
+    ...settings,
+    mediaBrowserRoots: ['/missing/media'],
+    invalidMediaBrowserRootIndexes: [0],
+  });
+
+  renderWithAdmin(
+    <><SystemSettingsPage /><AdminNotifications /></>,
+    { initialEntries: ['/admin/settings/system'] },
+  );
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Some media browser folders are unavailable');
+  expect(screen.getByLabelText('Media browser root 1')).toBeInvalid();
+  await waitFor(() => {
+    expect(warningToast).toHaveBeenCalledWith(
+      'Some media browser folders are unavailable',
+      { timeout: 8000 },
+    );
   });
 });

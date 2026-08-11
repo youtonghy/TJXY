@@ -12,6 +12,7 @@ pub struct VirtualFolderInfo {
     primary_image_item_id: Option<Uuid>,
     refresh_progress: Option<u8>,
     refresh_status: Option<String>,
+    unavailable_locations: Vec<String>,
 }
 
 impl VirtualFolderInfo {
@@ -32,7 +33,14 @@ impl VirtualFolderInfo {
             primary_image_item_id: None,
             refresh_progress: None,
             refresh_status: None,
+            unavailable_locations: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_unavailable_locations(mut self, locations: Vec<String>) -> Self {
+        self.unavailable_locations = locations;
+        self
     }
 }
 

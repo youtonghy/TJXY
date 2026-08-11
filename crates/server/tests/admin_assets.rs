@@ -7,7 +7,10 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use tempfile::TempDir;
-use tjxy_server::{AdminAssetsError, AppState, ServerIdentity, build_router_with_admin_dist};
+use tjxy_server::{
+    AdminAssetsError, AppState, InstallationConfigStore, ServerIdentity, SetupCoordinator,
+    SetupValidator, build_router_with_admin_dist, build_setup_router_with_admin_dist,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -105,6 +108,59 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
     assert_eq!(body_text(response).await, "RIFF-brand-fixture-WEBP");
+}
+
+#[tokio::test]
+async fn redirects_setup_pages_to_the_installed_application() {
+    let distribution = distribution();
+    let app = build_router_with_admin_dist(state(), distribution.path()).unwrap();
+
+    for path in ["/setup", "/setup/", "/setup/recovery"] {
+        let response = request(&app, Method::GET, path).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "path {path}"
+        );
+        assert_eq!(response.headers()[header::LOCATION], "/app/");
+    }
+}
+
+#[tokio::test]
+async fn redirects_application_pages_to_setup_before_installation() {
+    let distribution = distribution();
+    let configuration = tempfile::tempdir().unwrap();
+    let validator = SetupValidator::new(vec![configuration.path().to_path_buf()]).unwrap();
+    let app = build_setup_router_with_admin_dist(
+        SetupCoordinator::new(
+            InstallationConfigStore::at(configuration.path().join("tjxy.toml")),
+            validator.clone(),
+        ),
+        validator,
+        distribution.path(),
+    )
+    .unwrap();
+
+    for path in [
+        "/app",
+        "/app/",
+        "/app/items/item-1",
+        "/admin",
+        "/admin/libraries",
+    ] {
+        let response = request(&app, Method::GET, path).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "path {path}"
+        );
+        assert_eq!(response.headers()[header::LOCATION], "/setup/");
+    }
+
+    assert_eq!(
+        request(&app, Method::GET, "/unknown-api").await.status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

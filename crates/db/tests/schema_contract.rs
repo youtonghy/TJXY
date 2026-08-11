@@ -1,13 +1,309 @@
 use sea_orm::{
     ConnectionTrait, DbBackend, Statement,
-    sea_query::{Alias, Expr, Order, Query},
+    sea_query::{Alias, Expr, Index, Order, Query},
 };
 use sea_orm_migration::{MigratorTrait, SchemaManager};
 use tjxy_common::Username;
-use tjxy_db::{AuthRepository, Migrator};
+use tjxy_db::{
+    AuthRepository, LibraryPolicyUpdate, LibraryRepository, Migrator, SchemaMigrationError,
+    migrate_database,
+};
 use tjxy_test_support::test_database;
 
 const AI_MESSAGE_SEQUENCE_MIGRATION_POSITION: u32 = 55;
+const HYBRID_REMOVAL_MIGRATION_POSITION: u32 = 56;
+const LEGACY_TITLE_YEAR_MIGRATION_POSITION: u32 = 57;
+
+#[tokio::test]
+async fn older_database_is_upgraded_by_the_shared_schema_entrypoint() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(AI_MESSAGE_SEQUENCE_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+
+    migrate_database(&database).await.unwrap();
+
+    let schema = SchemaManager::new(&database);
+    assert!(
+        schema
+            .has_column("ai_messages", "sequence_number")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn hybrid_libraries_are_migrated_to_lazy_without_losing_other_policy_values() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(HYBRID_REMOVAL_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+    let library = LibraryRepository::new(&database)
+        .create(
+            "Legacy Hybrid",
+            "movies",
+            &LibraryPolicyUpdate::new(
+                "Lazy",
+                "title_layer",
+                "full",
+                "on_browse",
+                "on_playback",
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("scan_profile"), "Hybrid")
+                    .value(Alias::new("expansion_policy"), "background")
+                    .and_where(Expr::col(Alias::new("id")).eq(library.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    migrate_database(&database).await.unwrap();
+
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("scan_profile"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("profile_version"),
+                    ])
+                    .from(Alias::new("libraries"))
+                    .and_where(Expr::col(Alias::new("id")).eq(library.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "scan_profile").unwrap(), "Lazy");
+    assert_eq!(
+        row.try_get::<String>("", "metadata_policy").unwrap(),
+        "full"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "expansion_policy").unwrap(),
+        "on_browse"
+    );
+    assert_eq!(row.try_get::<i32>("", "profile_version").unwrap(), 2);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps legacy and protected rows in one migration transaction contract.
+async fn legacy_title_years_are_split_without_overwriting_remote_metadata() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(LEGACY_TITLE_YEAR_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+    let backend = database.get_database_backend();
+    let legacy = uuid::Uuid::new_v4();
+    let protected = uuid::Uuid::new_v4();
+    for (id, name) in [
+        (legacy, "玩具总动员5(2026)"),
+        (protected, "Remote Movie(2024)"),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("catalog_items"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("item_type"),
+                            Alias::new("name"),
+                            Alias::new("sort_name"),
+                            Alias::new("sort_key"),
+                            Alias::new("classification_state"),
+                            Alias::new("metadata_state"),
+                            Alias::new("structure_state"),
+                            Alias::new("source_state"),
+                            Alias::new("structure_expansion_revision"),
+                            Alias::new("source_index_revision"),
+                            Alias::new("is_present"),
+                        ])
+                        .values_panic([
+                            id.into(),
+                            "Movie".into(),
+                            name.into(),
+                            name.to_lowercase().into(),
+                            tjxy_common::SortKey::from_text(name).into_bytes().into(),
+                            "Matched".into(),
+                            "Partial".into(),
+                            "NotApplicable".into(),
+                            "NotIndexed".into(),
+                            0_i64.into(),
+                            0_i64.into(),
+                            true.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("provider_ids"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("provider"),
+                        Alias::new("provider_item_id"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        protected.into(),
+                        "tmdb".into(),
+                        "123".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    migrate_database(&database).await.unwrap();
+    migrate_database(&database).await.unwrap();
+
+    let legacy = database
+        .query_one(
+            backend.build(
+                &Query::select()
+                    .columns([
+                        Alias::new("name"),
+                        Alias::new("production_year"),
+                        Alias::new("metadata_revision"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(legacy))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.try_get::<String>("", "name").unwrap(), "玩具总动员5");
+    assert_eq!(
+        legacy
+            .try_get::<Option<i32>>("", "production_year")
+            .unwrap(),
+        Some(2026)
+    );
+    assert_eq!(legacy.try_get::<i64>("", "metadata_revision").unwrap(), 1);
+
+    let protected = database
+        .query_one(
+            backend.build(
+                &Query::select()
+                    .columns([Alias::new("name"), Alias::new("production_year")])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(protected))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        protected.try_get::<String>("", "name").unwrap(),
+        "Remote Movie(2024)"
+    );
+    assert_eq!(
+        protected
+            .try_get::<Option<i32>>("", "production_year")
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn newer_database_is_rejected_without_mutating_migration_history() {
+    let database = test_database().await.unwrap();
+    migrate_database(&database).await.unwrap();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("seaql_migrations"))
+                    .columns([Alias::new("version"), Alias::new("applied_at")])
+                    .values_panic(["m99999999_999999_future_schema".into(), 0_i64.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let error = migrate_database(&database).await.unwrap_err();
+    assert!(matches!(
+        error,
+        SchemaMigrationError::DatabaseIsNewer { .. }
+    ));
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("version"))
+                    .from(Alias::new("seaql_migrations")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(rows.iter().any(|row| {
+        row.try_get::<String>("", "version").unwrap() == "m99999999_999999_future_schema"
+    }));
+}
+
+#[tokio::test]
+async fn applied_migration_with_missing_schema_object_is_reported_as_drift() {
+    let database = test_database().await.unwrap();
+    migrate_database(&database).await.unwrap();
+    let manager = SchemaManager::new(&database);
+    manager
+        .drop_index(
+            Index::drop()
+                .name("uq_ai_messages_conversation_sequence")
+                .table(Alias::new("ai_messages"))
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+
+    let error = migrate_database(&database).await.unwrap_err();
+    assert!(matches!(error, SchemaMigrationError::SchemaDrift { .. }));
+}
+
+#[test]
+fn every_migration_file_is_registered_in_order() {
+    let mut files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/migration"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_str()?;
+            name.strip_prefix('m')?
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+                .then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let registered = Migrator::migrations()
+        .into_iter()
+        .map(|migration| migration.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(registered, files);
+}
 
 #[tokio::test]
 async fn ai_message_sequence_migration_backfills_existing_conversations() {

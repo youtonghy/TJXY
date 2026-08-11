@@ -2,7 +2,6 @@ use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, time::Duration as
 
 use chrono::Duration;
 use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
-use sea_orm_migration::MigratorTrait;
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
@@ -456,7 +455,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             ))
             .await?;
     }
-    tjxy_db::Migrator::up(&database, None).await?;
+    tjxy_db::migrate_database(&database).await?;
     if database.get_database_backend() == DbBackend::MySql {
         database.close().await?;
         database = Database::connect(&options.database_url).await?;
@@ -474,13 +473,19 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
                     .collect()
             }),
     };
-    let filesystem_browser = if filesystem_browser_roots.is_empty() {
-        None
-    } else {
-        Some(Arc::new(
-            FilesystemBrowser::from_roots(filesystem_browser_roots).await?,
-        ))
-    };
+    let (filesystem_browser, invalid_root_indexes) =
+        FilesystemBrowser::from_available_roots(filesystem_browser_roots).await;
+    if !invalid_root_indexes.is_empty() {
+        eprintln!(
+            "Filesystem browser skipped unavailable root indexes: {}",
+            invalid_root_indexes
+                .iter()
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let filesystem_browser = filesystem_browser.map(Arc::new);
     load_persisted_tmdb_settings(
         &database,
         metadata_settings_cipher.as_deref(),
@@ -586,9 +591,14 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
         Arc::new(AssetWriteService::new(database.clone(), options.assets_dir.clone()).await?);
     let image_fetcher = Arc::new(ReqwestMetadataImageFetcher::new()?);
     let assets = Arc::new(AssetReadService::new(database.clone(), options.assets_dir).await?);
-    let filesystem_backends =
-        prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled)
-            .await?;
+    let (filesystem_backends, unavailable_filesystem_accounts) =
+        prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled).await;
+    if !unavailable_filesystem_accounts.is_empty() {
+        eprintln!(
+            "{} filesystem storage account(s) remain offline until their roots are restored and TJXY is restarted",
+            unavailable_filesystem_accounts.len()
+        );
+    }
     let mut metadata_providers = options.metadata_providers;
     metadata_providers.insert(
         0,
@@ -898,17 +908,35 @@ async fn load_google_backends(
 async fn prepare_filesystem_backends(
     configured: Vec<(Uuid, PathBuf)>,
     realtime_enabled: bool,
-) -> Result<Vec<PreparedFilesystemBackend>, tjxy_storage::BackendError> {
+) -> (Vec<PreparedFilesystemBackend>, Vec<Uuid>) {
     let mut prepared = Vec::with_capacity(configured.len());
+    let mut unavailable = Vec::new();
     for (account_id, root) in configured {
-        let backend = Arc::new(FilesystemBackend::new(root).await?);
-        prepared.push(PreparedFilesystemBackend {
-            account_id,
-            backend,
-            realtime_enabled,
-        });
+        match FilesystemBackend::new(&root).await {
+            Ok(backend) => prepared.push(PreparedFilesystemBackend {
+                account_id,
+                backend: Arc::new(backend),
+                realtime_enabled,
+            }),
+            Err(error) => {
+                unavailable.push(account_id);
+                eprintln!(
+                    "Filesystem storage account {account_id} is offline ({})",
+                    backend_error_category(&error)
+                );
+            }
+        }
     }
-    Ok(prepared)
+    (prepared, unavailable)
+}
+
+fn backend_error_category(error: &tjxy_storage::BackendError) -> &'static str {
+    match error {
+        tjxy_storage::BackendError::NotFound => "not found",
+        tjxy_storage::BackendError::InvalidValue { .. } => "invalid root",
+        tjxy_storage::BackendError::TemporarilyUnavailable { .. } => "temporarily unavailable",
+        _ => "initialization failed",
+    }
 }
 
 fn configure_storage(
@@ -1043,6 +1071,8 @@ pub enum InitializationError {
     InvalidStorageBackend(String),
     #[error("database initialization failed: {0}")]
     Database(#[from] DbErr),
+    #[error("database schema is incompatible: {0}")]
+    DatabaseSchema(#[from] tjxy_db::SchemaMigrationError),
     #[error("filesystem storage configuration query failed: {0}")]
     FilesystemConfiguration(#[from] LibraryRepositoryError),
     #[error("system settings query failed: {0}")]
@@ -1162,7 +1192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_backends_are_all_validated_before_worker_configuration() {
+    async fn filesystem_backends_keep_valid_roots_and_report_unavailable_accounts() {
         let valid = TempDir::new().unwrap();
         let missing = PathBuf::from(format!("/definitely/missing/tjxy-{}", Uuid::new_v4()));
 
@@ -1175,7 +1205,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        assert_eq!(result.0.len(), 1);
+        assert_eq!(result.1.len(), 1);
     }
 
     #[tokio::test]

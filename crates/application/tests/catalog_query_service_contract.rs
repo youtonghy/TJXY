@@ -1558,3 +1558,47 @@ async fn lazy_requests_join_one_durable_job_and_hidden_items_schedule_nothing() 
         .unwrap();
     assert!(hidden_jobs.is_empty());
 }
+
+#[tokio::test]
+async fn lazy_item_detail_retries_partial_automatic_metadata() {
+    let (service, database, item, user) = lazy_service("Movie", true).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_state"), "Partial")
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    service.item_detail(user, None, item).await.unwrap();
+
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("task_kind"),
+                        Alias::new("expected_revision"),
+                        Alias::new("metadata_source_mode"),
+                    ])
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ResolveMetadata")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].try_get::<i64>("", "expected_revision").unwrap(), 11);
+    assert_eq!(
+        rows[0]
+            .try_get::<String>("", "metadata_source_mode")
+            .unwrap(),
+        "automatic_scrape"
+    );
+}

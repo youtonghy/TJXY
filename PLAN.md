@@ -49,7 +49,7 @@ TJXY 将这些职责拆开：StorageBackend 负责对象和字节，Storage Sync
 | G5 | React Admin | 向导、用户、存储账号、库、扫描、metadata、迁移和冲突管理 |
 | G6 | 功能对位 | `docs/api-parity.md` 与客户端最小链路持续更新 |
 | G7 | 原生云存储 | Google Drive、OneDrive 无需 rclone 或 OS 挂载即可建库、扫描和播放 |
-| G8 | 多扫描模式 | 每个媒体库可选择 Full、Lazy、Hybrid 或 Manual |
+| G8 | 多扫描模式 | 每个媒体库可选择 Full、Lazy 或 Manual |
 | G9 | 条目与文件解耦 | 一个逻辑作品可以拥有多个媒体版本和多个存储位置 |
 | G10 | Metadata 与图片复用 | 相同作品不重复获取 metadata；相同图片 hash 只保存一份 |
 | G11 | 云盘增量同步 | Google Drive Changes、OneDrive Delta 正常周期只处理变化对象 |
@@ -112,7 +112,7 @@ Jellyfin OpenAPI 是唯一主要协议契约。`ProductName` 和 `Version` 诚�
 | 项 | 决策 |
 |----|------|
 | 选择 | Media Scan 拆分为 Storage Object Selection、Title Classification、Metadata Resolution、Structure Expansion、Media Source Discovery、Media Probe |
-| 模式 | 每个媒体库支持 Full、Lazy、Hybrid、Manual |
+| 模式 | 每个媒体库支持 Full、Lazy、Manual |
 | 原因 | 大型云端冷媒体库不应在初次建库时读取全部内部目录和媒体头 |
 | 后果 | 每个阶段有独立状态、任务、重试和优先级；用户访问可触发高优先级展开 |
 
@@ -529,7 +529,7 @@ user_data
 - updated_at
 ```
 
-`scan_profile` 固定为 `Full | Lazy | Hybrid | Manual`。选择预设时，同一事务把 §10.1 对应的四个 effective policy 写入 Library；高级设置修改后保留 profile 名和 `profile_version`，但调度器只读取 SQL 中的 effective policy，不依赖代码隐藏默认值。VirtualFolders DTO 和 Admin 表单都映射同一行。
+`scan_profile` 固定为 `Full | Lazy | Manual`。旧数据库中的 `Hybrid` 在迁移时转换为 `Lazy`，`background` expansion 转换为 `on_browse`。选择预设时，同一事务把 §10.1 对应的四个 effective policy 写入 Library；高级设置修改后保留 profile 名和 `profile_version`，但调度器只读取 SQL 中的 effective policy，不依赖代码隐藏默认值。VirtualFolders DTO 和 Admin 表单都映射同一行。
 
 每次提交 UserData 变更时，在同一事务 upsert `user_data` 并递增对应 `user_catalog_state.revision`。播放进度可以按配置节流，但每个实际 SQL commit 只递增一次；Favorite、Played、PlayCount 和 Position 使用同一 revision 空间。Redis user-scoped key 固定包含 `g:{catalog_generation}:u:{user_id}:r:{user_revision}`，因此 Redis 失败或并发更新不会使已提交 UserData 被旧 Resume/NextUp/Home key 遮蔽。
 
@@ -709,7 +709,7 @@ Google Drive / OneDrive / Filesystem
     Storage Objects        |
           |                |
           v                |
- Full/Lazy/Hybrid/Manual   |
+    Full/Lazy/Manual       |
           Media Scan       |
           |                |
           v                |
@@ -874,7 +874,6 @@ probe_policy
 |------|------------------|----------|-----------|-------|
 | Full | all_synced_objects | full | eager | eager |
 | Lazy | title_layer | basic | on_browse | on_playback |
-| Hybrid | title_layer | basic | background | on_playback |
 | Manual | library_roots | none | manual | on_playback |
 
 ### 10.2 Full
@@ -896,7 +895,9 @@ Full Media Scan 以前置成功的 Storage Inventory/Validate 为依赖，从 SQ
 
 首次进入 Movie：由详情请求触发；若子树未物化先等待 scoped Storage Sync，再从 SQL 对象建立版本、Location 和外挂字幕，不 Probe。PlaybackInfo 在 source 尚未索引时复用同一任务并等待。
 
-首次进入 Series：递归该 Series 已同步子树，识别全部 Season/Episode/Location/字幕；使用 publication staging 完整校验后一次切换 active publication，不 Probe。发布成功时所有已发现 Episode 的 `source_state=Indexed`，其 Source/Location/Subtitle 已可用但 Probe 仍为 NotProbed。所有 Expand Item，无论来自用户、Hybrid 后台或 Full 调度，都共用持久化 job 和相同的 staging/原子可见协议；普通任务使用 `(catalog_item_id, task_kind, expected_revision)`，binding-scoped root Full 派生任务还必须包含 `storage_root_affinity`；失败不发布半成品。
+首次进入 Series：递归该 Series 已同步子树，识别全部 Season/Episode/Location/字幕；使用 publication staging 完整校验后一次切换 active publication，不 Probe。发布成功时所有已发现 Episode 的 `source_state=Indexed`，其 Source/Location/Subtitle 已可用但 Probe 仍为 NotProbed。所有 Expand Item，无论来自用户访问或 Full 调度，都共用持久化 job 和相同的 staging/原子可见协议；普通任务使用 `(catalog_item_id, task_kind, expected_revision)`，binding-scoped root Full 派生任务还必须包含 `storage_root_affinity`；失败不发布半成品。
+
+Movie/Series 详情访问发现 `metadata_state=Partial` 且媒体库为 `automatic_scrape` 时，会按短冷却窗口重新提交一次 durable Resolve Metadata，并在 API 的有限等待后返回当前 active 数据。客户端对 Partial 状态做有界轮询，完成后刷新详情；管理员可见蓝色扫描状态，并根据最新 Resolve Metadata 任务结果区分“无匹配”和“服务不可达”，普通用户不显示这些运维状态。
 
 首次 PlaybackInfo：若 Movie/Episode source 尚未索引，先等待对应 Source Index 任务；然后选择候选 MediaSource，Probe 数据不存在或 stale 时读取必要容器头/尾 Range，写 SQL 后返回。
 
@@ -905,22 +906,18 @@ Full Media Scan 以前置成功的 Storage Inventory/Validate 为依赖，从 SQ
 | Item 类型 | 触发 | 任务 | 状态字段 | 原子发布内容 |
 |-----------|------|------|----------|--------------|
 | Movie | `GET /Items/{id}`；PlaybackInfo 可等待 | Index Media Sources | `source_state`，`structure_state=NotApplicable` | MediaSource、MediaLocation、Subtitle |
-| Series | `GET /Items?ParentId=...`；Hybrid/Full | Expand Item | Series `structure_state`；子 Episode `source_state` | Season、Episode 及其 Source/Location/Subtitle；子 Episode 标记 Indexed |
+| Series | `GET /Items?ParentId=...`；Full | Expand Item | Series `structure_state`；子 Episode `source_state` | Season、Episode 及其 Source/Location/Subtitle；子 Episode 标记 Indexed |
 | Episode | 独立条目、Expand 未携带源、storage 变更或管理员 re-index；PlaybackInfo 可等待 | Index Media Sources | `source_state` | MediaSource、MediaLocation、Subtitle |
 
 两个任务都使用 `(catalog_item_id, task_kind, expected_revision)` 持久化 single-flight；root Full 还把 `storage_root_affinity` 作为持久化输入和提交围栏，不同 affinity 的同 revision 请求不兼容。Series 子树新增/删除/层级变化递增 Series `structure_expansion_revision` 并排 Expand；某 Episode 的媒体对象、sidecar 或 revision 变化递增该 Episode `source_index_revision` 并排 Index，除非该变化同时改变 Series 结构，此时两者都递增。Series Expand 发布时把每个子 Episode 的 source revision 记录为本次已同步 Storage revision；随后 PlaybackInfo 不重复 Index，只有 source 缺失或 revision stale 才走 Episode 任务。任务提交前必须再次比较 expected/current revision，不一致则丢弃 publication 并重试，禁止发布过期结果。成功发布必须递增 catalog generation。
 
 Library membership 规则：标题层 CatalogItem 显式关联 library；Expand 发布子项时，Season/Episode 继承被展开 Series 当前全部 `library_catalog_items` 关联。Series 从某库移除时，仅移除该库对应子树关联；只要仍被其他库或 MediaSource 引用，就不删除共享 CatalogItem。库根查询走 membership join，树内查询同时校验父项在目标库的 membership。
 
-### 10.4 Hybrid
-
-初次与 Lazy 相同。后台按低优先级展开最近添加、正在观看、收藏、首页候选和管理员指定条目。用户 Expand/PlaybackInfo 优先于后台任务；后台展开仍必须遵守与用户触发相同的 single-flight、完整校验和原子发布。
-
-### 10.5 Manual
+### 10.4 Manual
 
 Manual 是 root-scoped：初始只注册 `library_storage_roots`，不持久化隐式 selected object 集合。管理员命令必须显式携带 library root 或 CatalogItem scope；Discover Titles 对指定 root 的标题层执行，Expand/Resolve/Probe 对指定 CatalogItem 执行，Full Scan 对指定 root 执行。
 
-### 10.6 Probe 失效
+### 10.5 Probe 失效
 
 Probe 可以直接针对任一单独 Location 执行，并记录 `probe_location_id + probe_location_revision`；Filesystem 单位置默认使用 backend object revision（canonical path、size、mtime/file ID 的版本组合）判断该 Location 自身结果是否失效，但该组合不具备跨 Location 复用资格。只有 `provider_checksum`、`verified_content_identity` 或 `admin_confirmed` 才允许不同 Location 共享 Probe。Location revision 变化时先使结果 Stale；可信 content identity 不一致时将该 Location 从原 MediaSource 分离并重新分类。管理员可显式重新 Probe。
 
@@ -1054,7 +1051,6 @@ PlaybackInfo Probe       高
 用户触发 scoped sync/Expand/Index 高
 云盘增量同步                    中
 后台 metadata            低
-Hybrid 后台展开          更低
 Full Scan               最低
 ```
 
@@ -1118,7 +1114,7 @@ OAuth token 不出现在 TOML；配置只引用加密 credential store。
 5. OneDrive OAuth 和目录选择；
 6. 账号限流、错误和重新授权；
 7. Storage Sync 状态；
-8. 媒体库和 Full/Lazy/Hybrid/Manual 模式；
+8. 媒体库和 Full/Lazy/Manual 模式；
 9. 扫描阶段高级配置；
 10. 未展开、未匹配和重复候选；
 11. CatalogItem 合并/拆分和 Provider ID 修正；
@@ -1142,7 +1138,7 @@ OAuth token 不出现在 TOML；配置只引用加密 credential store。
 
 ### Phase 1：Filesystem 端到端
 
-- FilesystemBackend、稳定 file ID/weak path move 对账、Full/Lazy/Manual；Hybrid 调度基础。
+- FilesystemBackend、稳定 file ID/weak path move 对账、Full/Lazy/Manual。
 - Lazy 基础 metadata 及 Partial 降级语义。
 - Movie Source Indexing；Series 首次完整原子展开。
 - PlaybackInfo 惰性 Probe。
@@ -1154,7 +1150,7 @@ OAuth token 不出现在 TOML；配置只引用加密 credential store。
 - OAuth、My Drive、Shared Drive、目录选择。
 - StorageObject、Changes、cursor、scoped sync、outbox reconciliation、限流和重试。
 - Range 代理、token 刷新和断连取消。
-- Lazy/Hybrid 扫描。
+- Lazy 扫描。
 - Strict Lazy 初始标题层 inventory + 访问时 scoped Storage Sync。
 
 ### Phase 3：OneDrive
@@ -1200,7 +1196,7 @@ Initial Delta、nextLink、deltaLink、变更重放、删除、token 失效、�
 - Movie 详情触发 Source Indexing；直接请求 PlaybackInfo 时复用同一任务后再 Probe。
 - 首次 Series 只扫描该子树，一次发布全部 Season/Episode。
 - Series Expand 发布后 Episode source 已 Indexed，首次 PlaybackInfo 只 Probe；媒体 revision 变化后才单独 Source Index。
-- 用户、Hybrid 后台和另一 server instance 并发 Expand 同一 Item 时只有一个持久化 job；其他请求 join，API 超时只读取 active publication。
+- 用户和另一 server instance 并发 Expand 同一 Item 时只有一个持久化 job；其他请求 join，API 超时只读取 active publication。
 - worker 崩溃后 lease 可接管并按 natural key 恢复 staging；Storage revision 在任务运行中变化时丢弃旧 publication；成功后 generation bump 且旧缓存立即失效。
 - 超大 Series 用分批 staging + 一次 active pointer 切换，对外从不出现部分 Season/Episode。
 - 同一 Series 属于多个 library 时，展开子项继承全部 membership；移出一个库不影响其他库。

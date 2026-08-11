@@ -3,7 +3,6 @@ use std::{collections::HashSet, env, path::PathBuf};
 use chrono::Utc;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use sea_orm::{Database, DatabaseConnection, DbErr};
-use sea_orm_migration::MigratorTrait;
 use thiserror::Error;
 use tjxy_application::{
     AssetWriteError, AssetWriteService, MetadataImageFetchError, MetadataImageFetcher,
@@ -13,8 +12,8 @@ use tjxy_common::{CatalogItemId, ImageType};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
 use tjxy_db::{
     AssetPublication, DemoCatalogPublication, DemoCatalogPublicationError, DemoCatalogRepository,
-    MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError, Migrator,
-    demo_catalog_item_id,
+    MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
+    demo_catalog_item_id, migrate_database,
 };
 use tjxy_metadata::{
     MetadataError, MetadataImageReference, MetadataProviderError, RichCatalogItem,
@@ -76,6 +75,8 @@ enum ImportError {
     InvalidCredential,
     #[error("database operation failed: {0}")]
     Database(#[from] DbErr),
+    #[error("database schema is incompatible: {0}")]
+    DatabaseSchema(#[from] tjxy_db::SchemaMigrationError),
     #[error("metadata settings could not be read: {0}")]
     Settings(#[from] MetadataProviderSettingsRepositoryError),
     #[error("configured TMDB credential could not be decrypted: {0}")]
@@ -108,7 +109,7 @@ async fn main() -> Result<(), ImportError> {
     );
     let cipher = parse_credential_keyring(&encoded_keyring)?;
     let database = Database::connect(database_url).await?;
-    Migrator::up(&database, None).await?;
+    migrate_database(&database).await?;
     let (client, language) = configured_client(&database, &cipher, |access_token, language| {
         TmdbCatalogClient::new(access_token.to_owned(), language.to_owned())
     })

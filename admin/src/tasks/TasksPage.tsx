@@ -40,6 +40,7 @@ import type {
   ScheduledTaskState,
   StorageRootOption,
   TaskJob,
+  TaskJobOutcome,
   TaskJobStatus,
   TaskSnapshot,
 } from './taskApi';
@@ -577,6 +578,7 @@ function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
                 <Table.Column isRowHeader>Task</Table.Column>
                 <Table.Column>Scope</Table.Column>
                 <Table.Column>Status</Table.Column>
+                <Table.Column>Result</Table.Column>
                 <Table.Column className="w-24 text-right">Attempts</Table.Column>
                 <Table.Column>Created</Table.Column>
                 <Table.Column>Finished</Table.Column>
@@ -593,6 +595,7 @@ function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
                       <p className="break-all text-xs text-muted">{job.scopeId}</p>
                     </Table.Cell>
                     <Table.Cell><JobStatus status={job.status} /></Table.Cell>
+                    <Table.Cell><JobOutcome outcome={job.outcome} /></Table.Cell>
                     <Table.Cell><span className="block text-right tabular-nums">{job.attemptCount}</span></Table.Cell>
                     <Table.Cell>{formatDate(job.createdAt)}</Table.Cell>
                     <Table.Cell>{formatDate(job.completedAt)}</Table.Cell>
@@ -633,6 +636,15 @@ function TaskStatus({ state }: { state: ScheduledTaskState }) {
 function JobStatus({ status }: { status: TaskJobStatus }) {
   const tone = jobTones[status];
   return <span data-tone={tone}><StatusChip tone={tone}>{status}</StatusChip></span>;
+}
+
+function JobOutcome({ outcome }: { outcome: TaskJobOutcome | null }) {
+  if (outcome === null) return <span className="text-muted">-</span>;
+  return (
+    <StatusChip tone="warning">
+      {outcome === 'NoMetadataMatch' ? 'No remote metadata match' : 'Completed with warnings'}
+    </StatusChip>
+  );
 }
 
 function EmptyState({ message }: { message: string }) {

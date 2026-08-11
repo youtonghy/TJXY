@@ -13,6 +13,7 @@ use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, ImageType, PublicationId, StorageObjectRecordId, StorageRootId, UserId,
 };
+use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
 
 use crate::{
@@ -357,6 +358,7 @@ pub struct CatalogItemRecord {
     community_rating: Option<f64>,
     index_number: Option<i32>,
     runtime_ticks: Option<i64>,
+    metadata_state: String,
     date_created: DateTime<Utc>,
     is_favorite: bool,
     is_played: bool,
@@ -416,6 +418,11 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn runtime_ticks(&self) -> Option<i64> {
         self.runtime_ticks
+    }
+
+    #[must_use]
+    pub fn metadata_state(&self) -> &str {
+        &self.metadata_state
     }
 
     #[must_use]
@@ -693,6 +700,9 @@ pub struct CatalogQueryRepository<'connection> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LazyCatalogWorkTarget {
     item_type: CatalogItemType,
+    metadata_is_partial: bool,
+    metadata_requirement: Option<MetadataRequirement>,
+    metadata_source_mode: MetadataSourceMode,
     metadata_revision: i64,
     metadata_resolved_revision: i64,
     metadata_resolved_requirement: Option<MetadataRequirement>,
@@ -760,6 +770,26 @@ impl LazyCatalogWorkTarget {
     #[must_use]
     pub const fn item_type(self) -> CatalogItemType {
         self.item_type
+    }
+
+    #[must_use]
+    pub const fn should_retry_metadata(self) -> bool {
+        self.metadata_is_partial
+            && self.metadata_requirement.is_some()
+            && matches!(
+                self.metadata_source_mode,
+                MetadataSourceMode::AutomaticScrape
+            )
+    }
+
+    #[must_use]
+    pub const fn metadata_requirement(self) -> Option<MetadataRequirement> {
+        self.metadata_requirement
+    }
+
+    #[must_use]
+    pub const fn metadata_source_mode(self) -> MetadataSourceMode {
+        self.metadata_source_mode
     }
 
     #[must_use]
@@ -1584,6 +1614,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let query = Query::select()
             .columns([
                 (item.clone(), Alias::new("item_type")),
+                (item.clone(), Alias::new("metadata_state")),
                 (item.clone(), Alias::new("metadata_revision")),
                 (item.clone(), Alias::new("metadata_resolved_revision")),
                 (item.clone(), Alias::new("metadata_resolved_requirement")),
@@ -1615,6 +1646,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .limit(1)
             .to_owned();
         let backend = self.database.get_database_backend();
+        let metadata_policy = self.lazy_metadata_policy(item_id).await?;
         let target = self
             .database
             .query_one(backend.build(&query))
@@ -1624,6 +1656,10 @@ impl<'connection> CatalogQueryRepository<'connection> {
                     item_type: CatalogItemType::from_database_value(
                         &row.try_get::<String>("", "item_type")?,
                     )?,
+                    metadata_is_partial: row.try_get::<String>("", "metadata_state")? == "Partial",
+                    metadata_requirement: metadata_policy.map(|policy| policy.0),
+                    metadata_source_mode: metadata_policy
+                        .map_or(MetadataSourceMode::LocalOnly, |policy| policy.1),
                     metadata_revision: row.try_get("", "metadata_revision")?,
                     metadata_resolved_revision: row.try_get("", "metadata_resolved_revision")?,
                     metadata_resolved_requirement: row
@@ -1650,6 +1686,65 @@ impl<'connection> CatalogQueryRepository<'connection> {
             )
             .await?;
         Ok(Some(target))
+    }
+
+    async fn lazy_metadata_policy(
+        &self,
+        item_id: CatalogItemId,
+    ) -> Result<Option<(MetadataRequirement, MetadataSourceMode)>, CatalogQueryError> {
+        let item = Alias::new("lazy_policy_item");
+        let membership = Alias::new("lazy_policy_membership");
+        let library = Alias::new("lazy_policy_library");
+        let query = Query::select()
+            .columns([
+                (library.clone(), Alias::new("metadata_policy")),
+                (library.clone(), Alias::new("metadata_source_mode")),
+            ])
+            .from_as(Alias::new("catalog_items"), item.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("library_catalog_items"),
+                membership.clone(),
+                Condition::any()
+                    .add(
+                        Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                            .equals((item.clone(), Alias::new("id"))),
+                    )
+                    .add(
+                        Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                            .equals((item.clone(), Alias::new("structure_owner_item_id"))),
+                    ),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("libraries"),
+                library.clone(),
+                Expr::col((library.clone(), Alias::new("id")))
+                    .equals((membership, Alias::new("library_id"))),
+            )
+            .and_where(Expr::col((item, Alias::new("id"))).eq(item_id.as_uuid()))
+            .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        let mut requirement = None;
+        let mut source_mode = MetadataSourceMode::LocalOnly;
+        for row in self.database.query_all(backend.build(&query)).await? {
+            let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
+                "none" => None,
+                "basic" => Some(MetadataRequirement::Basic),
+                "full" => Some(MetadataRequirement::Full),
+                _ => return Err(CatalogQueryError::InvalidMetadataRequirement),
+            };
+            requirement = requirement.max(current);
+            if current.is_some() {
+                match row.try_get::<String>("", "metadata_source_mode")?.as_str() {
+                    "automatic_scrape" => source_mode = MetadataSourceMode::AutomaticScrape,
+                    "local_only" => {}
+                    _ => return Err(CatalogQueryError::InvalidMetadataSourceMode),
+                }
+            }
+        }
+        Ok(requirement.map(|requirement| (requirement, source_mode)))
     }
 
     async fn lazy_storage_scope(
@@ -2567,6 +2662,8 @@ pub enum CatalogQueryError {
     InvalidItemType,
     #[error("catalog metadata completion requirement is invalid")]
     InvalidMetadataRequirement,
+    #[error("catalog metadata source mode is invalid")]
+    InvalidMetadataSourceMode,
     #[error("parent UUID exists in both library and catalog item namespaces: {0}")]
     AmbiguousParent(Uuid),
     #[error("catalog item appears in more than one active structure publication: {0}")]
@@ -3416,6 +3513,7 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 "community_rating",
                 "index_number",
                 "runtime_ticks",
+                "metadata_state",
                 "date_created",
             ] {
                 query.expr_as(
@@ -3445,6 +3543,7 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 "community_rating",
                 "index_number",
                 "runtime_ticks",
+                "metadata_state",
                 "date_created",
             ] {
                 query.expr_as(
@@ -3489,6 +3588,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         community_rating: row.try_get("", "community_rating")?,
         index_number: row.try_get("", "index_number")?,
         runtime_ticks: row.try_get("", "runtime_ticks")?,
+        metadata_state: row.try_get("", "metadata_state")?,
         date_created: row.try_get("", "date_created")?,
         is_favorite: row
             .try_get::<Option<bool>>("", "is_favorite")?

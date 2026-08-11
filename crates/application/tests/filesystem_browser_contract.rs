@@ -65,3 +65,27 @@ async fn browser_does_not_list_or_resolve_a_symlink_that_escapes_the_allowed_roo
         Err(FilesystemBrowserError::EscapedRoot)
     ));
 }
+
+#[tokio::test]
+async fn available_roots_skip_missing_and_duplicate_entries() {
+    let root = TempDir::new().unwrap();
+    let missing = root.path().join("missing");
+
+    let (browser, invalid) =
+        FilesystemBrowser::from_available_roots([missing.as_path(), root.path(), root.path()])
+            .await;
+
+    assert_eq!(invalid, [0, 2]);
+    assert_eq!(browser.unwrap().roots().len(), 1);
+}
+
+#[tokio::test]
+async fn available_roots_return_no_browser_when_every_entry_is_invalid() {
+    let root = TempDir::new().unwrap();
+
+    let (browser, invalid) =
+        FilesystemBrowser::from_available_roots([root.path().join("missing")]).await;
+
+    assert!(browser.is_none());
+    assert_eq!(invalid, [0]);
+}

@@ -211,12 +211,16 @@ impl<'connection> MetadataWorkRepository<'connection> {
             .await?
             .ok_or(MetadataWorkError::StaleOrUnavailable)?;
         let kind = parse_kind(&item.try_get::<String>("", "item_type")?)?;
-        let lookup = MetadataLookup::new(
-            kind,
-            item.try_get::<String>("", "name")?,
-            item.try_get::<Option<i32>>("", "production_year")?,
-        )
-        .map_err(|_| MetadataWorkError::InvalidStoredMetadata)?;
+        let stored_name = item.try_get::<String>("", "name")?;
+        let stored_year = item.try_get::<Option<i32>>("", "production_year")?;
+        let legacy_parts = (stored_year.is_none()
+            && matches!(kind, MetadataItemKind::Movie | MetadataItemKind::Series))
+        .then(|| crate::title_year::split_title_year(&stored_name))
+        .flatten()
+        .map(|(name, year)| (name.to_owned(), Some(year)));
+        let (name, production_year) = legacy_parts.unwrap_or((stored_name, stored_year));
+        let lookup = MetadataLookup::new(kind, name, production_year)
+            .map_err(|_| MetadataWorkError::InvalidStoredMetadata)?;
         let rows = self
             .database
             .query_all(
@@ -356,6 +360,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
                         json!({
                             "changed": publication.changed() || asset_changed,
                             "image_changed": asset_changed,
+                            "matched": !resolution.provider_ids().is_empty(),
                             "state": resolution.state().as_str(),
                             "used_nfo": used_nfo
                         }),

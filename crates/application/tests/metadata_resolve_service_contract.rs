@@ -161,6 +161,58 @@ struct Fixture {
 }
 
 #[tokio::test]
+async fn legacy_compact_title_is_split_before_provider_resolution() {
+    let fixture = fixture().await;
+    let backend = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            backend.build(
+                &Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("name"), "玩具总动员5(2026)")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid()))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::AutomaticScrape)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "legacy-title-year-snapshot",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let snapshot = MetadataWorkRepository::new(&fixture.database)
+        .snapshot(&claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.lookup().fallback_title(), "玩具总动员5");
+    assert_eq!(snapshot.lookup().fallback_year(), Some(2026));
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keeps the running-upgrade rollback and successful Full retry in one race contract.
 async fn running_basic_job_rolls_back_when_its_requirement_is_upgraded_to_full() {
     let fixture = fixture().await;

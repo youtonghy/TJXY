@@ -274,7 +274,7 @@ fn render(frame: &mut Frame<'_>, project: &Project, snapshot: &StatusSnapshot, s
     if diagnostics_unlocked(snapshot.configuration.state) {
         match state.view {
             View::Overview => render_overview(frame, root[2], snapshot, language),
-            View::Diagnostics => render_diagnostics(frame, root[2], snapshot, language),
+            View::Diagnostics => render_diagnostics(frame, root[2], project, snapshot, language),
             View::Logs => render_logs(frame, root[2], snapshot, state),
         }
     } else {
@@ -427,6 +427,7 @@ fn render_overview(
 fn render_diagnostics(
     frame: &mut Frame<'_>,
     area: Rect,
+    project: &Project,
     snapshot: &StatusSnapshot,
     language: Language,
 ) {
@@ -435,6 +436,14 @@ fn render_diagnostics(
             language.text("后端进程", "Backend process"),
             snapshot.server.is_some(),
             server_state(snapshot, language),
+            language,
+        ),
+        diagnostic_row(
+            language.text("后端二进制", "Backend binary"),
+            project.server_binary_path().is_some(),
+            project
+                .server_binary_path()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
             language,
         ),
         diagnostic_row(

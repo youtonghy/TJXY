@@ -187,6 +187,10 @@ Use `g` to switch between Chinese and English. Set `TJXY_TUI_LANGUAGE=en-US` to
 start in English; Chinese is the default. Backend logs are read from
 `TJXY_LOG_FILE`, or `data/server.log` when it is unset. The process launcher must
 redirect backend stdout and stderr to that file for logs to appear in the TUI.
+Development builds pair binaries by Cargo profile: a debug TUI starts only the
+debug server, and a release TUI starts only the release server. The diagnostics
+view shows the selected server path. Portable release bundles continue to use
+the sibling `tjxy-server` binary.
 Before installation is complete, the TUI exposes only service startup and a prompt
 to finish setup in the desktop application; status and log content unlock after the
 installation manifest reaches the completed state.
@@ -195,7 +199,16 @@ The default bind address is `127.0.0.1:8096`; override it with `TJXY_BIND`.
 During first-run setup, `TJXY_SETUP_BIND` takes precedence when set, otherwise
 setup inherits `TJXY_BIND`.
 The default database is `sqlite://tjxy.db?mode=rwc`; override it with
-`TJXY_DATABASE_URL`. Original image assets default to `./data/assets`; override
+`TJXY_DATABASE_URL`. TJXY uses SeaORM's `seaql_migrations` history as the
+database schema version. A newer server automatically applies every pending
+migration before accepting traffic. An older server refuses to open a database
+that contains migrations it does not recognize; restore a database backup from
+the matching release before intentionally downgrading. Do not delete migration
+history to bypass this check. Startup also rejects a current migration history
+whose critical tables, columns, or indexes are missing instead of guessing how
+to repair potentially damaged data.
+
+Original image assets default to `./data/assets`; override
 that root with `TJXY_ASSETS_DIR`. The asset store validates actual image format,
 encoded size, dimensions, pixel count, and decoder allocation before an
 fd-confined atomic SHA-256 write; JPEG, PNG, GIF, WebP, and BMP originals are
@@ -212,15 +225,23 @@ persists that root, creates its storage identity and initial sync job atomically
 and reloads every active Filesystem root after restart. The legacy
 `TJXY_FILESYSTEM_ACCOUNT_ID` plus `TJXY_FILESYSTEM_ROOT` pair remains an explicit
 runtime override; both variables are required together. Each configured root
-starts an account-scoped inventory worker and shares the serial Probe worker. A
+that is currently available starts an account-scoped inventory worker and shares
+the serial Probe worker. Missing, unmounted, invalid, or unreadable Filesystem
+roots are kept in the database but reported offline instead of preventing server
+startup. Their scans remain paused and their media returns unavailable until the
+root is restored and TJXY is restarted. A
 server-side folder picker can be enabled by saving one or more media browser
 roots in **Admin > System settings**, or by setting `TJXY_MEDIA_BROWSER_ROOTS`
 to a platform path-list of allowed parent directories (colon-separated on Unix
 and semicolon-separated on Windows). An explicitly present environment variable,
 including an empty value, takes precedence over the database setting; database
-changes apply after TJXY restarts. The Admin API exposes opaque root IDs and
-relative paths only; every selection is canonicalized again before it can be
-attached to a Library, and symlinks cannot escape an allowed root.
+changes apply after TJXY restarts. Missing, unmounted, unreadable, and duplicate
+browser roots are skipped during startup instead of preventing the server from
+running. The system settings page reports each skipped root so an administrator
+can repair or remove it; saving new settings continues to reject unavailable
+roots. The Admin API exposes opaque root IDs and relative paths only; every
+selection is canonicalized again before it can be attached to a Library, and
+symlinks cannot escape an allowed root.
 
 A Library's metadata source is independent of its scan profile. The default
 `automatic_scrape` mode reads local NFO and artwork first and uses configured
@@ -229,7 +250,19 @@ and naming metadata without invoking remote providers. Supported local artwork
 names include `poster`, `folder`, `cover`, and `*-poster` for Primary images,
 plus `fanart` and `backdrop` for Backdrop images, using JPEG, PNG, GIF, WebP, or
 BMP extensions. Malformed NFO and artwork produce work warnings and fall back to
-the remaining permitted metadata sources.
+the remaining permitted metadata sources. Movie and Series detail access retries
+`Partial` metadata in `automatic_scrape` mode with durable single-flight and a
+short cooldown; `local_only` libraries never invoke remote providers. Title
+discovery accepts both `Movie(2026)` and `Movie (2026)` directory names.
+The normalized title and four-digit year are stored separately in
+`catalog_items.name` and `catalog_items.production_year`, and remote searches
+always pass those values as separate parameters. Upgrades repair legacy Partial
+Movie/Series rows that still contain a trailing year in `name`, while preserving
+rows that already have remote title provenance or provider identities.
+Administrator detail pages show an accent scan-in-progress status while the
+item remains Partial, then distinguish a confirmed provider no-match from a
+generic unavailable result. These operational messages are not rendered for
+regular users, and the underlying task observation API remains administrator-only.
 
 A native recursive filesystem event monitor is
 enabled by default; it coalesces event bursts for 500 ms and schedules durable
@@ -431,6 +464,8 @@ administrator NFO metadata import at
 `GET /ScheduledTasks`, `GET /ScheduledTasks/{taskId}`,
 `POST|DELETE /ScheduledTasks/Running/{taskId}`, `POST /Library/Refresh`,
 the safe, bounded durable-job observation route `GET /Admin/Tasks/Jobs?Limit=...`,
+whose optional `Outcome` reports `NoMetadataMatch` or `CompletedWithWarnings`
+without exposing provider diagnostics,
 explicit administrator tasks at `POST /Admin/Tasks/ValidateStorage/{rootId}`,
 `POST /Admin/Tasks/DiscoverTitles/{rootId}`,
 `POST /Admin/Tasks/ResolveMetadata/{itemId}`, and
@@ -659,24 +694,12 @@ omitted relations live until its successful final sweep. Each parent/root fixes
 one inventory or validation child across retries even when that child advances
 the root revision. `title_layer` scans continue to process only explicit Library
 members after a Structure publication; only `all_synced_objects` scans absorb
-the published children into the same scan lifecycle. Hybrid background refresh
-selects at most 20 unexpanded Series from the Lazy title layer, ranks
-administrator pins, watching, engaged NextUp, and favorite signals ahead of
-recently added items, and schedules the same durable Expand work at lower
-priority than interactive requests. Engaged NextUp requires one user to have
-both a played Episode and an unplayed, unstarted Episode in the Series' active
-structure publication, so retired projections and unrelated users cannot create
-a false signal. The chosen batch is staged under the parent FullScan and remains
-fixed across worker retries, so one refresh cannot advance through successive
-batches. A production-process TCP smoke verifies that refresh completes the
-low-priority expansion before any Series browse. Signals on existing Episodes
-are attributed to their owning Series. Administrator-pinned background
-candidates are stored on the library membership and rank ahead of derived
-signals. Administrators can page, pin, and unpin them from the Libraries screen;
-changing away from `background` keeps the preference dormant, and unpinning does
-not cancel work that was already submitted. The production scheduler
-periodically submits the same policy-aware scan at the lowest queue priority and
-delays missed ticks instead of creating a catch-up burst.
+the published children into the same scan lifecycle. Supported scan profiles are
+`Full`, `Lazy`, and `Manual`. Databases that still contain the removed `Hybrid`
+profile are migrated to `Lazy`; a historical `background` expansion value is
+normalized to `on_browse` while other advanced policy values are preserved. The
+production scheduler periodically submits policy-aware scans at the lowest
+queue priority and delays missed ticks instead of creating a catch-up burst.
 
 The explicit Probe command enqueues or joins one high-priority durable job for
 each active MediaSource with an available location, including sources that are
@@ -699,6 +722,8 @@ Discover and target selection remain isolated to the selected binding.
 TJXY starts in a database-independent setup mode until a completed local
 installation manifest exists. Open `http://127.0.0.1:8096/setup/` and complete the
 four configuration steps: branding, database, network, and the initial administrator.
+Before installation, client and administrator page URLs redirect to `/setup/`;
+after installation, setup page URLs redirect to `/app/`.
 The setup router is limited to loopback/private source addresses and does not expose
 login, media, client, or administrator APIs.
 

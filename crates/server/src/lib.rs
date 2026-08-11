@@ -15,7 +15,6 @@ mod dashboard_admin;
 mod device;
 mod display_preferences;
 mod filesystem_admin;
-mod hybrid_admin;
 mod image;
 mod import_admin;
 mod installation_config;
@@ -631,7 +630,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/Library/Refresh", post(task::refresh_library))
         .merge(admin_task_routes())
         .merge(admin_filesystem_routes())
-        .merge(admin_hybrid_routes())
         .merge(admin_storage_routes())
         .merge(admin_source_routes())
         .route("/Admin/Imports/Emby", post(import_admin::create_emby))
@@ -879,18 +877,6 @@ fn admin_filesystem_routes() -> Router<AppState> {
         .route(
             "/Admin/Filesystem/Directories",
             get(filesystem_admin::directories),
-        )
-}
-
-fn admin_hybrid_routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/Admin/Libraries/{library_id}/HybridCandidates",
-            get(hybrid_admin::list),
-        )
-        .route(
-            "/Admin/Libraries/{library_id}/HybridCandidates/{item_id}",
-            put(hybrid_admin::pin).delete(hybrid_admin::unpin),
         )
 }
 

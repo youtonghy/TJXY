@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ItemPage } from './ItemPage';
@@ -11,11 +11,14 @@ const api = vi.hoisted(() => ({
   toggleFavorite: vi.fn(),
   togglePlayed: vi.fn(),
 }));
+const auth = vi.hoisted(() => ({ isAdministrator: true }));
+const tasks = vi.hoisted(() => ({ listRecentTaskJobs: vi.fn() }));
 
 vi.mock('../api/catalogApi', () => api);
 vi.mock('../auth/ClientAuthContext', () => ({
-  useClientAuth: () => ({ user: { Id: 'user-1', Name: 'Viewer' } }),
+  useClientAuth: () => ({ user: { Id: 'user-1', Name: 'Viewer', Policy: { IsAdministrator: auth.isAdministrator } } }),
 }));
+vi.mock('../../tasks/taskApi', () => tasks);
 vi.mock('../ui/MediaImage', () => ({
   MediaImage: ({ alt }: { alt: string }) => <div aria-label={alt} role="img" />,
 }));
@@ -52,6 +55,9 @@ const series = {
 };
 
 beforeEach(() => {
+  auth.isAdministrator = true;
+  tasks.listRecentTaskJobs.mockReset();
+  tasks.listRecentTaskJobs.mockResolvedValue([]);
   api.getSimilarItems.mockReset();
   api.getSimilarItems.mockResolvedValue([]);
   api.getItem.mockResolvedValue(series);
@@ -67,6 +73,81 @@ beforeEach(() => {
         { Id: 'episode-2', Name: 'Please Remain Calm', Type: 'Episode', IndexNumber: 2, Overview: 'Second episode.', ImageTags: { Primary: 'still-2' } },
         { Id: 'episode-1', Name: '1:23:45', Type: 'Episode', IndexNumber: 1, Overview: 'First episode.', ImageTags: { Primary: 'still-1' } },
       ]));
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+it('polls a Partial movie until lazy metadata becomes complete', async () => {
+  vi.useFakeTimers();
+  const partial = {
+    Id: 'movie-lazy',
+    Name: 'Lazy Movie',
+    Type: 'Movie',
+    IsFolder: false,
+    MetadataState: 'Partial' as const,
+  };
+  api.getItem
+    .mockResolvedValueOnce(partial)
+    .mockResolvedValueOnce({
+      ...partial,
+      MetadataState: 'Complete',
+      Overview: 'Resolved metadata.',
+    });
+
+  renderItem('movie-lazy');
+  await act(async () => { await Promise.resolve(); });
+
+  expect(screen.getByText('Metadata scan in progress')).toBeVisible();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+
+  expect(screen.getByText('Resolved metadata.')).toBeVisible();
+  expect(screen.queryByText('Metadata scan in progress')).not.toBeInTheDocument();
+  expect(api.getItem).toHaveBeenCalledTimes(2);
+});
+
+it('shows an administrator when metadata resolution finds no match', async () => {
+  vi.useFakeTimers();
+  const partial = {
+    Id: 'movie-lazy',
+    Name: 'Lazy Movie',
+    Type: 'Movie',
+    IsFolder: false,
+    MetadataState: 'Partial' as const,
+  };
+  api.getItem.mockResolvedValue(partial);
+  tasks.listRecentTaskJobs.mockResolvedValue([{
+    id: 'job-1',
+    taskKind: 'ResolveMetadata',
+    scopeType: 'CatalogItem',
+    scopeId: 'movie-lazy',
+    outcome: 'NoMetadataMatch',
+  }]);
+
+  renderItem('movie-lazy');
+  await act(async () => { await Promise.resolve(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+
+  expect(screen.getByText('No metadata match')).toBeVisible();
+  expect(screen.queryByText('Metadata scan in progress')).not.toBeInTheDocument();
+});
+
+it('does not show metadata scan administration status to a regular user', async () => {
+  auth.isAdministrator = false;
+  api.getItem.mockResolvedValue({
+    Id: 'movie-lazy',
+    Name: 'Lazy Movie',
+    Type: 'Movie',
+    IsFolder: false,
+    MetadataState: 'Partial',
+  });
+
+  renderItem('movie-lazy');
+
+  expect(await screen.findByRole('heading', { name: 'Lazy Movie' })).toBeVisible();
+  expect(screen.queryByText('Metadata scan in progress')).not.toBeInTheDocument();
+  expect(screen.queryByText('No metadata match')).not.toBeInTheDocument();
 });
 
 it('renders a precise HeroUI breadcrumb path back through the library and item hierarchy', async () => {
@@ -223,7 +304,9 @@ it('does not invent rich facts for a sparse movie response', async () => {
   expect(screen.getByText('No additional details are available.')).toBeInTheDocument();
   expect(screen.queryByText('Rating')).not.toBeInTheDocument();
   expect(screen.queryByText('Demo metadata only')).not.toBeInTheDocument();
-  expect(api.getSimilarItems).toHaveBeenCalledWith('movie-1', 4);
+  await waitFor(() => {
+    expect(api.getSimilarItems).toHaveBeenCalledWith('movie-1', 4);
+  });
 });
 
 it('uses square primary artwork for an audio item', async () => {

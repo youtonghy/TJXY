@@ -53,8 +53,14 @@ mod m20260803_000052_announcements;
 mod m20260804_000053_installation;
 mod m20260804_000054_similar_item_indexes;
 mod m20260806_000055_ai_message_sequence;
+mod m20260811_000056_remove_hybrid_scan_profile;
+mod m20260811_000057_normalize_legacy_title_year;
 
-use sea_orm_migration::prelude::*;
+use std::collections::HashSet;
+
+use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm_migration::{MigratorTrait, prelude::*};
+use thiserror::Error;
 use uuid::Uuid;
 
 fn uuid_with_nil_default(backend: sea_orm::DbBackend, name: impl IntoIden) -> ColumnDef {
@@ -68,6 +74,132 @@ fn uuid_with_nil_default(backend: sea_orm::DbBackend, name: impl IntoIden) -> Co
 }
 
 pub struct Migrator;
+
+#[derive(Debug, Error)]
+pub enum SchemaMigrationError {
+    #[error("database migration failed: {0}")]
+    Database(#[from] DbErr),
+    #[error(
+        "database schema is newer than this program (latest supported migration: {supported}); unknown applied migrations: {unknown:?}"
+    )]
+    DatabaseIsNewer {
+        supported: String,
+        unknown: Vec<String>,
+    },
+    #[error("database migration history does not match its schema; missing objects: {missing:?}")]
+    SchemaDrift { missing: Vec<String> },
+}
+
+/// Applies all migrations supported by this build after rejecting a newer database.
+///
+/// `SeaORM` already handles the forward-upgrade path. The preflight turns its generic
+/// "migration file is missing" error into an actionable version-compatibility error.
+///
+/// # Errors
+///
+/// Returns [`SchemaMigrationError`] when migration storage is unavailable, the database
+/// contains migrations unknown to this build, a migration fails, or critical schema
+/// objects are missing after migration.
+pub async fn migrate_database(database: &DatabaseConnection) -> Result<(), SchemaMigrationError> {
+    let supported: Vec<String> = Migrator::migrations()
+        .iter()
+        .map(|migration| migration.name().to_owned())
+        .collect();
+    migration_history(database, &supported).await?;
+
+    Migrator::up(database, None).await?;
+    let applied = migration_history(database, &supported).await?;
+    let missing_migrations = supported
+        .iter()
+        .filter(|migration| !applied.contains(migration.as_str()))
+        .map(|migration| format!("migration {migration}"))
+        .collect::<Vec<_>>();
+    if !missing_migrations.is_empty() {
+        return Err(SchemaMigrationError::SchemaDrift {
+            missing: missing_migrations,
+        });
+    }
+    validate_current_schema(database).await?;
+    Ok(())
+}
+
+async fn migration_history(
+    database: &DatabaseConnection,
+    supported: &[String],
+) -> Result<HashSet<String>, SchemaMigrationError> {
+    let applied: HashSet<String> = Migrator::get_migration_models(database)
+        .await?
+        .into_iter()
+        .map(|migration| migration.version)
+        .collect();
+    let supported_set: HashSet<&str> = supported.iter().map(String::as_str).collect();
+    let mut unknown = applied
+        .iter()
+        .filter(|version| !supported_set.contains(version.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    unknown.sort();
+    if unknown.is_empty() {
+        Ok(applied)
+    } else {
+        Err(SchemaMigrationError::DatabaseIsNewer {
+            supported: supported
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "none".to_owned()),
+            unknown,
+        })
+    }
+}
+
+async fn validate_current_schema(
+    database: &DatabaseConnection,
+) -> Result<(), SchemaMigrationError> {
+    let manager = SchemaManager::new(database);
+    let mut missing = Vec::new();
+    let mut missing_tables = HashSet::new();
+    for table in [
+        "api_keys",
+        "playback_tickets",
+        "metadata_provider_settings",
+        "system_settings",
+        "ai_provider_settings",
+        "ai_models",
+        "ai_conversations",
+        "ai_messages",
+        "ai_execution_records",
+        "ai_daily_usage",
+        "announcements",
+        "installation_records",
+    ] {
+        if !manager.has_table(table).await? {
+            missing.push(format!("table {table}"));
+            missing_tables.insert(table);
+        }
+    }
+    for (table, column) in [
+        ("libraries", "metadata_source_mode"),
+        ("system_settings", "media_browser_roots"),
+        ("ai_models", "reasoning_effort"),
+        ("ai_messages", "sequence_number"),
+    ] {
+        if !missing_tables.contains(table) && !manager.has_column(table, column).await? {
+            missing.push(format!("column {table}.{column}"));
+        }
+    }
+    if !missing_tables.contains("ai_messages")
+        && !manager
+            .has_index("ai_messages", "uq_ai_messages_conversation_sequence")
+            .await?
+    {
+        missing.push("index uq_ai_messages_conversation_sequence".to_owned());
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(SchemaMigrationError::SchemaDrift { missing })
+    }
+}
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
@@ -128,6 +260,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260804_000053_installation::Migration),
             Box::new(m20260804_000054_similar_item_indexes::Migration),
             Box::new(m20260806_000055_ai_message_sequence::Migration),
+            Box::new(m20260811_000056_remove_hybrid_scan_profile::Migration),
+            Box::new(m20260811_000057_normalize_legacy_title_year::Migration),
         ]
     }
 }

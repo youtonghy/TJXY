@@ -100,6 +100,25 @@ it('renders a stable skeleton followed by readable desktop and mobile records', 
   expect(record).toHaveTextContent('Storage roots');
 });
 
+it('marks libraries with unavailable storage roots offline and warns once', async () => {
+  const warningToast = vi.spyOn(Toast.toast, 'warning').mockReturnValue('offline-warning');
+  listMock.mockResolvedValue([{ ...movies, unavailableLocations: movies.locations }]);
+
+  renderLibraries();
+
+  const grid = await librariesGrid();
+  expect(within(grid).getByText('Offline')).toBeVisible();
+  const mobile = screen.getByRole('list', { name: 'Libraries mobile' });
+  expect(within(mobile).getByText('Offline')).toBeVisible();
+  await waitFor(() => {
+    expect(warningToast).toHaveBeenCalledWith(
+      'Some library storage roots are offline. Restore the volumes and restart TJXY.',
+      { timeout: 8000 },
+    );
+  });
+  expect(warningToast).toHaveBeenCalledOnce();
+});
+
 it('distinguishes an initial error, retry success, and a proven empty collection', async () => {
   const dangerToast = vi.spyOn(Toast.toast, 'danger').mockReturnValue('unexpected-toast');
   listMock

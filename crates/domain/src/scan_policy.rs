@@ -45,7 +45,6 @@ impl std::error::Error for InvalidMetadataSourceMode {}
 pub enum ScanProfile {
     Full,
     Lazy,
-    Hybrid,
     Manual,
 }
 
@@ -100,12 +99,6 @@ impl EffectiveScanPolicy {
                 object_selection: ObjectSelectionScope::OnDemandSubtree,
                 metadata: MetadataPolicy::Basic,
                 expansion: StructureExpansionPolicy::OnAccess,
-                probe: ProbePolicy::OnPlaybackInfo,
-            },
-            ScanProfile::Hybrid => Self {
-                object_selection: ObjectSelectionScope::OnDemandSubtree,
-                metadata: MetadataPolicy::Basic,
-                expansion: StructureExpansionPolicy::Background,
                 probe: ProbePolicy::OnPlaybackInfo,
             },
             ScanProfile::Manual => Self {

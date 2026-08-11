@@ -63,11 +63,17 @@ it('loads and validates scheduled tasks, recent jobs, and reusable library roots
       CreatedAt: '2026-07-24T01:02:03Z',
       StartedAt: '2026-07-24T01:02:04Z',
       CompletedAt: '2026-07-24T01:02:05Z',
+      Outcome: 'NoMetadataMatch',
     }]);
 
   await expect(getTaskSnapshot()).resolves.toEqual({
     scheduled: [expect.objectContaining({ id: taskId, key: 'FullMediaScan', state: 'Idle' })],
-    jobs: [expect.objectContaining({ id: jobId, status: 'Completed', attemptCount: 1 })],
+    jobs: [expect.objectContaining({
+      id: jobId,
+      status: 'Completed',
+      attemptCount: 1,
+      outcome: 'NoMetadataMatch',
+    })],
     roots: [{
       key: `${taskId}:${rootId}`,
       libraryId: taskId,

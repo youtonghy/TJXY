@@ -10,15 +10,14 @@ use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, TransactionTrait,
     sea_query::{Alias, Expr, OnConflict, Query},
 };
-use sea_orm_migration::MigratorTrait;
 use tjxy_common::{
     CatalogItemId, MediaLocationId, MediaSourceId, PresentationKey, StorageObjectRecordId,
     StorageRootId, SubtitleId,
 };
 use tjxy_db::{
-    CatalogPublicationRepository, MediaLocationPublicationRow, MediaSourcePublicationRow, Migrator,
+    CatalogPublicationRepository, MediaLocationPublicationRow, MediaSourcePublicationRow,
     SourcePublicationManifest, SubtitlePublicationRow, WorkJobRepository, WorkJobSpec, WorkScope,
-    WorkTaskKind,
+    WorkTaskKind, migrate_database,
 };
 use tjxy_storage::{IdentityQuality, ObjectType, StorageBackend, StorageObject};
 use tjxy_storage_filesystem::FilesystemBackend;
@@ -712,7 +711,7 @@ async fn run() -> Result<(), AnyError> {
     let database_url = env::var("TJXY_DATABASE_URL")?;
     let root = PathBuf::from(env::var("TJXY_DEV_MEDIA_ROOT")?);
     let database = Database::connect(database_url).await?;
-    Migrator::up(&database, None).await?;
+    migrate_database(&database).await?;
     let items = playable_items(&database).await?;
     if items.is_empty() {
         return Err("no Movies or Episodes exist; import metadata first".into());
@@ -784,13 +783,13 @@ mod tests {
     };
     use sea_orm_migration::MigratorTrait;
     use tjxy_common::SortKey;
-    use tjxy_db::PublishedMediaSource;
+    use tjxy_db::{Migrator, PublishedMediaSource};
     use tjxy_storage::{IdentityQuality, StorageObject, StorageObjectId};
     use tjxy_test_support::test_database;
     use uuid::Uuid;
 
     use super::{
-        CatalogItemId, CatalogPublicationRepository, Migrator, PlayableItem, PlayableKind,
+        CatalogItemId, CatalogPublicationRepository, PlayableItem, PlayableKind,
         REPRESENTATIVE_ITEM_COUNT, fixture_plan, publish_item_sources, register_storage,
         source_filename, storage_record_id, subtitle_filename,
     };

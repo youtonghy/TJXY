@@ -101,34 +101,35 @@ impl FilesystemBrowser {
         let mut configured = Vec::new();
         let mut seen = HashSet::new();
         for (index, root) in roots.into_iter().enumerate() {
-            let canonical_path = tokio::fs::canonicalize(root.as_ref())
-                .await
-                .map_err(|_| FilesystemBrowserError::InvalidRoot { index })?;
-            let metadata = tokio::fs::metadata(&canonical_path)
-                .await
-                .map_err(|_| FilesystemBrowserError::InvalidRoot { index })?;
-            if !metadata.is_dir() {
-                return Err(FilesystemBrowserError::InvalidRoot { index });
-            }
-            if !seen.insert(canonical_path.clone()) {
-                return Err(FilesystemBrowserError::DuplicateRoot { index });
-            }
-            let label = canonical_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .filter(|value| !value.is_empty())
-                .map_or_else(|| format!("Media root {}", index + 1), str::to_owned);
-            let id = Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                canonical_path.as_os_str().as_encoded_bytes(),
-            );
-            configured.push(ConfiguredRoot {
-                id,
-                label,
-                canonical_path,
-            });
+            configured.push(configure_root(index, root.as_ref(), &mut seen).await?);
         }
         Ok(Self { roots: configured })
+    }
+
+    /// Builds a browser from every currently available root and reports skipped indexes.
+    ///
+    /// Missing, unreadable, non-directory, and duplicate roots are omitted so persisted
+    /// configuration cannot prevent the rest of the application from starting.
+    pub async fn from_available_roots<I, P>(roots: I) -> (Option<Self>, Vec<usize>)
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut configured = Vec::new();
+        let mut invalid_root_indexes = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, root) in roots.into_iter().enumerate() {
+            match configure_root(index, root.as_ref(), &mut seen).await {
+                Ok(root) => configured.push(root),
+                Err(
+                    FilesystemBrowserError::InvalidRoot { .. }
+                    | FilesystemBrowserError::DuplicateRoot { .. },
+                ) => invalid_root_indexes.push(index),
+                Err(_) => unreachable!("root configuration only returns root errors"),
+            }
+        }
+        let browser = (!configured.is_empty()).then_some(Self { roots: configured });
+        (browser, invalid_root_indexes)
     }
 
     #[must_use]
@@ -245,6 +246,39 @@ impl FilesystemBrowser {
             .find(|root| root.id == root_id)
             .ok_or(FilesystemBrowserError::UnknownRoot)
     }
+}
+
+async fn configure_root(
+    index: usize,
+    root: &Path,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<ConfiguredRoot, FilesystemBrowserError> {
+    let canonical_path = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|_| FilesystemBrowserError::InvalidRoot { index })?;
+    let metadata = tokio::fs::metadata(&canonical_path)
+        .await
+        .map_err(|_| FilesystemBrowserError::InvalidRoot { index })?;
+    if !metadata.is_dir() {
+        return Err(FilesystemBrowserError::InvalidRoot { index });
+    }
+    if !seen.insert(canonical_path.clone()) {
+        return Err(FilesystemBrowserError::DuplicateRoot { index });
+    }
+    let label = canonical_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| format!("Media root {}", index + 1), str::to_owned);
+    let id = Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        canonical_path.as_os_str().as_encoded_bytes(),
+    );
+    Ok(ConfiguredRoot {
+        id,
+        label,
+        canonical_path,
+    })
 }
 
 fn validate_relative_path(path: &Path) -> Result<(), FilesystemBrowserError> {

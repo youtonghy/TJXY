@@ -47,6 +47,7 @@ it('loads the complete persisted library policy contract', async () => {
       name: 'Movies',
       collectionType: 'movies',
       locations: ['tjxy://storage-root/root-1'],
+      unavailableLocations: [],
       enabled: true,
       scanProfile: 'Lazy',
       profileVersion: 3,

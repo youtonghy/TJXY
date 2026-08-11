@@ -9,9 +9,9 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use tjxy_common::{CatalogItemId, LibraryId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_db::{
-    ClaimedWorkJob, FullScanChildSubmission, MetadataRequirement, WorkJobAdminStatus, WorkJobClock,
-    WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope,
-    WorkStagingRow, WorkTaskKind,
+    ClaimedWorkJob, FullScanChildSubmission, MetadataRequirement, WorkJobAdminOutcome,
+    WorkJobAdminStatus, WorkJobClock, WorkJobRepository, WorkJobRepositoryError, WorkJobResult,
+    WorkJobSpec, WorkJobState, WorkScope, WorkStagingRow, WorkTaskKind,
 };
 use tjxy_domain::MetadataSourceMode;
 use tjxy_test_support::test_database;
@@ -343,6 +343,59 @@ async fn recent_jobs_are_bounded_ordered_and_never_expose_persisted_error_text()
         repository.recent_jobs(101).await,
         Err(WorkJobRepositoryError::InvalidObservationLimit)
     ));
+}
+
+#[tokio::test]
+async fn recent_jobs_classify_partial_automatic_metadata_without_exposing_result_details() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 7, 24, 10, 0, 0).unwrap();
+    let (repository, _) = repository(&database, now);
+    let submitted = repository
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ResolveMetadata,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                100,
+            )
+            .unwrap()
+            .with_metadata_requirement(MetadataRequirement::Basic)
+            .unwrap()
+            .with_metadata_source_mode(MetadataSourceMode::AutomaticScrape)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = repository
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "admin-outcome-test",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    complete_with_result(
+        &repository,
+        &database,
+        &claimed,
+        WorkJobResult::success(
+            json!({
+                "matched": false,
+                "state": "Partial",
+                "provider_debug": "must stay private"
+            }),
+            Vec::new(),
+        ),
+    )
+    .await;
+
+    let recent = repository.recent_jobs(1).await.unwrap();
+    assert_eq!(recent[0].job().id(), submitted.job().id());
+    assert_eq!(
+        recent[0].outcome(),
+        Some(WorkJobAdminOutcome::NoMetadataMatch)
+    );
 }
 
 #[tokio::test]

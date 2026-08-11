@@ -39,6 +39,6 @@ pub use playback::{
 pub use playstate::PlaybackStateRequest;
 pub use system::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
 pub use task::{
-    AdminHybridCandidateInfo, AdminHybridCandidatePage, AdminTaskJobInfo, AdminTaskJobStatus,
-    ScheduledTaskInfo, ScheduledTaskState,
+    AdminTaskJobInfo, AdminTaskJobOutcome, AdminTaskJobStatus, ScheduledTaskInfo,
+    ScheduledTaskState,
 };

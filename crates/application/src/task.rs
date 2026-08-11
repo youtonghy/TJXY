@@ -4,7 +4,6 @@ use tjxy_common::{CatalogItemId, LibraryId, StorageRootId, UserId};
 use tjxy_db::{
     ADMIN_CANCELLED_ERROR, CatalogItemType, CatalogQueryError, CatalogQueryRepository,
     DiscoverTitlesError, DiscoverTitlesRepository, FullScanRepository, FullScanRepositoryError,
-    HybridCandidateError, HybridCandidateMutation, HybridCandidatePage, HybridCandidateRepository,
     ManualProbeError, ManualProbeRepository, ManualProbeSubmission, MetadataWorkError,
     MetadataWorkRepository, StorageSyncRepository, StorageSyncRepositoryError, WorkJobAdminRecord,
     WorkJobRepository, WorkJobRepositoryError, WorkJobSpec, WorkJobSubmission, WorkScope,
@@ -49,57 +48,6 @@ impl TaskService {
     ) -> Result<Vec<WorkJobSubmission>, TaskServiceError> {
         WorkJobRepository::new(&self.database)
             .enqueue_enabled_library_scans(SCHEDULED_REFRESH_PRIORITY)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Lists one stable page of administrator-selected Hybrid expansion candidates.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TaskServiceError`] for an unknown Library, invalid page, or SQL failure.
-    pub async fn hybrid_candidates(
-        &self,
-        library_id: LibraryId,
-        start_index: u64,
-        limit: u64,
-    ) -> Result<HybridCandidatePage, TaskServiceError> {
-        HybridCandidateRepository::new(&self.database)
-            .selected(library_id, start_index, limit)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Idempotently adds one Library-scoped administrator Hybrid candidate preference.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TaskServiceError`] when the Library policy or item membership is incompatible.
-    pub async fn pin_hybrid_candidate(
-        &self,
-        library_id: LibraryId,
-        item_id: CatalogItemId,
-    ) -> Result<HybridCandidateMutation, TaskServiceError> {
-        HybridCandidateRepository::new(&self.database)
-            .pin(library_id, item_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Idempotently removes one administrator Hybrid candidate preference.
-    ///
-    /// Existing durable Expand or Scoped Sync work is deliberately left untouched.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TaskServiceError`] when the SQL update fails.
-    pub async fn unpin_hybrid_candidate(
-        &self,
-        library_id: LibraryId,
-        item_id: CatalogItemId,
-    ) -> Result<HybridCandidateMutation, TaskServiceError> {
-        HybridCandidateRepository::new(&self.database)
-            .unpin(library_id, item_id)
             .await
             .map_err(Into::into)
     }
@@ -321,8 +269,6 @@ pub enum TaskServiceError {
     ManualMediaItemUnavailable,
     #[error("manual media task is incompatible with the catalog item type")]
     InvalidManualMediaItemType,
-    #[error("hybrid expansion candidate is unavailable: {0}")]
-    HybridCandidate(#[from] HybridCandidateError),
     #[error("manual media task catalog query failed: {0}")]
     Catalog(#[from] CatalogQueryError),
     #[error("manual Probe task is unavailable: {0}")]

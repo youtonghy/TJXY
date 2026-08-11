@@ -21,13 +21,6 @@ vi.mock('./libraryApi', () => ({
   renameLibrary: vi.fn(),
   updateLibraryPolicy: vi.fn(),
 }));
-vi.mock('./HybridCandidatesPanel', () => ({
-  HybridCandidatesPanel: () => (
-    <section aria-labelledby="background-candidates-heading">
-      <h2 id="background-candidates-heading">Background candidates</h2>
-    </section>
-  ),
-}));
 vi.mock('./filesystemApi', () => ({ attachFilesystemFolder: vi.fn() }));
 vi.mock('./FolderPickerDialog', () => ({
   FolderPickerDialog: ({ isOpen, onSelect }: {
@@ -137,7 +130,6 @@ it('loads a direct deep link with ordered sections and a Back breadcrumb', async
     'Identity',
     'Scanning policy',
     'Media folders',
-    'Background candidates',
     'Danger zone',
   ]);
   expect(screen.getByText('3', { selector: 'dd' })).toBeVisible();
@@ -182,7 +174,7 @@ it('renames identity without reloading or replacing an unsaved policy draft', as
   renderEdit();
   const user = userEvent.setup();
   const name = await loadedNameInput();
-  await selectOption(user, 'Scan profile', 'Hybrid');
+  await selectOption(user, 'Scan profile', 'Manual');
   await user.clear(name);
   await user.type(name, 'Shows');
   await user.click(screen.getByRole('button', { name: 'Rename' }));
@@ -190,7 +182,7 @@ it('renames identity without reloading or replacing an unsaved policy draft', as
   expect(renameMock).toHaveBeenCalledWith('Movies', 'Shows');
   expect(listMock).toHaveBeenCalledOnce();
   await waitFor(() => { expect(screen.getByRole('heading', { name: 'Shows' })).toBeVisible(); });
-  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Hybrid');
+  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Manual');
 });
 
 it('clears the previous entity while a different route parameter is loading', async () => {
@@ -214,18 +206,18 @@ it('clears the previous entity while a different route parameter is loading', as
 it('saves a named profile with the loaded version and omits advanced overrides', async () => {
   listMock
     .mockResolvedValueOnce([movies])
-    .mockResolvedValueOnce([{ ...movies, enabled: false, scanProfile: 'Hybrid', profileVersion: 4 }]);
+    .mockResolvedValueOnce([{ ...movies, enabled: false, scanProfile: 'Manual', profileVersion: 4 }]);
   renderEdit();
   const user = userEvent.setup();
   await loadedNameInput();
   await user.click(screen.getByRole('switch', { name: 'Enabled' }));
-  await selectOption(user, 'Scan profile', 'Hybrid');
+  await selectOption(user, 'Scan profile', 'Manual');
   await user.click(screen.getByRole('button', { name: 'Save scan policy' }));
 
   expect(updateMock).toHaveBeenCalledWith({
     id: libraryId,
     enabled: false,
-    scanProfile: 'Hybrid',
+    scanProfile: 'Manual',
     profileVersion: 3,
     metadataSourceMode: 'automatic_scrape',
   });
@@ -240,7 +232,7 @@ it('sends all advanced policy values as one versioned update', async () => {
   await user.click(screen.getByRole('switch', { name: 'Override effective policy' }));
   await selectOption(user, 'Object selection', 'Library roots');
   await selectOption(user, 'Metadata', 'Full metadata');
-  await selectOption(user, 'Expansion', 'Background');
+  await selectOption(user, 'Expansion', 'Eager');
   await selectOption(user, 'Media probe', 'Eager');
   await user.click(screen.getByRole('button', { name: 'Save scan policy' }));
 
@@ -253,7 +245,7 @@ it('sends all advanced policy values as one versioned update', async () => {
     effectivePolicy: {
       objectSelectionScope: 'library_roots',
       metadataPolicy: 'full',
-      expansionPolicy: 'background',
+      expansionPolicy: 'eager',
       probePolicy: 'eager',
     },
   });
@@ -313,16 +305,16 @@ it('keeps every draft field after 409 and replaces it only through Reload latest
   await user.clear(name);
   await user.type(name, 'Local name');
   await user.click(screen.getByRole('switch', { name: 'Enabled' }));
-  await selectOption(user, 'Scan profile', 'Hybrid');
+  await selectOption(user, 'Scan profile', 'Full');
   await user.click(screen.getByRole('switch', { name: 'Override effective policy' }));
-  await selectOption(user, 'Expansion', 'Background');
+  await selectOption(user, 'Expansion', 'Eager');
   await user.click(screen.getByRole('button', { name: 'Save scan policy' }));
 
   expect(await screen.findByRole('alert')).toHaveTextContent('Your draft is intact');
   expect(name).toHaveValue('Local name');
   expect(screen.getByRole('switch', { name: 'Enabled' })).not.toBeChecked();
-  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Hybrid');
-  expect(screen.getByRole('button', { name: /Expansion/iu })).toHaveTextContent('Background');
+  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Full');
+  expect(screen.getByRole('button', { name: /Expansion/iu })).toHaveTextContent('Eager');
   expect(screen.getByRole('button', { name: 'Save scan policy' })).toBeDisabled();
   expect(updateMock).toHaveBeenCalledOnce();
   expect(screen.queryByText('private-conflict-detail')).not.toBeInTheDocument();
@@ -343,13 +335,13 @@ it('retains a full draft and current record after an explicit refresh fails', as
   const name = await loadedNameInput();
   await user.clear(name);
   await user.type(name, 'Unsaved name');
-  await selectOption(user, 'Scan profile', 'Hybrid');
+  await selectOption(user, 'Scan profile', 'Manual');
 
   await user.click(screen.getByRole('button', { name: 'Reload library' }));
 
   expect(await screen.findByText('Showing the last available data')).toBeVisible();
   expect(name).toHaveValue('Unsaved name');
-  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Hybrid');
+  expect(screen.getByRole('button', { name: /Scan profile/iu })).toHaveTextContent('Manual');
   expect(screen.queryByText('private-refresh-detail')).not.toBeInTheDocument();
 });
 

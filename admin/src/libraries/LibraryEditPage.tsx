@@ -23,7 +23,6 @@ import { AsyncContent } from '../ui/AsyncContent';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { PageHeader } from '../ui/PageHeader';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
-import { HybridCandidatesPanel } from './HybridCandidatesPanel';
 import { FolderPickerDialog } from './FolderPickerDialog';
 import { attachFilesystemFolder } from './filesystemApi';
 import type {
@@ -235,7 +234,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
           { label: 'Libraries', to: '/admin/libraries' },
           { label: pageTitle },
         ]}
-        description="Manage identity, versioned scanning policy, background candidates, and deletion."
+        description="Manage identity, versioned scanning policy, storage folders, and deletion."
         title={pageTitle}
       />
 
@@ -283,7 +282,6 @@ function LibraryEditPageContent({ id }: { id: string }) {
               library={library}
               onBrowse={() => { setFolderPickerOpen(true); }}
             />
-            <HybridCandidatesPanel library={library} />
             <DangerZone
               isDisabled={renamePending || policyPending}
               isPending={deletePending}

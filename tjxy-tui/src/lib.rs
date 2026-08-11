@@ -169,6 +169,7 @@ pub struct Project {
     pub root: PathBuf,
     target_dir: PathBuf,
     pid_path: PathBuf,
+    profile: Option<String>,
 }
 
 impl Project {
@@ -179,12 +180,19 @@ impl Project {
         }
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let development_root = manifest_dir.parent().unwrap_or(&manifest_dir);
-        let root = env::current_exe()
+        let executable_dir = env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf))
-            .filter(|path| !is_cargo_target_directory(path))
             .unwrap_or_else(|| development_root.to_path_buf());
-        Self::new(root)
+        let profile = cargo_profile(&executable_dir);
+        let root = if profile.is_some() {
+            development_root.to_path_buf()
+        } else {
+            executable_dir
+        };
+        let mut project = Self::new(root);
+        project.profile = profile.map(str::to_owned);
+        project
     }
 
     #[must_use]
@@ -193,6 +201,7 @@ impl Project {
             target_dir: root.join("target"),
             pid_path: root.join("data/tjxy-server.pid"),
             root,
+            profile: None,
         }
     }
 
@@ -491,13 +500,14 @@ impl Project {
     }
 
     fn preferred_server_binary(&self) -> Option<PathBuf> {
-        [
-            self.root.join("tjxy-server"),
-            self.server_binary("release"),
-            self.server_binary("debug"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        self.server_binary_candidates()
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
+    #[must_use]
+    pub fn server_binary_path(&self) -> Option<PathBuf> {
+        self.preferred_server_binary()
     }
 
     fn managed_pid(&self) -> Option<u32> {
@@ -508,13 +518,21 @@ impl Project {
         let Some(command_line) = process_command_line(pid) else {
             return false;
         };
-        [
-            self.root.join("tjxy-server"),
-            self.server_binary("release"),
-            self.server_binary("debug"),
-        ]
-        .into_iter()
-        .any(|binary| command_line_matches_binary(&command_line, &binary))
+        self.server_binary_candidates()
+            .into_iter()
+            .any(|binary| command_line_matches_binary(&command_line, &binary))
+    }
+
+    fn server_binary_candidates(&self) -> Vec<PathBuf> {
+        if let Some(profile) = &self.profile {
+            vec![self.server_binary(profile)]
+        } else {
+            vec![
+                self.root.join("tjxy-server"),
+                self.server_binary("release"),
+                self.server_binary("debug"),
+            ]
+        }
     }
 
     fn server_binary(&self, profile: &str) -> PathBuf {
@@ -532,6 +550,17 @@ fn is_cargo_target_directory(path: &Path) -> bool {
         ),
         (Some("debug" | "release" | "dist"), Some("target"))
     )
+}
+
+fn cargo_profile(path: &Path) -> Option<&'static str> {
+    if !is_cargo_target_directory(path) {
+        return None;
+    }
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some("debug") => Some("debug"),
+        Some("release") => Some("release"),
+        _ => None,
+    }
 }
 
 fn resolve_path(root: &Path, value: &str) -> PathBuf {
@@ -954,6 +983,35 @@ mod tests {
         let packaged = project.root.join("tjxy-server");
         fs::write(&packaged, "packaged").unwrap();
         assert_eq!(project.preferred_server_binary(), Some(packaged));
+        fs::remove_dir_all(&project.root).unwrap();
+    }
+
+    #[test]
+    fn cargo_profile_is_detected_from_target_directory() {
+        assert_eq!(
+            cargo_profile(Path::new("/repo/target/debug")),
+            Some("debug")
+        );
+        assert_eq!(
+            cargo_profile(Path::new("/repo/target/release")),
+            Some("release")
+        );
+        assert_eq!(cargo_profile(Path::new("/repo/target/dist")), None);
+        assert_eq!(cargo_profile(Path::new("/opt/tjxy")), None);
+    }
+
+    #[test]
+    fn profile_bound_project_does_not_fall_back_to_another_profile() {
+        let mut project = temporary_project("binary-profile");
+        project.profile = Some("debug".to_owned());
+        let debug = project.server_binary("debug");
+        let release = project.server_binary("release");
+        fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        fs::create_dir_all(release.parent().unwrap()).unwrap();
+        fs::write(&release, "release").unwrap();
+        assert_eq!(project.preferred_server_binary(), None);
+        fs::write(&debug, "debug").unwrap();
+        assert_eq!(project.preferred_server_binary(), Some(debug));
         fs::remove_dir_all(&project.root).unwrap();
     }
 

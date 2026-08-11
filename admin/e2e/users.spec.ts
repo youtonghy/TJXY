@@ -69,14 +69,12 @@ test.describe.serial('administrator library lifecycle', () => {
     await assertUniqueH1(page);
     const scanProfile = page.getByRole('button', { name: /Scan profile/u });
     await scanProfile.click();
-    await page.getByRole('option', { name: 'Hybrid' }).click();
+    await page.getByRole('option', { name: 'Manual' }).click();
     await persistLibraryPolicy(page);
-    await expect(scanProfile).toContainText('Hybrid');
-    await expect(page.getByText('No background candidates are pinned.')).toBeVisible();
+    await expect(scanProfile).toContainText('Manual');
 
     await page.reload();
-    await expect(page.getByRole('button', { name: /Scan profile/u })).toContainText('Hybrid');
-    await expect(page.getByText('No background candidates are pinned.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Scan profile/u })).toContainText('Manual');
     await assertNoHorizontalOverflow(page);
 
     await page.getByRole('textbox', { name: 'Library name' }).fill('Archive Movies');

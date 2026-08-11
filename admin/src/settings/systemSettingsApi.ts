@@ -18,12 +18,16 @@ export interface SystemSettings {
   listenHost: string;
   port: number;
   mediaBrowserRoots: string[];
+  invalidMediaBrowserRootIndexes: number[];
   revision: number;
   restartRequired: boolean;
   environmentOverrides: EnvironmentOverrides;
 }
 
-export type SaveSystemSettings = Omit<SystemSettings, 'restartRequired' | 'environmentOverrides'>;
+export type SaveSystemSettings = Omit<
+  SystemSettings,
+  'restartRequired' | 'environmentOverrides' | 'invalidMediaBrowserRootIndexes'
+>;
 type SettingsResponse = Record<string, unknown>;
 
 export async function getPublicSystemSettings(signal?: AbortSignal): Promise<SystemSettings> {
@@ -97,6 +101,9 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     listenHost: admin ? stringValue(value.ListenHost) ?? '127.0.0.1' : '127.0.0.1',
     port: admin ? numberValue(value.Port) ?? 8096 : 8096,
     mediaBrowserRoots: admin ? stringArray(value.MediaBrowserRoots) : [],
+    invalidMediaBrowserRootIndexes: admin
+      ? nonNegativeIntegerArray(value.InvalidMediaBrowserRootIndexes)
+      : [],
     revision,
     restartRequired: value.RestartRequired === true,
     environmentOverrides: isOverrides(overrides)
@@ -122,6 +129,16 @@ function stringArray(value: unknown): string[] {
     roots.push(entry);
   }
   return roots;
+}
+function nonNegativeIntegerArray(value: unknown): number[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Invalid media browser root diagnostics');
+  return value.map((entry) => {
+    if (!Number.isInteger(entry) || typeof entry !== 'number' || entry < 0) {
+      throw new Error('Invalid media browser root diagnostics');
+    }
+    return entry;
+  });
 }
 function isOverrides(value: unknown): value is EnvironmentOverrides {
   if (typeof value !== 'object' || value === null) return false;

@@ -1,9 +1,10 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sea_orm::{ConnectionTrait, DbBackend};
-use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
 use tjxy_application::{AuthService, SystemClock};
-use tjxy_db::{InstallationRepository, Migrator, SystemSettingsInput, SystemSettingsRepository};
+use tjxy_db::{
+    InstallationRepository, SystemSettingsInput, SystemSettingsRepository, migrate_database,
+};
 use tokio::sync::{Mutex, Notify, broadcast};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -332,7 +333,7 @@ impl SetupCoordinator {
             pending.installation_id(),
             SetupProgressStage::MigratingDatabase,
         );
-        Migrator::up(&database, None)
+        migrate_database(&database)
             .await
             .map_err(|_| SetupError::new(SetupErrorCode::InstallationFailed))?;
         if database.get_database_backend() == DbBackend::MySql {

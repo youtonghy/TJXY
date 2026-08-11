@@ -149,11 +149,11 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
     );
 
     let update = LibraryPolicyUpdate::new(
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
+        "Full",
+        "all_synced_objects",
+        "full",
+        "eager",
+        "eager",
         false,
     )
     .unwrap();

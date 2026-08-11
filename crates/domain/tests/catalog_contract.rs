@@ -45,15 +45,6 @@ fn scan_profiles_expand_to_persistable_effective_policies() {
     assert_eq!(lazy.expansion, StructureExpansionPolicy::OnAccess);
     assert_eq!(lazy.probe, ProbePolicy::OnPlaybackInfo);
 
-    let hybrid = EffectiveScanPolicy::for_profile(ScanProfile::Hybrid);
-    assert_eq!(
-        hybrid.object_selection,
-        ObjectSelectionScope::OnDemandSubtree
-    );
-    assert_eq!(hybrid.metadata, MetadataPolicy::Basic);
-    assert_eq!(hybrid.expansion, StructureExpansionPolicy::Background);
-    assert_eq!(hybrid.probe, ProbePolicy::OnPlaybackInfo);
-
     let manual = EffectiveScanPolicy::for_profile(ScanProfile::Manual);
     assert_eq!(manual.object_selection, ObjectSelectionScope::ExplicitOnly);
     assert_eq!(manual.metadata, MetadataPolicy::ExplicitOnly);

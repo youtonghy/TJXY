@@ -5,12 +5,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use tjxy_api::{AdminTaskJobInfo, AdminTaskJobStatus, ScheduledTaskInfo};
+use tjxy_api::{AdminTaskJobInfo, AdminTaskJobOutcome, AdminTaskJobStatus, ScheduledTaskInfo};
 use tjxy_application::TaskServiceError;
 use tjxy_common::{CatalogItemId, LibraryId, StorageRootId};
 use tjxy_db::{
     DiscoverTitlesError, FullScanRepositoryError, ManualProbeError, MetadataWorkError,
-    StorageSyncRepositoryError, WorkJobAdminRecord, WorkJobAdminStatus,
+    StorageSyncRepositoryError, WorkJobAdminOutcome, WorkJobAdminRecord, WorkJobAdminStatus,
 };
 use uuid::Uuid;
 
@@ -381,7 +381,6 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         TaskServiceError::Catalog(_)
-        | TaskServiceError::HybridCandidate(_)
         | TaskServiceError::Repository(_)
         | TaskServiceError::FullScan(
             FullScanRepositoryError::InvalidClaim
@@ -473,6 +472,12 @@ fn admin_job_info(record: &WorkJobAdminRecord) -> AdminTaskJobInfo {
         record.created_at(),
         record.started_at(),
         record.completed_at(),
+        record.outcome().map(|outcome| match outcome {
+            WorkJobAdminOutcome::NoMetadataMatch => AdminTaskJobOutcome::NoMetadataMatch,
+            WorkJobAdminOutcome::CompletedWithWarnings => {
+                AdminTaskJobOutcome::CompletedWithWarnings
+            }
+        }),
     )
 }
 
