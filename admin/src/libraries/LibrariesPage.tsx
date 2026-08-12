@@ -9,6 +9,7 @@ import { PageHeader } from '../ui/PageHeader';
 import { ResponsiveCollection } from '../ui/ResponsiveCollection';
 import { StatusChip } from '../ui/StatusChip';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
+import { useTranslate } from '../settings/i18n';
 import { LibraryCreateDialog } from './LibraryCreateDialog';
 import type { CreateLibraryRequest, LibraryOption } from './libraryApi';
 import { createLibrary, listLibraries } from './libraryApi';
@@ -30,6 +31,7 @@ const editLinkClassName = [
 ].join(' ');
 
 export function LibrariesPage() {
+  const tr = useTranslate();
   const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [libraries, setLibraries] = useState<LibraryOption[]>([]);
@@ -95,7 +97,7 @@ export function LibrariesPage() {
           <>
             <Tooltip>
               <Button
-                aria-label="Reload libraries"
+                aria-label={tr('Reload libraries', '重新加载媒体库')}
                 isDisabled={createPending}
                 isIconOnly
                 isPending={loading}
@@ -105,20 +107,20 @@ export function LibrariesPage() {
               >
                 <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
               </Button>
-              <Tooltip.Content>Reload libraries</Tooltip.Content>
+              <Tooltip.Content>{tr('Reload libraries', '重新加载媒体库')}</Tooltip.Content>
             </Tooltip>
             <Button isDisabled={controlsLocked} onPress={() => { setCreateOpen(true); }} size="sm">
               <Plus aria-hidden="true" className="size-4" />
-              Add library
+              {tr('Add library', '添加媒体库')}
             </Button>
           </>
         )}
-        description="Configure catalog sources and scanning behavior."
-        title="Libraries"
+        description={tr('Configure catalog sources and scanning behavior.', '配置媒体库来源和扫描行为。')}
+        title={tr('Libraries', '媒体库')}
       />
 
       {loading && hasLoaded && (
-        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing libraries...</p>
+        <p aria-live="polite" className="text-sm text-muted" role="status">{tr('Refreshing libraries...', '正在刷新媒体库…')}</p>
       )}
 
       <AsyncContent
@@ -148,18 +150,19 @@ export function LibrariesPage() {
 }
 
 function LibrariesTable({ libraries }: { libraries: LibraryOption[] }) {
+  const tr = useTranslate();
   return (
     <Table variant="secondary">
       <Table.ScrollContainer>
-        <Table.Content aria-label="Libraries" className="min-w-[48rem] table-fixed">
+        <Table.Content aria-label={tr('Libraries', '媒体库')} className="min-w-[48rem] table-fixed">
           <Table.Header>
-            <Table.Column isRowHeader>Name</Table.Column>
-            <Table.Column>Type</Table.Column>
-            <Table.Column>Status</Table.Column>
-            <Table.Column>Scan profile</Table.Column>
-            <Table.Column>Effective policy</Table.Column>
-            <Table.Column className="w-20 text-right">Roots</Table.Column>
-            <Table.Column className="w-32 text-right">Actions</Table.Column>
+            <Table.Column isRowHeader>{tr('Name', '名称')}</Table.Column>
+            <Table.Column>{tr('Type', '类型')}</Table.Column>
+            <Table.Column>{tr('Status', '状态')}</Table.Column>
+            <Table.Column>{tr('Scan profile', '扫描配置')}</Table.Column>
+            <Table.Column>{tr('Effective policy', '生效策略')}</Table.Column>
+            <Table.Column className="w-20 text-right">{tr('Roots', '根目录')}</Table.Column>
+            <Table.Column className="w-32 text-right">{tr('Actions', '操作')}</Table.Column>
           </Table.Header>
           <Table.Body>
             {libraries.map((library) => (
@@ -181,17 +184,18 @@ function LibrariesTable({ libraries }: { libraries: LibraryOption[] }) {
 }
 
 function LibrariesMobileList({ libraries }: { libraries: LibraryOption[] }) {
+  const tr = useTranslate();
   return (
-    <ul aria-label="Libraries mobile" className="divide-y divide-border border-y border-border">
+    <ul aria-label={tr('Libraries mobile', '媒体库移动端列表')} className="divide-y divide-border border-y border-border">
       {libraries.map((library) => (
         <li aria-label={library.name} className="space-y-4 py-5" key={library.id}>
           <LibraryName library={library} />
           <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
-            <MobileField label="Type">{collectionLabel(library.collectionType)}</MobileField>
-            <MobileField label="Status"><LibraryStatus library={library} /></MobileField>
-            <MobileField label="Scan profile">{library.scanProfile}</MobileField>
-            <MobileField label="Policy"><PolicySummary library={library} /></MobileField>
-            <MobileField label="Storage roots">{library.locations.length}</MobileField>
+            <MobileField label={tr('Type', '类型')}>{collectionLabel(library.collectionType)}</MobileField>
+            <MobileField label={tr('Status', '状态')}><LibraryStatus library={library} /></MobileField>
+            <MobileField label={tr('Scan profile', '扫描配置')}>{library.scanProfile}</MobileField>
+            <MobileField label={tr('Policy', '策略')}><PolicySummary library={library} /></MobileField>
+            <MobileField label={tr('Storage roots', '存储根目录')}>{library.locations.length}</MobileField>
           </dl>
           <div className="flex justify-end"><EditLibraryLink library={library} /></div>
         </li>
@@ -210,14 +214,15 @@ function LibraryName({ library }: { library: LibraryOption }) {
 }
 
 function LibraryStatus({ library }: { library: LibraryOption }) {
+  const tr = useTranslate();
   if (!library.enabled) {
-    return <StatusChip tone="neutral">Disabled</StatusChip>;
+    return <StatusChip tone="neutral">{tr('Disabled', '已禁用')}</StatusChip>;
   }
   const offline = (library.unavailableLocations?.length ?? 0) > 0;
   if (offline) {
-    return <StatusChip tone="warning"><span className="inline-flex items-center gap-1"><TriangleAlert aria-hidden="true" className="size-3.5" />Offline</span></StatusChip>;
+    return <StatusChip tone="warning"><span className="inline-flex items-center gap-1"><TriangleAlert aria-hidden="true" className="size-3.5" />{tr('Offline', '离线')}</span></StatusChip>;
   }
-  return <StatusChip tone="success">Enabled</StatusChip>;
+  return <StatusChip tone="success">{tr('Enabled', '已启用')}</StatusChip>;
 }
 
 function PolicySummary({ library }: { library: LibraryOption }) {
@@ -232,15 +237,16 @@ function PolicySummary({ library }: { library: LibraryOption }) {
 }
 
 function EditLibraryLink({ library }: { library: LibraryOption }) {
+  const tr = useTranslate();
   return (
     <div className="flex justify-end">
       <Link
-        aria-label={`Edit ${library.name}`}
+        aria-label={`${tr('Edit', '编辑')} ${library.name}`}
         className={editLinkClassName}
         to={`/admin/libraries/${encodeURIComponent(library.id)}`}
       >
         <Pencil aria-hidden="true" className="size-4" />
-        Edit
+        {tr('Edit', '编辑')}
       </Link>
     </div>
   );
@@ -256,8 +262,9 @@ function MobileField({ label, children }: { label: string; children: ReactNode }
 }
 
 function LibrariesSkeleton() {
+  const tr = useTranslate();
   return (
-    <div aria-label="Loading libraries" className="space-y-3" role="status">
+    <div aria-label={tr('Loading libraries', '正在加载媒体库')} className="space-y-3" role="status">
       <Skeleton className="h-11 w-full" />
       <Skeleton className="h-20 w-full" />
       <Skeleton className="h-20 w-full" />
@@ -266,12 +273,13 @@ function LibrariesSkeleton() {
 }
 
 function LibrariesEmptyState() {
+  const tr = useTranslate();
   return (
     <div className="flex min-h-52 flex-col items-center justify-center gap-3 border-y border-border py-8 text-center">
       <FolderKanban aria-hidden="true" className="size-6 text-muted" />
       <div>
-        <h2 className="text-base font-semibold text-foreground">No libraries are configured.</h2>
-        <p className="mt-1 text-sm text-muted">Add a library to begin organizing catalog content.</p>
+        <h2 className="text-base font-semibold text-foreground">{tr('No libraries are configured.', '尚未配置媒体库。')}</h2>
+        <p className="mt-1 text-sm text-muted">{tr('Add a library to begin organizing catalog content.', '添加媒体库后即可开始整理媒体内容。')}</p>
       </div>
     </div>
   );

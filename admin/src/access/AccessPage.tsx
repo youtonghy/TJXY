@@ -2,12 +2,14 @@ import { Tabs } from '@heroui/react';
 import { useSearchParams } from 'react-router-dom';
 
 import { PageHeader } from '../ui/PageHeader';
+import { useTranslate } from '../settings/i18n';
 import { ApiKeysPanel } from './ApiKeysPanel';
 import { DevicesPanel } from './DevicesPanel';
 
 type AccessTab = 'devices' | 'api-keys';
 
 export function AccessPage() {
+  const tr = useTranslate();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = parseAccessTab(searchParams);
 
@@ -22,12 +24,12 @@ export function AccessPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        description="Review signed-in devices and manage credentials used by external applications."
-        title="Access"
+        description={tr('Review signed-in devices and manage credentials used by external applications.', '查看已登录设备，并管理外部应用使用的凭据。')}
+        title={tr('Access', '访问控制')}
       />
 
       <Tabs
-        aria-label="Access management"
+        aria-label={tr('Access management', '访问控制管理')}
         onSelectionChange={selectTab}
         selectedKey={tab}
         variant="secondary"
@@ -35,11 +37,11 @@ export function AccessPage() {
         <Tabs.ListContainer>
           <Tabs.List>
             <Tabs.Tab id="devices">
-              Devices
+              {tr('Devices', '设备')}
               <Tabs.Indicator />
             </Tabs.Tab>
             <Tabs.Tab id="api-keys">
-              API Keys
+              {tr('API Keys', 'API 密钥')}
               <Tabs.Indicator />
             </Tabs.Tab>
           </Tabs.List>

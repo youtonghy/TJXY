@@ -30,10 +30,12 @@ import {
   startOneDriveOAuth,
 } from './googleDriveApi';
 import { uniqueChoices } from './directoryChoices';
+import { useTranslate } from '../settings/i18n';
 
 type BusyOperation = 'start' | 'verify' | 'browse' | 'more' | 'bind' | null;
 
 export function OneDrivePage() {
+  const tr = useTranslate();
   const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [libraries, setLibraries] = useState<LibraryOption[]>([]);
@@ -285,7 +287,7 @@ export function OneDrivePage() {
       }, controller.signal);
       if (!isCurrent(request)) return;
       setBinding(result);
-      notify('OneDrive was added.', { type: 'success' });
+      notify(tr('OneDrive was added.', 'OneDrive 已添加。'), { type: 'success' });
     } catch (error: unknown) {
       if (!isCurrent(request)) return;
       const handled = await logoutIfAccessDenied(error);
@@ -445,22 +447,23 @@ function AuthorizeStep({
   hasOAuth: boolean;
   isBusy: boolean;
 }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="onedrive-authorize-heading" className="max-w-2xl space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-foreground" id="onedrive-authorize-heading">Authorize OneDrive</h2>
-        <p className="mt-1 text-sm leading-6 text-muted">Choose an enabled library, then complete authorization in the provider window.</p>
+        <h2 className="text-lg font-semibold text-foreground" id="onedrive-authorize-heading">{tr('Authorize OneDrive', '授权 OneDrive')}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">{tr('Choose an enabled library, then complete authorization in the provider window.', '选择已启用的媒体库，然后在服务商窗口中完成授权。')}</p>
       </div>
       {librariesPending ? (
         <div aria-label="Loading target libraries" className="space-y-2" role="status"><Skeleton className="h-12 w-full" /></div>
       ) : librariesError ? (
         <Alert role="alert" status="danger"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>Target libraries could not be loaded</Alert.Title><Alert.Description>Retry before starting authorization.</Alert.Description></Alert.Content><Button onPress={onRetryLibraries} size="sm" variant="tertiary"><RefreshCw aria-hidden="true" className="size-4" />Retry</Button></Alert>
       ) : libraries.length === 0 ? (
-        <p className="border-y border-border py-8 text-sm text-muted">Create an enabled library before connecting OneDrive.</p>
+        <p className="border-y border-border py-8 text-sm text-muted">{tr('Create an enabled library before connecting OneDrive.', '连接 OneDrive 前请先创建已启用的媒体库。')}</p>
       ) : (
         <>
           <Select fullWidth isDisabled={isBusy || hasOAuth} onChange={(key) => { if (typeof key === 'string') setTargetLibraryId(key); }} value={targetLibraryId}>
-            <Label>Target library</Label>
+            <Label>{tr('Target library', '目标媒体库')}</Label>
             <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
             <Select.Popover><ListBox>{libraries.map((library) => <ListBox.Item id={library.id} isDisabled={!library.enabled} key={library.id} textValue={library.enabled ? library.name : `${library.name} disabled`}>{library.name}{!library.enabled && <span className="ml-auto text-xs text-muted">Disabled</span>}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
           </Select>
@@ -468,8 +471,8 @@ function AuthorizeStep({
           {authorizationError !== null && <Alert role="alert" status="warning"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>Authorization needs attention</Alert.Title><Alert.Description>{authorizationError}</Alert.Description></Alert.Content></Alert>}
           {popupBlocked && <Alert role="alert" status="warning"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>The authorization window was blocked</Alert.Title><Alert.Description>Allow popups for this admin page, then retry. Your authorization state is still available.</Alert.Description></Alert.Content><Button isDisabled={isBusy} onPress={onRetryPopup} size="sm" variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />Retry</Button></Alert>}
           <div className="flex flex-wrap gap-2">
-            {!hasOAuth && <Button isDisabled={targetLibraryId.length === 0 || selectedLibrary?.enabled !== true} isPending={isBusy} onPress={onStart}><ExternalLink aria-hidden="true" className="size-4" />Authorize OneDrive</Button>}
-            {hasOAuth && <Button isPending={isBusy} onPress={onVerify} variant="secondary"><RefreshCw aria-hidden="true" className="size-4" />Check authorization</Button>}
+            {!hasOAuth && <Button isDisabled={targetLibraryId.length === 0 || selectedLibrary?.enabled !== true} isPending={isBusy} onPress={onStart}><ExternalLink aria-hidden="true" className="size-4" />{tr('Authorize OneDrive', '授权 OneDrive')}</Button>}
+            {hasOAuth && <Button isPending={isBusy} onPress={onVerify} variant="secondary"><RefreshCw aria-hidden="true" className="size-4" />{tr('Check authorization', '检查授权')}</Button>}
           </div>
         </>
       )}
@@ -496,13 +499,14 @@ function ReviewStep({
   onDisplayNameChange: (value: string) => void;
   selectedLibrary: LibraryOption | undefined;
 }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="onedrive-review-heading" className="max-w-2xl space-y-5">
-      <div><h2 className="text-lg font-semibold text-foreground" id="onedrive-review-heading">Review binding</h2><p className="mt-1 text-sm leading-6 text-muted">Confirm the target library and provider folder before creating the binding.</p></div>
+      <div><h2 className="text-lg font-semibold text-foreground" id="onedrive-review-heading">{tr('Review binding', '检查绑定')}</h2><p className="mt-1 text-sm leading-6 text-muted">{tr('Confirm the target library and provider folder before creating the binding.', '创建绑定前请确认目标媒体库和服务商文件夹。')}</p></div>
       <dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-2"><ReviewField label="Target library">{selectedLibrary?.name ?? 'Unknown library'}</ReviewField><ReviewField label="Folder">{currentFolder.name}</ReviewField></dl>
-      <TextField fullWidth isRequired name="displayName"><Label>Display name</Label><Input disabled={isBusy || bindingError} maxLength={2048} onChange={(event) => { onDisplayNameChange(event.currentTarget.value); }} value={displayName} /></TextField>
+      <TextField fullWidth isRequired name="displayName"><Label>{tr('Display name', '显示名称')}</Label><Input disabled={isBusy || bindingError} maxLength={2048} onChange={(event) => { onDisplayNameChange(event.currentTarget.value); }} value={displayName} /></TextField>
       {bindingError && <Alert role="alert" status="danger"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>The binding result could not be confirmed</Alert.Title><Alert.Description>This authorization cannot be reused. Restart authorization before trying again.</Alert.Description></Alert.Content></Alert>}
-      <div className="flex flex-wrap justify-between gap-2"><Button isDisabled={isBusy || bindingError} onPress={onBack} variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />Back to folder</Button><Button isDisabled={bindingError || displayName.trim().length === 0} isPending={isBusy} onPress={onBind}><CheckCircle2 aria-hidden="true" className="size-4" />Add OneDrive</Button></div>
+      <div className="flex flex-wrap justify-between gap-2"><Button isDisabled={isBusy || bindingError} onPress={onBack} variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />{tr('Back to folder', '返回文件夹')}</Button><Button isDisabled={bindingError || displayName.trim().length === 0} isPending={isBusy} onPress={onBind}><CheckCircle2 aria-hidden="true" className="size-4" />{tr('Add OneDrive', '添加 OneDrive')}</Button></div>
     </section>
   );
 }
@@ -512,7 +516,8 @@ function ReviewField({ label, children }: { label: string; children: string }) {
 }
 
 function CompleteStep({ binding }: { binding: StorageBindingResult }) {
-  return <section aria-labelledby="onedrive-complete-heading" className="max-w-2xl space-y-5"><Alert status="success"><Alert.Indicator><CheckCircle2 aria-hidden="true" className="size-5" /></Alert.Indicator><Alert.Content><Alert.Title id="onedrive-complete-heading">OneDrive is connected</Alert.Title><Alert.Description>{binding.restartRequired ? 'Restart the server before the new storage root becomes active.' : 'The storage root is active and ready for its initial sync.'}</Alert.Description></Alert.Content></Alert><dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-2"><ReviewField label="Initial sync job">{binding.initialSyncJobId}</ReviewField><ReviewField label="Storage root">{binding.rootId}</ReviewField></dl></section>;
+  const tr = useTranslate();
+  return <section aria-labelledby="onedrive-complete-heading" className="max-w-2xl space-y-5"><Alert status="success"><Alert.Indicator><CheckCircle2 aria-hidden="true" className="size-5" /></Alert.Indicator><Alert.Content><Alert.Title id="onedrive-complete-heading">{tr('OneDrive is connected', 'OneDrive 已连接')}</Alert.Title><Alert.Description>{binding.restartRequired ? tr('Restart the server before the new storage root becomes active.', '请重启服务器后启用新的存储根目录。') : tr('The storage root is active and ready for its initial sync.', '存储根目录已启用，可以开始初始同步。')}</Alert.Description></Alert.Content></Alert><dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-2"><ReviewField label={tr('Initial sync job', '初始同步任务')}>{binding.initialSyncJobId}</ReviewField><ReviewField label={tr('Storage root', '存储根目录')}>{binding.rootId}</ReviewField></dl></section>;
 }
 
 function isConflict(error: unknown): boolean {

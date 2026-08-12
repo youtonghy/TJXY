@@ -32,6 +32,7 @@ import { isNonNegativeInteger, isRecord } from '../api/responseValidation';
 import { AsyncContent } from '../ui/AsyncContent';
 import { PageHeader } from '../ui/PageHeader';
 import { ResponsiveCollection } from '../ui/ResponsiveCollection';
+import { useTranslate } from '../settings/i18n';
 import { UserStatus } from './UserStatus';
 
 const actionLinkClassName = [
@@ -55,6 +56,7 @@ export function UserList() {
 }
 
 function UserListView() {
+  const tr = useTranslate();
   const listContext = useListContext<UserRecord>();
   const {
     data,
@@ -130,11 +132,11 @@ function UserListView() {
             to={createPath({ resource: 'users', type: 'create' })}
           >
             <Plus aria-hidden="true" className="size-4" />
-            Create user
+            {tr('Create user', '创建用户')}
           </Link>
         )}
-        description="Manage administrator access, sign-in state, and user credentials."
-        title="Users"
+        description={tr('Manage administrator access, sign-in state, and user credentials.', '管理管理员权限、登录状态和用户凭据。')}
+        title={tr('Users', '用户')}
       />
 
       {listMeta !== null && <UserSummaries meta={listMeta} />}
@@ -160,10 +162,10 @@ function UserListView() {
           className="space-y-4"
         >
           {isRefreshing && (
-            <p className="text-sm text-muted" role="status">Updating user results...</p>
+            <p className="text-sm text-muted" role="status">{tr('Updating user results...', '正在更新用户结果…')}</p>
           )}
           <ResponsiveCollection
-            ariaLabel="Users collection"
+            ariaLabel={tr('Users collection', '用户集合')}
             desktop={<UserTable isRefreshing={isRefreshing} records={records} />}
             mobile={<UserMobileList isRefreshing={isRefreshing} records={records} />}
           />
@@ -192,6 +194,7 @@ function UserFilters({
     access: UserAccessFilter,
   ) => void;
 }) {
+  const tr = useTranslate();
   const [query, setQuery] = useState(initialQuery);
   const [access, setAccess] = useState<UserAccessFilter>(initialAccess);
   const queryRef = useRef(initialQuery);
@@ -210,7 +213,7 @@ function UserFilters({
   return (
     <div className="grid gap-3 sm:grid-cols-[minmax(0,22rem)_13rem] sm:items-end">
       <TextField fullWidth name="user-search" value={query}>
-        <Label>Search users</Label>
+        <Label>{tr('Search users', '搜索用户')}</Label>
         <div className="relative">
           <Search
             aria-hidden="true"
@@ -229,7 +232,7 @@ function UserFilters({
                 onFiltersChange(nextQuery, access);
               }, 500);
             }}
-            placeholder="Name or user ID"
+            placeholder={tr('Name or user ID', '姓名或用户 ID')}
             type="search"
           />
         </div>
@@ -245,27 +248,27 @@ function UserFilters({
         }}
         value={access}
       >
-        <Label>Access</Label>
+        <Label>{tr('Access', '权限')}</Label>
         <Select.Trigger>
           <Select.Value />
           <Select.Indicator />
         </Select.Trigger>
         <Select.Popover>
           <ListBox>
-            <ListBox.Item id="all" textValue="All users">
-              All users
+            <ListBox.Item id="all" textValue={tr('All users', '所有用户')}>
+              {tr('All users', '所有用户')}
               <ListBox.ItemIndicator />
             </ListBox.Item>
-            <ListBox.Item id="administrator" textValue="Administrators">
-              Administrators
+            <ListBox.Item id="administrator" textValue={tr('Administrators', '管理员')}>
+              {tr('Administrators', '管理员')}
               <ListBox.ItemIndicator />
             </ListBox.Item>
-            <ListBox.Item id="standard" textValue="Standard users">
-              Standard users
+            <ListBox.Item id="standard" textValue={tr('Standard users', '普通用户')}>
+              {tr('Standard users', '普通用户')}
               <ListBox.ItemIndicator />
             </ListBox.Item>
-            <ListBox.Item id="disabled" textValue="Disabled">
-              Disabled
+            <ListBox.Item id="disabled" textValue={tr('Disabled', '已禁用')}>
+              {tr('Disabled', '已禁用')}
               <ListBox.ItemIndicator />
             </ListBox.Item>
           </ListBox>
@@ -276,11 +279,12 @@ function UserFilters({
 }
 
 function UserSummaries({ meta }: { meta: UserListMeta }) {
+  const tr = useTranslate();
   return (
-    <div aria-label="User summary" className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted" role="group">
-      <p><strong className="font-semibold text-foreground">{meta.totalUsers}</strong> total {plural(meta.totalUsers, 'user')}</p>
-      <p><strong className="font-semibold text-foreground">{meta.administrators}</strong> enabled {plural(meta.administrators, 'administrator')}</p>
-      <p><strong className="font-semibold text-foreground">{meta.disabled}</strong> disabled {plural(meta.disabled, 'user')}</p>
+    <div aria-label={tr('User summary', '用户摘要')} className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted" role="group">
+      <p><strong className="font-semibold text-foreground">{meta.totalUsers}</strong> {tr(`total ${plural(meta.totalUsers, 'user')}`, '位用户')}</p>
+      <p><strong className="font-semibold text-foreground">{meta.administrators}</strong> {tr(`enabled ${plural(meta.administrators, 'administrator')}`, '位已启用管理员')}</p>
+      <p><strong className="font-semibold text-foreground">{meta.disabled}</strong> {tr(`disabled ${plural(meta.disabled, 'user')}`, '位已禁用用户')}</p>
     </div>
   );
 }
@@ -292,14 +296,15 @@ function UserTable({
   isRefreshing: boolean;
   records: UserRecord[];
 }) {
+  const tr = useTranslate();
   return (
     <Table variant="secondary">
       <Table.ScrollContainer>
-        <Table.Content aria-label="Users">
+        <Table.Content aria-label={tr('Users', '用户')}>
           <Table.Header>
-            <Table.Column isRowHeader>Name</Table.Column>
-            <Table.Column>Access</Table.Column>
-            <Table.Column className="w-24 text-right">Actions</Table.Column>
+            <Table.Column isRowHeader>{tr('Name', '姓名')}</Table.Column>
+            <Table.Column>{tr('Access', '权限')}</Table.Column>
+            <Table.Column className="w-24 text-right">{tr('Actions', '操作')}</Table.Column>
           </Table.Header>
           <Table.Body>
             {records.map((record) => (
@@ -337,21 +342,22 @@ function UserMobileList({
   isRefreshing: boolean;
   records: UserRecord[];
 }) {
+  const tr = useTranslate();
   return (
-    <ul aria-label="Users mobile" className="divide-y divide-border border-y border-border">
+    <ul aria-label={tr('Users mobile', '用户移动端列表')} className="divide-y divide-border border-y border-border">
       {records.map((record) => (
         <li aria-label={record.Name} className="space-y-4 py-4" key={record.id}>
           <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
-            <MobileField label="Name"><span className="font-semibold text-foreground">{record.Name}</span></MobileField>
-            <MobileField label="User ID"><span className="break-all text-muted">{record.Id}</span></MobileField>
-            <MobileField label="Access">
-              {record.Policy.IsAdministrator ? 'Administrator' : 'Standard'}
+            <MobileField label={tr('Name', '姓名')}><span className="font-semibold text-foreground">{record.Name}</span></MobileField>
+            <MobileField label={tr('User ID', '用户 ID')}><span className="break-all text-muted">{record.Id}</span></MobileField>
+            <MobileField label={tr('Access', '权限')}>
+              {record.Policy.IsAdministrator ? tr('Administrator', '管理员') : tr('Standard', '普通用户')}
             </MobileField>
-            <MobileField label="Status">
-              {record.Policy.IsDisabled ? 'Disabled' : 'Enabled'}
+            <MobileField label={tr('Status', '状态')}>
+              {record.Policy.IsDisabled ? tr('Disabled', '已禁用') : tr('Enabled', '已启用')}
             </MobileField>
           </dl>
-          <div className="flex justify-end gap-1" aria-label={`Actions for ${record.Name}`}>
+          <div className="flex justify-end gap-1" aria-label={`${tr('Actions for', '操作：')} ${record.Name}`}>
             <UserActionLinks isDisabled={isRefreshing} record={record} />
           </div>
         </li>
@@ -376,14 +382,15 @@ function UserActionLinks({
   isDisabled: boolean;
   record: UserRecord;
 }) {
+  const tr = useTranslate();
   const createPath = useCreatePath();
   if (isDisabled) {
     return (
       <>
-        <span aria-label={`View ${record.Name} unavailable while updating`} className={actionLinkClassName}>
+        <span aria-label={`${tr('View', '查看')} ${record.Name} ${tr('unavailable while updating', '在更新期间不可用')}`} className={actionLinkClassName}>
           <Eye aria-hidden="true" className="size-4" />
         </span>
-        <span aria-label={`Edit ${record.Name} unavailable while updating`} className={actionLinkClassName}>
+        <span aria-label={`${tr('Edit', '编辑')} ${record.Name} ${tr('unavailable while updating', '在更新期间不可用')}`} className={actionLinkClassName}>
           <Pencil aria-hidden="true" className="size-4" />
         </span>
       </>
@@ -393,23 +400,23 @@ function UserActionLinks({
     <>
       <Tooltip>
         <Link
-          aria-label={`View ${record.Name}`}
+          aria-label={`${tr('View', '查看')} ${record.Name}`}
           className={actionLinkClassName}
           to={createPath({ id: record.id, resource: 'users', type: 'show' })}
         >
           <Eye aria-hidden="true" className="size-4" />
         </Link>
-        <Tooltip.Content>View user</Tooltip.Content>
+        <Tooltip.Content>{tr('View user', '查看用户')}</Tooltip.Content>
       </Tooltip>
       <Tooltip>
         <Link
-          aria-label={`Edit ${record.Name}`}
+          aria-label={`${tr('Edit', '编辑')} ${record.Name}`}
           className={actionLinkClassName}
           to={createPath({ id: record.id, resource: 'users', type: 'edit' })}
         >
           <Pencil aria-hidden="true" className="size-4" />
         </Link>
-        <Tooltip.Content>Edit user</Tooltip.Content>
+        <Tooltip.Content>{tr('Edit user', '编辑用户')}</Tooltip.Content>
       </Tooltip>
     </>
   );
@@ -428,35 +435,36 @@ function UserPagination({
   total: number;
   onPageChange: (page: number) => void;
 }) {
+  const tr = useTranslate();
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const first = (page - 1) * perPage + 1;
   const last = Math.min(page * perPage, total);
   return (
-    <Pagination aria-label="Users pagination" className="flex flex-wrap items-center justify-between gap-3">
-      <Pagination.Summary>{first}-{last} of {total}</Pagination.Summary>
+    <Pagination aria-label={tr('Users pagination', '用户分页')} className="flex flex-wrap items-center justify-between gap-3">
+      <Pagination.Summary>{first}-{last} {tr('of', '共')} {total}</Pagination.Summary>
       <Pagination.Content>
         <Pagination.Item>
           <Pagination.Previous
-            aria-label="Previous page"
+            aria-label={tr('Previous page', '上一页')}
             isDisabled={isDisabled || page <= 1}
             onPress={() => { onPageChange(page - 1); }}
           >
             <Pagination.PreviousIcon />
-            <span className="sr-only sm:not-sr-only">Previous</span>
+            <span className="sr-only sm:not-sr-only">{tr('Previous', '上一页')}</span>
           </Pagination.Previous>
         </Pagination.Item>
         <Pagination.Item>
-          <Pagination.Link aria-label={`Page ${String(page)}`} isActive isDisabled>
+          <Pagination.Link aria-label={`${tr('Page', '第')} ${String(page)} ${tr('', '页')}`} isActive isDisabled>
             {page}
           </Pagination.Link>
         </Pagination.Item>
         <Pagination.Item>
           <Pagination.Next
-            aria-label="Next page"
+            aria-label={tr('Next page', '下一页')}
             isDisabled={isDisabled || page >= totalPages}
             onPress={() => { onPageChange(page + 1); }}
           >
-            <span className="sr-only sm:not-sr-only">Next</span>
+            <span className="sr-only sm:not-sr-only">{tr('Next', '下一页')}</span>
             <Pagination.NextIcon />
           </Pagination.Next>
         </Pagination.Item>
@@ -466,23 +474,25 @@ function UserPagination({
 }
 
 function UserListSkeleton() {
+  const tr = useTranslate();
   return (
-    <div aria-label="Loading users" className="space-y-3" role="status">
+    <div aria-label={tr('Loading users', '正在加载用户')} className="space-y-3" role="status">
       <Skeleton className="h-11 w-full rounded-md" />
       <Skeleton className="h-16 w-full rounded-md" />
       <Skeleton className="h-16 w-full rounded-md" />
-      <span className="sr-only">Loading users</span>
+      <span className="sr-only">{tr('Loading users', '正在加载用户')}</span>
     </div>
   );
 }
 
 function UserEmptyState() {
+  const tr = useTranslate();
   return (
     <div className="flex min-h-52 flex-col items-center justify-center gap-3 border-y border-border py-8 text-center">
       <UsersRound aria-hidden="true" className="size-6 text-muted" />
       <div>
-        <h2 className="text-base font-semibold text-foreground">No users match the current filters.</h2>
-        <p className="mt-1 text-sm text-muted">Change the search or access filter to see other users.</p>
+        <h2 className="text-base font-semibold text-foreground">{tr('No users match the current filters.', '没有用户符合当前筛选条件。')}</h2>
+        <p className="mt-1 text-sm text-muted">{tr('Change the search or access filter to see other users.', '请更改搜索内容或权限筛选条件。')}</p>
       </div>
     </div>
   );

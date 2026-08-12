@@ -25,6 +25,7 @@ import { AsyncContent } from '../ui/AsyncContent';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { ResponsiveCollection } from '../ui/ResponsiveCollection';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
+import { useTranslate } from '../settings/i18n';
 import type { ApiKeyInfo } from './apiKeyApi';
 import { createApiKey, deleteApiKey, listApiKeys } from './apiKeyApi';
 import { formatAccessDate } from './formatAccessDate';
@@ -34,6 +35,7 @@ type LoadResult = { records: ApiKeyInfo[] } | { error: unknown };
 type BusyOperation = 'create' | 'delete' | null;
 
 export function ApiKeysPanel() {
+  const tr = useTranslate();
   const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
@@ -82,14 +84,14 @@ export function ApiKeysPanel() {
     try {
       await createApiKey(nextAppName);
       if (!isMounted()) return;
-      notify('API key created.', { type: 'success' });
+      notify(tr('API key created.', 'API 密钥已创建。'), { type: 'success' });
       setCreateOpen(false);
       setAppName('');
       await reload();
     } catch (caught: unknown) {
       if (!isMounted()) return;
       if (!(await logoutIfAccessDenied(caught)) && isMounted()) {
-        notify('The API key could not be created.', { type: 'error' });
+        notify(tr('The API key could not be created.', '无法创建 API 密钥。'), { type: 'error' });
       }
     } finally {
       operationRef.current = null;
@@ -130,9 +132,9 @@ export function ApiKeysPanel() {
   const copy = async (key: ApiKeyInfo) => {
     try {
       await navigator.clipboard.writeText(key.accessToken);
-      if (isMounted()) notify('API key copied.', { type: 'success' });
+      if (isMounted()) notify(tr('API key copied.', 'API 密钥已复制。'), { type: 'success' });
     } catch {
-      if (isMounted()) notify('The API key could not be copied.', { type: 'error' });
+      if (isMounted()) notify(tr('The API key could not be copied.', '无法复制 API 密钥。'), { type: 'error' });
     }
   };
 
@@ -148,13 +150,13 @@ export function ApiKeysPanel() {
             id="api-keys-heading"
             ref={headingRef}
             tabIndex={-1}
-          >API Keys</h2>
-          <p className="mt-1 text-sm text-muted">Long-lived credentials for trusted integrations.</p>
+          >{tr('API Keys', 'API 密钥')}</h2>
+          <p className="mt-1 text-sm text-muted">{tr('Long-lived credentials for trusted integrations.', '供可信集成使用的长期凭据。')}</p>
         </div>
         <div className="flex items-center gap-2">
           <Tooltip>
             <Button
-              aria-label="Reload API keys"
+              aria-label={tr('Reload API keys', '重新加载 API 密钥')}
               isDisabled={isLocked}
               isIconOnly
               onPress={() => { void reload(); }}
@@ -163,7 +165,7 @@ export function ApiKeysPanel() {
             >
               <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
             </Button>
-            <Tooltip.Content>Reload API keys</Tooltip.Content>
+            <Tooltip.Content>{tr('Reload API keys', '重新加载 API 密钥')}</Tooltip.Content>
           </Tooltip>
           <Button
             isDisabled={isLocked}
@@ -171,13 +173,13 @@ export function ApiKeysPanel() {
             size="sm"
           >
             <Plus aria-hidden="true" className="size-4" />
-            Create API key
+            {tr('Create API key', '创建 API 密钥')}
           </Button>
         </div>
       </div>
 
       {loading && hasLoaded && (
-        <p aria-live="polite" className="text-sm text-muted" role="status">Refreshing API keys...</p>
+        <p aria-live="polite" className="text-sm text-muted" role="status">{tr('Refreshing API keys...', '正在刷新 API 密钥…')}</p>
       )}
 
       <AsyncContent
@@ -190,7 +192,7 @@ export function ApiKeysPanel() {
         onRetry={() => { void reload(); }}
       >
         <ResponsiveCollection
-          ariaLabel="API keys collection"
+          ariaLabel={tr('API keys collection', 'API 密钥集合')}
           desktop={<ApiKeyTable isLocked={isLocked} keys={keys} onCopy={copy} onDelete={remove} onToggleReveal={toggleReveal} revealed={revealed} />}
           mobile={<ApiKeyMobileList isLocked={isLocked} keys={keys} onCopy={copy} onDelete={remove} onToggleReveal={toggleReveal} revealed={revealed} />}
         />
@@ -218,16 +220,17 @@ interface ApiKeyCollectionProps {
 }
 
 function ApiKeyTable(props: ApiKeyCollectionProps) {
+  const tr = useTranslate();
   return (
     <Table variant="secondary">
       <Table.ScrollContainer>
-        <Table.Content aria-label="API Keys" className="table-fixed">
+        <Table.Content aria-label={tr('API Keys', 'API 密钥')} className="table-fixed">
           <Table.Header>
-            <Table.Column isRowHeader>Application</Table.Column>
-            <Table.Column>Key</Table.Column>
-            <Table.Column>Created</Table.Column>
-            <Table.Column>Last used</Table.Column>
-            <Table.Column className="w-48 text-right">Actions</Table.Column>
+            <Table.Column isRowHeader>{tr('Application', '应用')}</Table.Column>
+            <Table.Column>{tr('Key', '密钥')}</Table.Column>
+            <Table.Column>{tr('Created', '创建时间')}</Table.Column>
+            <Table.Column>{tr('Last used', '最近使用')}</Table.Column>
+            <Table.Column className="w-48 text-right">{tr('Actions', '操作')}</Table.Column>
           </Table.Header>
           <Table.Body>
             {props.keys.map((key) => (
@@ -235,7 +238,7 @@ function ApiKeyTable(props: ApiKeyCollectionProps) {
                 <Table.Cell><span className="break-words font-semibold text-foreground">{key.appName}</span></Table.Cell>
                 <Table.Cell><ApiKeyValue isVisible={props.revealed.has(key.id)} value={key.accessToken} /></Table.Cell>
                 <Table.Cell>{formatAccessDate(key.dateCreated)}</Table.Cell>
-                <Table.Cell>{key.dateLastActivity === null ? 'Never' : formatAccessDate(key.dateLastActivity)}</Table.Cell>
+                <Table.Cell>{key.dateLastActivity === null ? tr('Never', '从未') : formatAccessDate(key.dateLastActivity)}</Table.Cell>
                 <Table.Cell><ApiKeyActions apiKey={key} {...props} /></Table.Cell>
               </Table.Row>
             ))}
@@ -247,15 +250,16 @@ function ApiKeyTable(props: ApiKeyCollectionProps) {
 }
 
 function ApiKeyMobileList(props: ApiKeyCollectionProps) {
+  const tr = useTranslate();
   return (
-    <ul aria-label="API Keys mobile" className="divide-y divide-border border-y border-border">
+    <ul aria-label={tr('API Keys mobile', 'API 密钥移动端列表')} className="divide-y divide-border border-y border-border">
       {props.keys.map((key) => (
         <li aria-label={key.appName} className="space-y-4 py-4" key={key.id}>
           <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
-            <MobileField label="Application"><span className="break-words font-semibold">{key.appName}</span></MobileField>
-            <MobileField label="Key"><ApiKeyValue isVisible={props.revealed.has(key.id)} value={key.accessToken} /></MobileField>
-            <MobileField label="Created">{formatAccessDate(key.dateCreated)}</MobileField>
-            <MobileField label="Last used">{key.dateLastActivity === null ? 'Never' : formatAccessDate(key.dateLastActivity)}</MobileField>
+            <MobileField label={tr('Application', '应用')}><span className="break-words font-semibold">{key.appName}</span></MobileField>
+            <MobileField label={tr('Key', '密钥')}><ApiKeyValue isVisible={props.revealed.has(key.id)} value={key.accessToken} /></MobileField>
+            <MobileField label={tr('Created', '创建时间')}>{formatAccessDate(key.dateCreated)}</MobileField>
+            <MobileField label={tr('Last used', '最近使用')}>{key.dateLastActivity === null ? tr('Never', '从未') : formatAccessDate(key.dateLastActivity)}</MobileField>
           </dl>
           <ApiKeyActions apiKey={key} {...props} />
         </li>
@@ -265,8 +269,9 @@ function ApiKeyMobileList(props: ApiKeyCollectionProps) {
 }
 
 function ApiKeyValue({ isVisible, value }: { isVisible: boolean; value: string }) {
+  const tr = useTranslate();
   return (
-    <code aria-label={isVisible ? 'Visible API key' : 'Hidden API key'} className="break-all font-mono text-xs text-foreground">
+    <code aria-label={isVisible ? tr('Visible API key', '可见的 API 密钥') : tr('Hidden API key', '隐藏的 API 密钥')} className="break-all font-mono text-xs text-foreground">
       {isVisible ? value : KEY_MASK}
     </code>
   );
@@ -280,12 +285,13 @@ function ApiKeyActions({
   onToggleReveal,
   revealed,
 }: Omit<ApiKeyCollectionProps, 'keys'> & { apiKey: ApiKeyInfo }) {
+  const tr = useTranslate();
   const visible = revealed.has(apiKey.id);
   return (
-    <div aria-label={`Actions for ${apiKey.appName}`} className="flex justify-end gap-1">
+    <div aria-label={`${tr('Actions for', '操作：')} ${apiKey.appName}`} className="flex justify-end gap-1">
       <Tooltip>
         <Button
-          aria-label={`${visible ? 'Hide' : 'Show'} key for ${apiKey.appName}`}
+          aria-label={`${visible ? tr('Hide', '隐藏') : tr('Show', '显示')} ${tr('key for', '密钥：')} ${apiKey.appName}`}
           isDisabled={isLocked}
           isIconOnly
           onPress={() => { onToggleReveal(apiKey.id); }}
@@ -294,11 +300,11 @@ function ApiKeyActions({
         >
           {visible ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
         </Button>
-        <Tooltip.Content>{visible ? 'Hide API key' : 'Show API key'}</Tooltip.Content>
+        <Tooltip.Content>{visible ? tr('Hide API key', '隐藏 API 密钥') : tr('Show API key', '显示 API 密钥')}</Tooltip.Content>
       </Tooltip>
       <Tooltip>
         <Button
-          aria-label={`Copy key for ${apiKey.appName}`}
+          aria-label={`${tr('Copy key for', '复制密钥：')} ${apiKey.appName}`}
           isDisabled={isLocked}
           isIconOnly
           onPress={() => { void onCopy(apiKey); }}
@@ -307,24 +313,24 @@ function ApiKeyActions({
         >
           <Copy aria-hidden="true" className="size-4" />
         </Button>
-        <Tooltip.Content>Copy API key</Tooltip.Content>
+        <Tooltip.Content>{tr('Copy API key', '复制 API 密钥')}</Tooltip.Content>
       </Tooltip>
       <ConfirmDialog
-        confirmLabel="Delete key"
-        description={<>Delete the API key for <strong>{apiKey.appName}</strong>?</>}
+        confirmLabel={tr('Delete key', '删除密钥')}
+        description={<>{tr('Delete the API key for', '删除以下应用的 API 密钥：')} <strong>{apiKey.appName}</strong>？</>}
         isPending={isLocked}
         onConfirm={() => onDelete(apiKey)}
-        title="Delete API key"
+        title={tr('Delete API key', '删除 API 密钥')}
         trigger={(
           <Button
-            aria-label={`Delete key for ${apiKey.appName}`}
+            aria-label={`${tr('Delete key for', '删除密钥：')} ${apiKey.appName}`}
             className="min-w-24"
             isDisabled={isLocked}
             size="sm"
             variant="danger-soft"
           >
             <Trash2 aria-hidden="true" className="size-4" />
-            Delete
+            {tr('Delete', '删除')}
           </Button>
         )}
       />
@@ -347,21 +353,22 @@ function CreateApiKeyModal({
   onClose: () => void;
   onSubmit: (event?: SyntheticEvent<HTMLFormElement>) => void | Promise<void>;
 }) {
+  const tr = useTranslate();
   return (
     <Modal isOpen={isOpen} onOpenChange={(nextOpen) => { if (!nextOpen && !isPending) onClose(); }}>
       <Modal.Backdrop isDismissable={!isPending} isKeyboardDismissDisabled={isPending}>
         <Modal.Container placement="center" size="sm">
           <Modal.Dialog>
-            <Modal.CloseTrigger aria-label="Close" isDisabled={isPending} />
+            <Modal.CloseTrigger aria-label={tr('Close', '关闭')} isDisabled={isPending} />
             <Modal.Header>
               <Modal.Icon><KeyRound aria-hidden="true" className="size-5" /></Modal.Icon>
-              <Modal.Heading>Create API key</Modal.Heading>
+              <Modal.Heading>{tr('Create API key', '创建 API 密钥')}</Modal.Heading>
             </Modal.Header>
             <Modal.Body>
-              <p className="mb-4 text-sm text-muted">Name the integration that will use this credential.</p>
+              <p className="mb-4 text-sm text-muted">{tr('Name the integration that will use this credential.', '为使用此凭据的集成命名。')}</p>
               <form id="create-api-key-form" onSubmit={(event) => { void onSubmit(event); }}>
                 <TextField fullWidth isRequired name="appName">
-                  <Label>Application name</Label>
+                  <Label>{tr('Application name', '应用名称')}</Label>
                   <Input
                     autoFocus
                     disabled={isPending}
@@ -373,7 +380,7 @@ function CreateApiKeyModal({
               </form>
             </Modal.Body>
             <Modal.Footer>
-              <Button isDisabled={isPending} onPress={onClose} variant="tertiary">Cancel</Button>
+              <Button isDisabled={isPending} onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button>
               <Button
                 form="create-api-key-form"
                 isDisabled={appName.trim().length === 0}
@@ -381,7 +388,7 @@ function CreateApiKeyModal({
                 type="submit"
               >
                 {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Plus aria-hidden="true" className="size-4" />}
-                <span className="inline-flex min-h-5 items-center">Create key</span>
+                <span className="inline-flex min-h-5 items-center">{tr('Create key', '创建密钥')}</span>
               </Button>
             </Modal.Footer>
           </Modal.Dialog>
@@ -401,8 +408,9 @@ function MobileField({ label, children }: { label: string; children: ReactNode }
 }
 
 function ApiKeySkeleton() {
+  const tr = useTranslate();
   return (
-    <div aria-label="Loading API keys" className="space-y-3" role="status">
+    <div aria-label={tr('Loading API keys', '正在加载 API 密钥')} className="space-y-3" role="status">
       <Skeleton className="h-10 w-full" />
       <Skeleton className="h-16 w-full" />
       <Skeleton className="h-16 w-full" />
@@ -411,10 +419,11 @@ function ApiKeySkeleton() {
 }
 
 function EmptyApiKeys() {
+  const tr = useTranslate();
   return (
     <div className="border-y border-border py-10 text-center">
-      <p className="font-medium text-foreground">No API keys</p>
-      <p className="mt-1 text-sm text-muted">Create a key when an integration needs server access.</p>
+      <p className="font-medium text-foreground">{tr('No API keys', '暂无 API 密钥')}</p>
+      <p className="mt-1 text-sm text-muted">{tr('Create a key when an integration needs server access.', '当集成需要访问服务器时，请创建密钥。')}</p>
     </div>
   );
 }

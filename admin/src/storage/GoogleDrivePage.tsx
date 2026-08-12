@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { FolderBrowser, type FolderChoice } from './FolderBrowser';
 import { uniqueChoices } from './directoryChoices';
+import { useTranslate } from '../settings/i18n';
 import { closeOAuthPopup, navigateOAuthPopup, reserveOAuthPopup } from './oauthPopup';
 import { StorageWorkflow, type StoragePhase } from './StorageWorkflow';
 import type {
@@ -43,6 +44,7 @@ import {
 type BusyOperation = 'libraries' | 'start' | 'verify' | 'browse' | 'shared-more' | 'directory-more' | 'bind' | null;
 
 export function GoogleDrivePage() {
+  const tr = useTranslate();
   const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [libraries, setLibraries] = useState<LibraryOption[]>([]);
@@ -413,7 +415,7 @@ export function GoogleDrivePage() {
       }, controller.signal);
       if (!isCurrent(request)) return;
       setBinding(result);
-      notify('Google Drive was added.', { type: 'success' });
+      notify(tr('Google Drive was added.', 'Google Drive 已添加。'), { type: 'success' });
     } catch (error: unknown) {
       if (!isCurrent(request)) return;
       const handled = await logoutIfAccessDenied(error);
@@ -589,11 +591,12 @@ function AuthorizeStep({
   hasOAuth: boolean;
   isBusy: boolean;
 }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="google-authorize-heading" className="max-w-2xl space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-foreground" id="google-authorize-heading">Authorize Google Drive</h2>
-        <p className="mt-1 text-sm leading-6 text-muted">Choose an enabled library, then complete authorization in the provider window.</p>
+        <h2 className="text-lg font-semibold text-foreground" id="google-authorize-heading">{tr('Authorize Google Drive', '授权 Google Drive')}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">{tr('Choose an enabled library, then complete authorization in the provider window.', '选择已启用的媒体库，然后在服务商窗口中完成授权。')}</p>
       </div>
       {librariesPending ? (
         <div aria-label="Loading target libraries" className="space-y-2" role="status"><Skeleton className="h-12 w-full" /></div>
@@ -604,7 +607,7 @@ function AuthorizeStep({
           <Button onPress={onRetryLibraries} size="sm" variant="tertiary"><RefreshCw aria-hidden="true" className="size-4" />Retry</Button>
         </Alert>
       ) : libraries.length === 0 ? (
-        <p className="border-y border-border py-8 text-sm text-muted">Create an enabled library before connecting Google Drive.</p>
+        <p className="border-y border-border py-8 text-sm text-muted">{tr('Create an enabled library before connecting Google Drive.', '连接 Google Drive 前请先创建已启用的媒体库。')}</p>
       ) : (
         <>
           <Select
@@ -613,7 +616,7 @@ function AuthorizeStep({
             onChange={(key) => { if (typeof key === 'string') setTargetLibraryId(key); }}
             value={targetLibraryId}
           >
-            <Label>Target library</Label>
+            <Label>{tr('Target library', '目标媒体库')}</Label>
             <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
             <Select.Popover>
               <ListBox>
@@ -646,12 +649,12 @@ function AuthorizeStep({
           <div className="flex flex-wrap gap-2">
             {!hasOAuth && (
               <Button isDisabled={targetLibraryId.length === 0 || selectedLibrary?.enabled !== true} isPending={isBusy} onPress={onStart}>
-                <ExternalLink aria-hidden="true" className="size-4" />Authorize Google Drive
+                <ExternalLink aria-hidden="true" className="size-4" />{tr('Authorize Google Drive', '授权 Google Drive')}
               </Button>
             )}
             {hasOAuth && (
               <Button isPending={isBusy} onPress={onVerify} variant="secondary">
-                <RefreshCw aria-hidden="true" className="size-4" />Check authorization
+                <RefreshCw aria-hidden="true" className="size-4" />{tr('Check authorization', '检查授权')}
               </Button>
             )}
           </div>
@@ -710,27 +713,28 @@ function ChooseFolderStep({
   onUseFolder: () => void;
   currentFolder: FolderChoice | undefined;
 }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="google-folder-heading" className="space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-foreground" id="google-folder-heading">Choose a folder</h2>
-        <p className="mt-1 text-sm leading-6 text-muted">Browse folders on the authorized account. Only the selected folder is bound.</p>
+        <h2 className="text-lg font-semibold text-foreground" id="google-folder-heading">{tr('Choose a folder', '选择文件夹')}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">{tr('Browse folders on the authorized account. Only the selected folder is bound.', '浏览已授权账户中的文件夹。仅绑定所选文件夹。')}</p>
       </div>
       <ToggleButtonGroup
-        aria-label="Drive scope"
+        aria-label={tr('Drive scope', '云端硬盘范围')}
         disallowEmptySelection
         isDisabled={isBusy}
         onSelectionChange={onChangeScope}
         selectedKeys={[scope]}
         selectionMode="single"
       >
-        <ToggleButton id="MyDrive">My Drive</ToggleButton>
-        <ToggleButton id="SharedDrive">Shared Drive</ToggleButton>
+        <ToggleButton id="MyDrive">{tr('My Drive', '我的云端硬盘')}</ToggleButton>
+        <ToggleButton id="SharedDrive">{tr('Shared Drive', '共享云端硬盘')}</ToggleButton>
       </ToggleButtonGroup>
       {scope === 'SharedDrive' && (
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <Select fullWidth isDisabled={isBusy} onChange={onChangeSharedDrive} value={sharedDriveId}>
-            <Label>Shared Drive</Label>
+            <Label>{tr('Shared Drive', '共享云端硬盘')}</Label>
             <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
             <Select.Popover><ListBox>{sharedDrives.map((drive) => <ListBox.Item id={drive.id} key={drive.id} textValue={drive.name}>{drive.name}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
           </Select>
@@ -740,7 +744,7 @@ function ChooseFolderStep({
       {noSharedDrives && (
         <Alert status="accent">
           <Alert.Content>
-            <Alert.Title>No Shared Drives are available</Alert.Title>
+            <Alert.Title>{tr('No Shared Drives are available', '没有可用的共享云端硬盘')}</Alert.Title>
             <Alert.Description>{hasMoreSharedDrives ? 'Load the next provider page, then try Shared Drive again.' : 'This account has no Shared Drives to browse.'}</Alert.Description>
           </Alert.Content>
           {hasMoreSharedDrives && nextPageButton(sharedError, loadMoreSharedDrives, isBusy, isLoadingSharedDrives)}
@@ -768,7 +772,7 @@ function ChooseFolderStep({
       />
       <div className="flex justify-end">
         <Button isDisabled={isBusy || currentFolder === undefined} onPress={onUseFolder}>
-          <FolderOpen aria-hidden="true" className="size-4" />Use this folder
+          <FolderOpen aria-hidden="true" className="size-4" />{tr('Use this folder', '使用此文件夹')}
         </Button>
       </div>
     </section>
@@ -809,26 +813,27 @@ function ReviewStep({
   sharedDrives: GoogleDriveChoice[];
   bindingError: boolean;
 }) {
+  const tr = useTranslate();
   const sharedDrive = sharedDrives.find((drive) => drive.id === sharedDriveId);
   return (
     <section aria-labelledby="google-review-heading" className="max-w-2xl space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-foreground" id="google-review-heading">Review binding</h2>
-        <p className="mt-1 text-sm leading-6 text-muted">Confirm the target library and provider folder before creating the binding.</p>
+        <h2 className="text-lg font-semibold text-foreground" id="google-review-heading">{tr('Review binding', '检查绑定')}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">{tr('Confirm the target library and provider folder before creating the binding.', '创建绑定前请确认目标媒体库和服务商文件夹。')}</p>
       </div>
       <dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-3">
-        <ReviewField label="Target library">{selectedLibrary?.name ?? 'Unknown library'}</ReviewField>
+        <ReviewField label={tr('Target library', '目标媒体库')}>{selectedLibrary?.name ?? tr('Unknown library', '未知媒体库')}</ReviewField>
         <ReviewField label="Drive scope">{scope === 'MyDrive' ? 'My Drive' : sharedDrive?.name ?? 'Shared Drive'}</ReviewField>
-        <ReviewField label="Folder">{currentFolder.name}</ReviewField>
+        <ReviewField label={tr('Folder', '文件夹')}>{currentFolder.name}</ReviewField>
       </dl>
       <TextField fullWidth isRequired name="displayName">
-        <Label>Display name</Label>
+        <Label>{tr('Display name', '显示名称')}</Label>
         <Input disabled={isBusy || bindingError} maxLength={2048} onChange={(event) => { onDisplayNameChange(event.currentTarget.value); }} value={displayName} />
       </TextField>
       {bindingError && <Alert role="alert" status="danger"><Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>The binding result could not be confirmed</Alert.Title><Alert.Description>This authorization cannot be reused. Restart authorization before trying again.</Alert.Description></Alert.Content></Alert>}
       <div className="flex flex-wrap justify-between gap-2">
-        <Button isDisabled={isBusy || bindingError} onPress={onBack} variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />Back to folder</Button>
-        <Button isDisabled={bindingError || displayName.trim().length === 0} isPending={isBusy} onPress={onBind}><CheckCircle2 aria-hidden="true" className="size-4" />Add Google Drive</Button>
+        <Button isDisabled={isBusy || bindingError} onPress={onBack} variant="tertiary"><RotateCcw aria-hidden="true" className="size-4" />{tr('Back to folder', '返回文件夹')}</Button>
+        <Button isDisabled={bindingError || displayName.trim().length === 0} isPending={isBusy} onPress={onBind}><CheckCircle2 aria-hidden="true" className="size-4" />{tr('Add Google Drive', '添加 Google Drive')}</Button>
       </div>
     </section>
   );
@@ -839,13 +844,14 @@ function ReviewField({ label, children }: { label: string; children: string }) {
 }
 
 function CompleteStep({ binding }: { binding: StorageBindingResult }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="google-complete-heading" className="max-w-2xl space-y-5">
       <Alert status="success">
         <Alert.Indicator><CheckCircle2 aria-hidden="true" className="size-5" /></Alert.Indicator>
         <Alert.Content>
-          <Alert.Title id="google-complete-heading">Google Drive is connected</Alert.Title>
-          <Alert.Description>{binding.restartRequired ? 'Restart the server before the new storage root becomes active.' : 'The storage root is active and ready for its initial sync.'}</Alert.Description>
+          <Alert.Title id="google-complete-heading">{tr('Google Drive is connected', 'Google Drive 已连接')}</Alert.Title>
+          <Alert.Description>{binding.restartRequired ? tr('Restart the server before the new storage root becomes active.', '请重启服务器后启用新的存储根目录。') : tr('The storage root is active and ready for its initial sync.', '存储根目录已启用，可以开始初始同步。')}</Alert.Description>
         </Alert.Content>
       </Alert>
       <dl className="grid gap-4 border-y border-border py-4 text-sm sm:grid-cols-2">

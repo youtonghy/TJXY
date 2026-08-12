@@ -35,6 +35,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { PageHeader } from '../ui/PageHeader';
 import { StatusChip, type StatusTone } from '../ui/StatusChip';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
+import { useTranslate } from '../settings/i18n';
 import type {
   ScheduledTask,
   ScheduledTaskState,
@@ -76,6 +77,7 @@ const jobTones: Record<TaskJobStatus, StatusTone> = {
 };
 
 export function TasksPage() {
+  const tr = useTranslate();
   const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [snapshot, setSnapshot] = useState<TaskSnapshot>({ scheduled: [], jobs: [], roots: [] });
@@ -181,7 +183,7 @@ export function TasksPage() {
         actions={(
           <Tooltip>
             <Button
-              aria-label="Reload tasks"
+              aria-label={tr('Reload tasks', '刷新任务')}
               isIconOnly
               isPending={reloadButtonPending}
               onPress={() => { void reloadManually(); }}
@@ -190,15 +192,15 @@ export function TasksPage() {
             >
               <RefreshCw aria-hidden="true" className={`size-4${reloadButtonPending ? ' animate-spin' : ''}`} />
             </Button>
-            <Tooltip.Content>Reload tasks</Tooltip.Content>
+            <Tooltip.Content>{tr('Reload tasks', '刷新任务')}</Tooltip.Content>
           </Tooltip>
         )}
-        description="Run scheduled maintenance, submit targeted work, and inspect durable job history."
+        description={tr('Run scheduled maintenance, submit targeted work, and inspect durable job history.', '运行计划维护、提交指定任务并查看持久任务历史。')}
         title="Tasks"
       />
 
       {manualRefreshPending && (
-        <p aria-live="polite" className="sr-only" role="status">Refreshing tasks...</p>
+        <p aria-live="polite" className="sr-only" role="status">{tr('Refreshing tasks...', '正在刷新任务...')}</p>
       )}
 
       <AsyncContent
@@ -247,17 +249,18 @@ function ScheduledTasks({
   ) => Promise<CommandResult>;
   tasks: ScheduledTask[];
 }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="scheduled-tasks-heading" className="space-y-4">
       <SectionHeading
-        description="Server maintenance routines reported by the scheduler."
+        description={tr('Server maintenance routines reported by the scheduler.', '调度器报告的服务器维护例程。')}
         id="scheduled-tasks-heading"
-        title="Scheduled tasks"
+        title={tr('Scheduled tasks', '计划任务')}
       />
       {tasks.length === 0 ? (
-        <EmptyState message="No scheduled tasks are available." />
+        <EmptyState message={tr('No scheduled tasks are available.', '暂无可用的计划任务。')} />
       ) : (
-        <ul aria-label="Scheduled tasks" className="divide-y divide-border border-y border-border">
+        <ul aria-label={tr('Scheduled tasks', '计划任务')} className="divide-y divide-border border-y border-border">
           {tasks.map((task) => {
             const operation = `scheduled-${task.id}`;
             const isPending = busyOperations.has(operation);
@@ -268,13 +271,13 @@ function ScheduledTasks({
                   <p className="mt-1 break-words text-sm text-muted">{task.description}</p>
                   <p className="mt-1 break-all font-mono text-xs text-muted">{task.key}</p>
                 </div>
-                <LabeledValue label="Category">{task.category}</LabeledValue>
-                <LabeledValue label="Status"><TaskStatus state={task.state} /></LabeledValue>
+                <LabeledValue label={tr('Category', '类别')}>{task.category}</LabeledValue>
+                <LabeledValue label={tr('Status', '状态')}><TaskStatus state={task.state} /></LabeledValue>
                 <div className="flex justify-end">
                   {task.state === 'Running' ? (
                     <ConfirmDialog
-                      confirmLabel="Cancel task"
-                      description={<>Stop the active <strong>{task.name}</strong> task?</>}
+                      confirmLabel={tr('Cancel task', '取消任务')}
+                      description={<>{tr('Stop the active ', '停止正在运行的')}<strong>{task.name}</strong>{tr(' task?', '任务？')}</>}
                       isPending={isPending}
                       onConfirm={async () => {
                         const result = await onRun(
@@ -286,23 +289,23 @@ function ScheduledTasks({
                         if (result === 'failed') throw new Error('Task cancellation failed.');
                         if (result === 'succeeded') focusScheduledHeading();
                       }}
-                      title="Cancel scheduled task"
+                      title={tr('Cancel scheduled task', '取消计划任务')}
                       trigger={(
                         <Button
-                          aria-label={`Cancel ${task.name}`}
+                          aria-label={`${tr('Cancel', '取消')} ${task.name}`}
                           className="min-w-24"
                           isPending={isPending}
                           size="sm"
                           variant="danger-soft"
                         >
                           {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <X aria-hidden="true" className="size-4" />}
-                          <span className="inline-flex min-h-5 items-center">Cancel</span>
+                          <span className="inline-flex min-h-5 items-center">{tr('Cancel', '取消')}</span>
                         </Button>
                       )}
                     />
                   ) : (
                     <Button
-                      aria-label={`Start ${task.name}`}
+                      aria-label={`${tr('Start', '启动')} ${task.name}`}
                       className="min-w-24"
                       isPending={isPending}
                       onPress={() => {
@@ -318,7 +321,7 @@ function ScheduledTasks({
                       variant="secondary"
                     >
                       {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <CirclePlay aria-hidden="true" className="size-4" />}
-                      <span className="inline-flex min-h-5 items-center">Start</span>
+                      <span className="inline-flex min-h-5 items-center">{tr('Start', '启动')}</span>
                     </Button>
                   )}
                 </div>
@@ -350,6 +353,7 @@ function ManualCommands({
   selectedRoot: string;
   selectedRootOption: StorageRootOption | undefined;
 }) {
+  const tr = useTranslate();
   const [commandTarget, setCommandTarget] = useState<'root' | 'item'>('root');
   const run = (operation: string, command: () => Promise<unknown>, success: string) => {
     void onRun(operation, command, success);
@@ -366,41 +370,41 @@ function ManualCommands({
               render={(props) => <h2 {...props} />}
               tabIndex={-1}
             >
-              Manual commands
+              {tr('Manual commands', '手动命令')}
             </Card.Title>
-            <Card.Description className="mt-1">Submit focused jobs without waiting for a scheduled maintenance cycle.</Card.Description>
+            <Card.Description className="mt-1">{tr('Submit focused jobs without waiting for a scheduled maintenance cycle.', '无需等待计划维护周期即可提交指定任务。')}</Card.Description>
           </div>
         </Card.Header>
         <Card.Content className="space-y-6 p-5 sm:p-6">
           <Segment
-            aria-label="Command target"
+            aria-label={tr('Command target', '命令目标')}
             className="w-full sm:max-w-sm"
             onSelectionChange={(key) => {
-              if (key === 'root' || key === 'item') setCommandTarget(key);
+              if (key === 'root' || key === 'item') setCommandTarget(key as 'root' | 'item');
             }}
             selectedKey={commandTarget}
           >
-            <Segment.Item className="min-w-0 flex-1" id="root">Library root</Segment.Item>
-            <Segment.Item className="min-w-0 flex-1" id="item">Catalog item</Segment.Item>
+            <Segment.Item className="min-w-0 flex-1" id="root">{tr('Library root', '媒体库根目录')}</Segment.Item>
+            <Segment.Item className="min-w-0 flex-1" id="item">{tr('Catalog item', '目录项目')}</Segment.Item>
           </Segment>
 
           {commandTarget === 'root' ? (
             <section aria-labelledby="root-commands-heading" className="space-y-5">
               <div>
-                <h3 className="font-semibold text-foreground" id="root-commands-heading">Library root</h3>
-                <p className="mt-1 text-sm text-muted">Run discovery or maintenance against one attached storage root.</p>
+                <h3 className="font-semibold text-foreground" id="root-commands-heading">{tr('Library root', '媒体库根目录')}</h3>
+                <p className="mt-1 text-sm text-muted">{tr('Run discovery or maintenance against one attached storage root.', '针对一个已连接的存储根目录运行发现或维护。')}</p>
               </div>
               {roots.length === 0 ? (
                 <Alert status="accent">
                   <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
                   <Alert.Content>
-                    <Alert.Title>No library roots</Alert.Title>
-                    <Alert.Description>No storage roots are attached to a library.</Alert.Description>
+                    <Alert.Title>{tr('No library roots', '没有媒体库根目录')}</Alert.Title>
+                    <Alert.Description>{tr('No storage roots are attached to a library.', '媒体库尚未连接存储根目录。')}</Alert.Description>
                   </Alert.Content>
                 </Alert>
               ) : (
                 <Select fullWidth onChange={(key) => { if (typeof key === 'string') onRootChange(key); }} value={selectedRoot}>
-                  <Label>Library root</Label>
+                  <Label>{tr('Library root', '媒体库根目录')}</Label>
                   <Select.Trigger>
                     <Select.Value />
                     <Select.Indicator />
@@ -422,7 +426,7 @@ function ManualCommands({
                   icon={<ScanSearch aria-hidden="true" className="size-4" />}
                   isDisabled={selectedRootOption === undefined}
                   isPending={busyOperations.has('full-scan-root')}
-                  label="Full scan"
+                  label={tr('Full scan', '完整扫描')}
                   onPress={() => {
                     run(
                       'full-scan-root',
@@ -430,7 +434,7 @@ function ManualCommands({
                         selectedRootOption?.libraryId ?? '',
                         selectedRootOption?.storageRootId ?? '',
                       ),
-                      'Full scan submitted.',
+                      tr('Full scan submitted.', '完整扫描已提交。'),
                     );
                   }}
                   variant="primary"
@@ -440,12 +444,12 @@ function ManualCommands({
                     icon={<ShieldCheck aria-hidden="true" className="size-4" />}
                     isDisabled={selectedRootOption === undefined}
                     isPending={busyOperations.has('validate-storage')}
-                    label="Validate storage"
+                    label={tr('Validate storage', '验证存储')}
                     onPress={() => {
                       run(
                         'validate-storage',
                         () => validateStorage(selectedRootOption?.storageRootId ?? ''),
-                        'Storage validation submitted.',
+                        tr('Storage validation submitted.', '存储验证已提交。'),
                       );
                     }}
                   />
@@ -453,12 +457,12 @@ function ManualCommands({
                     icon={<Search aria-hidden="true" className="size-4" />}
                     isDisabled={selectedRootOption === undefined}
                     isPending={busyOperations.has('discover-titles')}
-                    label="Discover titles"
+                    label={tr('Discover titles', '发现标题')}
                     onPress={() => {
                       run(
                         'discover-titles',
                         () => discoverTitles(selectedRootOption?.storageRootId ?? ''),
-                        'Title discovery submitted.',
+                        tr('Title discovery submitted.', '标题发现已提交。'),
                       );
                     }}
                   />
@@ -468,58 +472,58 @@ function ManualCommands({
           ) : (
             <section aria-labelledby="item-commands-heading" className="space-y-5">
               <div>
-                <h3 className="font-semibold text-foreground" id="item-commands-heading">Catalog item</h3>
-                <p className="mt-1 text-sm text-muted">Submit metadata and media operations for one indexed catalog item.</p>
+                <h3 className="font-semibold text-foreground" id="item-commands-heading">{tr('Catalog item', '目录项目')}</h3>
+                <p className="mt-1 text-sm text-muted">{tr('Submit metadata and media operations for one indexed catalog item.', '为一个已索引的目录项目提交元数据和媒体操作。')}</p>
               </div>
               <TextField
                 fullWidth
                 isInvalid={itemId.length > 0 && !validItem}
                 name="catalogItemId"
               >
-                <Label>Catalog item ID</Label>
+                <Label>{tr('Catalog item ID', '目录项目 ID')}</Label>
                 <Input
                   maxLength={64}
                   onChange={(event) => { onItemIdChange(event.currentTarget.value); }}
-                  placeholder="Enter a catalog item UUID"
+                  placeholder={tr('Enter a catalog item UUID', '输入目录项目 UUID')}
                   value={itemId}
                 />
-                <FieldError>Enter a valid UUID.</FieldError>
+                <FieldError>{tr('Enter a valid UUID.', '请输入有效的 UUID。')}</FieldError>
               </TextField>
               <div className="grid gap-3 sm:grid-cols-2">
                 <CommandButton
                   icon={<Tags aria-hidden="true" className="size-4" />}
                   isDisabled={!validItem}
                   isPending={busyOperations.has('resolve-metadata')}
-                  label="Resolve metadata"
+                  label={tr('Resolve metadata', '解析元数据')}
                   onPress={() => {
-                    run('resolve-metadata', () => resolveMetadata(itemId), 'Metadata resolution submitted.');
+                    run('resolve-metadata', () => resolveMetadata(itemId), tr('Metadata resolution submitted.', '元数据解析已提交。'));
                   }}
                 />
                 <CommandButton
                   icon={<GitBranch aria-hidden="true" className="size-4" />}
                   isDisabled={!validItem}
                   isPending={busyOperations.has('expand-item')}
-                  label="Expand item"
+                  label={tr('Expand item', '展开项目')}
                   onPress={() => {
-                    run('expand-item', () => expandItem(itemId), 'Item expansion submitted.');
+                    run('expand-item', () => expandItem(itemId), tr('Item expansion submitted.', '项目展开已提交。'));
                   }}
                 />
                 <CommandButton
                   icon={<ListPlus aria-hidden="true" className="size-4" />}
                   isDisabled={!validItem}
                   isPending={busyOperations.has('index-media-sources')}
-                  label="Index sources"
+                  label={tr('Index sources', '索引来源')}
                   onPress={() => {
-                    run('index-media-sources', () => indexMediaSources(itemId), 'Source indexing submitted.');
+                    run('index-media-sources', () => indexMediaSources(itemId), tr('Source indexing submitted.', '来源索引已提交。'));
                   }}
                 />
                 <CommandButton
                   icon={<Activity aria-hidden="true" className="size-4" />}
                   isDisabled={!validItem}
                   isPending={busyOperations.has('probe-media')}
-                  label="Probe media"
+                  label={tr('Probe media', '探测媒体')}
                   onPress={() => {
-                    run('probe-media', () => probeMedia(itemId), 'Media probe submitted.');
+                    run('probe-media', () => probeMedia(itemId), tr('Media probe submitted.', '媒体探测已提交。'));
                   }}
                 />
               </div>
@@ -561,27 +565,28 @@ function CommandButton({
 }
 
 function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
+  const tr = useTranslate();
   return (
     <section aria-labelledby="recent-jobs-heading" className="space-y-4">
       <SectionHeading
-        description="The latest durable submissions and their terminal outcomes."
+        description={tr('The latest durable submissions and their terminal outcomes.', '最新的持久任务提交及其最终结果。')}
         id="recent-jobs-heading"
-        title="Recent durable jobs"
+        title={tr('Recent durable jobs', '最近的持久任务')}
       />
       {jobs.length === 0 ? (
-        <EmptyState message="No durable jobs have been submitted." />
+        <EmptyState message={tr('No durable jobs have been submitted.', '尚未提交持久任务。')} />
       ) : (
         <Table variant="secondary">
           <Table.ScrollContainer className="max-h-[32rem] overflow-auto">
-            <Table.Content aria-label="Recent durable jobs" className="min-w-[52rem] table-fixed">
+            <Table.Content aria-label={tr('Recent durable jobs', '最近的持久任务')} className="min-w-[52rem] table-fixed">
               <Table.Header>
-                <Table.Column isRowHeader>Task</Table.Column>
-                <Table.Column>Scope</Table.Column>
-                <Table.Column>Status</Table.Column>
-                <Table.Column>Result</Table.Column>
-                <Table.Column className="w-24 text-right">Attempts</Table.Column>
-                <Table.Column>Created</Table.Column>
-                <Table.Column>Finished</Table.Column>
+                <Table.Column isRowHeader>{tr('Task', '任务')}</Table.Column>
+                <Table.Column>{tr('Scope', '范围')}</Table.Column>
+                <Table.Column>{tr('Status', '状态')}</Table.Column>
+                <Table.Column>{tr('Result', '结果')}</Table.Column>
+                <Table.Column className="w-24 text-right">{tr('Attempts', '尝试次数')}</Table.Column>
+                <Table.Column>{tr('Created', '创建时间')}</Table.Column>
+                <Table.Column>{tr('Finished', '完成时间')}</Table.Column>
               </Table.Header>
               <Table.Body>
                 {jobs.map((job) => (
@@ -629,20 +634,24 @@ function LabeledValue({ label, children }: { label: string; children: ReactNode 
 }
 
 function TaskStatus({ state }: { state: ScheduledTaskState }) {
+  const tr = useTranslate();
   const tone = scheduledTones[state];
-  return <span data-tone={tone}><StatusChip tone={tone}>{state}</StatusChip></span>;
+  return <span data-tone={tone}><StatusChip tone={tone}>{tr(state, state === 'Running' ? '运行中' : '空闲')}</StatusChip></span>;
 }
 
 function JobStatus({ status }: { status: TaskJobStatus }) {
+  const tr = useTranslate();
   const tone = jobTones[status];
-  return <span data-tone={tone}><StatusChip tone={tone}>{status}</StatusChip></span>;
+  const labels: Record<TaskJobStatus, string> = { Pending: '等待中', Retrying: '重试中', Running: '运行中', Completed: '已完成', Cancelled: '已取消', Failed: '失败' };
+  return <span data-tone={tone}><StatusChip tone={tone}>{tr(status, labels[status])}</StatusChip></span>;
 }
 
 function JobOutcome({ outcome }: { outcome: TaskJobOutcome | null }) {
+  const tr = useTranslate();
   if (outcome === null) return <span className="text-muted">-</span>;
   return (
     <StatusChip tone="warning">
-      {outcome === 'NoMetadataMatch' ? 'No remote metadata match' : 'Completed with warnings'}
+      {outcome === 'NoMetadataMatch' ? tr('No remote metadata match', '没有匹配的远程元数据') : tr('Completed with warnings', '已完成，但有警告')}
     </StatusChip>
   );
 }
@@ -652,8 +661,9 @@ function EmptyState({ message }: { message: string }) {
 }
 
 function TasksSkeleton() {
+  const tr = useTranslate();
   return (
-    <div aria-label="Loading tasks" className="space-y-8" role="status">
+    <div aria-label={tr('Loading tasks', '正在加载任务')} className="space-y-8" role="status">
       <div className="space-y-3">
         <Skeleton className="h-6 w-48" />
         <Skeleton className="h-20 w-full" />

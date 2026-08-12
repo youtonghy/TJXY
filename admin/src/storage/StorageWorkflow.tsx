@@ -3,6 +3,7 @@ import { Check, RotateCcw } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { PageHeader } from '../ui/PageHeader';
+import { useTranslate } from '../settings/i18n';
 
 export type StoragePhase = 'authorize' | 'choose-folder' | 'review' | 'complete';
 
@@ -31,6 +32,7 @@ export function StorageWorkflow({
   onRestart,
   children,
 }: StorageWorkflowProps) {
+  const tr = useTranslate();
   const currentIndex = phase === 'complete'
     ? phases.length
     : phases.findIndex((item) => item.id === phase);
@@ -41,15 +43,15 @@ export function StorageWorkflow({
         actions={canRestart ? (
           <Button isDisabled={isBusy} onPress={onRestart} size="sm" variant="secondary">
             <RotateCcw aria-hidden="true" className="size-4" />
-            Restart authorization
+            {tr('Restart authorization', '重新授权')}
           </Button>
         ) : undefined}
-        description={`Authorize ${providerName}, choose the exact folder, and review the binding before it is created.`}
+        description={tr(`Authorize ${providerName}, choose the exact folder, and review the binding before it is created.`, `授权${providerName}，选择准确的文件夹，并在创建前检查绑定信息。`)}
         title={title}
       />
 
       <ol
-        aria-label={`${providerName} setup progress`}
+        aria-label={tr(`${providerName} setup progress`, `${providerName} 设置进度`)}
         className="grid grid-cols-1 gap-2 sm:grid-cols-3"
       >
         {phases.map((item, index) => {
@@ -78,9 +80,9 @@ export function StorageWorkflow({
                 {isComplete ? <Check className="size-3.5" /> : index + 1}
               </span>
               <span className="min-w-0">
-                <span className="block text-sm font-semibold">{item.label}</span>
+                <span className="block text-sm font-semibold">{tr(item.label, item.id === 'authorize' ? '授权' : item.id === 'choose-folder' ? '选择文件夹' : '检查')}</span>
                 <span className="block text-xs">
-                  {isComplete ? 'Complete' : isCurrent ? 'Current step' : 'Upcoming'}
+                  {isComplete ? tr('Complete', '已完成') : isCurrent ? tr('Current step', '当前步骤') : tr('Upcoming', '即将开始')}
                 </span>
               </span>
             </li>
