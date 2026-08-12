@@ -18,6 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::NaiveDate;
 use quick_xml::{Reader, events::Event};
 use thiserror::Error;
 
@@ -109,6 +110,36 @@ pub struct MetadataPerson {
     name: String,
     role: Option<String>,
     order: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataNamedValue {
+    code: String,
+    name: String,
+}
+
+impl MetadataNamedValue {
+    /// Defines one bounded coded association such as a country or language.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataError::InvalidAssociation`] for invalid code or display text.
+    pub fn new(code: impl Into<String>, name: impl Into<String>) -> Result<Self, MetadataError> {
+        let code = code.into();
+        let name = name.into();
+        if !valid_text(&code, 128) || !valid_text(&name, 512) {
+            return Err(MetadataError::InvalidAssociation);
+        }
+        Ok(Self { code, name })
+    }
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl MetadataPerson {
@@ -252,6 +283,17 @@ impl NfoDocument {
             genres: Some(self.genres),
             studios: Some(self.studios),
             people: Some(self.people),
+            community_rating: None,
+            vote_count: None,
+            runtime_ticks: None,
+            premiere_date: None,
+            end_date: None,
+            release_status: None,
+            official_rating: None,
+            original_language: None,
+            countries: None,
+            languages: None,
+            details_loaded: false,
             source: self.source,
         }
     }
@@ -502,6 +544,17 @@ pub struct MetadataCandidate {
     genres: Option<Vec<String>>,
     studios: Option<Vec<String>>,
     people: Option<Vec<MetadataPerson>>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
+    countries: Option<Vec<MetadataNamedValue>>,
+    languages: Option<Vec<MetadataNamedValue>>,
+    details_loaded: bool,
     source: MetadataSource,
 }
 
@@ -591,6 +644,17 @@ impl MetadataCandidate {
             genres: None,
             studios: None,
             people: None,
+            community_rating: None,
+            vote_count: None,
+            runtime_ticks: None,
+            premiere_date: None,
+            end_date: None,
+            release_status: None,
+            official_rating: None,
+            original_language: None,
+            countries: None,
+            languages: None,
+            details_loaded: false,
             source,
         }
     }
@@ -649,8 +713,70 @@ impl MetadataCandidate {
     }
 
     #[must_use]
+    pub fn with_studios(mut self, studios: Vec<String>) -> Self {
+        self.studios = Some(studios);
+        self
+    }
+
+    #[must_use]
     pub fn with_people(mut self, people: Vec<MetadataPerson>) -> Self {
         self.people = Some(people);
+        self
+    }
+
+    #[must_use]
+    pub fn with_community_rating(mut self, value: f64) -> Self {
+        self.community_rating = Some(value);
+        self
+    }
+    #[must_use]
+    pub const fn with_vote_count(mut self, value: i64) -> Self {
+        self.vote_count = Some(value);
+        self
+    }
+    #[must_use]
+    pub const fn with_runtime_ticks(mut self, value: i64) -> Self {
+        self.runtime_ticks = Some(value);
+        self
+    }
+    #[must_use]
+    pub const fn with_premiere_date(mut self, value: NaiveDate) -> Self {
+        self.premiere_date = Some(value);
+        self
+    }
+    #[must_use]
+    pub const fn with_end_date(mut self, value: NaiveDate) -> Self {
+        self.end_date = Some(value);
+        self
+    }
+    #[must_use]
+    pub fn with_release_status(mut self, value: impl Into<String>) -> Self {
+        self.release_status = Some(value.into());
+        self
+    }
+    #[must_use]
+    pub fn with_official_rating(mut self, value: impl Into<String>) -> Self {
+        self.official_rating = Some(value.into());
+        self
+    }
+    #[must_use]
+    pub fn with_original_language(mut self, value: impl Into<String>) -> Self {
+        self.original_language = Some(value.into());
+        self
+    }
+    #[must_use]
+    pub fn with_countries(mut self, value: Vec<MetadataNamedValue>) -> Self {
+        self.countries = Some(value);
+        self
+    }
+    #[must_use]
+    pub fn with_languages(mut self, value: Vec<MetadataNamedValue>) -> Self {
+        self.languages = Some(value);
+        self
+    }
+    #[must_use]
+    pub const fn with_details_loaded(mut self) -> Self {
+        self.details_loaded = true;
         self
     }
 
@@ -701,6 +827,25 @@ impl MetadataCandidate {
                         })
                     })
             })
+            && self
+                .community_rating
+                .is_none_or(|value| value.is_finite() && (0.0..=10.0).contains(&value))
+            && self.vote_count.is_none_or(|value| value >= 0)
+            && self.runtime_ticks.is_none_or(|value| value >= 0)
+            && self
+                .release_status
+                .as_deref()
+                .is_none_or(|value| valid_text(value, 64))
+            && self
+                .official_rating
+                .as_deref()
+                .is_none_or(|value| valid_text(value, 32))
+            && self
+                .original_language
+                .as_deref()
+                .is_none_or(|value| valid_text(value, 16))
+            && valid_named_values(self.countries.as_deref())
+            && valid_named_values(self.languages.as_deref())
     }
 }
 
@@ -835,6 +980,16 @@ pub trait TmdbTransport: Send + Sync {
         year: Option<i32>,
         language: &str,
     ) -> Result<Vec<TmdbSearchItem>, MetadataProviderError>;
+
+    async fn detail(
+        &self,
+        kind: MetadataItemKind,
+        id: u64,
+        language: &str,
+    ) -> Result<MetadataCandidate, MetadataProviderError> {
+        let _ = (kind, id, language);
+        Err(MetadataProviderError::TemporarilyUnavailable)
+    }
 }
 
 pub struct TmdbProvider {
@@ -858,7 +1013,7 @@ impl TmdbProvider {
             return Err(MetadataError::InvalidProvider);
         }
         Ok(Self {
-            transport: Arc::new(ReqwestTmdbTransport::new(access_token)?),
+            transport: Arc::new(ReqwestTmdbTransport::new(access_token, language.clone())?),
             language,
         })
     }
@@ -927,48 +1082,21 @@ impl MetadataProvider for TmdbProvider {
         if selected.id == 0 || !valid_text(&selected.title, 512) {
             return Err(MetadataProviderError::InvalidResponse);
         }
-        let source = MetadataSource::new(
-            "Tmdb",
-            Some(format!(
-                "{}:{}",
-                if lookup.kind() == MetadataItemKind::Movie {
-                    "movie"
-                } else {
-                    "tv"
-                },
-                selected.id
-            )),
-            8_000,
-        )
-        .map_err(|_| MetadataProviderError::InvalidResponse)?;
-        let mut candidate = MetadataCandidate::new(source)
-            .with_title(selected.title.clone())
-            .with_provider_id("tmdb", selected.id.to_string());
-        if let Some(original) = &selected.original_title {
-            candidate = candidate.with_original_title(original.clone());
-        }
-        if let Some(overview) = &selected.overview {
-            candidate = candidate.with_overview(overview.clone());
-        }
-        if let Some(year) = selected.year {
-            candidate = candidate.with_year(year);
-        }
-        if let Some(path) = &selected.poster_path
-            && let Some(image) = MetadataImageReference::tmdb(path)
-        {
-            candidate.primary_image = Some(image);
-        }
-        Ok(Some(candidate))
+        self.transport
+            .detail(lookup.kind(), selected.id, &self.language)
+            .await
+            .map(Some)
     }
 }
 
 struct ReqwestTmdbTransport {
     client: reqwest::Client,
     access_token: zeroize::Zeroizing<String>,
+    catalog: TmdbCatalogClient,
 }
 
 impl ReqwestTmdbTransport {
-    fn new(access_token: String) -> Result<Self, MetadataError> {
+    fn new(access_token: String, language: String) -> Result<Self, MetadataError> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(10))
@@ -977,9 +1105,11 @@ impl ReqwestTmdbTransport {
             .https_only(true)
             .build()
             .map_err(|_| MetadataError::InvalidProvider)?;
+        let catalog = TmdbCatalogClient::new(access_token.clone(), language)?;
         Ok(Self {
             client,
             access_token: zeroize::Zeroizing::new(access_token),
+            catalog,
         })
     }
 }
@@ -1150,6 +1280,119 @@ impl TmdbTransport for ReqwestTmdbTransport {
             })
             .collect()
     }
+
+    async fn detail(
+        &self,
+        kind: MetadataItemKind,
+        id: u64,
+        _language: &str,
+    ) -> Result<MetadataCandidate, MetadataProviderError> {
+        let item = match kind {
+            MetadataItemKind::Movie => self.catalog.movie(id).await?,
+            MetadataItemKind::Series => self.catalog.series_item(id).await?,
+            _ => return Err(MetadataProviderError::Rejected),
+        };
+        rich_item_candidate(&item)
+    }
+}
+
+fn rich_item_candidate(item: &RichCatalogItem) -> Result<MetadataCandidate, MetadataProviderError> {
+    let source = MetadataSource::new(
+        "Tmdb",
+        Some(format!(
+            "{}:{}",
+            if item.kind() == MetadataItemKind::Movie {
+                "movie"
+            } else {
+                "series"
+            },
+            item.provider_id()
+        )),
+        8_000,
+    )
+    .map_err(|_| MetadataProviderError::InvalidResponse)?;
+    let mut candidate = MetadataCandidate::new(source)
+        .with_title(item.title())
+        .with_genres(item.genres().to_vec())
+        .with_studios(item.studios().to_vec())
+        .with_people(
+            item.credits()
+                .iter()
+                .map(|credit| {
+                    MetadataPerson::new(
+                        credit.person_name(),
+                        credit.role().or(Some(credit.credit_type())),
+                        Some(credit.order()),
+                    )
+                    .map_err(|_| MetadataProviderError::InvalidResponse)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .with_countries(
+            item.countries()
+                .iter()
+                .map(|country| {
+                    MetadataNamedValue::new(country.code(), country.name())
+                        .map_err(|_| MetadataProviderError::InvalidResponse)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .with_languages(
+            item.languages()
+                .iter()
+                .map(|language| {
+                    MetadataNamedValue::new(language.code(), language.name())
+                        .map_err(|_| MetadataProviderError::InvalidResponse)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .with_details_loaded();
+    if let Some(value) = item.original_title() {
+        candidate = candidate.with_original_title(value);
+    }
+    if let Some(value) = item.overview() {
+        candidate = candidate.with_overview(value);
+    }
+    if let Some(value) = item.production_year() {
+        candidate = candidate.with_year(value);
+    }
+    if let Some(value) = item.community_rating() {
+        candidate = candidate.with_community_rating(value);
+    }
+    if let Some(value) = item.vote_count() {
+        candidate = candidate.with_vote_count(
+            i64::try_from(value).map_err(|_| MetadataProviderError::InvalidResponse)?,
+        );
+    }
+    if let Some(value) = item.runtime_ticks() {
+        candidate = candidate.with_runtime_ticks(value);
+    }
+    if let Some(value) = item.premiere_date() {
+        candidate = candidate.with_premiere_date(value);
+    }
+    if let Some(value) = item.end_date() {
+        candidate = candidate.with_end_date(value);
+    }
+    if let Some(value) = item.release_status() {
+        candidate = candidate.with_release_status(value);
+    }
+    if let Some(value) = item.official_rating() {
+        candidate = candidate.with_official_rating(value);
+    }
+    if let Some(value) = item.original_language() {
+        candidate = candidate.with_original_language(value);
+    }
+    for (provider, provider_id) in item.provider_ids() {
+        candidate = candidate.with_provider_id(provider, provider_id);
+    }
+    if let Some(image) = item
+        .images()
+        .iter()
+        .find(|image| image.kind() == RichRemoteImageKind::Primary)
+    {
+        candidate = candidate.with_primary_image(image.path());
+    }
+    Ok(candidate)
 }
 
 pub struct MetadataResolver {
@@ -1274,6 +1517,18 @@ pub struct MetadataResolution {
     genres: Option<Vec<String>>,
     studios: Option<Vec<String>>,
     people: Option<Vec<MetadataPerson>>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
+    countries: Option<Vec<MetadataNamedValue>>,
+    languages: Option<Vec<MetadataNamedValue>>,
+    details_loaded: bool,
+    details_required: bool,
     provenance: BTreeMap<String, FieldProvenance>,
     state: MetadataState,
     warnings: Vec<MetadataWarning>,
@@ -1349,6 +1604,66 @@ impl MetadataResolution {
     }
 
     #[must_use]
+    pub const fn community_rating(&self) -> Option<f64> {
+        self.community_rating
+    }
+    #[must_use]
+    pub const fn vote_count(&self) -> Option<i64> {
+        self.vote_count
+    }
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
+    }
+    #[must_use]
+    pub const fn premiere_date(&self) -> Option<NaiveDate> {
+        self.premiere_date
+    }
+    #[must_use]
+    pub const fn end_date(&self) -> Option<NaiveDate> {
+        self.end_date
+    }
+    #[must_use]
+    pub fn release_status(&self) -> Option<&str> {
+        self.release_status.as_deref()
+    }
+    #[must_use]
+    pub fn official_rating(&self) -> Option<&str> {
+        self.official_rating.as_deref()
+    }
+    #[must_use]
+    pub fn original_language(&self) -> Option<&str> {
+        self.original_language.as_deref()
+    }
+    #[must_use]
+    pub fn countries(&self) -> Option<&[MetadataNamedValue]> {
+        self.countries.as_deref()
+    }
+    #[must_use]
+    pub fn languages(&self) -> Option<&[MetadataNamedValue]> {
+        self.languages.as_deref()
+    }
+    #[must_use]
+    pub const fn details_loaded(&self) -> bool {
+        self.details_loaded
+    }
+
+    /// Requires a successful rich-detail response before this resolution is considered ready.
+    #[must_use]
+    pub fn require_complete_details(mut self) -> Self {
+        self.details_required = true;
+        if !self.details_loaded {
+            self.state = MetadataState::Partial;
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn details_required(&self) -> bool {
+        self.details_required
+    }
+
+    #[must_use]
     pub fn provenance(&self, field: &str) -> Option<&FieldProvenance> {
         self.provenance.get(field)
     }
@@ -1386,6 +1701,17 @@ struct ResolutionBuilder {
     genres: Option<Vec<String>>,
     studios: Option<Vec<String>>,
     people: Option<Vec<MetadataPerson>>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
+    countries: Option<Vec<MetadataNamedValue>>,
+    languages: Option<Vec<MetadataNamedValue>>,
+    details_loaded: bool,
 }
 
 impl ResolutionBuilder {
@@ -1411,15 +1737,36 @@ impl ResolutionBuilder {
         if self.primary_image.is_none() {
             self.primary_image = candidate.primary_image;
         }
-        if self.genres.is_none() {
+        if self.genres.as_ref().is_none_or(Vec::is_empty) {
             self.genres = candidate.genres;
         }
-        if self.studios.is_none() {
+        if self.studios.as_ref().is_none_or(Vec::is_empty) {
             self.studios = candidate.studios;
         }
-        if self.people.is_none() {
+        if self.people.as_ref().is_none_or(Vec::is_empty) {
             self.people = candidate.people;
         }
+        self.community_rating = self.community_rating.or(candidate.community_rating);
+        self.vote_count = self.vote_count.or(candidate.vote_count);
+        self.runtime_ticks = self.runtime_ticks.or(candidate.runtime_ticks);
+        self.premiere_date = self.premiere_date.or(candidate.premiere_date);
+        self.end_date = self.end_date.or(candidate.end_date);
+        if self.release_status.is_none() {
+            self.release_status = candidate.release_status;
+        }
+        if self.official_rating.is_none() {
+            self.official_rating = candidate.official_rating;
+        }
+        if self.original_language.is_none() {
+            self.original_language = candidate.original_language;
+        }
+        if self.countries.as_ref().is_none_or(Vec::is_empty) {
+            self.countries = candidate.countries;
+        }
+        if self.languages.as_ref().is_none_or(Vec::is_empty) {
+            self.languages = candidate.languages;
+        }
+        self.details_loaded |= candidate.details_loaded;
     }
 
     fn with_fallback(&mut self, lookup: &MetadataLookup) {
@@ -1464,12 +1811,16 @@ impl ResolutionBuilder {
             );
             provider_ids.insert(provider, sourced.value);
         }
-        let state = completeness(
-            Some(&title.value),
-            production_year,
-            overview.as_deref(),
-            &provider_ids,
-        );
+        let state = if self.details_loaded {
+            MetadataState::Ready
+        } else {
+            completeness(
+                Some(&title.value),
+                production_year,
+                overview.as_deref(),
+                &provider_ids,
+            )
+        };
         MetadataResolution {
             item_kind,
             title: title.value,
@@ -1481,6 +1832,18 @@ impl ResolutionBuilder {
             genres: self.genres,
             studios: self.studios,
             people: self.people,
+            community_rating: self.community_rating,
+            vote_count: self.vote_count,
+            runtime_ticks: self.runtime_ticks,
+            premiere_date: self.premiere_date,
+            end_date: self.end_date,
+            release_status: self.release_status,
+            official_rating: self.official_rating,
+            original_language: self.original_language,
+            countries: self.countries,
+            languages: self.languages,
+            details_loaded: self.details_loaded,
+            details_required: false,
             provenance,
             state,
             warnings,
@@ -1669,4 +2032,18 @@ fn valid_text(value: &str, max_chars: usize) -> bool {
     !value.trim().is_empty()
         && value.chars().count() <= max_chars
         && !value.chars().any(char::is_control)
+}
+
+fn valid_named_values(values: Option<&[MetadataNamedValue]>) -> bool {
+    values.is_none_or(|values| {
+        values.len() <= MAX_ASSOCIATIONS
+            && values
+                .iter()
+                .all(|value| valid_text(value.code(), 64) && valid_text(value.name(), 512))
+            && values.iter().enumerate().all(|(index, value)| {
+                !values[..index]
+                    .iter()
+                    .any(|earlier| earlier.code() == value.code())
+            })
+    })
 }

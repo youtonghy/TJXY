@@ -201,8 +201,8 @@ it('renders rich series metadata and loads ordered episodes for the selected sea
   expect(episodeOne.compareDocumentPosition(episodeTwo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.getByRole('img', { name: 'Still for episode 1: 1:23:45' })).toBeVisible();
   expect(screen.getByRole('img', { name: 'Still for episode 2: Please Remain Calm' })).toBeVisible();
-  expect(screen.getByText('No video source available')).toBeVisible();
-  expect(screen.getByText('Add a media file to this title before starting playback.')).toBeVisible();
+  expect(screen.queryByText('No video source available')).not.toBeInTheDocument();
+  expect(screen.queryByText('Add a media file to this title before starting playback.')).not.toBeInTheDocument();
   expect(screen.queryByText(/demo|development/i)).not.toBeInTheDocument();
   const seasonsHeading = screen.getByRole('heading', { name: 'Seasons' });
   const detailsHeading = screen.getByRole('heading', { name: 'Details' });
@@ -307,6 +307,20 @@ it('does not invent rich facts for a sparse movie response', async () => {
   await waitFor(() => {
     expect(api.getSimilarItems).toHaveBeenCalledWith('movie-1', 4);
   });
+});
+
+it('warns when a directly playable movie has no media source', async () => {
+  api.getItem.mockResolvedValueOnce({
+    Id: 'movie-1',
+    Name: 'Missing File',
+    Type: 'Movie',
+    IsFolder: false,
+    HasMediaSources: false,
+  });
+  renderItem('movie-1');
+
+  expect(await screen.findByText('No video source available')).toBeVisible();
+  expect(screen.getByText('Add a media file to this title before starting playback.')).toBeVisible();
 });
 
 it('uses square primary artwork for an audio item', async () => {

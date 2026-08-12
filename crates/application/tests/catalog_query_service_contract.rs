@@ -1602,3 +1602,73 @@ async fn lazy_item_detail_retries_partial_automatic_metadata() {
         "automatic_scrape"
     );
 }
+
+#[tokio::test]
+async fn lazy_item_detail_retries_legacy_ready_metadata_payload() {
+    let (service, database, item, user) = lazy_service("Movie", true).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_requirement"), 2_i32)
+                    .value(Alias::new("metadata_payload_version"), 0_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    service.item_detail(user, None, item).await.unwrap();
+
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("task_kind"))
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ResolveMetadata")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn lazy_item_detail_does_not_retry_current_ready_metadata_payload() {
+    let (service, database, item, user) = lazy_service("Movie", true).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_requirement"), 2_i32)
+                    .value(Alias::new("metadata_payload_version"), 1_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    service.item_detail(user, None, item).await.unwrap();
+
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("task_kind"))
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ResolveMetadata")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}

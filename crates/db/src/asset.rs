@@ -22,6 +22,7 @@ pub struct AssetPublication {
     local_relative_path: String,
     source_provider: String,
     source_reference: Option<String>,
+    storage_root_id: Option<Uuid>,
 }
 
 impl AssetPublication {
@@ -63,6 +64,7 @@ impl AssetPublication {
             local_relative_path: local_relative_path.into(),
             source_provider: source_provider.into(),
             source_reference,
+            storage_root_id: None,
         };
         if publication.sha256.len() != 64
             || !publication
@@ -83,6 +85,12 @@ impl AssetPublication {
             return Err(AssetRepositoryError::InvalidPublication);
         }
         Ok(publication)
+    }
+
+    #[must_use]
+    pub const fn with_storage_root(mut self, storage_root_id: Uuid) -> Self {
+        self.storage_root_id = Some(storage_root_id);
+        self
     }
 }
 
@@ -208,6 +216,7 @@ async fn find_or_insert_blob(
             Alias::new("height"),
             Alias::new("byte_size"),
             Alias::new("local_relative_path"),
+            Alias::new("storage_root_id"),
             Alias::new("created_at"),
         ])
         .values_panic([
@@ -218,6 +227,7 @@ async fn find_or_insert_blob(
             publication.height.into(),
             publication.byte_size.into(),
             publication.local_relative_path.clone().into(),
+            publication.storage_root_id.into(),
             Utc::now().into(),
         ])
         .on_conflict(conflict)

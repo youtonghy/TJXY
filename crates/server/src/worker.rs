@@ -674,6 +674,8 @@ fn series_expand_error_is_terminal(error: &SeriesExpandError) -> bool {
         SeriesExpandError::IncompleteTree
             | SeriesExpandError::NoEpisodes
             | SeriesExpandError::InvalidMedia
+            | SeriesExpandError::InvalidMediaName(_)
+            | SeriesExpandError::InvalidNamingHints
             | SeriesExpandError::Repository(
                 SeriesExpandRepositoryError::InvalidClaim
                     | SeriesExpandRepositoryError::MissingSyncRevision
@@ -765,6 +767,8 @@ fn source_index_error_is_terminal(error: &SourceIndexError) -> bool {
     matches!(
         error,
         SourceIndexError::NoMedia
+            | SourceIndexError::InvalidMediaName(_)
+            | SourceIndexError::InvalidNamingHints
             | SourceIndexError::Repository(
                 SourceIndexRepositoryError::InvalidClaim
                     | SourceIndexRepositoryError::MissingSyncRevision
@@ -1116,6 +1120,10 @@ fn metadata_error_is_terminal(error: &MetadataResolveError) -> bool {
         error,
         MetadataResolveError::ObjectChanged
             | MetadataResolveError::NfoKindMismatch
+            | MetadataResolveError::Provider(
+                tjxy_metadata::MetadataProviderError::Rejected
+                    | tjxy_metadata::MetadataProviderError::InvalidResponse
+            )
             | MetadataResolveError::Metadata(_)
             | MetadataResolveError::Storage(
                 BackendError::UnsupportedCapability { .. }

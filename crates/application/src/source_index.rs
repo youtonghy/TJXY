@@ -2,7 +2,9 @@ use std::{collections::HashSet, path::Path};
 
 use sea_orm::DatabaseConnection;
 use thiserror::Error;
-use tjxy_common::{MediaLocationId, MediaSourceId, PresentationKey, SubtitleId};
+use tjxy_common::{
+    MediaLocationId, MediaNameError, MediaSourceId, PresentationKey, SubtitleId, parse_media_name,
+};
 use tjxy_db::{
     CatalogPublicationError, CatalogPublicationRepository, ClaimedWorkJob,
     MediaLocationPublicationRow, MediaSourcePublicationRow, SourceIndexObject,
@@ -101,12 +103,15 @@ fn build_graph(
             )
         });
         if source_ids.insert(source) {
-            sources.push(MediaSourcePublicationRow::new(
-                source,
-                presentation,
-                None,
-                Some(extension),
-            )?);
+            let mut source_row =
+                MediaSourcePublicationRow::new(source, presentation, None, Some(extension))?;
+            if !is_audio {
+                let parsed = parse_media_name(object.name())?;
+                let hints = serde_json::to_value(parsed)
+                    .map_err(|_| SourceIndexError::InvalidNamingHints)?;
+                source_row = source_row.with_naming_hints(hints)?;
+            }
+            sources.push(source_row);
         }
         let (identity, kind) = object.checksum().map_or((None, None), |value| {
             (Some(value.to_owned()), Some("provider_checksum".to_owned()))
@@ -195,7 +200,10 @@ fn supported_media_extension(extension: &str, is_audio: bool) -> bool {
             "aac" | "flac" | "m4a" | "mp3" | "oga" | "ogg" | "opus" | "wav" | "wave" | "webm"
         )
     } else {
-        matches!(extension, "mkv" | "mp4" | "m4v" | "webm")
+        matches!(
+            extension,
+            "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts"
+        )
     }
 }
 
@@ -211,6 +219,10 @@ fn file_parts(name: &str) -> Option<(String, String)> {
 pub enum SourceIndexError {
     #[error("source-index input has no supported media object")]
     NoMedia,
+    #[error("source-index input contains an invalid media name: {0}")]
+    InvalidMediaName(#[from] MediaNameError),
+    #[error("source-index naming hints could not be serialized")]
+    InvalidNamingHints,
     #[error("source-index input query failed: {0}")]
     Repository(#[from] SourceIndexRepositoryError),
     #[error("source-index publication failed: {0}")]

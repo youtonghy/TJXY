@@ -56,6 +56,9 @@ mod m20260806_000055_ai_message_sequence;
 mod m20260811_000056_remove_hybrid_scan_profile;
 mod m20260811_000057_normalize_legacy_title_year;
 mod m20260811_000058_site_theme_settings;
+mod m20260811_000059_media_name_parser;
+mod m20260812_000060_metadata_payload_version;
+mod m20260812_000061_asset_storage_roots;
 
 use std::collections::HashSet;
 
@@ -109,6 +112,9 @@ pub async fn migrate_database(database: &DatabaseConnection) -> Result<(), Schem
     migration_history(database, &supported).await?;
 
     Migrator::up(database, None).await?;
+    m20260811_000059_media_name_parser::ensure_schema(&SchemaManager::new(database)).await?;
+    m20260812_000060_metadata_payload_version::ensure_schema(&SchemaManager::new(database)).await?;
+    m20260812_000061_asset_storage_roots::ensure_schema(&SchemaManager::new(database)).await?;
     let applied = migration_history(database, &supported).await?;
     let missing_migrations = supported
         .iter()
@@ -173,6 +179,7 @@ async fn validate_current_schema(
         "ai_daily_usage",
         "announcements",
         "installation_records",
+        "asset_storage_roots",
     ] {
         if !manager.has_table(table).await? {
             missing.push(format!("table {table}"));
@@ -181,6 +188,14 @@ async fn validate_current_schema(
     }
     for (table, column) in [
         ("libraries", "metadata_source_mode"),
+        ("library_storage_roots", "naming_parser_version"),
+        ("catalog_items", "naming_parser_version"),
+        ("catalog_items", "metadata_payload_version"),
+        ("asset_blobs", "storage_root_id"),
+        ("catalog_publications", "naming_parser_version"),
+        ("publication_catalog_items", "index_number"),
+        ("media_sources", "naming_hints"),
+        ("publication_media_sources", "naming_hints"),
         ("system_settings", "media_browser_roots"),
         ("site_theme_settings", "active_theme_id"),
         ("site_theme_settings", "configurations"),
@@ -268,6 +283,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260811_000056_remove_hybrid_scan_profile::Migration),
             Box::new(m20260811_000057_normalize_legacy_title_year::Migration),
             Box::new(m20260811_000058_site_theme_settings::Migration),
+            Box::new(m20260811_000059_media_name_parser::Migration),
+            Box::new(m20260812_000060_metadata_payload_version::Migration),
+            Box::new(m20260812_000061_asset_storage_roots::Migration),
         ]
     }
 }

@@ -1,10 +1,13 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 
 use sea_orm::DatabaseConnection;
 use thiserror::Error;
 use tjxy_common::{
-    CatalogItemId, MediaLocationId, MediaSourceId, PresentationKey, StorageObjectRecordId,
-    SubtitleId,
+    CatalogItemId, MediaLocationId, MediaNameError, MediaSourceId, NumberRange, ParsedMediaName,
+    PresentationKey, StorageObjectRecordId, SubtitleId, parse_media_name,
 };
 use tjxy_db::{
     CatalogPublicationError, CatalogPublicationRepository, ClaimedWorkJob,
@@ -16,6 +19,7 @@ use tjxy_db::{
 use uuid::Uuid;
 
 const MAX_SUBTITLES_PER_EPISODE: usize = 32;
+const MAX_SCAN_WARNINGS: usize = 100;
 
 pub struct SeriesExpandService {
     database: DatabaseConnection,
@@ -61,6 +65,7 @@ impl SeriesExpandService {
             snapshot.storage_root(),
             snapshot.sync_revision(),
             snapshot.objects(),
+            &snapshot,
         )?;
         let manifest = StructurePublicationManifest::from_series(&graph.rows, &graph.sources)?;
         let publications = CatalogPublicationRepository::new(&self.database);
@@ -77,10 +82,11 @@ impl SeriesExpandService {
         }
         publications.seal_structure(claimed, publication).await?;
         publications
-            .publish_structure(
+            .publish_structure_with_warnings(
                 &WorkJobRepository::new(&self.database),
                 claimed,
                 publication,
+                graph.warnings,
             )
             .await
             .map_err(Into::into)
@@ -90,6 +96,13 @@ impl SeriesExpandService {
 struct SeriesGraph {
     rows: Vec<StructurePublicationRow>,
     sources: Vec<SeriesSourcePublication>,
+    warnings: Vec<String>,
+}
+
+struct SeasonGroup<'object> {
+    id: CatalogItemId,
+    scope: StorageObjectRecordId,
+    episodes: Vec<(&'object SeriesStorageObject, ParsedMediaName, NumberRange)>,
 }
 
 fn build_graph(
@@ -98,52 +111,85 @@ fn build_graph(
     storage_root: tjxy_common::StorageRootId,
     sync_revision: i64,
     objects: &[SeriesStorageObject],
+    snapshot: &tjxy_db::SeriesExpandSnapshot,
 ) -> Result<SeriesGraph, SeriesExpandError> {
     let children = child_map(objects);
+    let by_id = objects
+        .iter()
+        .map(|object| (object.id(), object))
+        .collect::<HashMap<_, _>>();
+    let mut videos = descendant_videos(root, &children);
+    videos.sort_unstable_by_key(|object| object.name().to_lowercase());
+    let mut seasons = BTreeMap::<u32, SeasonGroup<'_>>::new();
+    let mut warnings = Vec::new();
+    for video in videos {
+        let (parsed, season_scope) = parse_episode_path(video, root, &by_id)?;
+        let (Some(season), Some(episode)) = (parsed.season(), parsed.episode()) else {
+            if warnings.len() < MAX_SCAN_WARNINGS {
+                warnings.push(format!(
+                    "Skipped series video {:?}: could not determine both season and episode",
+                    video.name()
+                ));
+            }
+            continue;
+        };
+        let season_number = season.start();
+        let scope = season_scope.unwrap_or(root);
+        let season_id = snapshot
+            .existing_season_id(season_number)
+            .unwrap_or_else(|| derived_season_index(owner, season_number));
+        seasons
+            .entry(season_number)
+            .or_insert_with(|| SeasonGroup {
+                id: season_id,
+                scope,
+                episodes: Vec::new(),
+            })
+            .episodes
+            .push((video, parsed, episode));
+    }
+
     let mut rows = Vec::new();
     let mut sources = Vec::new();
-    let mut seasons = children
-        .get(&root)
-        .into_iter()
-        .flatten()
-        .filter(|object| object.object_type() == "Directory")
-        .copied()
-        .collect::<Vec<_>>();
-    seasons.sort_unstable_by_key(|object| object.name().to_lowercase());
-    for season_object in seasons {
-        if !season_object.children_indexed() {
-            return Err(SeriesExpandError::IncompleteTree);
-        }
-        let season_id = derived_item(owner, "season", season_object.id());
-        rows.push(StructurePublicationRow::new(
-            season_id,
-            owner,
-            storage_root,
-            season_object.id(),
-            "Season",
-            season_object.name(),
-            season_object.name().to_lowercase(),
-            None,
-            None,
-        )?);
-        let mut videos = descendant_videos(season_object.id(), &children);
-        videos.sort_unstable_by_key(|object| object.name().to_lowercase());
-        for video in videos {
-            let (stem, container) =
-                video_parts(video.name()).ok_or(SeriesExpandError::InvalidMedia)?;
+    for (season_number, mut group) in seasons {
+        group
+            .episodes
+            .sort_unstable_by_key(|(_, _, episode)| (episode.start(), episode.end()));
+        let season_name = format!("Season {season_number}");
+        rows.push(
+            StructurePublicationRow::new(
+                group.id,
+                owner,
+                storage_root,
+                group.scope,
+                "Season",
+                &season_name,
+                season_name.to_lowercase(),
+                None,
+                None,
+            )?
+            .with_index_number(Some(number_to_i32(season_number)?))?,
+        );
+        for (video, parsed, episode) in group.episodes {
             let episode_id = derived_item(owner, "episode", video.id());
             let episode_scope = video.parent().ok_or(SeriesExpandError::InvalidMedia)?;
-            rows.push(StructurePublicationRow::new(
-                episode_id,
-                season_id,
-                storage_root,
-                episode_scope,
-                "Episode",
-                &stem,
-                stem.to_lowercase(),
-                None,
-                None,
-            )?);
+            let episode_name = episode_display_name(season_number, episode);
+            rows.push(
+                StructurePublicationRow::new(
+                    episode_id,
+                    group.id,
+                    storage_root,
+                    episode_scope,
+                    "Episode",
+                    &episode_name,
+                    episode_name.to_lowercase(),
+                    parsed.year(),
+                    None,
+                )?
+                .with_index_number(Some(number_to_i32(episode.start())?))?,
+            );
+            let (stem, container) =
+                video_parts(video.name()).ok_or(SeriesExpandError::InvalidMedia)?;
             sources.push(episode_source(
                 episode_id,
                 video,
@@ -155,13 +201,74 @@ fn build_graph(
                 &stem,
                 container,
                 sync_revision,
+                &parsed,
             )?);
         }
     }
     if sources.is_empty() {
         return Err(SeriesExpandError::NoEpisodes);
     }
-    Ok(SeriesGraph { rows, sources })
+    Ok(SeriesGraph {
+        rows,
+        sources,
+        warnings,
+    })
+}
+
+fn parse_episode_path(
+    video: &SeriesStorageObject,
+    root: StorageObjectRecordId,
+    by_id: &HashMap<StorageObjectRecordId, &SeriesStorageObject>,
+) -> Result<(ParsedMediaName, Option<StorageObjectRecordId>), SeriesExpandError> {
+    let mut parsed = parse_media_name(video.name())?;
+    let mut season_scope = None;
+    for ancestor in ancestor_directories(video, root, by_id) {
+        let context = parse_media_name(ancestor.name())?;
+        if season_scope.is_none() && context.season().is_some() {
+            season_scope = Some(ancestor.id());
+        }
+        parsed.merge_path_context(&context);
+    }
+    Ok((parsed, season_scope))
+}
+
+fn ancestor_directories<'object>(
+    video: &'object SeriesStorageObject,
+    root: StorageObjectRecordId,
+    by_id: &HashMap<StorageObjectRecordId, &'object SeriesStorageObject>,
+) -> Vec<&'object SeriesStorageObject> {
+    let mut ancestors = Vec::new();
+    let mut current = video.parent();
+    while let Some(id) = current {
+        let Some(object) = by_id.get(&id).copied() else {
+            break;
+        };
+        ancestors.push(object);
+        if id == root {
+            break;
+        }
+        current = object.parent();
+    }
+    ancestors
+}
+
+fn episode_display_name(season: u32, episode: NumberRange) -> String {
+    if episode.start() == episode.end() {
+        format!("S{season:02}E{:02}", episode.start())
+    } else {
+        format!("S{season:02}E{:02}-E{:02}", episode.start(), episode.end())
+    }
+}
+
+fn number_to_i32(number: u32) -> Result<i32, SeriesExpandError> {
+    i32::try_from(number).map_err(|_| SeriesExpandError::InvalidMedia)
+}
+
+fn derived_season_index(owner: CatalogItemId, season: u32) -> CatalogItemId {
+    CatalogItemId::from_uuid(Uuid::new_v5(
+        &owner.as_uuid(),
+        format!("season-index:{season}").as_bytes(),
+    ))
 }
 
 fn descendant_videos<'a>(
@@ -224,11 +331,15 @@ fn episode_source(
     stem: &str,
     container: String,
     sync_revision: i64,
+    parsed: &ParsedMediaName,
 ) -> Result<SeriesSourcePublication, SeriesExpandError> {
     let source = MediaSourceId::from_uuid(derived_uuid(episode.as_uuid(), "source", video.id()));
     let presentation =
         PresentationKey::from_uuid(derived_uuid(episode.as_uuid(), "presentation", video.id()));
-    let source_row = MediaSourcePublicationRow::new(source, presentation, None, Some(container))?;
+    let naming_hints =
+        serde_json::to_value(parsed).map_err(|_| SeriesExpandError::InvalidNamingHints)?;
+    let source_row = MediaSourcePublicationRow::new(source, presentation, None, Some(container))?
+        .with_naming_hints(naming_hints)?;
     let (identity, kind) = video.checksum().map_or((None, None), |checksum| {
         (
             Some(checksum.to_owned()),
@@ -298,7 +409,10 @@ fn derived_uuid(namespace: Uuid, kind: &str, object: StorageObjectRecordId) -> U
 fn video_parts(name: &str) -> Option<(String, String)> {
     let path = Path::new(name);
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if !matches!(extension.as_str(), "mkv" | "mp4" | "m4v" | "webm") {
+    if !matches!(
+        extension.as_str(),
+        "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts"
+    ) {
         return None;
     }
     Some((path.file_stem()?.to_str()?.to_owned(), extension))
@@ -323,6 +437,10 @@ pub enum SeriesExpandError {
     NoEpisodes,
     #[error("Series storage tree contains an invalid media graph")]
     InvalidMedia,
+    #[error("Series storage tree contains an invalid media name: {0}")]
+    InvalidMediaName(#[from] MediaNameError),
+    #[error("Series naming hints could not be serialized")]
+    InvalidNamingHints,
     #[error("Series storage snapshot failed: {0}")]
     Repository(#[from] SeriesExpandRepositoryError),
     #[error("Series expansion work scheduling failed: {0}")]

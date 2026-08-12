@@ -11,6 +11,9 @@ export interface ConfirmDialogProps {
   confirmLabel: string;
   isPending: boolean;
   onConfirm: () => void | Promise<void>;
+  cancelLabel?: string;
+  closeLabel?: string;
+  errorTitle?: string;
 }
 
 export function ConfirmDialog({
@@ -21,6 +24,9 @@ export function ConfirmDialog({
   confirmLabel,
   isPending,
   onConfirm,
+  cancelLabel = 'Cancel',
+  closeLabel = 'Close',
+  errorTitle = 'The action could not be completed',
 }: ConfirmDialogProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -71,7 +77,7 @@ export function ConfirmDialog({
       >
         <Modal.Container placement="center" size="sm">
           <Modal.Dialog>
-            <Modal.CloseTrigger aria-label="Close" isDisabled={isLocked} />
+            <Modal.CloseTrigger aria-label={closeLabel} isDisabled={isLocked} />
             <Modal.Header>
               <Modal.Heading>{title}</Modal.Heading>
             </Modal.Header>
@@ -83,7 +89,7 @@ export function ConfirmDialog({
                     <TriangleAlert aria-hidden="true" className="size-4" />
                   </Alert.Indicator>
                   <Alert.Content>
-                    <Alert.Title>The action could not be completed</Alert.Title>
+                    <Alert.Title>{errorTitle}</Alert.Title>
                     <Alert.Description>
                       {errorDescription ?? 'Review the current state and try again.'}
                     </Alert.Description>
@@ -93,7 +99,7 @@ export function ConfirmDialog({
             </Modal.Body>
             <Modal.Footer>
               <Button autoFocus isDisabled={isLocked} slot="close" variant="tertiary">
-                Cancel
+                {cancelLabel}
               </Button>
               <Button
                 isPending={isLocked}

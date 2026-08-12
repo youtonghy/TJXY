@@ -8,7 +8,8 @@ use sea_orm::{
 use serde_json::{Value, json};
 use thiserror::Error;
 use tjxy_common::{
-    CatalogItemId, LibraryRootBindingId, SortKey, StorageObjectRecordId, StorageRootId,
+    CatalogItemId, LibraryRootBindingId, MEDIA_NAME_PARSER_VERSION, SortKey, StorageObjectRecordId,
+    StorageRootId, parse_media_name,
 };
 use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
@@ -53,6 +54,7 @@ pub async fn enqueue_after_root_sync(
 struct DiscoveryLibraryScope {
     id: Uuid,
     profile_version: i32,
+    naming_parser_version: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -314,7 +316,8 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 .await?;
             for title in &snapshot.titles {
                 let metadata_revision = upsert_title(&transaction, title).await?;
-                if let Some(requirement) = title.metadata_requirement {
+                if title.metadata_requirement == Some(MetadataRequirement::Full) {
+                    let requirement = MetadataRequirement::Full;
                     let spec = crate::WorkJobSpec::new(
                         WorkTaskKind::ResolveMetadata,
                         WorkScope::CatalogItem(title.item_id),
@@ -447,6 +450,10 @@ where
                         Expr::col((library.clone(), Alias::new("profile_version"))),
                         Alias::new("profile_version"),
                     )
+                    .expr_as(
+                        Expr::col((binding.clone(), Alias::new("naming_parser_version"))),
+                        Alias::new("naming_parser_version"),
+                    )
                     .from_as(Alias::new("library_storage_roots"), binding.clone())
                     .join_as(
                         JoinType::InnerJoin,
@@ -472,8 +479,19 @@ where
                     .and_where(
                         Expr::col((binding.clone(), Alias::new("id"))).eq(binding_id.as_uuid()),
                     )
-                    .and_where(
-                        Expr::col((binding, Alias::new("discovered_sync_revision"))).lt(revision),
+                    .cond_where(
+                        Cond::any()
+                            .add(
+                                Expr::col((
+                                    binding.clone(),
+                                    Alias::new("discovered_sync_revision"),
+                                ))
+                                .lt(revision),
+                            )
+                            .add(
+                                Expr::col((binding, Alias::new("naming_parser_version")))
+                                    .lt(MEDIA_NAME_PARSER_VERSION),
+                            ),
                     )
                     .and_where(
                         Expr::col((root, Alias::new("reconciled_sync_revision"))).eq(revision),
@@ -498,6 +516,7 @@ where
         DiscoveryLibraryScope {
             id: row.try_get("", "library_id")?,
             profile_version: row.try_get("", "profile_version")?,
+            naming_parser_version: row.try_get("", "naming_parser_version")?,
         },
     ))
 }
@@ -526,6 +545,10 @@ where
             Expr::col((library.clone(), Alias::new("profile_version"))),
             Alias::new("profile_version"),
         )
+        .expr_as(
+            Expr::col((binding.clone(), Alias::new("naming_parser_version"))),
+            Alias::new("naming_parser_version"),
+        )
         .from_as(Alias::new("storage_roots"), root.clone())
         .join_as(
             JoinType::InnerJoin,
@@ -550,7 +573,17 @@ where
         )
         .and_where(Expr::col((root.clone(), Alias::new("id"))).eq(root_id.as_uuid()))
         .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).eq(revision))
-        .and_where(Expr::col((binding, Alias::new("discovered_sync_revision"))).lt(revision))
+        .cond_where(
+            Cond::any()
+                .add(
+                    Expr::col((binding.clone(), Alias::new("discovered_sync_revision")))
+                        .lt(revision),
+                )
+                .add(
+                    Expr::col((binding.clone(), Alias::new("naming_parser_version")))
+                        .lt(MEDIA_NAME_PARSER_VERSION),
+                ),
+        )
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
         .and_where(Expr::col((relation.clone(), Alias::new("parent_storage_object_id"))).is_null())
         .and_where(Expr::col((relation.clone(), Alias::new("children_indexed"))).eq(true))
@@ -576,6 +609,7 @@ where
             Ok(DiscoveryLibraryScope {
                 id: row.try_get("", "library_id")?,
                 profile_version: row.try_get("", "profile_version")?,
+                naming_parser_version: row.try_get("", "naming_parser_version")?,
             })
         })
         .collect()
@@ -605,7 +639,11 @@ async fn stage_discovery_libraries(
                 job_id.as_uuid().into(),
                 DISCOVERY_LIBRARY_KIND.into(),
                 library.id.to_string().into(),
-                json!({"profile_version": library.profile_version}).into(),
+                json!({
+                    "profile_version": library.profile_version,
+                    "naming_parser_version": library.naming_parser_version
+                })
+                .into(),
                 "Required".into(),
             ])
             .on_conflict(
@@ -639,6 +677,10 @@ pub(crate) async fn stage_discovery_binding(
             Expr::col((binding.clone(), Alias::new("library_id"))),
             Alias::new("library_id"),
         )
+        .expr_as(
+            Expr::col((binding.clone(), Alias::new("naming_parser_version"))),
+            Alias::new("naming_parser_version"),
+        )
         .from_as(Alias::new("library_storage_roots"), binding.clone())
         .join_as(
             JoinType::InnerJoin,
@@ -662,6 +704,7 @@ pub(crate) async fn stage_discovery_binding(
         &[DiscoveryLibraryScope {
             id: row.try_get("", "library_id")?,
             profile_version,
+            naming_parser_version: row.try_get("", "naming_parser_version")?,
         }],
     )
     .await
@@ -696,9 +739,16 @@ async fn staged_discovery_libraries(
             .and_then(|value| i32::try_from(value).ok())
             .filter(|value| *value >= 0)
             .ok_or(DiscoverTitlesError::InvalidLibraryScope)?;
+        let naming_parser_version = payload
+            .get("naming_parser_version")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| (0..=MEDIA_NAME_PARSER_VERSION).contains(value))
+            .ok_or(DiscoverTitlesError::InvalidLibraryScope)?;
         libraries.push(DiscoveryLibraryScope {
             id,
             profile_version,
+            naming_parser_version,
         });
     }
     if libraries.is_empty() {
@@ -720,7 +770,7 @@ async fn fence_discovery_snapshot(
             Expr::col(Alias::new("reconciled_sync_revision")),
         )
         .and_where(Expr::col(Alias::new("id")).eq(snapshot.root_id.as_uuid()))
-        .and_where(
+        .cond_where(
             Expr::col(Alias::new("reconciled_sync_revision")).eq(claimed.job().expected_revision()),
         )
         .to_owned();
@@ -788,11 +838,18 @@ async fn advance_discovery_watermarks(
                 Alias::new("discovered_sync_revision"),
                 claimed.job().expected_revision(),
             )
+            .value(
+                Alias::new("naming_parser_version"),
+                MEDIA_NAME_PARSER_VERSION,
+            )
             .and_where(Expr::col(Alias::new("library_id")).eq(library.id))
             .and_where(Expr::col(Alias::new("storage_root_id")).eq(snapshot.root_id.as_uuid()))
             .and_where(
                 Expr::col(Alias::new("discovered_sync_revision"))
-                    .lt(claimed.job().expected_revision()),
+                    .lte(claimed.job().expected_revision()),
+            )
+            .and_where(
+                Expr::col(Alias::new("naming_parser_version")).eq(library.naming_parser_version),
             );
         if let WorkScope::LibraryRootBinding(binding_id) = snapshot.scope {
             update.and_where(Expr::col(Alias::new("id")).eq(binding_id.as_uuid()));
@@ -890,6 +947,7 @@ async fn upsert_title(
             Alias::new("structure_expansion_revision"),
             Alias::new("source_index_revision"),
             Alias::new("is_present"),
+            Alias::new("naming_parser_version"),
         ])
         .values_panic([
             title.item_id.as_uuid().into(),
@@ -905,10 +963,12 @@ async fn upsert_title(
             0_i64.into(),
             0_i64.into(),
             true.into(),
+            MEDIA_NAME_PARSER_VERSION.into(),
         ])
         .on_conflict(idempotent_conflict(backend, "id"))
         .to_owned();
     transaction.execute(backend.build(&insert)).await?;
+    refresh_title_naming(transaction, title).await?;
     let row = transaction
         .query_one(
             backend.build(
@@ -971,6 +1031,80 @@ async fn upsert_title(
         )
         .await?;
     Ok(row.try_get("", "metadata_revision")?)
+}
+
+async fn refresh_title_naming(
+    transaction: &sea_orm::DatabaseTransaction,
+    title: &DiscoveredTitle,
+) -> Result<(), DiscoverTitlesError> {
+    let provenance = Alias::new("discover_naming_provenance");
+    let provider = Alias::new("discover_naming_provider");
+    let authoritative_metadata = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("metadata_provenance"), provenance.clone())
+        .and_where(
+            Expr::col((provenance.clone(), Alias::new("catalog_item_id")))
+                .eq(title.item_id.as_uuid()),
+        )
+        .and_where(
+            Expr::col((provenance.clone(), Alias::new("field_name")))
+                .is_in(["title", "production_year"]),
+        )
+        .and_where(Expr::col((provenance, Alias::new("source_provider"))).ne("Naming"))
+        .to_owned();
+    let provider_identity = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("provider_ids"), provider.clone())
+        .and_where(Expr::col((provider, Alias::new("catalog_item_id"))).eq(title.item_id.as_uuid()))
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    let refresh = Query::update()
+        .table(Alias::new("catalog_items"))
+        .values([
+            (Alias::new("name"), title.name.clone().into()),
+            (Alias::new("sort_name"), title.name.to_lowercase().into()),
+            (
+                Alias::new("sort_key"),
+                SortKey::from_text(&title.name).into_bytes().into(),
+            ),
+            (Alias::new("production_year"), title.production_year.into()),
+            (Alias::new("metadata_state"), "Partial".into()),
+            (Alias::new("last_error"), Option::<String>::None.into()),
+            (
+                Alias::new("metadata_revision"),
+                Expr::col(Alias::new("metadata_revision")).add(1_i64),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
+        .cond_where(
+            Cond::all()
+                .add(Expr::exists(authoritative_metadata).not())
+                .add(Expr::exists(provider_identity).not()),
+        )
+        .to_owned();
+    transaction.execute(backend.build(&refresh)).await?;
+
+    let revision_column = if title.item_type == "Series" {
+        "structure_expansion_revision"
+    } else {
+        "source_index_revision"
+    };
+    let advance = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("naming_parser_version"),
+            MEDIA_NAME_PARSER_VERSION,
+        )
+        .value(
+            Alias::new(revision_column),
+            Expr::col(Alias::new(revision_column)).add(1_i64),
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
+        .to_owned();
+    transaction.execute(backend.build(&advance)).await?;
+    Ok(())
 }
 
 fn idempotent_conflict(backend: sea_orm::DbBackend, column: &'static str) -> OnConflict {
@@ -1074,7 +1208,17 @@ fn candidate_query(
         )
         .and_where(Expr::col((root.clone(), Alias::new("id"))).eq(root_id.as_uuid()))
         .and_where(Expr::col((root.clone(), Alias::new("reconciled_sync_revision"))).eq(revision))
-        .and_where(Expr::col((binding, Alias::new("discovered_sync_revision"))).lt(revision))
+        .cond_where(
+            Cond::any()
+                .add(
+                    Expr::col((binding.clone(), Alias::new("discovered_sync_revision")))
+                        .lt(revision),
+                )
+                .add(
+                    Expr::col((binding, Alias::new("naming_parser_version")))
+                        .lt(MEDIA_NAME_PARSER_VERSION),
+                ),
+        )
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
         .and_where(
             Expr::col((library.clone(), Alias::new("id"))).is_in(library_ids.iter().copied()),
@@ -1091,10 +1235,42 @@ fn candidate_query(
                 )
                 .add(
                     Cond::all()
-                        .add(Expr::col((library, Alias::new("collection_type"))).ne("music"))
+                        .add(
+                            Expr::col((library.clone(), Alias::new("collection_type")))
+                                .eq("movies"),
+                        )
+                        .add(
+                            Expr::col((child.clone(), Alias::new("parent_storage_object_id")))
+                                .equals((root_object.clone(), Alias::new("storage_object_id"))),
+                        )
+                        .add(
+                            Cond::any()
+                                .add(
+                                    Expr::col((object.clone(), Alias::new("object_type")))
+                                        .eq("Directory"),
+                                )
+                                .add(
+                                    Cond::all()
+                                        .add(
+                                            Expr::col((object.clone(), Alias::new("object_type")))
+                                                .eq("File"),
+                                        )
+                                        .add(supported_video_name_condition(&object)),
+                                ),
+                        ),
+                )
+                .add(
+                    Cond::all()
+                        .add(
+                            Expr::col((library, Alias::new("collection_type")))
+                                .is_in(["tvshows", "shows", "mixed"]),
+                        )
                         .add(
                             Expr::col((child.clone(), Alias::new("parent_storage_object_id")))
                                 .equals((root_object, Alias::new("storage_object_id"))),
+                        )
+                        .add(
+                            Expr::col((object.clone(), Alias::new("object_type"))).eq("Directory"),
                         ),
                 ),
         )
@@ -1119,15 +1295,29 @@ fn supported_audio_name_condition(object: &Alias) -> sea_orm::sea_query::Conditi
     })
 }
 
+fn supported_video_name_condition(object: &Alias) -> sea_orm::sea_query::Condition {
+    ["mkv", "mp4", "m4v", "webm", "avi", "mov", "ts", "m2ts"]
+        .into_iter()
+        .fold(Cond::any(), |condition, extension| {
+            condition.add(
+                Expr::col((object.clone(), Alias::new("normalized_name")))
+                    .like(format!("%.{extension}")),
+            )
+        })
+}
+
 fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > 512 {
+    let parsed = parse_media_name(value).map_err(|_| DiscoverTitlesError::InvalidTitle)?;
+    let fallback = std::path::Path::new(value.trim())
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(value)
+        .trim();
+    let name = parsed.title().unwrap_or(fallback);
+    if name.is_empty() {
         return Err(DiscoverTitlesError::InvalidTitle);
     }
-    if let Some((name, year)) = crate::title_year::split_title_year(trimmed) {
-        return Ok((name.to_owned(), Some(year)));
-    }
-    Ok((trimmed.to_owned(), None))
+    Ok((name.to_owned(), parsed.year()))
 }
 
 fn parse_audio_title(value: &str) -> Option<String> {

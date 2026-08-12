@@ -13,8 +13,8 @@ use tjxy_test_support::test_database;
 use uuid::Uuid;
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Mirrors the matched directory and its synchronized children.
-async fn source_index_publishes_video_and_sidecar_from_sql_inventory() {
+#[allow(clippy::too_many_lines)] // Mirrors a flat Movie file and its synchronized sibling sidecar.
+async fn source_index_publishes_flat_video_and_sidecar_from_sql_inventory() {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let sql = database.get_database_backend();
@@ -177,8 +177,12 @@ async fn source_index_publishes_video_and_sidecar_from_sql_inventory() {
         .unwrap();
     for (id, name, object_type) in [
         (parent, "Arrival", "Directory"),
-        (video, "Arrival.mkv", "File"),
-        (subtitle, "Arrival.eng.srt", "File"),
+        (video, "Arrival.2016.1080p.BluRay.x264-GROUP.mkv", "File"),
+        (
+            subtitle,
+            "Arrival.2016.1080p.BluRay.x264-GROUP.eng.srt",
+            "File",
+        ),
     ] {
         database
             .execute(
@@ -267,7 +271,7 @@ async fn source_index_publishes_video_and_sidecar_from_sql_inventory() {
                     ])
                     .values_panic([
                         Uuid::new_v4().into(),
-                        parent.as_uuid().into(),
+                        video.as_uuid().into(),
                         item.as_uuid().into(),
                         1.0.into(),
                         "Matched".into(),
@@ -321,6 +325,24 @@ async fn source_index_publishes_video_and_sidecar_from_sql_inventory() {
     assert_eq!(sources[0].subtitles()[0].storage_object_id(), subtitle);
     assert_eq!(sources[0].subtitles()[0].format(), "srt");
     assert_eq!(sources[0].subtitles()[0].language(), Some("eng"));
+    let naming_hints: serde_json::Value = database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .column(Alias::new("naming_hints"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("id")).eq(sources[0].id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "naming_hints")
+        .unwrap();
+    assert_eq!(naming_hints["year"], 2016);
+    assert_eq!(naming_hints["resolution"], "1080p");
+    assert_eq!(naming_hints["sources"], serde_json::json!(["BluRay"]));
+    assert_eq!(naming_hints["video_codec"], "H264");
     let stable = (sources[0].id(), sources[0].presentation_key());
     let previous_location_id = sources[0].locations()[0].id();
     let replacement = StorageObjectRecordId::new();
@@ -496,15 +518,42 @@ async fn source_index_publishes_video_and_sidecar_from_sql_inventory() {
         .await
         .unwrap();
     assert_eq!(completion.reconciled_sync_revision, 2);
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("identity_matches"))
+                    .value(Alias::new("storage_object_id"), replacement.as_uuid())
+                    .and_where(
+                        Expr::col(Alias::new("candidate_catalog_item_id")).eq(item.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let source_revision: i64 = database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .column(Alias::new("source_index_revision"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "source_index_revision")
+        .unwrap();
     jobs.enqueue_or_join(
         &WorkJobSpec::new(
             WorkTaskKind::IndexMediaSources,
             WorkScope::CatalogItem(item),
-            2,
+            source_revision,
             100,
         )
         .unwrap()
-        .with_input_sync_revision(1)
+        .with_input_sync_revision(2)
         .unwrap(),
     )
     .await

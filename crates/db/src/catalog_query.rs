@@ -635,6 +635,7 @@ pub struct AssetRecord {
     height: Option<i32>,
     byte_size: u64,
     local_relative_path: String,
+    storage_root_path: Option<String>,
 }
 
 impl AssetRecord {
@@ -666,6 +667,11 @@ impl AssetRecord {
     #[must_use]
     pub fn local_relative_path(&self) -> &str {
         &self.local_relative_path
+    }
+
+    #[must_use]
+    pub fn storage_root_path(&self) -> Option<&str> {
+        self.storage_root_path.as_deref()
     }
 }
 
@@ -706,6 +712,7 @@ pub struct LazyCatalogWorkTarget {
     metadata_revision: i64,
     metadata_resolved_revision: i64,
     metadata_resolved_requirement: Option<MetadataRequirement>,
+    metadata_payload_version: i32,
     structure_revision: i64,
     source_revision: i64,
     has_current_structure: bool,
@@ -774,7 +781,7 @@ impl LazyCatalogWorkTarget {
 
     #[must_use]
     pub const fn should_retry_metadata(self) -> bool {
-        self.metadata_is_partial
+        (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
             && self.metadata_requirement.is_some()
             && matches!(
                 self.metadata_source_mode,
@@ -799,11 +806,22 @@ impl LazyCatalogWorkTarget {
 
     #[must_use]
     pub const fn needs_metadata_resolution(self, requirement: MetadataRequirement) -> bool {
-        self.metadata_resolved_revision < self.metadata_revision
+        self.requires_metadata_payload_upgrade()
+            || self.metadata_resolved_revision < self.metadata_revision
             || match self.metadata_resolved_requirement {
                 Some(current) => current.as_i32() < requirement.as_i32(),
                 None => true,
             }
+    }
+
+    const fn requires_metadata_payload_upgrade(self) -> bool {
+        matches!(
+            self.item_type,
+            CatalogItemType::Movie | CatalogItemType::Series
+        ) && matches!(
+            self.metadata_source_mode,
+            MetadataSourceMode::AutomaticScrape
+        ) && self.metadata_payload_version < crate::metadata::METADATA_PAYLOAD_VERSION
     }
 
     #[must_use]
@@ -1413,8 +1431,8 @@ impl<'connection> CatalogQueryRepository<'connection> {
 
     /// Returns one published item only when it is visible through an enabled library.
     ///
-    /// Active Structure projection metadata takes precedence over the canonical
-    /// identity row. Staging and retired publications are never read.
+    /// Active Structure projections provide topology while canonical metadata
+    /// remains authoritative. Staging and retired publications are never read.
     ///
     /// # Errors
     ///
@@ -1618,6 +1636,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
                 (item.clone(), Alias::new("metadata_revision")),
                 (item.clone(), Alias::new("metadata_resolved_revision")),
                 (item.clone(), Alias::new("metadata_resolved_requirement")),
+                (item.clone(), Alias::new("metadata_payload_version")),
                 (item.clone(), Alias::new("structure_expansion_revision")),
                 (item.clone(), Alias::new("source_index_revision")),
             ])
@@ -1667,6 +1686,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
                         .map(MetadataRequirement::from_database)
                         .transpose()
                         .map_err(|_| CatalogQueryError::InvalidMetadataRequirement)?,
+                    metadata_payload_version: row.try_get("", "metadata_payload_version")?,
                     structure_revision: row.try_get("", "structure_expansion_revision")?,
                     source_revision: row.try_get("", "source_index_revision")?,
                     has_current_structure: row.try_get("", "has_current_structure")?,
@@ -1891,6 +1911,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let item = Alias::new("item");
         let asset = Alias::new("asset");
         let blob = Alias::new("blob");
+        let storage_root = Alias::new("storage_root");
         let enabled_membership = enabled_membership_for_item(&item);
         let projected_membership = projected_enabled_membership(&item);
 
@@ -1910,6 +1931,13 @@ impl<'connection> CatalogQueryRepository<'connection> {
                 blob.clone(),
                 Expr::col((blob.clone(), Alias::new("id")))
                     .equals((asset.clone(), Alias::new("asset_blob_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("asset_storage_roots"),
+                storage_root.clone(),
+                Expr::col((storage_root.clone(), Alias::new("id")))
+                    .equals((blob.clone(), Alias::new("storage_root_id"))),
             )
             .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
             .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
@@ -1935,6 +1963,10 @@ impl<'connection> CatalogQueryRepository<'connection> {
                 Alias::new(column),
             );
         }
+        query.expr_as(
+            Expr::col((storage_root, Alias::new("canonical_path"))),
+            Alias::new("storage_root_path"),
+        );
         let backend = self.database.get_database_backend();
         self.database
             .query_one(backend.build(&query))
@@ -2693,7 +2725,9 @@ impl ItemQuerySource {
     fn sort_expr(self) -> Expr {
         match self {
             Self::Catalog => Expr::col((Alias::new("ci"), Alias::new("sort_key"))),
-            Self::Publication(_) => Expr::col((Alias::new("pci"), Alias::new("sort_key"))),
+            Self::Publication(_) => {
+                Expr::col((Alias::new("publication_item"), Alias::new("sort_key")))
+            }
         }
     }
 
@@ -2712,11 +2746,12 @@ impl ItemQuerySource {
                 Expr::col((Alias::new("ci"), Alias::new("runtime_ticks")))
             }
             (Self::Publication(_), CatalogSortField::SortName) => {
-                Expr::col((Alias::new("pci"), Alias::new("sort_key")))
+                Expr::col((Alias::new("publication_item"), Alias::new("sort_key")))
             }
-            (Self::Publication(_), CatalogSortField::ProductionYear) => {
-                Expr::col((Alias::new("pci"), Alias::new("production_year")))
-            }
+            (Self::Publication(_), CatalogSortField::ProductionYear) => Expr::col((
+                Alias::new("publication_item"),
+                Alias::new("production_year"),
+            )),
             (Self::Publication(_), CatalogSortField::DateCreated) => {
                 Expr::col((Alias::new("publication_item"), Alias::new("date_created")))
             }
@@ -2824,21 +2859,25 @@ fn apply_search_term(query: &mut SelectStatement, source: ItemQuerySource, searc
         .replace('%', "\\%")
         .replace('_', "\\_");
     let pattern = LikeExpr::new(format!("%{escaped}%")).escape('\\');
-    let (name, original_title) = match source {
+    let (name, original_title, naming_name) = match source {
         ItemQuerySource::Catalog => (
             Expr::col((Alias::new("ci"), Alias::new("name"))),
             Expr::col((Alias::new("ci"), Alias::new("original_title"))),
+            None,
         ),
         ItemQuerySource::Publication(_) => (
-            Expr::col((Alias::new("pci"), Alias::new("name"))),
+            Expr::col((Alias::new("publication_item"), Alias::new("name"))),
             Expr::col((Alias::new("publication_item"), Alias::new("original_title"))),
+            Some(Expr::col((Alias::new("pci"), Alias::new("name")))),
         ),
     };
-    query.cond_where(
-        Condition::any()
-            .add(Expr::expr(Func::lower(name)).like(pattern.clone()))
-            .add(Expr::expr(Func::lower(original_title)).like(pattern)),
-    );
+    let mut search = Condition::any()
+        .add(Expr::expr(Func::lower(name)).like(pattern.clone()))
+        .add(Expr::expr(Func::lower(original_title)).like(pattern.clone()));
+    if let Some(naming_name) = naming_name {
+        search = search.add(Expr::expr(Func::lower(naming_name)).like(pattern));
+    }
+    query.cond_where(search);
 }
 
 fn apply_item_sort(
@@ -2849,8 +2888,12 @@ fn apply_item_sort(
 ) {
     if sorts.is_empty() {
         if natural_index_order {
+            let item_alias = match source {
+                ItemQuerySource::Catalog => Alias::new("ci"),
+                ItemQuerySource::Publication(_) => Alias::new("publication_item"),
+            };
             query.order_by_expr_with_nulls(
-                Expr::col((Alias::new("ci"), Alias::new("index_number"))).into(),
+                Expr::col((item_alias, Alias::new("index_number"))).into(),
                 Order::Asc,
                 NullOrdering::Last,
             );
@@ -3528,9 +3571,6 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                 ("catalog_item_id", "id"),
                 ("parent_catalog_item_id", "parent_id"),
                 ("item_type", "item_type"),
-                ("name", "name"),
-                ("production_year", "production_year"),
-                ("overview", "overview"),
             ] {
                 query.expr_as(
                     Expr::col((pci.clone(), Alias::new(column))),
@@ -3539,7 +3579,10 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
             }
             let catalog_item = Alias::new("publication_item");
             for column in [
+                "name",
                 "original_title",
+                "production_year",
+                "overview",
                 "community_rating",
                 "index_number",
                 "runtime_ticks",
@@ -3704,5 +3747,6 @@ fn asset_from_row(row: &QueryResult) -> Result<AssetRecord, CatalogQueryError> {
         height: row.try_get("", "height")?,
         byte_size: u64::try_from(byte_size).map_err(|_| CatalogQueryError::InvalidAssetSize)?,
         local_relative_path: row.try_get("", "local_relative_path")?,
+        storage_root_path: row.try_get("", "storage_root_path")?,
     })
 }

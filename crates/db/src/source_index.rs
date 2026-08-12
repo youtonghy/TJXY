@@ -119,12 +119,12 @@ impl<'connection> SourceIndexRepository<'connection> {
             }
         })?
         .ok_or(SourceIndexRepositoryError::MissingScope)?;
-        if (!is_audio && !scope.children_indexed())
+        if (!is_audio && !scope.is_file() && !scope.children_indexed())
             || !scope.accepts_metadata_input(revision)
             || !crate::catalog_storage_scope::storage_scope_is_reconciled(
                 self.database,
                 scope,
-                !is_audio,
+                !is_audio && !scope.is_file(),
             )
             .await?
         {
@@ -134,6 +134,8 @@ impl<'connection> SourceIndexRepository<'connection> {
             .database
             .query_all(self.database.get_database_backend().build(&if is_audio {
                 direct_audio_candidate_query(owner, revision, claimed.job().storage_root_affinity())
+            } else if scope.is_file() {
+                direct_video_candidate_query(owner, revision, scope)
             } else {
                 candidate_query(owner, revision, claimed.job().storage_root_affinity())
             }))
@@ -216,6 +218,118 @@ fn direct_audio_candidate_query(
     owner: CatalogItemId,
     revision: i64,
     storage_root: Option<StorageRootId>,
+) -> sea_orm::sea_query::SelectStatement {
+    direct_file_candidate_query(owner, revision, storage_root, "music")
+}
+
+fn direct_video_candidate_query(
+    owner: CatalogItemId,
+    revision: i64,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+) -> sea_orm::sea_query::SelectStatement {
+    let relation = Alias::new("flat_video_relation");
+    let object = Alias::new("flat_video_object");
+    let root = Alias::new("flat_video_root");
+    let library_root = Alias::new("flat_video_library_root");
+    let membership = Alias::new("flat_video_membership");
+    let library = Alias::new("flat_video_library");
+    let normalized_name = Expr::col((object.clone(), Alias::new("normalized_name")));
+    let subtitle = Cond::any()
+        .add(normalized_name.clone().like("%.srt"))
+        .add(normalized_name.clone().like("%.ass"))
+        .add(normalized_name.clone().like("%.ssa"))
+        .add(normalized_name.clone().like("%.vtt"))
+        .add(normalized_name.like("%.sub"));
+    Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("id"))),
+            Alias::new("storage_object_id"),
+        )
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("name"))),
+            Alias::new("name"),
+        )
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("checksum"))),
+            Alias::new("checksum"),
+        )
+        .from_as(Alias::new("storage_root_objects"), relation.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_objects"),
+            object.clone(),
+            Expr::col((object.clone(), Alias::new("id")))
+                .equals((relation.clone(), Alias::new("storage_object_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_roots"),
+            root.clone(),
+            Expr::col((root.clone(), Alias::new("id")))
+                .equals((relation.clone(), Alias::new("storage_root_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            library_root.clone(),
+            Expr::col((library_root.clone(), Alias::new("storage_root_id")))
+                .equals((root.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Cond::all()
+                .add(
+                    Expr::col((membership.clone(), Alias::new("library_id")))
+                        .equals((library_root, Alias::new("library_id"))),
+                )
+                .add(
+                    Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                        .eq(owner.as_uuid()),
+                ),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership, Alias::new("library_id"))),
+        )
+        .and_where(
+            Expr::col((relation.clone(), Alias::new("storage_root_id")))
+                .eq(scope.storage_root_id().as_uuid()),
+        )
+        .and_where(
+            Expr::col((relation.clone(), Alias::new("parent_storage_object_id")))
+                .eq(scope.sidecar_parent_object_id().as_uuid()),
+        )
+        .and_where(
+            Cond::any()
+                .add(
+                    Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                        .eq(scope.storage_object_id().as_uuid()),
+                )
+                .add(subtitle)
+                .into(),
+        )
+        .and_where(Expr::col((relation.clone(), Alias::new("presence_state"))).eq("Present"))
+        .and_where(Expr::col((relation, Alias::new("observed_sync_revision"))).lte(revision))
+        .and_where(Expr::col((object.clone(), Alias::new("object_type"))).eq("File"))
+        .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
+        .and_where(Expr::col((object, Alias::new("observed_sync_revision"))).lte(revision))
+        .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(revision))
+        .and_where(Expr::col((library.clone(), Alias::new("collection_type"))).eq("movies"))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .to_owned()
+}
+
+fn direct_file_candidate_query(
+    owner: CatalogItemId,
+    revision: i64,
+    storage_root: Option<StorageRootId>,
+    collection_type: &'static str,
 ) -> sea_orm::sea_query::SelectStatement {
     let identity = Alias::new("audio_source_identity");
     let relation = Alias::new("audio_source_relation");
@@ -305,7 +419,7 @@ fn direct_audio_candidate_query(
         .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
         .and_where(Expr::col((object, Alias::new("observed_sync_revision"))).lte(revision))
         .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(revision))
-        .and_where(Expr::col((library.clone(), Alias::new("collection_type"))).eq("music"))
+        .and_where(Expr::col((library.clone(), Alias::new("collection_type"))).eq(collection_type))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .to_owned()
 }

@@ -19,6 +19,7 @@ mod image;
 mod import_admin;
 mod installation_config;
 mod library;
+mod local_metadata_admin;
 mod media_collection;
 mod metadata_admin;
 mod metadata_settings_admin;
@@ -164,6 +165,7 @@ pub struct AppState {
     import_admin: Option<Arc<import_admin::ImportAdminService>>,
     metadata_import: Option<Arc<MetadataImportService>>,
     metadata_settings_admin: Option<Arc<metadata_settings_admin::MetadataSettingsAdminService>>,
+    local_metadata_admin: Option<Arc<local_metadata_admin::LocalMetadataAdminService>>,
     system_settings: Option<Arc<system_settings::SystemSettingsService>>,
     restart: RestartController,
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
@@ -199,6 +201,7 @@ impl AppState {
             import_admin: None,
             metadata_import: None,
             metadata_settings_admin: None,
+            local_metadata_admin: None,
             system_settings: None,
             restart: RestartController::default(),
             relink_admin: None,
@@ -408,6 +411,15 @@ impl AppState {
         service: Arc<metadata_settings_admin::MetadataSettingsAdminService>,
     ) -> Self {
         self.metadata_settings_admin = Some(service);
+        self
+    }
+
+    #[must_use]
+    fn with_local_metadata_admin(
+        mut self,
+        service: Arc<local_metadata_admin::LocalMetadataAdminService>,
+    ) -> Self {
+        self.local_metadata_admin = Some(service);
         self
     }
 
@@ -645,6 +657,15 @@ pub fn build_router(state: AppState) -> Router {
             get(metadata_settings_admin::get)
                 .put(metadata_settings_admin::put)
                 .delete(metadata_settings_admin::delete),
+        )
+        .route("/Admin/Metadata/Local", get(local_metadata_admin::get))
+        .route(
+            "/Admin/Metadata/Local/Location",
+            put(local_metadata_admin::put_location),
+        )
+        .route(
+            "/Admin/Metadata/Local/Cleanup",
+            post(local_metadata_admin::cleanup),
         )
         .route(
             "/Admin/Metadata/Providers/Tmdb/Test",

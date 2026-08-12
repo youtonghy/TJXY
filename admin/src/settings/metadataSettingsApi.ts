@@ -2,13 +2,16 @@ import { ApiError, apiRequest } from '../api/httpClient';
 import {
   hasControlCharacters,
   invalidResponse,
+  isNonNegativeInteger,
   isRecord,
+  validDate,
   validText,
 } from '../api/responseValidation';
 
 const TMDB_SETTINGS_PATH = '/Admin/Metadata/Providers/Tmdb';
 const THEAUDIODB_SETTINGS_PATH = '/Admin/Metadata/Providers/TheAudioDB';
 const MUSICBRAINZ_SETTINGS_PATH = '/Admin/Metadata/Providers/MusicBrainz';
+const LOCAL_METADATA_PATH = '/Admin/Metadata/Local';
 const SETTINGS_KEYS = [
   'Provider',
   'Configured',
@@ -80,6 +83,52 @@ export interface TestTheAudioDbConnectionRequest {
 
 export interface TestMusicBrainzConnectionRequest {
   userAgent?: string;
+}
+
+export interface LocalMetadataMetric { count: number; bytes: number }
+export interface LocalMetadataStorage {
+  currentPath: string;
+  pendingPath: string | null;
+  historicalLocations: string[];
+  source: 'Default' | 'Database' | 'Environment';
+  locationEditable: boolean;
+  restartRequired: boolean;
+  checkedAt: string;
+  statistics: Record<'total' | 'linked' | 'orphaned' | 'missing' | 'unregistered', LocalMetadataMetric>;
+  cleanupInProgress: boolean;
+}
+export interface LocalMetadataCleanupResult {
+  deleted: LocalMetadataMetric;
+  skippedCount: number;
+  failedCount: number;
+  storage: LocalMetadataStorage;
+}
+
+export async function getLocalMetadataStorage(signal?: AbortSignal): Promise<LocalMetadataStorage> {
+  return toLocalMetadataStorage(await apiRequest<unknown>(LOCAL_METADATA_PATH, signal === undefined ? {} : { signal }));
+}
+
+export async function saveLocalMetadataLocation(path: string): Promise<LocalMetadataStorage> {
+  const normalized = path.trim();
+  if (!validText(normalized, 4096)) throw new ApiError(400, 'validation', 'A valid metadata location is required.');
+  return toLocalMetadataStorage(await apiRequest<unknown>(`${LOCAL_METADATA_PATH}/Location`, { method: 'PUT', body: JSON.stringify({ Path: normalized }) }));
+}
+
+export async function cleanupLocalMetadata(): Promise<LocalMetadataCleanupResult> {
+  const value = await apiRequest<unknown>(`${LOCAL_METADATA_PATH}/Cleanup`, { method: 'POST' });
+  if (!isRecord(value) || !hasExactKeys(value, ['Deleted', 'SkippedCount', 'FailedCount', 'Storage']) || !isNonNegativeInteger(value.SkippedCount) || !isNonNegativeInteger(value.FailedCount)) throw invalidResponse('local metadata cleanup result');
+  return { deleted: toMetric(value.Deleted), skippedCount: value.SkippedCount, failedCount: value.FailedCount, storage: toLocalMetadataStorage(value.Storage) };
+}
+
+function toMetric(value: unknown): LocalMetadataMetric {
+  if (!isRecord(value) || !hasExactKeys(value, ['Count', 'Bytes']) || !isNonNegativeInteger(value.Count) || !isNonNegativeInteger(value.Bytes)) throw invalidResponse('local metadata metric');
+  return { count: value.Count, bytes: value.Bytes };
+}
+
+function toLocalMetadataStorage(value: unknown): LocalMetadataStorage {
+  const keys = ['CurrentPath', 'PendingPath', 'HistoricalLocations', 'Source', 'LocationEditable', 'RestartRequired', 'CheckedAt', 'Statistics', 'CleanupInProgress'] as const;
+  if (!isRecord(value) || !hasExactKeys(value, keys) || !validText(value.CurrentPath, 4096) || (value.PendingPath !== null && !validText(value.PendingPath, 4096)) || !Array.isArray(value.HistoricalLocations) || !value.HistoricalLocations.every((path) => validText(path, 4096)) || !['Default', 'Database', 'Environment'].includes(value.Source as string) || typeof value.LocationEditable !== 'boolean' || typeof value.RestartRequired !== 'boolean' || !validDate(value.CheckedAt) || typeof value.CleanupInProgress !== 'boolean' || !isRecord(value.Statistics) || !hasExactKeys(value.Statistics, ['Total', 'Linked', 'Orphaned', 'Missing', 'Unregistered'])) throw invalidResponse('local metadata storage');
+  return { currentPath: value.CurrentPath, pendingPath: value.PendingPath, historicalLocations: value.HistoricalLocations, source: value.Source as LocalMetadataStorage['source'], locationEditable: value.LocationEditable, restartRequired: value.RestartRequired, checkedAt: value.CheckedAt, statistics: { total: toMetric(value.Statistics.Total), linked: toMetric(value.Statistics.Linked), orphaned: toMetric(value.Statistics.Orphaned), missing: toMetric(value.Statistics.Missing), unregistered: toMetric(value.Statistics.Unregistered) }, cleanupInProgress: value.CleanupInProgress };
 }
 
 export async function getTmdbSettings(signal?: AbortSignal): Promise<TmdbSettings> {

@@ -44,16 +44,16 @@ it('uses the server camelCase query contract for catalog reads', async () => {
   expect(client.clientRequest).toHaveBeenNthCalledWith(5, '/Search/Hints?searchTerm=arrival&limit=24');
 });
 
-it('hydrates popular summaries with full catalog records for poster metadata', async () => {
-  client.clientRequest
-    .mockResolvedValueOnce({ Items: [{ Id: 'movie-1', Name: 'Arrival' }] })
-    .mockResolvedValueOnce({ Id: 'movie-1', ImageTags: { Primary: 'poster-tag' }, Name: 'Arrival' });
+it('uses popular summaries without triggering detail-side lazy metadata work', async () => {
+  client.clientRequest.mockResolvedValueOnce({
+    Items: [{ Id: 'movie-1', ImageTags: { Primary: 'poster-tag' }, Name: 'Arrival' }],
+  });
 
   await expect(getPopular(12)).resolves.toEqual([
     { Id: 'movie-1', ImageTags: { Primary: 'poster-tag' }, Name: 'Arrival' },
   ]);
-  expect(client.clientRequest).toHaveBeenNthCalledWith(1, '/Discover/Popular?limit=12');
-  expect(client.clientRequest).toHaveBeenNthCalledWith(2, '/Items/movie-1');
+  expect(client.clientRequest).toHaveBeenCalledTimes(1);
+  expect(client.clientRequest).toHaveBeenCalledWith('/Discover/Popular?limit=12');
 });
 
 it('requests audio items for a music library', () => {

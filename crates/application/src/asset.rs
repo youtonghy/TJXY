@@ -12,13 +12,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{CatalogItemId, ImageType};
 use tjxy_db::{
-    AssetPublication, AssetRepository, AssetRepositoryError, CatalogQueryError,
-    CatalogQueryRepository,
+    AssetPublication, AssetRepository, AssetRepositoryError, AssetStorageError,
+    AssetStorageRepository, CatalogQueryError, CatalogQueryRepository,
 };
 use tokio::fs::File;
 
 pub struct AssetReadService {
     database: DatabaseConnection,
+    fallback_root: std::path::PathBuf,
     #[cfg(not(unix))]
     root: PathBuf,
     #[cfg(unix)]
@@ -32,6 +33,7 @@ const MAX_DECODE_ALLOCATION: u64 = 256 * 1024 * 1024;
 
 pub struct AssetWriteService {
     database: DatabaseConnection,
+    storage_root_id: uuid::Uuid,
     #[cfg(not(unix))]
     root: PathBuf,
     #[cfg(unix)]
@@ -48,16 +50,38 @@ impl AssetWriteService {
         database: DatabaseConnection,
         root: impl AsRef<Path>,
     ) -> Result<Self, AssetWriteError> {
+        Self::new_with_override(database, root, false).await
+    }
+
+    pub async fn new_environment_override(
+        database: DatabaseConnection,
+        root: impl AsRef<Path>,
+    ) -> Result<Self, AssetWriteError> {
+        Self::new_with_override(database, root, true).await
+    }
+
+    async fn new_with_override(
+        database: DatabaseConnection,
+        root: impl AsRef<Path>,
+        environment_override: bool,
+    ) -> Result<Self, AssetWriteError> {
         tokio::fs::create_dir_all(root.as_ref())
             .await
             .map_err(AssetWriteError::Root)?;
         let root = tokio::fs::canonicalize(root.as_ref())
             .await
             .map_err(AssetWriteError::Root)?;
+        let repository = AssetStorageRepository::new(&database);
+        let storage_root = if environment_override {
+            repository.register_history(&root.to_string_lossy()).await?
+        } else {
+            repository.activate(&root.to_string_lossy()).await?
+        };
         #[cfg(unix)]
         let root_directory = open_root(&root).map_err(AssetWriteError::Root)?;
         Ok(Self {
             database,
+            storage_root_id: storage_root.id(),
             #[cfg(not(unix))]
             root,
             #[cfg(unix)]
@@ -157,7 +181,8 @@ impl AssetWriteService {
             prepared.relative_path,
             source_provider,
             source_reference.map(str::to_owned),
-        )?;
+        )?
+        .with_storage_root(self.storage_root_id);
         Ok(PreparedAssetPublication {
             publication,
             sha256: prepared.sha256,
@@ -412,6 +437,7 @@ impl AssetReadService {
         };
         Ok(Self {
             database,
+            fallback_root: root.clone(),
             #[cfg(not(unix))]
             root,
             #[cfg(unix)]
@@ -445,7 +471,10 @@ impl AssetReadService {
         {
             return Err(AssetReadError::InvalidStoredPath);
         }
-        let file = self.open_file(relative).await?;
+        let root = asset
+            .storage_root_path()
+            .map_or(self.fallback_root.as_path(), Path::new);
+        let file = self.open_file(root, relative).await?;
         let metadata = file.metadata().await.map_err(AssetReadError::File)?;
         if !metadata.is_file() {
             return Err(AssetReadError::NotAFile);
@@ -465,11 +494,14 @@ impl AssetReadService {
     }
 
     #[cfg(unix)]
-    async fn open_file(&self, relative: &Path) -> Result<File, AssetReadError> {
-        let root = self
-            .root_directory
-            .try_clone()
-            .map_err(AssetReadError::File)?;
+    async fn open_file(&self, root_path: &Path, relative: &Path) -> Result<File, AssetReadError> {
+        let root = if root_path == self.fallback_root {
+            self.root_directory
+                .try_clone()
+                .map_err(AssetReadError::File)?
+        } else {
+            open_root(root_path).map_err(AssetReadError::File)?
+        };
         let relative = relative.to_owned();
         let file = tokio::task::spawn_blocking(move || open_relative_no_symlinks(&root, &relative))
             .await
@@ -479,7 +511,7 @@ impl AssetReadService {
     }
 
     #[cfg(not(unix))]
-    async fn open_file(&self, _relative: &Path) -> Result<File, AssetReadError> {
+    async fn open_file(&self, _root_path: &Path, _relative: &Path) -> Result<File, AssetReadError> {
         let _ = &self.root;
         Err(AssetReadError::UnsupportedPlatform)
     }
@@ -632,4 +664,6 @@ pub enum AssetWriteError {
     UnsupportedPlatform,
     #[error("asset publication failed: {0}")]
     Repository(#[from] AssetRepositoryError),
+    #[error("asset storage configuration failed: {0}")]
+    Storage(#[from] AssetStorageError),
 }

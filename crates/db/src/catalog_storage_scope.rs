@@ -11,9 +11,11 @@ use uuid::Uuid;
 pub(crate) struct CatalogStorageScope {
     storage_root_id: StorageRootId,
     storage_object_id: StorageObjectRecordId,
+    parent_storage_object_id: Option<StorageObjectRecordId>,
     children_indexed: bool,
     children_revision: i64,
     reconciled_revision: i64,
+    is_file: bool,
 }
 
 impl CatalogStorageScope {
@@ -23,6 +25,17 @@ impl CatalogStorageScope {
 
     pub(crate) const fn storage_object_id(self) -> StorageObjectRecordId {
         self.storage_object_id
+    }
+
+    pub(crate) const fn sidecar_parent_object_id(self) -> StorageObjectRecordId {
+        if self.is_file {
+            match self.parent_storage_object_id {
+                Some(parent) => parent,
+                None => self.storage_object_id,
+            }
+        } else {
+            self.storage_object_id
+        }
     }
 
     pub(crate) const fn children_indexed(self) -> bool {
@@ -50,9 +63,14 @@ impl CatalogStorageScope {
         self.reconciled_revision
     }
 
+    pub(crate) const fn is_file(self) -> bool {
+        self.is_file
+    }
+
     pub(crate) fn has_same_inventory(self, other: Self) -> bool {
         self.storage_root_id == other.storage_root_id
             && self.storage_object_id == other.storage_object_id
+            && self.parent_storage_object_id == other.parent_storage_object_id
             && self.children_indexed == other.children_indexed
             && self.children_revision == other.children_revision
     }
@@ -92,13 +110,17 @@ fn scope_from_row(
     Ok(CatalogStorageScope {
         storage_root_id: StorageRootId::from_uuid(row.try_get("", "storage_root_id")?),
         storage_object_id: StorageObjectRecordId::from_uuid(row.try_get("", "storage_object_id")?),
+        parent_storage_object_id: row
+            .try_get::<Option<Uuid>>("", "parent_storage_object_id")?
+            .map(StorageObjectRecordId::from_uuid),
         children_indexed: row.try_get("", "children_indexed")?,
         children_revision: row.try_get("", "children_index_revision")?,
         reconciled_revision: row.try_get("", "reconciled_sync_revision")?,
+        is_file: row.try_get::<String>("", "object_type")? == "File",
     })
 }
 
-fn scope_columns(query: &mut SelectStatement, relation: &Alias, root: &Alias) {
+fn scope_columns(query: &mut SelectStatement, relation: &Alias, object: &Alias, root: &Alias) {
     query
         .expr_as(
             Expr::col((relation.clone(), Alias::new("storage_root_id"))),
@@ -107,6 +129,10 @@ fn scope_columns(query: &mut SelectStatement, relation: &Alias, root: &Alias) {
         .expr_as(
             Expr::col((relation.clone(), Alias::new("storage_object_id"))),
             Alias::new("storage_object_id"),
+        )
+        .expr_as(
+            Expr::col((relation.clone(), Alias::new("parent_storage_object_id"))),
+            Alias::new("parent_storage_object_id"),
         )
         .expr_as(
             Expr::col((relation.clone(), Alias::new("children_indexed"))),
@@ -119,6 +145,10 @@ fn scope_columns(query: &mut SelectStatement, relation: &Alias, root: &Alias) {
         .expr_as(
             Expr::col((root.clone(), Alias::new("reconciled_sync_revision"))),
             Alias::new("reconciled_sync_revision"),
+        )
+        .expr_as(
+            Expr::col((object.clone(), Alias::new("object_type"))),
+            Alias::new("object_type"),
         );
 }
 
@@ -486,7 +516,7 @@ fn direct_scope_query(
     let library = Alias::new("catalog_scope_library");
     let mut query = Query::select();
     query.distinct();
-    scope_columns(&mut query, &relation, &root);
+    scope_columns(&mut query, &relation, &object, &root);
     query
         .from_as(Alias::new("catalog_items"), item.clone())
         .join_as(
@@ -584,7 +614,7 @@ fn structure_scope_query(
     let library = Alias::new("structure_scope_library");
     let mut query = Query::select();
     query.distinct();
-    scope_columns(&mut query, &relation, &root);
+    scope_columns(&mut query, &relation, &object, &root);
     query
         .from_as(Alias::new("catalog_items"), item.clone())
         .join_as(

@@ -6,7 +6,9 @@ use sea_orm::{
 };
 use serde_json::json;
 use thiserror::Error;
-use tjxy_common::{CatalogItemId, ImageType, StorageObjectRecordId, StorageRootId};
+use tjxy_common::{
+    CatalogItemId, ImageType, StorageObjectRecordId, StorageRootId, parse_media_name,
+};
 use tjxy_metadata::{MetadataItemKind, MetadataLookup, MetadataResolution};
 use uuid::Uuid;
 
@@ -215,12 +217,22 @@ impl<'connection> MetadataWorkRepository<'connection> {
         let stored_year = item.try_get::<Option<i32>>("", "production_year")?;
         let legacy_parts = (stored_year.is_none()
             && matches!(kind, MetadataItemKind::Movie | MetadataItemKind::Series))
-        .then(|| crate::title_year::split_title_year(&stored_name))
+        .then(|| parse_media_name(&stored_name).ok())
         .flatten()
-        .map(|(name, year)| (name.to_owned(), Some(year)));
+        .and_then(|parsed| {
+            parsed
+                .title()
+                .zip(parsed.year())
+                .map(|(name, year)| (name.to_owned(), Some(year)))
+        });
         let (name, production_year) = legacy_parts.unwrap_or((stored_name, stored_year));
         let lookup = MetadataLookup::new(kind, name, production_year)
             .map_err(|_| MetadataWorkError::InvalidStoredMetadata)?;
+        let flat_file_stem = if scope.is_file() {
+            storage_object_stem(self.database, scope.storage_object_id()).await?
+        } else {
+            None
+        };
         let rows = self
             .database
             .query_all(
@@ -241,6 +253,9 @@ impl<'connection> MetadataWorkRepository<'connection> {
             .iter()
             .map(sidecar_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(stem) = &flat_file_stem {
+            candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
+        }
         let video_names = if kind == MetadataItemKind::Episode {
             crate::source_publication::effective_video_storage_names(
                 self.database,
@@ -269,12 +284,14 @@ impl<'connection> MetadataWorkRepository<'connection> {
         if u64::try_from(image_rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
             return Err(MetadataWorkError::TooManyImages);
         }
-        let images = select_images(
-            &image_rows
-                .iter()
-                .map(sidecar_from_row)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let mut image_candidates = image_rows
+            .iter()
+            .map(sidecar_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(stem) = &flat_file_stem {
+            image_candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
+        }
+        let images = select_images(&image_candidates);
         Ok(MetadataWorkSnapshot {
             lookup,
             sidecar,
@@ -385,6 +402,37 @@ impl<'connection> MetadataWorkRepository<'connection> {
             }
         }
     }
+}
+
+async fn storage_object_stem(
+    connection: &impl ConnectionTrait,
+    object_id: StorageObjectRecordId,
+) -> Result<Option<String>, DbErr> {
+    let query = Query::select()
+        .column(Alias::new("name"))
+        .from(Alias::new("storage_objects"))
+        .and_where(Expr::col(Alias::new("id")).eq(object_id.as_uuid()))
+        .limit(1)
+        .to_owned();
+    let backend = connection.get_database_backend();
+    let Some(row) = connection.query_one(backend.build(&query)).await? else {
+        return Ok(None);
+    };
+    let name: String = row.try_get("", "name")?;
+    Ok(Path::new(&name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_ascii_lowercase))
+}
+
+fn sidecar_stem_matches(name: &str, video_stem: &str) -> bool {
+    Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            stem == video_stem || stem.starts_with(&format!("{video_stem}-"))
+        })
 }
 
 async fn revalidate_metadata_snapshot(
@@ -789,7 +837,7 @@ fn sibling_file_query(
         )
         .and_where(
             Expr::col((parent.clone(), Alias::new("storage_object_id")))
-                .eq(scope.storage_object_id().as_uuid()),
+                .eq(scope.sidecar_parent_object_id().as_uuid()),
         )
         .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((item, Alias::new("classification_state"))).eq("Matched"))

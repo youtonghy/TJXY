@@ -13,8 +13,8 @@ use tjxy_db::{
 };
 use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{
-    MetadataError, MetadataImageReference, MetadataProvider, MetadataResolution, MetadataResolver,
-    MetadataState, NfoDocument,
+    MetadataError, MetadataImageReference, MetadataItemKind, MetadataProvider,
+    MetadataProviderError, MetadataResolution, MetadataResolver, MetadataState, NfoDocument,
 };
 use tjxy_storage::{BackendError, ByteRange, StorageBackend, StorageObject, StorageObjectId};
 use uuid::Uuid;
@@ -337,9 +337,14 @@ impl MetadataResolveService {
                 return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
             }
         };
+        let requires_remote_details =
+            matches!(
+                snapshot.lookup().kind(),
+                MetadataItemKind::Movie | MetadataItemKind::Series
+            ) && providers.iter().any(|provider| provider.name() == "Tmdb");
         let resolver = MetadataResolver::new(providers)?;
         let mut execution_warnings = Vec::new();
-        let (resolution, used_nfo) = if let Some(sidecar) = snapshot.sidecar() {
+        let (mut resolution, used_nfo) = if let Some(sidecar) = snapshot.sidecar() {
             let backend = self
                 .backends
                 .backend_for_drive(sidecar.storage_account_id(), sidecar.provider_drive_id())
@@ -399,6 +404,17 @@ impl MetadataResolveService {
         } else {
             (resolver.resolve(snapshot.lookup()).await, false)
         };
+        if requires_remote_details {
+            resolution = resolution.require_complete_details();
+        }
+        if requires_remote_details
+            && let Some(warning) = resolution
+                .warnings()
+                .iter()
+                .find(|warning| warning.provider() == "Tmdb")
+        {
+            return Err(MetadataResolveError::Provider(warning.error()));
+        }
         execution_warnings.extend(
             resolution
                 .warnings()
@@ -623,6 +639,8 @@ pub enum MetadataResolveError {
     ObjectChanged,
     #[error("metadata NFO kind does not match the catalog item")]
     NfoKindMismatch,
+    #[error("metadata provider failed while loading complete details: {0}")]
+    Provider(MetadataProviderError),
     #[error("metadata sidecar storage operation failed: {0}")]
     Storage(#[from] BackendError),
     #[error("metadata storage availability persistence failed: {0}")]

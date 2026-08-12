@@ -4,14 +4,17 @@ import {
   deleteTheAudioDbSettings,
   deleteTmdbSettings,
   getMusicBrainzSettings,
+  getLocalMetadataStorage,
   getTheAudioDbSettings,
   getTmdbSettings,
   saveMusicBrainzSettings,
+  saveLocalMetadataLocation,
   saveTheAudioDbSettings,
   saveTmdbSettings,
   testMusicBrainzConnection,
   testTheAudioDbConnection,
   testTmdbConnection,
+  cleanupLocalMetadata,
 } from './metadataSettingsApi';
 
 vi.mock('../api/httpClient', async (importOriginal) => {
@@ -23,6 +26,46 @@ const requestMock = vi.mocked(apiRequest);
 
 beforeEach(() => {
   requestMock.mockReset();
+});
+
+const localStorageResponse = {
+  CurrentPath: '/var/lib/tjxy/assets',
+  PendingPath: null,
+  HistoricalLocations: [],
+  Source: 'Database',
+  LocationEditable: true,
+  RestartRequired: false,
+  CheckedAt: '2026-08-12T03:00:00Z',
+  Statistics: {
+    Total: { Count: 10, Bytes: 1000 }, Linked: { Count: 6, Bytes: 600 },
+    Orphaned: { Count: 2, Bytes: 200 }, Missing: { Count: 1, Bytes: 100 },
+    Unregistered: { Count: 1, Bytes: 100 },
+  },
+  CleanupInProgress: false,
+};
+
+it('strictly maps local metadata statistics and forwards the abort signal', async () => {
+  requestMock.mockResolvedValue(localStorageResponse);
+  const controller = new AbortController();
+  await expect(getLocalMetadataStorage(controller.signal)).resolves.toMatchObject({
+    currentPath: '/var/lib/tjxy/assets',
+    statistics: { orphaned: { count: 2, bytes: 200 } },
+  });
+  expect(requestMock).toHaveBeenCalledWith('/Admin/Metadata/Local', { signal: controller.signal });
+});
+
+it('saves a trimmed local metadata path and maps cleanup results', async () => {
+  requestMock.mockResolvedValueOnce({ ...localStorageResponse, PendingPath: '/srv/tjxy/assets', RestartRequired: true })
+    .mockResolvedValueOnce({ Deleted: { Count: 2, Bytes: 200 }, SkippedCount: 0, FailedCount: 0, Storage: localStorageResponse });
+  await saveLocalMetadataLocation('  /srv/tjxy/assets  ');
+  await expect(cleanupLocalMetadata()).resolves.toMatchObject({ deleted: { count: 2, bytes: 200 } });
+  expect(requestMock).toHaveBeenNthCalledWith(1, '/Admin/Metadata/Local/Location', { method: 'PUT', body: JSON.stringify({ Path: '/srv/tjxy/assets' }) });
+  expect(requestMock).toHaveBeenNthCalledWith(2, '/Admin/Metadata/Local/Cleanup', { method: 'POST' });
+});
+
+it('rejects malformed local metadata metrics', async () => {
+  requestMock.mockResolvedValue({ ...localStorageResponse, Statistics: { ...localStorageResponse.Statistics, Orphaned: { Count: -1, Bytes: 200 } } });
+  await expect(getLocalMetadataStorage()).rejects.toMatchObject({ category: 'invalid-response' });
 });
 
 it('loads and strictly maps the redacted TMDB settings contract', async () => {

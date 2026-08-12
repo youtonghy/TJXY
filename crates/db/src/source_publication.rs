@@ -5,12 +5,12 @@ use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
     sea_query::{Alias, CaseStatement, Cond, Expr, JoinType, OnConflict, Order, Query, SimpleExpr},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{
-    CatalogItemId, MediaLocationId, MediaSourceId, PresentationKey, PublicationId,
-    StorageObjectRecordId, StorageRootId, SubtitleId,
+    CatalogItemId, MEDIA_NAME_PARSER_VERSION, MediaLocationId, MediaSourceId, PresentationKey,
+    PublicationId, StorageObjectRecordId, StorageRootId, SubtitleId,
 };
 use uuid::Uuid;
 
@@ -82,6 +82,7 @@ pub struct MediaSourcePublicationRow {
     presentation_key: PresentationKey,
     edition: Option<String>,
     container: Option<String>,
+    naming_hints: Option<Value>,
     row_sha256: String,
 }
 
@@ -107,6 +108,7 @@ impl MediaSourcePublicationRow {
             presentation_key,
             edition,
             container,
+            naming_hints: None,
             row_sha256: String::new(),
         };
         row.row_sha256 = source_hash(&row);
@@ -121,6 +123,28 @@ impl MediaSourcePublicationRow {
     #[must_use]
     pub const fn presentation_key(&self) -> PresentationKey {
         self.presentation_key
+    }
+
+    /// Adds bounded parser evidence without treating it as probe output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError::InvalidSourceRow`] for non-object or oversized JSON.
+    pub fn with_naming_hints(
+        mut self,
+        naming_hints: Value,
+    ) -> Result<Self, CatalogPublicationError> {
+        if !naming_hints.is_object()
+            || serde_json::to_vec(&naming_hints)
+                .map_err(|_| CatalogPublicationError::InvalidSourceRow)?
+                .len()
+                > 8_192
+        {
+            return Err(CatalogPublicationError::InvalidSourceRow);
+        }
+        self.naming_hints = Some(naming_hints);
+        self.row_sha256 = source_hash(&self);
+        Ok(self)
     }
 }
 
@@ -1036,6 +1060,7 @@ async fn begin_sources(
             Alias::new("state"),
             Alias::new("manifest_sha256"),
             Alias::new("expected_row_count"),
+            Alias::new("naming_parser_version"),
             Alias::new("created_at"),
         ])
         .values_panic([
@@ -1048,6 +1073,7 @@ async fn begin_sources(
             STATE_BUILDING.into(),
             manifest.sha256.clone().into(),
             manifest.expected_row_count.into(),
+            MEDIA_NAME_PARSER_VERSION.into(),
             now.into(),
         ])
         .on_conflict(idempotent_conflict(backend, "job_id"))
@@ -1078,6 +1104,7 @@ fn validate_source_publication(
         )
         || row.try_get::<String>("", "manifest_sha256")? != manifest.sha256
         || row.try_get::<i64>("", "expected_row_count")? != manifest.expected_row_count
+        || row.try_get::<i32>("", "naming_parser_version")? != MEDIA_NAME_PARSER_VERSION
     {
         return Err(CatalogPublicationError::InvalidPublication);
     }
@@ -1120,6 +1147,7 @@ async fn stage_source_rows(
                 Alias::new("presentation_key"),
                 Alias::new("edition"),
                 Alias::new("container"),
+                Alias::new("naming_hints"),
                 Alias::new("row_sha256"),
             ])
             .values_panic([
@@ -1130,6 +1158,7 @@ async fn stage_source_rows(
                 row.presentation_key.as_uuid().into(),
                 row.edition.clone().into(),
                 row.container.clone().into(),
+                row.naming_hints.clone().into(),
                 row.row_sha256.clone().into(),
             ])
             .on_conflict(
@@ -1138,6 +1167,7 @@ async fn stage_source_rows(
                         Alias::new("presentation_key"),
                         Alias::new("edition"),
                         Alias::new("container"),
+                        Alias::new("naming_hints"),
                         Alias::new("row_sha256"),
                     ])
                     .to_owned(),
@@ -1615,6 +1645,7 @@ async fn load_series_source_groups(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("naming_hints"),
             Alias::new("row_sha256"),
         ])
         .from(Alias::new("publication_media_sources"))
@@ -1630,6 +1661,7 @@ async fn load_series_source_groups(
             presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
             edition: row.try_get("", "edition")?,
             container: row.try_get("", "container")?,
+            naming_hints: row.try_get("", "naming_hints")?,
             row_sha256: row.try_get("", "row_sha256")?,
         };
         source_owners.insert(source.id, owner);
@@ -2139,6 +2171,7 @@ async fn materialize_sources(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("naming_hints"),
             Alias::new("probe_state"),
             Alias::new("probe_revision"),
         ]);
@@ -2149,11 +2182,16 @@ async fn materialize_sources(
                 row.presentation_key.as_uuid().into(),
                 row.edition.clone().into(),
                 row.container.clone().into(),
+                row.naming_hints.clone().into(),
                 "NotProbed".into(),
                 0_i64.into(),
             ]);
         }
-        insert.on_conflict(idempotent_conflict(backend, "id"));
+        insert.on_conflict(
+            OnConflict::column(Alias::new("id"))
+                .update_columns([Alias::new("edition"), Alias::new("naming_hints")])
+                .to_owned(),
+        );
         transaction.execute(backend.build(&insert)).await?;
         ensure_uuid_pair_identities(
             transaction,
@@ -3586,6 +3624,7 @@ async fn load_source_rows(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("naming_hints"),
             Alias::new("row_sha256"),
         ])
         .from(Alias::new("publication_media_sources"))
@@ -3602,6 +3641,7 @@ async fn load_source_rows(
                 presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
                 edition: row.try_get("", "edition")?,
                 container: row.try_get("", "container")?,
+                naming_hints: row.try_get("", "naming_hints")?,
                 row_sha256: row.try_get("", "row_sha256")?,
             })
         })
@@ -3700,6 +3740,7 @@ fn publication_for_job(job_id: Uuid) -> sea_orm::sea_query::SelectStatement {
             Alias::new("state"),
             Alias::new("manifest_sha256"),
             Alias::new("expected_row_count"),
+            Alias::new("naming_parser_version"),
         ])
         .from(Alias::new("catalog_publications"))
         .and_where(Expr::col(Alias::new("job_id")).eq(job_id))
@@ -3773,6 +3814,8 @@ fn source_hash(row: &MediaSourcePublicationRow) -> String {
     hasher.update(row.presentation_key.as_uuid().as_bytes());
     hash_optional_text(&mut hasher, row.edition.as_deref());
     hash_optional_text(&mut hasher, row.container.as_deref());
+    let naming_hints = row.naming_hints.as_ref().map(Value::to_string);
+    hash_optional_text(&mut hasher, naming_hints.as_deref());
     format!("{:x}", hasher.finalize())
 }
 

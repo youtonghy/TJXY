@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
     sea_query::{Alias, Expr, JoinType, OnConflict, Order, Query},
@@ -7,8 +8,10 @@ use sea_orm::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{CatalogItemId, SortKey};
-use tjxy_metadata::{MetadataItemKind, MetadataLookup, MetadataResolution};
+use tjxy_metadata::{MetadataItemKind, MetadataLookup, MetadataNamedValue, MetadataResolution};
 use uuid::Uuid;
+
+pub(crate) const METADATA_PAYLOAD_VERSION: i32 = 1;
 
 const MAX_TITLE_CHARS: usize = 512;
 const MAX_OVERVIEW_CHARS: usize = 32 * 1024;
@@ -165,7 +168,7 @@ pub(crate) async fn publish_in_transaction(
     transaction: &DatabaseTransaction,
     item_id: CatalogItemId,
     resolution: &MetadataResolution,
-    requirement: crate::MetadataRequirement,
+    _requirement: crate::MetadataRequirement,
 ) -> Result<MetadataPublicationReport, MetadataPublicationError> {
     let current = current_item(transaction, item_id).await?;
     if current.item_kind != item_kind(resolution.item_kind()) {
@@ -174,13 +177,21 @@ pub(crate) async fn publish_in_transaction(
     let current_provider_ids = read_provider_ids(transaction, item_id).await?;
     let effective = EffectiveMetadata::new(&current, &current_provider_ids, resolution);
     let desired_provenance = desired_provenance(resolution)?;
-    let associations_changed = requirement == crate::MetadataRequirement::Full
-        && associations_changed(transaction, item_id, resolution).await?;
+    let associations_changed = associations_changed(transaction, item_id, resolution).await?;
     let changed = current.name != effective.title
         || current.original_title != effective.original_title
         || current.production_year != effective.production_year
         || current.overview != effective.overview
+        || current.community_rating != effective.community_rating
+        || current.vote_count != effective.vote_count
+        || current.runtime_ticks != effective.runtime_ticks
+        || current.premiere_date != effective.premiere_date
+        || current.end_date != effective.end_date
+        || current.release_status != effective.release_status
+        || current.official_rating != effective.official_rating
+        || current.original_language != effective.original_language
         || current.metadata_state != effective.metadata_state
+        || current.metadata_payload_version != effective.metadata_payload_version
         || current_provider_ids != effective.provider_ids
         || !provenance_matches(transaction, item_id, &desired_provenance).await?
         || associations_changed;
@@ -190,9 +201,7 @@ pub(crate) async fn publish_in_transaction(
     update_item(transaction, item_id, &effective).await?;
     publish_provider_ids(transaction, item_id, resolution.provider_ids()).await?;
     publish_provenance(transaction, item_id, &desired_provenance).await?;
-    if requirement == crate::MetadataRequirement::Full {
-        publish_associations(transaction, item_id, resolution).await?;
-    }
+    publish_associations(transaction, item_id, resolution).await?;
     bump_generation(transaction).await?;
     Ok(MetadataPublicationReport { changed: true })
 }
@@ -203,7 +212,16 @@ struct CurrentItem {
     original_title: Option<String>,
     production_year: Option<i32>,
     overview: Option<String>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
     metadata_state: String,
+    metadata_payload_version: i32,
 }
 
 struct EffectiveMetadata {
@@ -211,8 +229,17 @@ struct EffectiveMetadata {
     original_title: Option<String>,
     production_year: Option<i32>,
     overview: Option<String>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
     provider_ids: BTreeMap<String, String>,
     metadata_state: String,
+    metadata_payload_version: i32,
 }
 
 impl EffectiveMetadata {
@@ -233,13 +260,21 @@ impl EffectiveMetadata {
             .overview()
             .map(str::to_owned)
             .or_else(|| current.overview.clone());
-        let metadata_state = if production_year.is_some()
-            && overview.as_deref().is_some_and(|value| !value.is_empty())
-            && !provider_ids.is_empty()
+        let metadata_state = if resolution.details_required() && !resolution.details_loaded() {
+            "Partial"
+        } else if resolution.details_loaded()
+            || (production_year.is_some()
+                && overview.as_deref().is_some_and(|value| !value.is_empty())
+                && !provider_ids.is_empty())
         {
             "Ready"
         } else {
             "Partial"
+        };
+        let metadata_payload_version = if resolution.details_loaded() {
+            METADATA_PAYLOAD_VERSION
+        } else {
+            current.metadata_payload_version
         };
         Self {
             title: resolution.title().to_owned(),
@@ -249,8 +284,29 @@ impl EffectiveMetadata {
                 .or_else(|| current.original_title.clone()),
             production_year,
             overview,
+            community_rating: resolution.community_rating().or(current.community_rating),
+            vote_count: resolution.vote_count().or(current.vote_count),
+            runtime_ticks: resolution.runtime_ticks().or(current.runtime_ticks),
+            premiere_date: resolution
+                .premiere_date()
+                .map(date_time)
+                .or(current.premiere_date),
+            end_date: resolution.end_date().map(date_time).or(current.end_date),
+            release_status: resolution
+                .release_status()
+                .map(str::to_owned)
+                .or_else(|| current.release_status.clone()),
+            official_rating: resolution
+                .official_rating()
+                .map(str::to_owned)
+                .or_else(|| current.official_rating.clone()),
+            original_language: resolution
+                .original_language()
+                .map(str::to_owned)
+                .or_else(|| current.original_language.clone()),
             provider_ids,
             metadata_state: metadata_state.to_owned(),
+            metadata_payload_version,
         }
     }
 }
@@ -266,7 +322,16 @@ async fn current_item<Connection: ConnectionTrait>(
             Alias::new("original_title"),
             Alias::new("production_year"),
             Alias::new("overview"),
+            Alias::new("community_rating"),
+            Alias::new("vote_count"),
+            Alias::new("runtime_ticks"),
+            Alias::new("premiere_date"),
+            Alias::new("end_date"),
+            Alias::new("release_status"),
+            Alias::new("official_rating"),
+            Alias::new("original_language"),
             Alias::new("metadata_state"),
+            Alias::new("metadata_payload_version"),
         ])
         .from(Alias::new("catalog_items"))
         .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
@@ -283,7 +348,16 @@ async fn current_item<Connection: ConnectionTrait>(
         original_title: row.try_get("", "original_title")?,
         production_year: row.try_get("", "production_year")?,
         overview: row.try_get("", "overview")?,
+        community_rating: row.try_get("", "community_rating")?,
+        vote_count: row.try_get("", "vote_count")?,
+        runtime_ticks: row.try_get("", "runtime_ticks")?,
+        premiere_date: row.try_get("", "premiere_date")?,
+        end_date: row.try_get("", "end_date")?,
+        release_status: row.try_get("", "release_status")?,
+        official_rating: row.try_get("", "official_rating")?,
+        original_language: row.try_get("", "original_language")?,
         metadata_state: row.try_get("", "metadata_state")?,
+        metadata_payload_version: row.try_get("", "metadata_payload_version")?,
     })
 }
 
@@ -306,9 +380,30 @@ async fn update_item(
         )
         .value(Alias::new("production_year"), metadata.production_year)
         .value(Alias::new("overview"), metadata.overview.as_deref())
+        .value(Alias::new("community_rating"), metadata.community_rating)
+        .value(Alias::new("vote_count"), metadata.vote_count)
+        .value(Alias::new("runtime_ticks"), metadata.runtime_ticks)
+        .value(Alias::new("premiere_date"), metadata.premiere_date)
+        .value(Alias::new("end_date"), metadata.end_date)
+        .value(
+            Alias::new("release_status"),
+            metadata.release_status.as_deref(),
+        )
+        .value(
+            Alias::new("official_rating"),
+            metadata.official_rating.as_deref(),
+        )
+        .value(
+            Alias::new("original_language"),
+            metadata.original_language.as_deref(),
+        )
         .value(
             Alias::new("metadata_state"),
             metadata.metadata_state.as_str(),
+        )
+        .value(
+            Alias::new("metadata_payload_version"),
+            metadata.metadata_payload_version,
         )
         .value(Alias::new("last_error"), Option::<String>::None)
         .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
@@ -323,6 +418,15 @@ async fn update_item(
         return Err(MetadataPublicationError::ItemNotFound);
     }
     Ok(())
+}
+
+fn date_time(value: chrono::NaiveDate) -> DateTime<Utc> {
+    DateTime::from_naive_utc_and_offset(
+        value
+            .and_hms_opt(0, 0, 0)
+            .expect("a validated date always has a midnight timestamp"),
+        Utc,
+    )
 }
 
 async fn read_provider_ids(
@@ -542,6 +646,32 @@ async fn associations_changed(
             return Ok(true);
         }
     }
+    if let Some(countries) = resolution.countries()
+        && read_code_associations(
+            transaction,
+            item_id,
+            "item_countries",
+            "countries",
+            "country_id",
+        )
+        .await?
+            != named_values(countries)
+    {
+        return Ok(true);
+    }
+    if let Some(languages) = resolution.languages()
+        && read_code_associations(
+            transaction,
+            item_id,
+            "item_languages",
+            "languages",
+            "language_id",
+        )
+        .await?
+            != named_values(languages)
+    {
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -630,6 +760,51 @@ async fn read_people(
         .collect()
 }
 
+fn named_values(values: &[MetadataNamedValue]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|value| (value.code().to_owned(), value.name().to_owned()))
+        .collect()
+}
+
+async fn read_code_associations(
+    transaction: &DatabaseTransaction,
+    item_id: CatalogItemId,
+    link_table: &str,
+    value_table: &str,
+    value_id_column: &str,
+) -> Result<Vec<(String, String)>, DbErr> {
+    let link = Alias::new("metadata_code_link");
+    let value = Alias::new("metadata_code_value");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((value.clone(), Alias::new("code"))),
+            Alias::new("code"),
+        )
+        .expr_as(
+            Expr::col((value.clone(), Alias::new("name"))),
+            Alias::new("name"),
+        )
+        .from_as(Alias::new(link_table), link.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new(value_table),
+            value.clone(),
+            Expr::col((value.clone(), Alias::new("id")))
+                .equals((link.clone(), Alias::new(value_id_column))),
+        )
+        .and_where(Expr::col((link.clone(), Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .order_by((link, Alias::new("sort_order")), Order::Asc)
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    transaction
+        .query_all(backend.build(&query))
+        .await?
+        .iter()
+        .map(|row| Ok((row.try_get("", "code")?, row.try_get("", "name")?)))
+        .collect()
+}
+
 async fn publish_associations(
     transaction: &DatabaseTransaction,
     item_id: CatalogItemId,
@@ -659,6 +834,105 @@ async fn publish_associations(
     }
     if let Some(people) = resolution.people() {
         replace_people(transaction, item_id, people).await?;
+    }
+    if let Some(countries) = resolution.countries() {
+        replace_code_associations(
+            transaction,
+            item_id,
+            "item_countries",
+            "countries",
+            "country_id",
+            countries,
+        )
+        .await?;
+    }
+    if let Some(languages) = resolution.languages() {
+        replace_code_associations(
+            transaction,
+            item_id,
+            "item_languages",
+            "languages",
+            "language_id",
+            languages,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn replace_code_associations(
+    transaction: &DatabaseTransaction,
+    item_id: CatalogItemId,
+    link_table: &str,
+    value_table: &str,
+    value_id_column: &str,
+    values: &[MetadataNamedValue],
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    transaction
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new(link_table))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid())),
+            ),
+        )
+        .await?;
+    for (index, value) in values.iter().enumerate() {
+        transaction
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new(value_table))
+                        .columns([Alias::new("id"), Alias::new("code"), Alias::new("name")])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            value.code().into(),
+                            value.name().into(),
+                        ])
+                        .on_conflict(
+                            OnConflict::column(Alias::new("code"))
+                                .update_column(Alias::new("name"))
+                                .to_owned(),
+                        ),
+                ),
+            )
+            .await?;
+        let value_id: Uuid = transaction
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("id"))
+                        .from(Alias::new(value_table))
+                        .and_where(Expr::col(Alias::new("code")).eq(value.code()))
+                        .limit(1),
+                ),
+            )
+            .await?
+            .ok_or_else(|| DbErr::Custom("metadata coded association is missing".to_owned()))?
+            .try_get("", "id")?;
+        transaction
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new(link_table))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new(value_id_column),
+                            Alias::new("sort_order"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            item_id.as_uuid().into(),
+                            value_id.into(),
+                            i32::try_from(index)
+                                .map_err(|error| DbErr::Custom(error.to_string()))?
+                                .into(),
+                        ]),
+                ),
+            )
+            .await?;
     }
     Ok(())
 }

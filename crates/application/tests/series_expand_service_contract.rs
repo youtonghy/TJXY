@@ -917,6 +917,116 @@ async fn expand_publishes_seasons_episodes_and_episode_sources_atomically() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the flat-root storage rewrite and published hierarchy assertions together.
+async fn expand_groups_episode_files_stored_directly_under_the_series_root() {
+    let fixture = fixture(true, false, false).await;
+    let sql = fixture.database.get_database_backend();
+    let title: Uuid = fixture
+        .database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .column(Alias::new("storage_object_id"))
+                    .from(Alias::new("identity_matches"))
+                    .and_where(
+                        Expr::col(Alias::new("candidate_catalog_item_id"))
+                            .eq(fixture.series.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "storage_object_id")
+        .unwrap();
+    for (object, name) in [
+        (fixture.video, "S01E01.mp4"),
+        (fixture.subtitle, "S01E01.eng.srt"),
+    ] {
+        fixture
+            .database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new("storage_objects"))
+                        .value(Alias::new("name"), name)
+                        .value(Alias::new("normalized_name"), name.to_lowercase())
+                        .and_where(Expr::col(Alias::new("id")).eq(object.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+        fixture
+            .database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new("storage_root_objects"))
+                        .value(Alias::new("parent_storage_object_id"), title)
+                        .and_where(
+                            Expr::col(Alias::new("storage_root_id")).eq(fixture.root.as_uuid()),
+                        )
+                        .and_where(Expr::col(Alias::new("storage_object_id")).eq(object.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ExpandItem,
+            WorkScope::CatalogItem(fixture.series),
+            1,
+            100,
+        )
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ExpandItem],
+            "flat-root-series",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    SeriesExpandService::new(fixture.database.clone())
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    let query = CatalogQueryRepository::new(&fixture.database);
+    let seasons = query
+        .items(
+            UserId::new(),
+            BrowseParent::Item(fixture.series),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seasons.items().len(), 1);
+    assert_eq!(seasons.items()[0].name(), "Season 1");
+    assert_eq!(seasons.items()[0].index_number(), Some(1));
+    let episodes = query
+        .items(
+            UserId::new(),
+            BrowseParent::Item(seasons.items()[0].id()),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(episodes.items().len(), 1);
+    assert_eq!(episodes.items()[0].name(), "S01E01");
+    assert_eq!(episodes.items()[0].index_number(), Some(1));
+}
+
+#[tokio::test]
 async fn expanded_items_retain_their_structure_directory_scope() {
     let fixture = fixture(true, false, false).await;
     let jobs = WorkJobRepository::new(&fixture.database);

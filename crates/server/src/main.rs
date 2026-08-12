@@ -194,8 +194,9 @@ async fn serve_application(config_store: InstallationConfigStore) -> Result<(), 
         Duration::from_secs(redis_empty_ttl),
     )?;
     startup = startup.with_redis_cache(redis);
-    let assets_dir = env::var("TJXY_ASSETS_DIR").unwrap_or_else(|_| "./data/assets".to_owned());
-    startup = startup.with_assets_dir(assets_dir);
+    if let Ok(assets_dir) = env::var("TJXY_ASSETS_DIR") {
+        startup = startup.with_assets_dir_from_environment(assets_dir);
+    }
     let remote_providers = env::var("TJXY_ENABLE_REMOTE_PROVIDERS")
         .map_or(Ok(false), |value| value.parse::<bool>())
         .map_err(|_| StartupError::InvalidRemoteProviders)?;

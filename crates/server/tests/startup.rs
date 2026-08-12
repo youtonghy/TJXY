@@ -67,6 +67,20 @@ impl TmdbTransport for StartupTmdbTransport {
             format!("{}:{}", self.label, self.language),
         )])
     }
+
+    async fn detail(
+        &self,
+        _kind: MetadataItemKind,
+        _id: u64,
+        _language: &str,
+    ) -> Result<tjxy_metadata::MetadataCandidate, MetadataProviderError> {
+        let source = tjxy_metadata::MetadataSource::new("Tmdb", Some("movie:1"), 8_000)
+            .map_err(|_| MetadataProviderError::InvalidResponse)?;
+        Ok(tjxy_metadata::MetadataCandidate::new(source)
+            .with_title(format!("{}:{}", self.label, self.language))
+            .with_provider_id("tmdb", "1")
+            .with_details_loaded())
+    }
 }
 
 #[async_trait::async_trait]

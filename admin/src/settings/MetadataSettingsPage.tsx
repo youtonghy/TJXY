@@ -29,6 +29,7 @@ import { StatusChip } from '../ui/StatusChip';
 import { PageError } from '../ui/SystemPages';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import { interpolate, useTranslate } from './i18n';
+import { LocalMetadataStoragePanel } from './LocalMetadataStoragePanel';
 import {
   deleteMusicBrainzSettings,
   deleteTheAudioDbSettings,
@@ -370,6 +371,8 @@ export function MetadataSettingsPage() {
         description={t('admin.metadata.subtitle')}
         title={t('admin.metadata.title')}
       />
+
+      <LocalMetadataStoragePanel />
 
       {loading && settings === null ? (
         <MetadataSettingsSkeleton />

@@ -819,7 +819,7 @@ where
         finish(transaction, result).await
     }
 
-    /// Retries Partial automatic metadata resolution with a short cooldown.
+    /// Retries incomplete automatic metadata resolution with a short cooldown.
     ///
     /// # Errors
     ///
@@ -838,16 +838,23 @@ where
         };
         let transaction = self.database.begin().await?;
         let backend = transaction.get_database_backend();
-        let partial = Query::select()
+        let incomplete = Query::select()
             .expr(Expr::val(1_i32))
             .from(Alias::new("catalog_items"))
             .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
             .and_where(Expr::col(Alias::new("metadata_revision")).eq(spec.expected_revision))
-            .and_where(Expr::col(Alias::new("metadata_state")).eq("Partial"))
+            .cond_where(
+                Cond::any()
+                    .add(Expr::col(Alias::new("metadata_state")).eq("Partial"))
+                    .add(
+                        Expr::col(Alias::new("metadata_payload_version"))
+                            .lt(crate::metadata::METADATA_PAYLOAD_VERSION),
+                    ),
+            )
             .limit(1)
             .to_owned();
         if transaction
-            .query_one(backend.build(&partial))
+            .query_one(backend.build(&incomplete))
             .await?
             .is_none()
         {
@@ -1404,6 +1411,14 @@ async fn fence_metadata_item(
         .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
         .and_where(Expr::col(Alias::new("metadata_resolved_revision")).gte(spec.expected_revision))
         .and_where(Expr::col(Alias::new("metadata_resolved_requirement")).gte(requirement.as_i32()))
+        .cond_where(
+            Cond::any()
+                .add(Expr::col(Alias::new("item_type")).is_not_in(["Movie", "Series"]))
+                .add(
+                    Expr::col(Alias::new("metadata_payload_version"))
+                        .gte(crate::metadata::METADATA_PAYLOAD_VERSION),
+                ),
+        )
         .limit(1)
         .to_owned();
     Ok(

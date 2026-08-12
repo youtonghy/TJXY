@@ -508,6 +508,35 @@ impl TmdbCatalogClient {
         Ok(RichSeries { item, seasons })
     }
 
+    /// Fetches and validates the Series root record without expanding Seasons or Episodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for invalid IDs, transport failures, or invalid data.
+    pub async fn series_item(&self, id: u64) -> Result<RichCatalogItem, MetadataProviderError> {
+        if id == 0 {
+            return Err(MetadataProviderError::Rejected);
+        }
+        let path = format!("/tv/{id}");
+        let bytes = self.fetch(&path, &self.root_query("tv")).await?;
+        let (mut wire, snapshot) = parse_response::<SeriesWire>(&bytes)?;
+        if self.language != "en-US" && needs_text_fallback(&wire.name, wire.overview.as_deref()) {
+            let bytes = self
+                .fetch(&path, &Self::root_query_for("tv", "en-US"))
+                .await?;
+            let (fallback, _) = parse_response::<SeriesWire>(&bytes)?;
+            merge_missing_text(
+                &mut wire.name,
+                &mut wire.overview,
+                &mut wire.tagline,
+                fallback.name,
+                fallback.overview,
+                fallback.tagline,
+            );
+        }
+        series_item(wire, snapshot, &self.language)
+    }
+
     /// Returns one validated page of popular Movie IDs for manifest generation.
     ///
     /// # Errors

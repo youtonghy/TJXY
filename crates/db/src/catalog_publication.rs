@@ -3,12 +3,15 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Expr, OnConflict, Query},
+    sea_query::{Alias, Cond, Expr, OnConflict, Query},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tjxy_common::{CatalogItemId, PublicationId, SortKey, StorageObjectRecordId, StorageRootId};
+use tjxy_common::{
+    CatalogItemId, MEDIA_NAME_PARSER_VERSION, PublicationId, SortKey, StorageObjectRecordId,
+    StorageRootId,
+};
 use uuid::Uuid;
 
 use crate::source_publication::{
@@ -40,6 +43,7 @@ pub struct StructurePublicationRow {
     sort_name: String,
     production_year: Option<i32>,
     overview: Option<String>,
+    index_number: Option<i32>,
     row_sha256: String,
 }
 
@@ -84,6 +88,7 @@ impl StructurePublicationRow {
             sort_name,
             production_year,
             overview,
+            index_number: None,
             row_sha256: String::new(),
         };
         row.row_sha256 = row_hash(&row);
@@ -93,6 +98,23 @@ impl StructurePublicationRow {
     #[must_use]
     pub const fn id(&self) -> CatalogItemId {
         self.catalog_item_id
+    }
+
+    /// Adds a non-negative season or episode number to this projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError::InvalidStructureRow`] for negative numbers.
+    pub fn with_index_number(
+        mut self,
+        index_number: Option<i32>,
+    ) -> Result<Self, CatalogPublicationError> {
+        if index_number.is_some_and(|value| value < 0) {
+            return Err(CatalogPublicationError::InvalidStructureRow);
+        }
+        self.index_number = index_number;
+        self.row_sha256 = row_hash(&self);
+        Ok(self)
     }
 }
 
@@ -228,9 +250,33 @@ impl<'connection> CatalogPublicationRepository<'connection> {
         claimed: &ClaimedWorkJob,
         publication_id: PublicationId,
     ) -> Result<i64, CatalogPublicationError> {
+        self.publish_structure_with_warnings(jobs, claimed, publication_id, Vec::new())
+            .await
+    }
+
+    /// Atomically activates a complete structure projection, retaining bounded scan warnings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError`] without committing any partial state when
+    /// the manifest, revision, ownership, or lease fence no longer matches.
+    pub async fn publish_structure_with_warnings(
+        &self,
+        jobs: &WorkJobRepository<'_>,
+        claimed: &ClaimedWorkJob,
+        publication_id: PublicationId,
+        warnings: Vec<String>,
+    ) -> Result<i64, CatalogPublicationError> {
         let transaction = self.database.begin().await?;
-        let result =
-            publish_structure(&transaction, jobs, claimed, publication_id, Utc::now()).await;
+        let result = publish_structure(
+            &transaction,
+            jobs,
+            claimed,
+            publication_id,
+            warnings,
+            Utc::now(),
+        )
+        .await;
         finish(transaction, result).await
     }
 }
@@ -308,6 +354,7 @@ async fn begin_structure(
             Alias::new("expected_row_count"),
             Alias::new("source_manifest_sha256"),
             Alias::new("expected_source_row_count"),
+            Alias::new("naming_parser_version"),
             Alias::new("created_at"),
         ])
         .values_panic([
@@ -330,6 +377,7 @@ async fn begin_structure(
                 .as_ref()
                 .map(SourcePublicationManifest::expected_row_count)
                 .into(),
+            MEDIA_NAME_PARSER_VERSION.into(),
             now.into(),
         ])
         .on_conflict(conflict)
@@ -360,6 +408,7 @@ fn validate_publication_row(
         )
         || row.try_get::<String>("", "manifest_sha256")? != manifest.sha256
         || row.try_get::<i64>("", "expected_row_count")? != manifest.expected_row_count
+        || row.try_get::<i32>("", "naming_parser_version")? != MEDIA_NAME_PARSER_VERSION
         || row.try_get::<Option<String>>("", "source_manifest_sha256")?
             != manifest
                 .source
@@ -406,6 +455,7 @@ async fn stage_structure_batch(
                 Alias::new("sort_key"),
                 Alias::new("production_year"),
                 Alias::new("overview"),
+                Alias::new("index_number"),
                 Alias::new("classification_state"),
                 Alias::new("metadata_state"),
                 Alias::new("structure_state"),
@@ -414,6 +464,7 @@ async fn stage_structure_batch(
                 Alias::new("source_index_revision"),
                 Alias::new("structure_owner_item_id"),
                 Alias::new("is_present"),
+                Alias::new("naming_parser_version"),
             ])
             .values_panic([
                 row.catalog_item_id.as_uuid().into(),
@@ -423,6 +474,7 @@ async fn stage_structure_batch(
                 SortKey::from_text(&row.sort_name).into_bytes().into(),
                 row.production_year.into(),
                 row.overview.clone().into(),
+                row.index_number.into(),
                 "Matched".into(),
                 "Ready".into(),
                 "PublishedProjection".into(),
@@ -431,6 +483,7 @@ async fn stage_structure_batch(
                 0.into(),
                 owner.as_uuid().into(),
                 true.into(),
+                MEDIA_NAME_PARSER_VERSION.into(),
             ])
             .on_conflict(identity_conflict)
             .to_owned();
@@ -453,6 +506,7 @@ async fn stage_structure_batch(
                 Alias::new("sort_key"),
                 Alias::new("production_year"),
                 Alias::new("overview"),
+                Alias::new("index_number"),
                 Alias::new("source_state"),
                 Alias::new("source_index_revision"),
                 Alias::new("row_sha256"),
@@ -470,6 +524,7 @@ async fn stage_structure_batch(
                 SortKey::from_text(&row.sort_name).into_bytes().into(),
                 row.production_year.into(),
                 row.overview.clone().into(),
+                row.index_number.into(),
                 "Unknown".into(),
                 0_i64.into(),
                 row.row_sha256.clone().into(),
@@ -486,6 +541,7 @@ async fn stage_structure_batch(
                         Alias::new("sort_key"),
                         Alias::new("production_year"),
                         Alias::new("overview"),
+                        Alias::new("index_number"),
                         Alias::new("row_sha256"),
                     ])
                     .to_owned(),
@@ -522,11 +578,94 @@ async fn ensure_structure_identity(
     Ok(())
 }
 
+async fn refresh_structure_naming(
+    transaction: &DatabaseTransaction,
+    row: &StructureNamingRow,
+) -> Result<(), CatalogPublicationError> {
+    let provenance = Alias::new("structure_naming_provenance");
+    let provider = Alias::new("structure_naming_provider");
+    let authoritative_metadata = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("metadata_provenance"), provenance.clone())
+        .and_where(
+            Expr::col((provenance.clone(), Alias::new("catalog_item_id")))
+                .eq(row.catalog_item_id.as_uuid()),
+        )
+        .and_where(
+            Expr::col((provenance.clone(), Alias::new("field_name")))
+                .is_in(["title", "production_year"]),
+        )
+        .and_where(Expr::col((provenance, Alias::new("source_provider"))).ne("Naming"))
+        .to_owned();
+    let provider_identity = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("provider_ids"), provider.clone())
+        .and_where(
+            Expr::col((provider, Alias::new("catalog_item_id"))).eq(row.catalog_item_id.as_uuid()),
+        )
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    let refresh = Query::update()
+        .table(Alias::new("catalog_items"))
+        .values([
+            (Alias::new("name"), row.name.clone().into()),
+            (Alias::new("sort_name"), row.sort_name.clone().into()),
+            (
+                Alias::new("sort_key"),
+                SortKey::from_text(&row.sort_name).into_bytes().into(),
+            ),
+            (Alias::new("production_year"), row.production_year.into()),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(row.catalog_item_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
+        .cond_where(
+            Cond::all()
+                .add(Expr::exists(authoritative_metadata).not())
+                .add(Expr::exists(provider_identity).not()),
+        )
+        .to_owned();
+    transaction.execute(backend.build(&refresh)).await?;
+    let index_provenance = Alias::new("structure_index_provenance");
+    let authoritative_index = Query::select()
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("metadata_provenance"), index_provenance.clone())
+        .and_where(
+            Expr::col((index_provenance.clone(), Alias::new("catalog_item_id")))
+                .eq(row.catalog_item_id.as_uuid()),
+        )
+        .and_where(
+            Expr::col((index_provenance.clone(), Alias::new("field_name"))).eq("index_number"),
+        )
+        .and_where(Expr::col((index_provenance, Alias::new("source_provider"))).ne("Naming"))
+        .to_owned();
+    let refresh_index = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(Alias::new("index_number"), row.index_number)
+        .and_where(Expr::col(Alias::new("id")).eq(row.catalog_item_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
+        .and_where(Expr::exists(authoritative_index).not())
+        .to_owned();
+    transaction.execute(backend.build(&refresh_index)).await?;
+    let advance = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("naming_parser_version"),
+            MEDIA_NAME_PARSER_VERSION,
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(row.catalog_item_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("structure_owner_item_id")).is_not_null())
+        .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
+        .to_owned();
+    transaction.execute(backend.build(&advance)).await?;
+    Ok(())
+}
+
 async fn publish_structure(
     transaction: &DatabaseTransaction,
     jobs: &WorkJobRepository<'_>,
     claimed: &ClaimedWorkJob,
     publication_id: PublicationId,
+    warnings: Vec<String>,
     now: DateTime<Utc>,
 ) -> Result<i64, CatalogPublicationError> {
     let owner = structure_owner(claimed)?;
@@ -548,6 +687,9 @@ async fn publish_structure(
     let revision: i64 = owner_row.try_get("", "structure_expansion_revision")?;
     if revision != publication.expected_revision {
         return Err(CatalogPublicationError::StaleExpectedRevision);
+    }
+    for row in load_structure_naming(transaction, publication_id).await? {
+        refresh_structure_naming(transaction, &row).await?;
     }
     materialize_structure_sources(transaction, publication_id).await?;
     let previous: Option<Uuid> = owner_row.try_get("", "active_structure_publication_id")?;
@@ -589,7 +731,7 @@ async fn publish_structure(
         claimed,
         WorkJobResult::success(
             json!({"published_rows": publication.expected_row_count, "catalog_generation": generation}),
-            Vec::new(),
+            warnings,
         ),
     )
     .await?;
@@ -609,6 +751,14 @@ struct StoredProjectionRow {
     parent_id: CatalogItemId,
     item_type: String,
     row_sha256: String,
+}
+
+struct StructureNamingRow {
+    catalog_item_id: CatalogItemId,
+    name: String,
+    sort_name: String,
+    production_year: Option<i32>,
+    index_number: Option<i32>,
 }
 
 async fn load_building_publication(
@@ -714,6 +864,38 @@ async fn load_projection(
                 parent_id: CatalogItemId::from_uuid(row.try_get("", "parent_catalog_item_id")?),
                 item_type: row.try_get("", "item_type")?,
                 row_sha256: row.try_get("", "row_sha256")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_structure_naming(
+    transaction: &DatabaseTransaction,
+    publication_id: PublicationId,
+) -> Result<Vec<StructureNamingRow>, CatalogPublicationError> {
+    let query = Query::select()
+        .columns([
+            Alias::new("catalog_item_id"),
+            Alias::new("name"),
+            Alias::new("sort_name"),
+            Alias::new("production_year"),
+            Alias::new("index_number"),
+        ])
+        .from(Alias::new("publication_catalog_items"))
+        .and_where(Expr::col(Alias::new("publication_id")).eq(publication_id.as_uuid()))
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    transaction
+        .query_all(backend.build(&query))
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(StructureNamingRow {
+                catalog_item_id: CatalogItemId::from_uuid(row.try_get("", "catalog_item_id")?),
+                name: row.try_get("", "name")?,
+                sort_name: row.try_get("", "sort_name")?,
+                production_year: row.try_get("", "production_year")?,
+                index_number: row.try_get("", "index_number")?,
             })
         })
         .collect()
@@ -873,6 +1055,7 @@ fn publication_for_job(job_id: Uuid) -> sea_orm::sea_query::SelectStatement {
             Alias::new("expected_row_count"),
             Alias::new("source_manifest_sha256"),
             Alias::new("expected_source_row_count"),
+            Alias::new("naming_parser_version"),
         ])
         .from(Alias::new("catalog_publications"))
         .and_where(Expr::col(Alias::new("job_id")).eq(job_id))
@@ -943,6 +1126,13 @@ fn row_hash(row: &StructurePublicationRow) -> String {
         Some(overview) => {
             hasher.update([1]);
             hash_text(&mut hasher, overview);
+        }
+        None => hasher.update([0]),
+    }
+    match row.index_number {
+        Some(index) => {
+            hasher.update([1]);
+            hasher.update(index.to_be_bytes());
         }
         None => hasher.update([0]),
     }

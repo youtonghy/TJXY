@@ -14,6 +14,7 @@ const AI_MESSAGE_SEQUENCE_MIGRATION_POSITION: u32 = 55;
 const HYBRID_REMOVAL_MIGRATION_POSITION: u32 = 56;
 const LEGACY_TITLE_YEAR_MIGRATION_POSITION: u32 = 57;
 const SITE_THEME_SETTINGS_MIGRATION_POSITION: u32 = 58;
+const MEDIA_NAME_PARSER_MIGRATION_POSITION: u32 = 59;
 
 #[tokio::test]
 async fn older_database_is_upgraded_by_the_shared_schema_entrypoint() {
@@ -60,6 +61,63 @@ async fn site_theme_settings_are_added_by_their_migration() {
                 .unwrap()
         );
     }
+}
+
+#[tokio::test]
+async fn media_name_parser_schema_is_added_by_its_migration() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, Some(MEDIA_NAME_PARSER_MIGRATION_POSITION - 1))
+        .await
+        .unwrap();
+    let schema = SchemaManager::new(&database);
+    assert!(
+        !schema
+            .has_column("catalog_items", "naming_parser_version")
+            .await
+            .unwrap()
+    );
+
+    Migrator::up(&database, Some(1)).await.unwrap();
+
+    for (table, column) in [
+        ("library_storage_roots", "naming_parser_version"),
+        ("catalog_items", "naming_parser_version"),
+        ("catalog_publications", "naming_parser_version"),
+        ("publication_catalog_items", "index_number"),
+        ("media_sources", "naming_hints"),
+        ("publication_media_sources", "naming_hints"),
+    ] {
+        assert!(schema.has_column(table, column).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn media_name_parser_schema_repairs_a_missing_additive_column() {
+    let database = test_database().await.unwrap();
+    migrate_database(&database).await.unwrap();
+    database
+        .execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "ALTER TABLE media_sources DROP COLUMN naming_hints",
+        ))
+        .await
+        .unwrap();
+    let schema = SchemaManager::new(&database);
+    assert!(
+        !schema
+            .has_column("media_sources", "naming_hints")
+            .await
+            .unwrap()
+    );
+
+    migrate_database(&database).await.unwrap();
+
+    assert!(
+        schema
+            .has_column("media_sources", "naming_hints")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -872,6 +930,7 @@ async fn schema_keeps_effective_policy_and_revisions_in_sql() {
                 "metadata_revision",
                 "metadata_resolved_revision",
                 "metadata_resolved_requirement",
+                "metadata_payload_version",
             ],
         ),
         (

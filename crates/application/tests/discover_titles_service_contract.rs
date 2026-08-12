@@ -3,9 +3,6 @@ use sea_orm::{
     sea_query::{Alias, Expr, JoinType, Query},
 };
 use sea_orm_migration::MigratorTrait;
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use tjxy_application::{
     DiscoverTitlesService, MetadataResolveService, SourceIndexService, TaskService,
     TaskServiceError,
@@ -16,34 +13,8 @@ use tjxy_db::{
     MetadataRequirement, WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
 use tjxy_domain::MetadataSourceMode;
-use tjxy_metadata::{
-    MetadataCandidate, MetadataLookup, MetadataProvider, MetadataProviderError, MetadataSource,
-};
 use tjxy_test_support::test_database;
 use uuid::Uuid;
-
-struct CompleteProvider;
-
-#[async_trait]
-impl MetadataProvider for CompleteProvider {
-    fn name(&self) -> &'static str {
-        "Fixture"
-    }
-
-    async fn resolve(
-        &self,
-        _lookup: &MetadataLookup,
-    ) -> Result<Option<MetadataCandidate>, MetadataProviderError> {
-        let source = MetadataSource::new("Fixture", Some("movie:329865"), 8_000).unwrap();
-        Ok(Some(
-            MetadataCandidate::new(source)
-                .with_title("Arrival")
-                .with_year(2016)
-                .with_overview("A linguist meets visitors.")
-                .with_provider_id("tmdb", "329865"),
-        ))
-    }
-}
 
 struct DiscoveryFixture {
     database: sea_orm::DatabaseConnection,
@@ -137,7 +108,7 @@ async fn discovery_fixture(metadata_policy: &str) -> DiscoveryFixture {
         account,
         title_object,
         "arrival",
-        "Arrival (2016)",
+        "Arrival.2016.1080p.BluRay.x264-GROUP",
         "Directory",
         false,
     )
@@ -249,43 +220,16 @@ async fn discover_titles_publishes_root_children_without_reading_a_backend() {
             .unwrap(),
         1
     );
-    let metadata = jobs
-        .claim_next(
+    assert!(
+        jobs.claim_next(
             &[WorkTaskKind::ResolveMetadata],
-            "metadata-worker",
+            "unexpected-lazy-metadata",
             chrono::Duration::minutes(5),
         )
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(metadata.job().expected_revision(), 0);
-    assert_eq!(metadata.job().input_sync_revision(), Some(1));
-    assert_eq!(
-        metadata.job().metadata_requirement(),
-        Some(MetadataRequirement::Basic)
+        .is_none()
     );
-    let report = MetadataResolveService::new(database.clone())
-        .with_provider(Arc::new(CompleteProvider))
-        .execute(&metadata)
-        .await
-        .unwrap();
-    assert_eq!(report.state().as_str(), "Ready");
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 2);
-    let overview = database
-        .query_one(
-            sql.build(
-                Query::select()
-                    .column(Alias::new("overview"))
-                    .from(Alias::new("catalog_items"))
-                    .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid())),
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .try_get::<String>("", "overview")
-        .unwrap();
-    assert_eq!(overview, "A linguist meets visitors.");
 
     let manual = TaskService::new(database.clone())
         .resolve_metadata(item_id)
@@ -306,9 +250,163 @@ async fn discover_titles_publishes_root_children_without_reading_a_backend() {
 }
 
 #[tokio::test]
+async fn stale_naming_parser_version_reprocesses_a_current_storage_revision() {
+    let fixture = discovery_fixture("full").await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+    let sql = fixture.database.get_database_backend();
+    let item_id: Uuid = fixture
+        .database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .column(Alias::new("candidate_catalog_item_id"))
+                    .from(Alias::new("identity_matches"))
+                    .and_where(
+                        Expr::col(Alias::new("storage_object_id"))
+                            .eq(fixture.title_object.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "candidate_catalog_item_id")
+        .unwrap();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("name"), "Arrival.2016.1080p.BluRay.x264-GROUP")
+                    .value(Alias::new("production_year"), Option::<i32>::None)
+                    .value(Alias::new("naming_parser_version"), 0_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("library_storage_roots"))
+                    .value(Alias::new("naming_parser_version"), 0_i32)
+                    .and_where(Expr::col(Alias::new("library_id")).eq(fixture.library_id)),
+            ),
+        )
+        .await
+        .unwrap();
+
+    DiscoverTitlesRepository::new(&fixture.database)
+        .enqueue(fixture.root, 30)
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::DiscoverTitles],
+            "naming-upgrade",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    let row = fixture
+        .database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .columns([
+                        Alias::new("name"),
+                        Alias::new("production_year"),
+                        Alias::new("naming_parser_version"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "name").unwrap(), "Arrival");
+    assert_eq!(row.try_get::<i32>("", "production_year").unwrap(), 2016);
+    assert_eq!(row.try_get::<i32>("", "naming_parser_version").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn discover_titles_accepts_a_movie_file_directly_under_the_library_root() {
+    let fixture = discovery_fixture("basic").await;
+    let sql = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("name"), "Arrival.2016.1080p.BluRay.mkv")
+                    .value(
+                        Alias::new("normalized_name"),
+                        "arrival.2016.1080p.bluray.mkv",
+                    )
+                    .value(Alias::new("object_type"), "File")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.title_object.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let report = DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(report.discovered(), 1);
+    let row = fixture
+        .database
+        .query_one(
+            sql.build(
+                Query::select()
+                    .columns([Alias::new("name"), Alias::new("production_year")])
+                    .from(Alias::new("catalog_items"))
+                    .join(
+                        JoinType::InnerJoin,
+                        Alias::new("identity_matches"),
+                        Expr::col((
+                            Alias::new("identity_matches"),
+                            Alias::new("candidate_catalog_item_id"),
+                        ))
+                        .equals((Alias::new("catalog_items"), Alias::new("id"))),
+                    )
+                    .and_where(
+                        Expr::col((
+                            Alias::new("identity_matches"),
+                            Alias::new("storage_object_id"),
+                        ))
+                        .eq(fixture.title_object.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "name").unwrap(), "Arrival");
+    assert_eq!(row.try_get::<i32>("", "production_year").unwrap(), 2016);
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keeps the recursive music discovery fixture and assertions together.
 async fn discover_titles_recursively_publishes_music_files_as_audio_items() {
-    let fixture = discovery_fixture("basic").await;
+    let fixture = discovery_fixture("full").await;
     let sql = fixture.database.get_database_backend();
     let track = StorageObjectRecordId::new();
     fixture
@@ -417,7 +515,7 @@ async fn discover_titles_recursively_publishes_music_files_as_audio_items() {
         .unwrap();
     assert_eq!(
         metadata.job().metadata_requirement(),
-        Some(MetadataRequirement::Basic)
+        Some(MetadataRequirement::Full)
     );
     assert_eq!(
         metadata.job().metadata_source_mode(),
@@ -493,7 +591,7 @@ async fn full_metadata_policy_is_preserved_by_title_discovery() {
 
 #[tokio::test]
 async fn title_discovery_captures_local_only_metadata_source_mode() {
-    let fixture = discovery_fixture("basic").await;
+    let fixture = discovery_fixture("full").await;
     fixture
         .database
         .execute(

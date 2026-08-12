@@ -216,7 +216,12 @@ Original image assets default to `./data/assets`; override
 that root with `TJXY_ASSETS_DIR`. The asset store validates actual image format,
 encoded size, dimensions, pixel count, and decoder allocation before an
 fd-confined atomic SHA-256 write; JPEG, PNG, GIF, WebP, and BMP originals are
-accepted. Lazy Expand/Source requests wait up to 2500 ms
+accepted. Administrators can inspect linked, orphaned, missing, and unregistered
+content-addressed assets under `/admin/settings/metadata`, clean unreferenced
+assets, and select a new writable absolute storage location. A database-selected
+location takes effect after restart; existing roots remain readable for stored
+assets. `TJXY_ASSETS_DIR` has runtime precedence and disables location editing
+until the override is removed. Lazy Expand/Source requests wait up to 2500 ms
 for joined work by default; set `TJXY_LAZY_WAIT_MS` to `0..=30000` to override
 it. The production binary submits a lowest-priority policy-aware media refresh
 every 900 seconds by default. Set `TJXY_MEDIA_REFRESH_INTERVAL_SECONDS` to a
@@ -705,6 +710,23 @@ profile are migrated to `Lazy`; a historical `background` expansion value is
 normalized to `on_browse` while other advanced policy values are preserved. The
 production scheduler periodically submits policy-aware scans at the lowest
 queue priority and delays missed ticks instead of creating a catch-up burst.
+
+Lazy libraries publish Naming-only title rows during discovery and defer the
+complete metadata lookup until an administrator or user opens the item detail.
+Full libraries enqueue that complete lookup during the scan. A successful
+Movie or Series lookup is versioned as one complete payload (summary, artwork,
+ratings, runtime, genres, studios, people, countries, and languages); upgrading
+that contract reopens older automatic-scrape rows instead of leaving them
+permanently Ready with only search-result fields.
+
+Video Naming uses one versioned parser shared by title discovery, Series
+expansion, and source indexing. It separates title and year, recognizes common
+release-name resolution/source/codec tokens, and merges missing season/episode
+facts from the nearest parent directories. Flat Movie files and Series-root
+`SxxExx`/`Sxxx` files are supported. Filename-derived technical values are
+stored as Naming hints and never replace NFO/remote metadata or probed stream
+facts. A parser version increase marks each library-root binding for durable
+re-discovery while the previous active projection remains readable.
 
 The explicit Probe command enqueues or joins one high-priority durable job for
 each active MediaSource with an available location, including sources that are

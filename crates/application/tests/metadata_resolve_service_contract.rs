@@ -35,6 +35,8 @@ struct PosterProvider;
 
 struct ForbiddenRemoteProvider;
 
+struct FailingTmdbProvider;
+
 #[async_trait]
 impl tjxy_metadata::MetadataProvider for ForbiddenRemoteProvider {
     fn name(&self) -> &'static str {
@@ -46,6 +48,20 @@ impl tjxy_metadata::MetadataProvider for ForbiddenRemoteProvider {
         _lookup: &tjxy_metadata::MetadataLookup,
     ) -> Result<Option<MetadataCandidate>, tjxy_metadata::MetadataProviderError> {
         panic!("LocalOnly metadata resolution must not invoke remote providers")
+    }
+}
+
+#[async_trait]
+impl tjxy_metadata::MetadataProvider for FailingTmdbProvider {
+    fn name(&self) -> &'static str {
+        "Tmdb"
+    }
+
+    async fn resolve(
+        &self,
+        _lookup: &tjxy_metadata::MetadataLookup,
+    ) -> Result<Option<MetadataCandidate>, tjxy_metadata::MetadataProviderError> {
+        Err(tjxy_metadata::MetadataProviderError::TemporarilyUnavailable)
     }
 }
 
@@ -65,7 +81,8 @@ impl tjxy_metadata::MetadataProvider for PosterProvider {
         Ok(Some(
             tjxy_metadata::MetadataCandidate::new(source)
                 .with_provider_id("tmdb", "329865")
-                .with_primary_image("/arrival.jpg"),
+                .with_primary_image("/arrival.jpg")
+                .with_details_loaded(),
         ))
     }
 }
@@ -408,9 +425,9 @@ async fn metadata_get_failure_is_transient_and_the_same_claim_can_restore_presen
         jobs.get(claimed.id()).await.unwrap().unwrap().state(),
         WorkJobState::Completed
     );
-    assert_eq!(association_count(&fixture, "item_genres").await, 0);
-    assert_eq!(association_count(&fixture, "item_studios").await, 0);
-    assert_eq!(association_count(&fixture, "item_people").await, 0);
+    assert_eq!(association_count(&fixture, "item_genres").await, 1);
+    assert_eq!(association_count(&fixture, "item_studios").await, 1);
+    assert_eq!(association_count(&fixture, "item_people").await, 1);
 }
 
 async fn association_count(fixture: &Fixture, table: &str) -> i64 {
@@ -1229,6 +1246,67 @@ async fn resolve_metadata_atomically_publishes_tmdb_primary_image_with_one_gener
         .unwrap();
     let result: serde_json::Value = result.try_get("", "counters").unwrap();
     assert_eq!(result["image_changed"], true);
+}
+
+#[tokio::test]
+async fn tmdb_detail_failure_does_not_complete_or_publish_partial_metadata() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let service = MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(FailingTmdbProvider));
+
+    assert!(matches!(
+        service.execute(&claimed).await,
+        Err(MetadataResolveError::Provider(
+            tjxy_metadata::MetadataProviderError::TemporarilyUnavailable
+        ))
+    ));
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Running
+    );
+    let row = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .columns([Alias::new("name"), Alias::new("metadata_resolved_revision")])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "name").unwrap(), "Arrival (2016)");
+    assert_eq!(
+        row.try_get::<i64>("", "metadata_resolved_revision")
+            .unwrap(),
+        -1
+    );
 }
 
 #[tokio::test]

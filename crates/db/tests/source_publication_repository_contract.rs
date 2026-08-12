@@ -1572,6 +1572,7 @@ async fn reindex_preserves_stable_source_key_and_existing_probe_state() {
                     .table(Alias::new("media_sources"))
                     .value(Alias::new("probe_state"), "Probed")
                     .value(Alias::new("probe_revision"), 7_i64)
+                    .value(Alias::new("container"), "matroska")
                     .and_where(Expr::col(Alias::new("id")).eq(fixture.sources[0].id().as_uuid())),
             ),
         )
@@ -1621,6 +1622,7 @@ async fn reindex_preserves_stable_source_key_and_existing_probe_state() {
     );
     assert_eq!(active[0].probe_state(), "Probed");
     assert_eq!(active[0].probe_revision(), 7);
+    assert_eq!(active[0].container(), Some("matroska"));
     let first_state: String = database
         .query_one(
             backend.build(

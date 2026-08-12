@@ -277,7 +277,7 @@ export function ItemPage() {
         </div>
       </div>
 
-      {item.HasMediaSources === false && (
+      {hasPlayableAction && item.HasMediaSources === false && (
         <Alert status="warning">
           <Alert.Indicator />
           <Alert.Content>

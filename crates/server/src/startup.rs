@@ -70,6 +70,7 @@ pub struct StartupOptions {
     session_lifetime: Option<Duration>,
     max_concurrent_password_hashes: usize,
     assets_dir: PathBuf,
+    assets_dir_source: &'static str,
     lazy_wait_timeout: StdDuration,
     filesystem_backends: Vec<(Uuid, PathBuf)>,
     filesystem_browser_roots: Option<Vec<PathBuf>>,
@@ -177,6 +178,7 @@ impl StartupOptions {
             session_lifetime: None,
             max_concurrent_password_hashes: 2,
             assets_dir: PathBuf::from("./data/assets"),
+            assets_dir_source: "Default",
             lazy_wait_timeout: StdDuration::from_millis(2_500),
             filesystem_backends: Vec::new(),
             filesystem_browser_roots: None,
@@ -230,6 +232,14 @@ impl StartupOptions {
     #[must_use]
     pub fn with_assets_dir(mut self, assets_dir: impl Into<PathBuf>) -> Self {
         self.assets_dir = assets_dir.into();
+        self.assets_dir_source = "Database";
+        self
+    }
+
+    #[must_use]
+    pub fn with_assets_dir_from_environment(mut self, assets_dir: impl Into<PathBuf>) -> Self {
+        self.assets_dir = assets_dir.into();
+        self.assets_dir_source = "Environment";
         self
     }
 
@@ -432,7 +442,7 @@ impl StartupOptions {
 /// Returns [`InitializationError`] without exposing bootstrap credentials when
 /// connection, migration, or authentication setup fails.
 #[allow(clippy::too_many_lines)] // Startup deliberately composes every long-lived service once.
-pub async fn initialize(options: StartupOptions) -> Result<AppState, InitializationError> {
+pub async fn initialize(mut options: StartupOptions) -> Result<AppState, InitializationError> {
     let storage_admin_cipher = options.credential_cipher.clone();
     let metadata_settings_cipher = options.credential_cipher.clone();
     let ai_settings_cipher = options.credential_cipher.clone();
@@ -459,6 +469,19 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     if database.get_database_backend() == DbBackend::MySql {
         database.close().await?;
         database = Database::connect(&options.database_url).await?;
+    }
+    if options.assets_dir_source == "Default" {
+        let roots = tjxy_db::AssetStorageRepository::new(&database)
+            .roots()
+            .await?;
+        if let Some(persisted) = roots
+            .iter()
+            .find(|root| root.state() == "Pending")
+            .or_else(|| roots.iter().find(|root| root.state() == "Current"))
+        {
+            options.assets_dir = PathBuf::from(persisted.canonical_path());
+            options.assets_dir_source = "Database";
+        }
     }
     let filesystem_browser_roots = match options.filesystem_browser_roots.clone() {
         Some(roots) => roots,
@@ -587,10 +610,18 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     let catalog = Arc::new(catalog);
     let libraries = Arc::new(LibraryService::new(database.clone()));
     let branding_assets_dir = options.assets_dir.join("branding");
-    let asset_writer =
-        Arc::new(AssetWriteService::new(database.clone(), options.assets_dir.clone()).await?);
+    let asset_writer = Arc::new(if options.assets_dir_source == "Environment" {
+        AssetWriteService::new_environment_override(database.clone(), options.assets_dir.clone())
+            .await?
+    } else {
+        AssetWriteService::new(database.clone(), options.assets_dir.clone()).await?
+    });
+    let canonical_assets_dir = tokio::fs::canonicalize(&options.assets_dir)
+        .await
+        .map_err(AssetWriteError::Root)?;
     let image_fetcher = Arc::new(ReqwestMetadataImageFetcher::new()?);
-    let assets = Arc::new(AssetReadService::new(database.clone(), options.assets_dir).await?);
+    let assets =
+        Arc::new(AssetReadService::new(database.clone(), options.assets_dir.clone()).await?);
     let (filesystem_backends, unavailable_filesystem_accounts) =
         prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled).await;
     if !unavailable_filesystem_accounts.is_empty() {
@@ -658,6 +689,12 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
             musicbrainz_provider_factory,
         ),
     );
+    let local_metadata_admin =
+        Arc::new(crate::local_metadata_admin::LocalMetadataAdminService::new(
+            database.clone(),
+            canonical_assets_dir,
+            options.assets_dir_source,
+        ));
     let relink_admin = Arc::new(crate::relink_admin::RelinkAdminService::new(
         database.clone(),
     ));
@@ -690,6 +727,7 @@ pub async fn initialize(options: StartupOptions) -> Result<AppState, Initializat
     .with_import_admin(import_admin)
     .with_metadata_import(metadata_import)
     .with_metadata_settings_admin(metadata_settings_admin)
+    .with_local_metadata_admin(local_metadata_admin)
     .with_system_settings_assets(database.clone(), branding_assets_dir)
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)
@@ -1087,6 +1125,8 @@ pub enum InitializationError {
     Asset(#[from] AssetReadError),
     #[error("asset writer initialization failed: {0}")]
     AssetWriter(#[from] AssetWriteError),
+    #[error("asset storage configuration failed: {0}")]
+    AssetStorage(#[from] tjxy_db::AssetStorageError),
     #[error("metadata image client initialization failed: {0}")]
     MetadataImage(#[from] MetadataImageFetchError),
     #[error("filesystem storage backend initialization failed: {0}")]

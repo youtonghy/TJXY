@@ -90,13 +90,7 @@ export async function getPopular(limit = 12): Promise<MediaItem[]> {
   const summaries = Array.isArray(value.Items) && value.Items.length > 0
     ? value.Items
     : (await getLatest({ limit, includeItemTypes: 'Movie,Series' }));
-  return Promise.all(summaries.map(async (summary) => {
-    try {
-      return await getItem(summary.Id);
-    } catch {
-      return summary;
-    }
-  }));
+  return summaries;
 }
 export async function getItem(id: string): Promise<MediaItem> { return clientRequest<MediaItem>(`/Items/${encodeURIComponent(id)}`); }
 export async function getSimilarItems(id: string, limit = 4): Promise<MediaItem[]> {

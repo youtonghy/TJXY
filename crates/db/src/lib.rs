@@ -5,6 +5,7 @@ mod ai_usage;
 mod announcement;
 mod api_key;
 mod asset;
+mod asset_storage;
 mod auth;
 mod cache_invalidation;
 mod catalog_publication;
@@ -66,6 +67,7 @@ pub use announcement::{
 };
 pub use api_key::{ApiKeyDraft, ApiKeyRepository, ApiKeyRepositoryError, StoredApiKey};
 pub use asset::{AssetPublication, AssetPublicationReport, AssetRepository, AssetRepositoryError};
+pub use asset_storage::{AssetStorageError, AssetStorageRepository, AssetStorageRoot};
 pub use auth::{
     AuthRepository, AuthRepositoryError, AuthSessionQuery, AuthSessionRecord, AuthUser,
     AuthenticatedPrincipal, AuthenticationOrigin, CredentialSnapshot, IssuedSession,

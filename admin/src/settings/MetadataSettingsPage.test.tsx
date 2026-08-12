@@ -10,6 +10,7 @@ import {
   deleteTheAudioDbSettings,
   deleteTmdbSettings,
   getMusicBrainzSettings,
+  getLocalMetadataStorage,
   getTheAudioDbSettings,
   getTmdbSettings,
   saveMusicBrainzSettings,
@@ -21,6 +22,7 @@ import {
   type MusicBrainzSettings,
   type TheAudioDbSettings,
   type TmdbSettings,
+  type LocalMetadataStorage,
 } from './metadataSettingsApi';
 
 vi.mock('./metadataSettingsApi', async (importOriginal) => {
@@ -31,6 +33,9 @@ vi.mock('./metadataSettingsApi', async (importOriginal) => {
     deleteTheAudioDbSettings: vi.fn(),
     deleteTmdbSettings: vi.fn(),
     getMusicBrainzSettings: vi.fn(),
+    getLocalMetadataStorage: vi.fn(),
+    cleanupLocalMetadata: vi.fn(),
+    saveLocalMetadataLocation: vi.fn(),
     getTheAudioDbSettings: vi.fn(),
     getTmdbSettings: vi.fn(),
     saveMusicBrainzSettings: vi.fn(),
@@ -54,6 +59,7 @@ const getMusicBrainzMock = vi.mocked(getMusicBrainzSettings);
 const saveMusicBrainzMock = vi.mocked(saveMusicBrainzSettings);
 const testMusicBrainzMock = vi.mocked(testMusicBrainzConnection);
 const deleteMusicBrainzMock = vi.mocked(deleteMusicBrainzSettings);
+const getLocalMetadataMock = vi.mocked(getLocalMetadataStorage);
 
 const databaseSettings: TmdbSettings = {
   provider: 'Tmdb',
@@ -84,6 +90,17 @@ const musicBrainzSettings: MusicBrainzSettings = {
   encryptionAvailable: true,
 };
 
+const localMetadataStorage: LocalMetadataStorage = {
+  currentPath: '/var/lib/tjxy/assets', pendingPath: null, historicalLocations: [],
+  source: 'Database', locationEditable: true, restartRequired: false,
+  checkedAt: '2026-08-12T03:00:00Z', cleanupInProgress: false,
+  statistics: {
+    total: { count: 3, bytes: 300 }, linked: { count: 2, bytes: 200 },
+    orphaned: { count: 1, bytes: 100 }, missing: { count: 0, bytes: 0 },
+    unregistered: { count: 0, bytes: 0 },
+  },
+};
+
 function renderPage() {
   return renderWithAdmin(
     <>
@@ -107,7 +124,9 @@ beforeEach(() => {
   saveMusicBrainzMock.mockReset();
   testMusicBrainzMock.mockReset();
   deleteMusicBrainzMock.mockReset();
+  getLocalMetadataMock.mockReset();
   getMock.mockResolvedValue(databaseSettings);
+  getLocalMetadataMock.mockResolvedValue(localMetadataStorage);
   saveMock.mockResolvedValue({ ...databaseSettings, revision: 3 });
   testMock.mockResolvedValue(undefined);
   deleteMock.mockResolvedValue(undefined);

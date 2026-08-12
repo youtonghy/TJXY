@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection,
     sea_query::{Alias, Expr, Order, Query},
@@ -6,8 +7,8 @@ use sea_orm_migration::MigratorTrait;
 use tjxy_common::CatalogItemId;
 use tjxy_db::MetadataPublicationRepository;
 use tjxy_metadata::{
-    MetadataCandidate, MetadataItemKind, MetadataLookup, MetadataResolution, MetadataSource,
-    NfoDocument,
+    MetadataCandidate, MetadataItemKind, MetadataLookup, MetadataNamedValue, MetadataPerson,
+    MetadataResolution, MetadataSource, NfoDocument,
 };
 use tjxy_test_support::test_database;
 
@@ -220,6 +221,104 @@ async fn metadata_publication_is_atomic_provenanced_and_replay_safe() {
         assert_eq!(hash.len(), 64);
         assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
+    assert_eq!(generation(&database).await, 1);
+}
+
+#[tokio::test]
+async fn rich_metadata_publishes_details_and_classification_atomically() {
+    let database = database().await;
+    let item = seed_item(&database).await;
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Toy Story 5", Some(2026)).unwrap();
+    let source = MetadataSource::new("Tmdb", Some("movie:1084244"), 8_000).unwrap();
+    let resolution = MetadataResolution::from_candidate(
+        &lookup,
+        MetadataCandidate::new(source)
+            .with_title("玩具总动员5")
+            .with_original_title("Toy Story 5")
+            .with_year(2026)
+            .with_overview("Woody and Buzz return.")
+            .with_provider_id("tmdb", "1084244")
+            .with_community_rating(7.4)
+            .with_vote_count(1250)
+            .with_runtime_ticks(60_000_000_000)
+            .with_premiere_date(NaiveDate::from_ymd_opt(2026, 6, 19).unwrap())
+            .with_release_status("Released")
+            .with_official_rating("PG")
+            .with_original_language("en")
+            .with_genres(vec!["Animation".to_owned(), "Family".to_owned()])
+            .with_studios(vec!["Pixar".to_owned()])
+            .with_countries(vec![
+                MetadataNamedValue::new("US", "United States").unwrap(),
+            ])
+            .with_languages(vec![MetadataNamedValue::new("en", "English").unwrap()])
+            .with_people(vec![
+                MetadataPerson::new("Tom Hanks", Some("Woody"), Some(0)).unwrap(),
+            ])
+            .with_details_loaded(),
+    )
+    .unwrap();
+    let repository = MetadataPublicationRepository::new(&database);
+
+    assert!(
+        repository
+            .publish(item, &resolution)
+            .await
+            .unwrap()
+            .changed()
+    );
+    assert!(
+        !repository
+            .publish(item, &resolution)
+            .await
+            .unwrap()
+            .changed()
+    );
+
+    let backend = database.get_database_backend();
+    let row = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("community_rating"),
+                        Alias::new("vote_count"),
+                        Alias::new("runtime_ticks"),
+                        Alias::new("release_status"),
+                        Alias::new("official_rating"),
+                        Alias::new("original_language"),
+                        Alias::new("metadata_payload_version"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!((row.try_get::<f64>("", "community_rating").unwrap() - 7.4).abs() < f64::EPSILON);
+    assert_eq!(row.try_get::<i64>("", "vote_count").unwrap(), 1250);
+    assert_eq!(
+        row.try_get::<i64>("", "runtime_ticks").unwrap(),
+        60_000_000_000
+    );
+    assert_eq!(
+        row.try_get::<String>("", "release_status").unwrap(),
+        "Released"
+    );
+    assert_eq!(row.try_get::<String>("", "official_rating").unwrap(), "PG");
+    assert_eq!(
+        row.try_get::<String>("", "original_language").unwrap(),
+        "en"
+    );
+    assert_eq!(
+        row.try_get::<i32>("", "metadata_payload_version").unwrap(),
+        1
+    );
+    assert_eq!(count(&database, "item_genres").await, 2);
+    assert_eq!(count(&database, "item_studios").await, 1);
+    assert_eq!(count(&database, "item_people").await, 1);
+    assert_eq!(count(&database, "item_countries").await, 1);
+    assert_eq!(count(&database, "item_languages").await, 1);
     assert_eq!(generation(&database).await, 1);
 }
 

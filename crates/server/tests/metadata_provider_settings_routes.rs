@@ -86,6 +86,20 @@ impl TmdbTransport for FixtureTransport {
             format!("{}:{}", self.label, self.language),
         )])
     }
+
+    async fn detail(
+        &self,
+        _kind: MetadataItemKind,
+        _id: u64,
+        _language: &str,
+    ) -> Result<MetadataCandidate, MetadataProviderError> {
+        let source = MetadataSource::new("Tmdb", Some("movie:1"), 8_000)
+            .map_err(|_| MetadataProviderError::InvalidResponse)?;
+        Ok(MetadataCandidate::new(source)
+            .with_title(format!("{}:{}", self.label, self.language))
+            .with_provider_id("tmdb", "1")
+            .with_details_loaded())
+    }
 }
 
 struct Fixture {

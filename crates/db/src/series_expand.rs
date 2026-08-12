@@ -73,6 +73,7 @@ pub struct SeriesExpandSnapshot {
     storage_root: StorageRootId,
     sync_revision: i64,
     objects: Vec<SeriesStorageObject>,
+    existing_seasons: HashMap<u32, CatalogItemId>,
 }
 
 impl SeriesExpandSnapshot {
@@ -95,6 +96,11 @@ impl SeriesExpandSnapshot {
     #[must_use]
     pub fn objects(&self) -> &[SeriesStorageObject] {
         &self.objects
+    }
+
+    #[must_use]
+    pub fn existing_season_id(&self, season: u32) -> Option<CatalogItemId> {
+        self.existing_seasons.get(&season).copied()
     }
 }
 
@@ -180,14 +186,67 @@ impl<'connection> SeriesExpandRepository<'connection> {
             })
             .collect::<Result<Vec<_>, DbErr>>()?;
         let objects = reconciled_subtree(root_object, storage_root, objects)?;
+        let existing_seasons = existing_season_ids(self.database, owner).await?;
         Ok(SeriesExpandSnapshot {
             owner,
             root_object,
             storage_root,
             sync_revision,
             objects,
+            existing_seasons,
         })
     }
+}
+
+async fn existing_season_ids(
+    connection: &impl ConnectionTrait,
+    owner: CatalogItemId,
+) -> Result<HashMap<u32, CatalogItemId>, DbErr> {
+    let series = Alias::new("existing_season_owner");
+    let projection = Alias::new("existing_season_projection");
+    let item = Alias::new("existing_season_item");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("id"))),
+            Alias::new("season_id"),
+        )
+        .expr_as(
+            Expr::col((item.clone(), Alias::new("index_number"))),
+            Alias::new("season_number"),
+        )
+        .from_as(Alias::new("catalog_items"), series.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("publication_catalog_items"),
+            projection.clone(),
+            Expr::col((projection.clone(), Alias::new("publication_id"))).equals((
+                series.clone(),
+                Alias::new("active_structure_publication_id"),
+            )),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            item.clone(),
+            Expr::col((item.clone(), Alias::new("id")))
+                .equals((projection, Alias::new("catalog_item_id"))),
+        )
+        .and_where(Expr::col((series, Alias::new("id"))).eq(owner.as_uuid()))
+        .and_where(Expr::col((item.clone(), Alias::new("item_type"))).eq("Season"))
+        .and_where(Expr::col((item, Alias::new("index_number"))).is_not_null())
+        .to_owned();
+    let backend = connection.get_database_backend();
+    let mut seasons = HashMap::new();
+    for row in connection.query_all(backend.build(&query)).await? {
+        let number: i32 = row.try_get("", "season_number")?;
+        if let Ok(number) = u32::try_from(number) {
+            seasons.insert(
+                number,
+                CatalogItemId::from_uuid(row.try_get("", "season_id")?),
+            );
+        }
+    }
+    Ok(seasons)
 }
 
 #[derive(Debug, Error)]
