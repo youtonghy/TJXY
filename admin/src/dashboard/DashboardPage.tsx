@@ -6,6 +6,7 @@ import { useLogoutIfAccessDenied } from 'ra-core';
 import { useCallback, useEffect, useState } from 'react';
 
 import { PageHeader } from '../ui/PageHeader';
+import { useTranslate } from '../settings/i18n';
 import { PlaybackTrendChart, TopItemsChart } from './DashboardCharts';
 import {
   getDashboardSnapshot,
@@ -19,6 +20,7 @@ import { HistorySection, NowPlayingTable, type HistoryResult, type HistoryTab } 
 const HISTORY_PAGE_SIZE = 25;
 
 export function DashboardPage() {
+  const tr = useTranslate();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [range, setRange] = useState<DashboardRange>('today');
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
@@ -89,7 +91,7 @@ export function DashboardPage() {
             />
             <Button
               isIconOnly
-              aria-label="Refresh dashboard"
+              aria-label={tr('Refresh dashboard', '刷新仪表盘')}
               className="shrink-0"
               onPress={refresh}
               variant="tertiary"
@@ -98,22 +100,22 @@ export function DashboardPage() {
             </Button>
           </div>
         )}
-        description="Server-wide catalog, playback, and account activity."
-        title="Dashboard"
+        description={tr('Server-wide catalog, playback, and account activity.', '查看服务器整体媒体库、播放和账户活动。')}
+        title={tr('Dashboard', '仪表盘')}
       />
 
       {error !== null && (
         <Alert status="danger">
           <Alert.Indicator />
-          <Alert.Content><Alert.Title>Dashboard data unavailable</Alert.Title><Alert.Description>Try refreshing after the server is ready.</Alert.Description></Alert.Content>
+          <Alert.Content><Alert.Title>{tr('Dashboard data unavailable', '无法加载仪表盘数据')}</Alert.Title><Alert.Description>{tr('Try refreshing after the server is ready.', '请在服务器就绪后刷新重试。')}</Alert.Description></Alert.Content>
         </Alert>
       )}
 
       {loading && snapshot === null ? <DashboardSkeleton /> : snapshot !== null && (
         <>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <p className="text-sm text-muted">{rangeLabel(range)} · {formatWindow(snapshot.summary.from, snapshot.summary.to)}</p>
-            <p className="text-xs tabular-nums text-muted">{snapshot.summary.catalogTotal.toLocaleString()} catalog records</p>
+            <p className="text-sm text-muted">{rangeLabel(range, tr)} · {formatWindow(snapshot.summary.from, snapshot.summary.to)}</p>
+            <p className="text-xs tabular-nums text-muted">{snapshot.summary.catalogTotal.toLocaleString()} {tr('catalog records', '条媒体记录')}</p>
           </div>
           <KpiGrid snapshot={snapshot} />
           <div className="grid gap-4 lg:grid-cols-2">
@@ -145,39 +147,41 @@ export function DashboardPage() {
 }
 
 function RangeTabs({ range, onRangeChange }: { range: DashboardRange; onRangeChange: (range: DashboardRange) => void }) {
+  const tr = useTranslate();
   return (
     <Tabs
       className="min-w-0 flex-1 sm:flex-none"
       selectedKey={range}
       onSelectionChange={(key) => { if (key === 'today' || key === '7d' || key === '30d') onRangeChange(key); }}
     >
-      <Tabs.ListContainer className="w-full sm:w-60"><Tabs.List aria-label="Dashboard time range" className="grid w-full min-w-0 grid-cols-3">
-        <Tabs.Tab className="whitespace-nowrap px-3" id="today">Today<Tabs.Indicator /></Tabs.Tab>
-        <Tabs.Tab className="whitespace-nowrap px-3" id="7d">7 days<Tabs.Indicator /></Tabs.Tab>
-        <Tabs.Tab className="whitespace-nowrap px-3" id="30d">30 days<Tabs.Indicator /></Tabs.Tab>
+      <Tabs.ListContainer className="w-full sm:w-60"><Tabs.List aria-label={tr('Dashboard time range', '仪表盘时间范围')} className="grid w-full min-w-0 grid-cols-3">
+        <Tabs.Tab className="whitespace-nowrap px-3" id="today">{tr('Today', '今天')}<Tabs.Indicator /></Tabs.Tab>
+        <Tabs.Tab className="whitespace-nowrap px-3" id="7d">{tr('7 days', '7 天')}<Tabs.Indicator /></Tabs.Tab>
+        <Tabs.Tab className="whitespace-nowrap px-3" id="30d">{tr('30 days', '30 天')}<Tabs.Indicator /></Tabs.Tab>
       </Tabs.List></Tabs.ListContainer>
     </Tabs>
   );
 }
 
 function KpiGrid({ snapshot }: { snapshot: DashboardSnapshot }) {
+  const tr = useTranslate();
   const summary = snapshot.summary;
   return (
-    <div aria-label="Server KPIs" className="grid gap-3 lg:grid-cols-2" role="group">
-      <KPIGroup aria-label="Accounts and library">
-        <DashboardKpi detail={`${summary.usersDisabled.toLocaleString()} disabled`} icon={UsersRound} label="Users" value={summary.usersTotal} />
+    <div aria-label={tr('Server KPIs', '服务器关键指标')} className="grid gap-3 lg:grid-cols-2" role="group">
+      <KPIGroup aria-label={tr('Accounts and library', '账户与媒体库')}>
+        <DashboardKpi detail={`${summary.usersDisabled.toLocaleString()} ${tr('disabled', '个已禁用')}`} icon={UsersRound} label={tr('Users', '用户')} value={summary.usersTotal} />
         <KPIGroup.Separator />
         <DashboardKpi
-          detail={`${summary.movies.toLocaleString()} movies · ${summary.series.toLocaleString()} series · ${summary.episodes.toLocaleString()} episodes`}
+          detail={`${summary.movies.toLocaleString()} ${tr('movies', '部电影')} · ${summary.series.toLocaleString()} ${tr('series', '部剧集')} · ${summary.episodes.toLocaleString()} ${tr('episodes', '集')}`}
           icon={LibraryBig}
-          label="Catalog records"
+          label={tr('Catalog records', '媒体记录')}
           value={summary.catalogTotal}
         />
       </KPIGroup>
-      <KPIGroup aria-label="Selected period activity">
-        <DashboardKpi detail="In the selected period" icon={CirclePlay} label="Playback starts" value={summary.playCount} />
+      <KPIGroup aria-label={tr('Selected period activity', '所选时段活动')}>
+        <DashboardKpi detail={tr('In the selected period', '所选时段内')} icon={CirclePlay} label={tr('Playback starts', '播放次数')} value={summary.playCount} />
         <KPIGroup.Separator />
-        <DashboardKpi detail="Distinct accounts with playback" icon={Eye} label="Unique viewers" value={summary.uniqueViewers} />
+        <DashboardKpi detail={tr('Distinct accounts with playback', '发生过播放的不同账户')} icon={Eye} label={tr('Unique viewers', '独立观众')} value={summary.uniqueViewers} />
       </KPIGroup>
     </div>
   );
@@ -197,12 +201,13 @@ function DashboardKpi({ detail, icon: Icon, label, value }: { detail: string; ic
 }
 
 function DashboardSkeleton() {
-  return <div className="space-y-4" role="status" aria-label="Loading dashboard"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton className="h-32 rounded-md" key={index} />)}</div><div className="grid gap-4 lg:grid-cols-2"><Skeleton className="h-80 rounded-md" /><Skeleton className="h-80 rounded-md" /></div></div>;
+  const tr = useTranslate();
+  return <div className="space-y-4" role="status" aria-label={tr('Loading dashboard', '正在加载仪表盘')}><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton className="h-32 rounded-md" key={index} />)}</div><div className="grid gap-4 lg:grid-cols-2"><Skeleton className="h-80 rounded-md" /><Skeleton className="h-80 rounded-md" /></div></div>;
 }
 
-function rangeLabel(range: DashboardRange): string {
-  if (range === 'today') return 'Today';
-  return range === '7d' ? 'Last 7 days' : 'Last 30 days';
+function rangeLabel(range: DashboardRange, tr: (english: string, chinese: string) => string): string {
+  if (range === 'today') return tr('Today', '今天');
+  return range === '7d' ? tr('Last 7 days', '最近 7 天') : tr('Last 30 days', '最近 30 天');
 }
 
 function formatWindow(from: string, to: string): string {
