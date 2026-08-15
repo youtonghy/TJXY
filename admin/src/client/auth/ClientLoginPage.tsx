@@ -9,6 +9,8 @@ import { useTranslate } from '../../settings/i18n';
 import { useActiveClientTheme } from '../themes/ThemeRuntime';
 import { useClientAuth } from './ClientAuthContext';
 import { safeClientDestination } from './clientDestination';
+import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
+import { ServerAddressField } from '../ui/ServerAddressField';
 
 export function ClientLoginPage() {
   const { isLoading, signIn, user } = useClientAuth();
@@ -19,10 +21,32 @@ export function ClientLoginPage() {
   const [visible, setVisible] = useState(false);
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [server, setServer] = useState(getStoredApiBaseUrl() ?? 'http://127.0.0.1:8096');
+  const [serverPending, setServerPending] = useState(false);
+  const [serverError, setServerError] = useState<string>();
+  const [serverOk, setServerOk] = useState(Boolean(getStoredApiBaseUrl()));
   const { locale, setLocale, siteTitle, siteSubtitle, logoUrl } = useSystemLocale();
   const { definition, options } = useActiveClientTheme();
   const tr = useTranslate();
   const destination = safeClientDestination(new URLSearchParams(location.search).get('redirect'));
+
+  async function connectServer(): Promise<string> {
+    setServerPending(true);
+    setServerError(undefined);
+    try {
+      const origin = await probeServer(server);
+      setApiBaseUrl(origin);
+      setServer(origin);
+      setServerOk(true);
+      return origin;
+    } catch {
+      setServerOk(false);
+      setServerError(tr('Could not reach that server.', '无法连接到该服务器。'));
+      throw new Error('unreachable');
+    } finally {
+      setServerPending(false);
+    }
+  }
 
   async function submit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -30,6 +54,7 @@ export function ClientLoginPage() {
     setPending(true);
     setFailed(false);
     try {
+      if (isDesktopShell()) await connectServer();
       await signIn(username, password);
       navigate(destination, { replace: true });
     } catch {
@@ -57,11 +82,32 @@ export function ClientLoginPage() {
     >
       <h1 className="text-2xl font-semibold text-foreground">{tr('Welcome back', '欢迎回来')}</h1>
       <p className="mt-1 text-sm text-muted">{tr('Sign in to continue watching.', '登录后继续观看。')}</p>
-      {failed && <Alert className="mt-5" role="alert" status="danger"><Alert.Indicator><CircleAlert className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>{tr('Sign in failed', '登录失败')}</Alert.Title><Alert.Description>{tr('Check your username and password.', '请检查用户名和密码。')}</Alert.Description></Alert.Content></Alert>}
+      {isDesktopShell() && (
+        <div className="mt-5">
+          <ServerAddressField
+            error={serverError}
+            ok={serverOk}
+            pending={serverPending}
+            required
+            value={server}
+            onChange={(next) => { setServer(next); setServerOk(false); setServerError(undefined); }}
+            onSave={() => { void connectServer(); }}
+          />
+        </div>
+      )}
+      {failed && !serverError && (
+        <Alert className="mt-5" role="alert" status="danger">
+          <Alert.Indicator><CircleAlert className="size-4" /></Alert.Indicator>
+          <Alert.Content>
+            <Alert.Title>{tr('Sign in failed', '登录失败')}</Alert.Title>
+            <Alert.Description>{tr('Check your username and password.', '请检查用户名和密码。')}</Alert.Description>
+          </Alert.Content>
+        </Alert>
+      )}
       <form className="mt-6 space-y-4" onSubmit={(event) => { void submit(event); }}>
         <TextField fullWidth isRequired name="username"><Label>{tr('Username', '用户名')}</Label><Input autoComplete="username" fullWidth value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} /></TextField>
         <TextField fullWidth isRequired name="password"><Label>{tr('Password', '密码')}</Label><div className="relative"><Input autoComplete="current-password" className="pr-11" fullWidth type={visible ? 'text' : 'password'} value={password} onChange={(event) => { setPassword(event.currentTarget.value); }} /><Tooltip><Button aria-label={visible ? tr('Hide password', '隐藏密码') : tr('Show password', '显示密码')} className="absolute right-1 top-1/2 -translate-y-1/2" isIconOnly onPress={() => { setVisible((value) => !value); }} size="sm" type="button" variant="ghost">{visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button><Tooltip.Content>{visible ? tr('Hide password', '隐藏密码') : tr('Show password', '显示密码')}</Tooltip.Content></Tooltip></div></TextField>
-        <Button fullWidth isDisabled={pending} type="submit">{pending ? tr('Signing in…', '登录中…') : tr('Sign in', '登录')}</Button>
+        <Button fullWidth isDisabled={pending || serverPending} type="submit">{pending ? tr('Signing in…', '登录中…') : tr('Sign in', '登录')}</Button>
       </form>
     </LoginFrame>
   );

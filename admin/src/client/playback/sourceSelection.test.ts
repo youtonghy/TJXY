@@ -1,4 +1,10 @@
-import { selectBrowserSource, sourceLabel } from './sourceSelection';
+import { selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
+
+it('keeps MKV sources for native desktop playback', () => {
+  const mkv = { Id: 'mkv', Container: 'mkv', SupportsDirectPlay: true, DirectStreamUrl: '/Videos/item/stream' };
+  expect(selectNativeSource([mkv])?.Id).toBe('mkv');
+  expect(selectBrowserSource([mkv])).toBeNull();
+});
 
 it('keeps server source priority and rejects an MKV-only source list', () => {
   const mkv = { Id: 'mkv', Container: 'mkv', SupportsDirectPlay: true, DirectStreamUrl: '/Videos/item/stream' };

@@ -1,3 +1,4 @@
+import { desktopAwareFetch, getApiBaseUrl, resolveApiUrl } from './apiBase';
 import { clientIdentityHeader, clearClientToken, getClientToken } from '../auth/clientSession';
 
 export type ClientErrorKind = 'network' | 'authentication' | 'authorization' | 'not-found' | 'validation' | 'unavailable' | 'invalid-response' | 'unexpected';
@@ -33,8 +34,12 @@ export async function clientFetch(path: string, options: RequestInit = {}): Prom
   else headers.set('Authorization', clientIdentityHeader());
   if (options.body !== undefined && options.body !== null && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   let response: Response;
-  try { response = await fetch(new Request(new URL(path, window.location.origin), { ...options, headers })); }
-  catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; throw new ClientApiError(0, 'network'); }
+  try {
+    const baseUrl = getApiBaseUrl();
+    if (!baseUrl) throw new ClientApiError(0, 'validation');
+    response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, headers });
+  }
+  catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; if (error instanceof ClientApiError) throw error; throw new ClientApiError(0, 'network'); }
   if (response.status === 401 && token) clearClientToken();
   return response;
 }
@@ -47,3 +52,4 @@ function errorKind(status: number): ClientErrorKind {
   if (status >= 500) return 'unavailable';
   return 'unexpected';
 }
+

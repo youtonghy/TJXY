@@ -2,16 +2,27 @@ import type { PlaybackSource } from '../api/playbackApi';
 
 const BROWSER_CONTAINERS = new Set(['mp4', 'm4v', 'webm', 'mp3', 'm4a', 'ogg']);
 
+function isDirectPlaySource(source: PlaybackSource): boolean {
+  return source.SupportsDirectPlay !== false && Boolean(source.DirectStreamUrl);
+}
+
 export function browserSources(sources: PlaybackSource[]): PlaybackSource[] {
   return sources.filter((source) => (
-    source.SupportsDirectPlay !== false
-    && Boolean(source.DirectStreamUrl)
+    isDirectPlaySource(source)
     && BROWSER_CONTAINERS.has((source.Container ?? '').toLowerCase())
   ));
 }
 
+export function nativeSources(sources: PlaybackSource[]): PlaybackSource[] {
+  return sources.filter(isDirectPlaySource);
+}
+
 export function selectBrowserSource(sources: PlaybackSource[]): PlaybackSource | null {
   return browserSources(sources)[0] ?? null;
+}
+
+export function selectNativeSource(sources: PlaybackSource[]): PlaybackSource | null {
+  return nativeSources(sources)[0] ?? null;
 }
 
 export function sourceLabel(source: PlaybackSource): string {

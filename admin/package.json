@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@heroui-pro/react": "^1.0.0-beta.8",
+    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-http": "^2.5.0",
     "@heroui/react": "3.2.2",
     "@heroui/styles": "3.2.2",
     "@number-flow/react": "^0.6.2",

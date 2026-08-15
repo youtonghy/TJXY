@@ -18,7 +18,8 @@ import {
   type PlaybackTicket,
 } from '../api/playbackApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
-import { browserSources, selectBrowserSource, sourceLabel } from './sourceSelection';
+import { getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../api/apiBase';
+import { browserSources, nativeSources, selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
 import { useTranslate } from '../../settings/i18n';
 
 type LoadState = 'loading' | 'ready' | 'no-source' | 'unsupported' | 'error';
@@ -104,8 +105,11 @@ export function PlayerPage() {
         }
         const playback = await getPlaybackInfo(id);
         if (!playback.PlaySessionId) throw new Error('missing playback session');
-        const compatible = browserSources(playback.MediaSources ?? []);
-        const initial = selectBrowserSource(compatible);
+        const desktop = isDesktopShell();
+        const compatible = desktop
+          ? nativeSources(playback.MediaSources ?? [])
+          : browserSources(playback.MediaSources ?? []);
+        const initial = desktop ? selectNativeSource(compatible) : selectBrowserSource(compatible);
         if (!initial) {
           setState('unsupported');
           return;
@@ -205,6 +209,39 @@ export function PlayerPage() {
     }
   }, [selectedSubtitle, subtitleTracks]);
 
+  const desktop = isDesktopShell();
+
+  useEffect(() => {
+    if (!desktop || !id || !ticket || !item || !selectedSource || !playSessionId) return;
+    let cancelled = false;
+    const streamUrl = ticket.StreamUrl.startsWith('http')
+      ? ticket.StreamUrl
+      : resolveApiUrl(ticket.StreamUrl, getApiBaseUrl());
+    void import('./desktopPlayer')
+      .then(({ playExternalStream }) => playExternalStream(streamUrl, item.Name))
+      .then(() => {
+        if (cancelled) return;
+        startedRef.current = true;
+        const nextState = {
+          itemId: id,
+          mediaSourceId: selectedSource.Id,
+          playSessionId,
+          positionTicks: positionTicksRef.current,
+        };
+        lastProgressTicksRef.current = nextState.positionTicks;
+        void startPlayback(nextState);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setPlaybackError(error instanceof Error ? error.message : 'External player failed.');
+        }
+      });
+    return () => {
+      cancelled = true;
+      void import('./desktopPlayer').then(({ stopExternalPlayer }) => stopExternalPlayer()).catch(() => undefined);
+    };
+  }, [desktop, id, item, playSessionId, selectedSource, ticket]);
+
   if (!id) return <p className="text-muted">{tr('This title could not be found.', '找不到此影片。')}</p>;
   if (state === 'loading') return <Skeleton className="aspect-video w-full rounded-lg" />;
   if (state === 'error') {
@@ -232,8 +269,10 @@ export function PlayerPage() {
   }
   if (state === 'unsupported') {
     return (
-      <PlaybackAlert id={id} status="warning" title={tr('No browser-compatible source', '没有浏览器兼容的视频源')}>
-        {tr('Choose an MP4, WebM, MP3, M4A, or Ogg source for browser playback.', '请选择 MP4、WebM、MP3、M4A 或 Ogg 格式以在浏览器中播放。')}
+      <PlaybackAlert id={id} status="warning" title={desktop ? tr('No playable source', '没有可播放的视频源') : tr('No browser-compatible source', '没有浏览器兼容的视频源')}>
+        {desktop
+          ? tr('This title has no direct-play source.', '此影片没有可直接播放的视频源。')
+          : tr('Choose an MP4, WebM, MP3, M4A, or Ogg source for browser playback.', '请选择 MP4、WebM、MP3、M4A 或 Ogg 格式以在浏览器中播放。')}
       </PlaybackAlert>
     );
   }
@@ -282,6 +321,24 @@ export function PlayerPage() {
       </div>
 
       <div className="overflow-hidden rounded-lg bg-black shadow-sm">
+        {desktop ? (
+          <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center text-white">
+            <p className="text-lg font-medium">{tr(`Playing ${item.Name} in the system player`, `正在系统播放器中播放 ${item.Name}`)}</p>
+            <p className="text-sm text-white/70">{tr('Install ffplay (FFmpeg) or mpv if the player does not start.', '若播放器未启动，请安装 ffplay（FFmpeg）或 mpv。')}</p>
+            <Button
+              variant="secondary"
+              onPress={() => {
+                void import('./desktopPlayer').then(({ stopExternalPlayer }) => stopExternalPlayer());
+                if (startedRef.current) {
+                  startedRef.current = false;
+                  void stopPlayback(playbackState(positionTicksRef.current));
+                }
+              }}
+            >
+              {tr('Stop player', '停止播放')}
+            </Button>
+          </div>
+        ) : (
         <video
           aria-label={tr(`Playing ${item.Name}`, `正在播放 ${item.Name}`)}
           className="aspect-video w-full"
@@ -335,6 +392,7 @@ export function PlayerPage() {
             />
           ))}
         </video>
+        )}
       </div>
 
       {playbackError && (

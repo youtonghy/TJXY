@@ -36,6 +36,8 @@ import {
   type UserProfile,
 } from '../api/portalApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
+import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
+import { ServerAddressField } from '../ui/ServerAddressField';
 import { useTranslate } from '../../settings/i18n';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 
@@ -53,6 +55,10 @@ export function ProfilePage() {
   const [insights, setInsights] = useState<UserInsights>();
   const [range, setRange] = useState<InsightRange>('today');
   const [editing, setEditing] = useState(false);
+  const [server, setServer] = useState(getStoredApiBaseUrl() ?? 'http://127.0.0.1:8096');
+  const [serverPending, setServerPending] = useState(false);
+  const [serverError, setServerError] = useState<string>();
+  const [serverOk, setServerOk] = useState(false);
   const tr = useTranslate();
   const { locale } = useSystemLocale();
 
@@ -73,6 +79,40 @@ export function ProfilePage() {
           <Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button>
         </Card.Content>
       </Card>
+
+      {isDesktopShell() && (
+        <Card>
+          <Card.Header>
+            <Card.Title>{tr('Server', '服务器')}</Card.Title>
+            <Card.Description>{tr('Changing the server address signs you out.', '更改服务器地址会退出当前登录。')}</Card.Description>
+          </Card.Header>
+          <Card.Content>
+            <ServerAddressField
+              error={serverError}
+              ok={serverOk}
+              pending={serverPending}
+              value={server}
+              onChange={(next) => { setServer(next); setServerOk(false); setServerError(undefined); }}
+              onSave={() => {
+                setServerPending(true);
+                setServerError(undefined);
+                void probeServer(server)
+                  .then(async (origin) => {
+                    setApiBaseUrl(origin);
+                    setServer(origin);
+                    setServerOk(true);
+                    await signOut();
+                    void navigate('/app/login', { replace: true });
+                  })
+                  .catch(() => {
+                    setServerError(tr('Could not reach that server.', '无法连接到该服务器。'));
+                  })
+                  .finally(() => { setServerPending(false); });
+              }}
+            />
+          </Card.Content>
+        </Card>
+      )}
 
       <section className="space-y-5" aria-labelledby="statistics-heading">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">

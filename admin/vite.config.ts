@@ -44,6 +44,8 @@ export default defineConfig(({ mode }) => {
         '/Sessions': target,
         '/Videos': target,
         '/Audio': target,
+        '/Discover': target,
+        '/PlaybackTickets': target,
       },
     },
   };

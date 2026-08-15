@@ -24,7 +24,10 @@ export function getClientDeviceId(): string {
 }
 
 export function clientIdentityHeader(): string {
-  return `MediaBrowser Client="TJXY Web", Device="Browser", DeviceId="${getClientDeviceId()}", Version="0.1.0"`;
+  const desktop = import.meta.env.VITE_TJXY_SHELL === 'desktop';
+  const client = desktop ? 'TJXY Desktop' : 'TJXY Web';
+  const device = desktop ? 'Desktop' : 'Browser';
+  return `MediaBrowser Client="${client}", Device="${device}", DeviceId="${getClientDeviceId()}", Version="0.1.0"`;
 }
 
 export { SESSION_TOKEN_KEY as CLIENT_TOKEN_KEY, SESSION_DEVICE_KEY as CLIENT_DEVICE_KEY };

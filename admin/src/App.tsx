@@ -1,7 +1,8 @@
+import { isDesktopShell } from './client/api/apiBase';
 import { Spinner } from '@heroui/react';
 import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
 import { lazy, Suspense, type ComponentType } from 'react';
-import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
@@ -48,6 +49,10 @@ export function App() {
   );
 }
 
+function NavigateToApp() {
+  return <Navigate replace to="/app/" />;
+}
+
 function RouteLoading() {
   return (
     <div className="flex min-h-screen items-center justify-center" role="status">
@@ -75,6 +80,14 @@ function RouteBoundary() {
 }
 
 function ApplicationRoutes() {
+  if (isDesktopShell()) {
+    return (
+      <Routes>
+        <Route element={<ClientApp />} path="/app/*" />
+        <Route element={<NavigateToApp />} path="*" />
+      </Routes>
+    );
+  }
   return (
       <Routes>
         <Route element={<ClientApp />} path="/app/*" />

@@ -1,4 +1,5 @@
 import { getAccessToken, getDeviceId } from '../auth/session';
+import { desktopAwareFetch, getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../client/api/apiBase';
 
 export type ApiErrorCategory =
   | 'network'
@@ -66,11 +67,14 @@ export async function apiRequest<T = undefined>(
 
   let response: Response;
   try {
-    response = await fetch(new Request(new URL(path, window.location.origin), {
+    const origin = getApiBaseUrl() || (isDesktopShell() ? '' : window.location.origin);
+    if (!origin) throw apiError(0, 'network');
+    response = await desktopAwareFetch(resolveApiUrl(path, origin), {
       ...requestOptions,
       headers,
-    }));
-  } catch {
+    });
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw apiError(0, 'network');
   }
 
