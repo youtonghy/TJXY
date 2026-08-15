@@ -676,7 +676,7 @@ async fn admission_enforces_persisted_daily_token_limits_before_provider_io() {
     app.database
         .execute(
             backend.build(
-                Query::update()
+                &Query::update()
                     .table(Alias::new("ai_provider_settings"))
                     .value(Alias::new("daily_total_token_limit"), 0_i64)
                     .value(Alias::new("daily_user_token_limit"), 100_i64)
@@ -696,7 +696,7 @@ async fn admission_enforces_persisted_daily_token_limits_before_provider_io() {
     app.database
         .execute(
             backend.build(
-                Query::update()
+                &Query::update()
                     .table(Alias::new("ai_provider_settings"))
                     .value(Alias::new("daily_total_token_limit"), 100_i64)
                     .value(Alias::new("daily_user_token_limit"), 0_i64)
