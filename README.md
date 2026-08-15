@@ -147,7 +147,10 @@ SSE streams per user, 8 concurrent SSE streams server-wide, and 100 requests per
 user per UTC day. Configure these limits with
 `TJXY_AI_REQUESTS_PER_MINUTE`,
 `TJXY_AI_MAX_CONCURRENT_STREAMS_PER_USER`,
-`TJXY_AI_MAX_CONCURRENT_STREAMS`, and `TJXY_AI_DAILY_QUOTA`. Admission rejections
+`TJXY_AI_MAX_CONCURRENT_STREAMS`, and `TJXY_AI_DAILY_QUOTA`. Administrators can
+set server-wide and per-user daily Token limits under **Admin > AI assistant**;
+these limits use upstream-reported `total_tokens`, reset at server-local
+midnight, and treat `0` as unlimited. Admission rejections
 return `429 Too Many Requests` with `Retry-After` in delta seconds and
 `Cache-Control: no-store`; provider I/O is not started for rejected requests.
 
@@ -191,6 +194,13 @@ Use `g` to switch between Chinese and English. Set `TJXY_TUI_LANGUAGE=en-US` to
 start in English; Chinese is the default. Backend logs are read from
 `TJXY_LOG_FILE`, or `data/server.log` when it is unset. The process launcher must
 redirect backend stdout and stderr to that file for logs to appear in the TUI.
+The server also writes structured JSON Lines logs to `data/logs`; set
+`TJXY_LOG_DIR` to override that directory. **Admin > Logs** switches file logging
+between the default Error mode and a Debug mode covering scan, metadata,
+expansion, source indexing, probe, import, and Lazy-click workflows. Files rotate
+on UTC dates and retain 1-365 days as configured by an administrator. Log fields
+must not include authentication headers, credentials, response bodies, or raw
+provider payloads.
 Development builds pair binaries by Cargo profile: a debug TUI starts only the
 debug server, and a release TUI starts only the release server. The diagnostics
 view shows the selected server path. Portable release bundles continue to use
@@ -268,6 +278,21 @@ The normalized title and four-digit year are stored separately in
 always pass those values as separate parameters. Upgrades repair legacy Partial
 Movie/Series rows that still contain a trailing year in `name`, while preserving
 rows that already have remote title provenance or provider identities.
+
+`local_only` libraries can additionally select `import` or `direct` local
+metadata access. `import` preserves the existing behavior: parsed NFO fields are
+published to the catalog and local artwork is copied into TJXY's asset store.
+`direct` is available only for filesystem roots. It keeps the lightweight item,
+source, playback, subtitle, and user-data indexes required by the Jellyfin API,
+but stores only revision-fenced references to NFO, Primary, and Backdrop files.
+Detail requests parse the referenced NFO in memory and image requests stream the
+original file without copying bytes into TJXY. Lazy Direct libraries create
+those references only when an item is opened; lists therefore keep the naming
+placeholder until then. Search, sort, filters, similar-items, and AI continue to
+use the lightweight SQL fields rather than NFO-only rich fields. If an item is
+also visible through an Import or automatic library, imported canonical metadata
+takes precedence. Switching to Direct does not immediately delete historical
+asset blobs; normal reference-safe asset cleanup remains responsible for them.
 Administrator detail pages show an accent scan-in-progress status while the
 item remains Partial, then distinguish a confirmed provider no-match from a
 generic unavailable result. These operational messages are not rendered for
@@ -774,6 +799,30 @@ only on `127.0.0.1:5433` for local tools; from the TJXY container use host
 the manifest is persisted under `/config` and branding/application data under
 `/data`.
 
+The default Dockerfile builds the frontend from its lockfile. Maintainers with
+HeroUI Pro access can instead build the licensed frontend on the host and pass
+only the generated, platform-independent `admin/dist` directory to Docker. The
+key is used only by `hpsetup`; it is not included in the Docker build context or
+image:
+
+```bash
+cd admin
+HEROUI_KEY="$HeroPro" npx -y hpsetup@latest --auto
+npm run build
+cd ..
+docker compose -f compose.yaml -f compose.prebuilt.yaml up --build
+```
+
+`compose.prebuilt.yaml` uses `admin/dist` as a named BuildKit context and fails
+the image build when `index.html` is missing or empty. It never copies host
+`node_modules` into the Linux image. End users of a published, prebuilt image do
+not need HeroUI Pro credentials; only the maintainer producing `admin/dist`
+does.
+
+To build the frontend inside Docker instead, use the original source-build
+path. That environment must independently have access to all licensed HeroUI
+Pro artifacts:
+
 ```bash
 docker compose up --build
 ```
@@ -816,7 +865,10 @@ cd tjxy-v0.1.0-linux-x86_64-gnu
 ```
 
 The TUI starts and manages the sibling `tjxy-server`; use `1` to start, `2` to
-stop, and `3` to restart it. It writes its PID and log under `data/`. The server
+stop, and `3` to restart it. Press `4` to rebuild the frontend and release
+server/TUI with the existing lockfiles, then restart the server automatically.
+This action never runs `hpsetup` or changes frontend dependencies; if a build
+fails, the running server is left untouched. It writes its PID and log under `data/`. The server
 defaults to the bundled `admin/dist`, `./data` for setup data, and the platform
 configuration directory for `tjxy.toml`. Copy `.env.example` to `.env` only when
 runtime overrides are needed; do not commit credentials or database URLs.

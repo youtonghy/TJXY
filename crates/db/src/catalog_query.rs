@@ -13,7 +13,7 @@ use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, ImageType, PublicationId, StorageObjectRecordId, StorageRootId, UserId,
 };
-use tjxy_domain::MetadataSourceMode;
+use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
 use uuid::Uuid;
 
 use crate::{
@@ -464,6 +464,22 @@ impl CatalogItemRecord {
     pub const fn primary_image_aspect_ratio(&self) -> Option<f64> {
         self.primary_image_aspect_ratio
     }
+
+    pub fn apply_direct_metadata(
+        &mut self,
+        name: Option<&str>,
+        original_title: Option<&str>,
+        production_year: Option<i32>,
+        overview: Option<&str>,
+    ) {
+        if let Some(name) = name {
+            self.name = name.to_owned();
+        }
+        self.original_title = original_title.map(str::to_owned);
+        self.production_year = production_year.or(self.production_year);
+        self.overview = overview.map(str::to_owned);
+        self.metadata_state = "Complete".to_owned();
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -625,6 +641,36 @@ impl CatalogItemDetailRecord {
     pub const fn has_media_sources(&self) -> bool {
         self.has_media_sources
     }
+
+    pub fn apply_direct_nfo(&mut self, document: &tjxy_metadata::NfoDocument) {
+        self.item.apply_direct_metadata(
+            document.title(),
+            document.original_title(),
+            document.production_year(),
+            document.overview(),
+        );
+        self.genres = document.genres().to_vec();
+        self.studios = document.studios().to_vec();
+        self.provider_ids = document.provider_ids().clone();
+        self.credits = document
+            .people()
+            .iter()
+            .enumerate()
+            .map(|(index, person)| CatalogCreditRecord {
+                person_id: Uuid::new_v5(
+                    &self.item.id.as_uuid(),
+                    format!("{}:{index}", person.name()).as_bytes(),
+                ),
+                person_name: person.name().to_owned(),
+                role: person.role().unwrap_or("").to_owned(),
+                credit_type: Some("Actor".to_owned()),
+                sort_order: person
+                    .order()
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(index as i32),
+            })
+            .collect();
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -709,6 +755,7 @@ pub struct LazyCatalogWorkTarget {
     metadata_is_partial: bool,
     metadata_requirement: Option<MetadataRequirement>,
     metadata_source_mode: MetadataSourceMode,
+    local_metadata_access_mode: LocalMetadataAccessMode,
     metadata_revision: i64,
     metadata_resolved_revision: i64,
     metadata_resolved_requirement: Option<MetadataRequirement>,
@@ -780,13 +827,21 @@ impl LazyCatalogWorkTarget {
     }
 
     #[must_use]
-    pub const fn should_retry_metadata(self) -> bool {
-        (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
-            && self.metadata_requirement.is_some()
-            && matches!(
-                self.metadata_source_mode,
-                MetadataSourceMode::AutomaticScrape
-            )
+    pub fn should_retry_metadata(self) -> bool {
+        self.metadata_requirement.is_some_and(|requirement| {
+            if matches!(
+                self.local_metadata_access_mode,
+                LocalMetadataAccessMode::Direct
+            ) {
+                self.needs_metadata_resolution(requirement)
+            } else {
+                (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
+                    && matches!(
+                        self.metadata_source_mode,
+                        MetadataSourceMode::AutomaticScrape
+                    )
+            }
+        })
     }
 
     #[must_use]
@@ -800,13 +855,21 @@ impl LazyCatalogWorkTarget {
     }
 
     #[must_use]
+    pub const fn local_metadata_access_mode(self) -> LocalMetadataAccessMode {
+        self.local_metadata_access_mode
+    }
+
+    #[must_use]
     pub const fn metadata_revision(self) -> i64 {
         self.metadata_revision
     }
 
     #[must_use]
     pub const fn needs_metadata_resolution(self, requirement: MetadataRequirement) -> bool {
-        self.requires_metadata_payload_upgrade()
+        (!matches!(
+            self.local_metadata_access_mode,
+            LocalMetadataAccessMode::Direct
+        ) && self.requires_metadata_payload_upgrade())
             || self.metadata_resolved_revision < self.metadata_revision
             || match self.metadata_resolved_requirement {
                 Some(current) => current.as_i32() < requirement.as_i32(),
@@ -1679,6 +1742,8 @@ impl<'connection> CatalogQueryRepository<'connection> {
                     metadata_requirement: metadata_policy.map(|policy| policy.0),
                     metadata_source_mode: metadata_policy
                         .map_or(MetadataSourceMode::LocalOnly, |policy| policy.1),
+                    local_metadata_access_mode: metadata_policy
+                        .map_or(LocalMetadataAccessMode::Import, |policy| policy.2),
                     metadata_revision: row.try_get("", "metadata_revision")?,
                     metadata_resolved_revision: row.try_get("", "metadata_resolved_revision")?,
                     metadata_resolved_requirement: row
@@ -1711,7 +1776,14 @@ impl<'connection> CatalogQueryRepository<'connection> {
     async fn lazy_metadata_policy(
         &self,
         item_id: CatalogItemId,
-    ) -> Result<Option<(MetadataRequirement, MetadataSourceMode)>, CatalogQueryError> {
+    ) -> Result<
+        Option<(
+            MetadataRequirement,
+            MetadataSourceMode,
+            LocalMetadataAccessMode,
+        )>,
+        CatalogQueryError,
+    > {
         let item = Alias::new("lazy_policy_item");
         let membership = Alias::new("lazy_policy_membership");
         let library = Alias::new("lazy_policy_library");
@@ -1719,6 +1791,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .columns([
                 (library.clone(), Alias::new("metadata_policy")),
                 (library.clone(), Alias::new("metadata_source_mode")),
+                (library.clone(), Alias::new("local_metadata_access_mode")),
             ])
             .from_as(Alias::new("catalog_items"), item.clone())
             .join_as(
@@ -1748,6 +1821,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let backend = self.database.get_database_backend();
         let mut requirement = None;
         let mut source_mode = MetadataSourceMode::LocalOnly;
+        let mut access_mode = LocalMetadataAccessMode::Direct;
         for row in self.database.query_all(backend.build(&query)).await? {
             let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
                 "none" => None,
@@ -1762,9 +1836,17 @@ impl<'connection> CatalogQueryRepository<'connection> {
                     "local_only" => {}
                     _ => return Err(CatalogQueryError::InvalidMetadataSourceMode),
                 }
+                match row
+                    .try_get::<String>("", "local_metadata_access_mode")?
+                    .as_str()
+                {
+                    "import" => access_mode = LocalMetadataAccessMode::Import,
+                    "direct" => {}
+                    _ => return Err(CatalogQueryError::InvalidMetadataSourceMode),
+                }
             }
         }
-        Ok(requirement.map(|requirement| (requirement, source_mode)))
+        Ok(requirement.map(|requirement| (requirement, source_mode, access_mode)))
     }
 
     async fn lazy_storage_scope(
@@ -3728,6 +3810,54 @@ async fn attach_image_tags(
                 .entry(item_id)
                 .or_default()
                 .insert(image_type, sha256);
+        }
+    }
+    let direct = Alias::new("direct_image_ref");
+    let direct_rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        (direct.clone(), Alias::new("catalog_item_id")),
+                        (direct.clone(), Alias::new("resource_kind")),
+                        (direct.clone(), Alias::new("storage_object_id")),
+                        (direct.clone(), Alias::new("priority")),
+                        (direct.clone(), Alias::new("input_revision")),
+                    ])
+                    .from_as(Alias::new("direct_metadata_refs"), direct.clone())
+                    .and_where(
+                        Expr::col((direct.clone(), Alias::new("catalog_item_id")))
+                            .is_in(items.iter().map(|item| item.id.as_uuid())),
+                    )
+                    .and_where(
+                        Expr::col((direct.clone(), Alias::new("resource_kind")))
+                            .is_in(["Primary", "Backdrop"]),
+                    )
+                    .order_by((direct.clone(), Alias::new("catalog_item_id")), Order::Asc)
+                    .order_by((direct.clone(), Alias::new("resource_kind")), Order::Asc)
+                    .order_by((direct, Alias::new("priority")), Order::Asc),
+            ),
+        )
+        .await?;
+    for row in direct_rows {
+        let item_id: Uuid = row.try_get("", "catalog_item_id")?;
+        let kind: String = row.try_get("", "resource_kind")?;
+        let priority: i32 = row.try_get("", "priority")?;
+        let object_id: Uuid = row.try_get("", "storage_object_id")?;
+        let revision: i64 = row.try_get("", "input_revision")?;
+        let tag = format!("direct-{object_id}-{revision}");
+        if kind == "Backdrop" {
+            let values = backdrops.entry(item_id).or_default();
+            if !values.contains(&tag) {
+                values.push(tag.clone());
+            }
+        }
+        if priority == 0 {
+            by_item
+                .entry(item_id)
+                .or_default()
+                .entry(kind)
+                .or_insert(tag);
         }
     }
     for item in items {

@@ -221,6 +221,7 @@ pub struct CatalogQueryService {
     database: DatabaseConnection,
     lazy_wait_timeout: Duration,
     cache: Option<CatalogCache>,
+    direct_metadata: Option<Arc<crate::DirectMetadataReadService>>,
 }
 
 #[derive(Clone)]
@@ -246,7 +247,14 @@ impl CatalogQueryService {
             database,
             lazy_wait_timeout: Duration::ZERO,
             cache: None,
+            direct_metadata: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_direct_metadata(mut self, service: Arc<crate::DirectMetadataReadService>) -> Self {
+        self.direct_metadata = Some(service);
+        self
     }
 
     #[must_use]
@@ -772,16 +780,26 @@ impl CatalogQueryService {
         if let Some(target) = repository.lazy_work_target(principal, item_id).await?
             && matches!(
                 target.item_type(),
-                CatalogItemType::Movie | CatalogItemType::Series
+                CatalogItemType::Movie | CatalogItemType::Series | CatalogItemType::Episode
             )
             && target.should_retry_metadata()
         {
+            tracing::debug!(
+                trigger = "lazy_click",
+                task_kind = WorkTaskKind::ResolveMetadata.as_str(),
+                scope_type = "CatalogItem",
+                scope_id = %item_id,
+                expected_revision = target.metadata_revision(),
+                "lazy detail requested metadata resolution"
+            );
             self.retry_metadata_and_wait(target, item_id).await?;
         }
         let Some(cache) = &self.cache else {
-            return self
+            let mut item = self
                 .read_item_detail_with_lazy(&repository, principal, item_id)
-                .await;
+                .await?;
+            self.apply_direct_metadata(item_id, &mut item).await;
+            return Ok(item);
         };
         let revisions = repository.cache_revisions(principal).await?;
         let descriptor = format!("rich-detail/{item_id}");
@@ -793,10 +811,16 @@ impl CatalogQueryService {
             &CacheQueryDigest::from_bytes(descriptor.as_bytes()),
         );
         match cache_lookup(cache, &key).await {
-            CacheLookup::Hit(item) => Ok(item),
+            CacheLookup::Hit(mut item) => {
+                self.apply_direct_metadata(item_id, &mut item).await;
+                Ok(item)
+            }
             CacheLookup::Fallback => {
-                self.read_item_detail_with_lazy(&repository, principal, item_id)
-                    .await
+                let mut item = self
+                    .read_item_detail_with_lazy(&repository, principal, item_id)
+                    .await?;
+                self.apply_direct_metadata(item_id, &mut item).await;
+                Ok(item)
             }
             CacheLookup::Leader(_leader) => {
                 let item = self
@@ -808,8 +832,25 @@ impl CatalogQueryService {
                     cache.empty_ttl
                 };
                 cache_put(cache, &key, &item, ttl).await;
+                let mut item = item;
+                self.apply_direct_metadata(item_id, &mut item).await;
                 Ok(item)
             }
+        }
+    }
+
+    async fn apply_direct_metadata(
+        &self,
+        item_id: CatalogItemId,
+        item: &mut Option<CatalogItemDetailRecord>,
+    ) {
+        let (Some(service), Some(item)) = (&self.direct_metadata, item.as_mut()) else {
+            return;
+        };
+        match service.nfo(item_id).await {
+            Ok(Some(document)) => item.apply_direct_nfo(&document),
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%item_id, %error, "direct NFO overlay unavailable"),
         }
     }
 
@@ -1082,6 +1123,15 @@ impl CatalogQueryService {
         let Some(submission) = jobs.enqueue_lazy_or_join(&media_spec).await? else {
             return Ok(());
         };
+        tracing::debug!(
+            trigger = "lazy_click",
+            job_id = %submission.job().id().as_uuid(),
+            task_kind = task_kind.as_str(),
+            scope_type = "CatalogItem",
+            scope_id = %item_id,
+            created = submission.created(),
+            "lazy media work enqueued or joined"
+        );
         self.wait_for_job(&jobs, submission.job().id(), deadline)
             .await
     }
@@ -1134,10 +1184,28 @@ impl CatalogQueryService {
         spec = spec
             .with_metadata_requirement(requirement)?
             .with_metadata_source_mode(target.metadata_source_mode())?
+            .with_local_metadata_access_mode(target.local_metadata_access_mode())?
             .with_storage_root_affinity(scope.storage_root_id())?;
-        let Some(submission) = jobs.enqueue_metadata_retry_or_join(&spec).await? else {
+        let submission = if matches!(
+            target.local_metadata_access_mode(),
+            tjxy_domain::LocalMetadataAccessMode::Direct
+        ) {
+            Some(jobs.enqueue_or_join(&spec).await?)
+        } else {
+            jobs.enqueue_metadata_retry_or_join(&spec).await?
+        };
+        let Some(submission) = submission else {
             return Ok(());
         };
+        tracing::debug!(
+            trigger = "lazy_click",
+            job_id = %submission.job().id().as_uuid(),
+            task_kind = WorkTaskKind::ResolveMetadata.as_str(),
+            scope_type = "CatalogItem",
+            scope_id = %item_id,
+            created = submission.created(),
+            "lazy metadata work enqueued or joined"
+        );
         self.wait_for_job(&jobs, submission.job().id(), deadline)
             .await
     }

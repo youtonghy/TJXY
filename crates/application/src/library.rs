@@ -53,8 +53,15 @@ impl LibraryService {
         profile: &str,
         enabled: bool,
         metadata_source_mode: &str,
+        local_metadata_access_mode: &str,
     ) -> Result<LibraryId, LibraryServiceError> {
-        let update = policy_update(profile, enabled, None, Some(metadata_source_mode))?;
+        let update = policy_update(
+            profile,
+            enabled,
+            None,
+            Some(metadata_source_mode),
+            Some(local_metadata_access_mode),
+        )?;
         LibraryRepository::new(&self.database)
             .create(name, collection_type, &update)
             .await
@@ -73,9 +80,16 @@ impl LibraryService {
         profile: &str,
         enabled: bool,
         metadata_source_mode: &str,
+        local_metadata_access_mode: &str,
         root: &FilesystemRootDraft,
     ) -> Result<CreatedFilesystemLibrary, LibraryServiceError> {
-        let update = policy_update(profile, enabled, None, Some(metadata_source_mode))?;
+        let update = policy_update(
+            profile,
+            enabled,
+            None,
+            Some(metadata_source_mode),
+            Some(local_metadata_access_mode),
+        )?;
         LibraryRepository::new(&self.database)
             .create_with_filesystem_root(name, collection_type, &update, root)
             .await
@@ -173,9 +187,16 @@ impl LibraryService {
         expected_version: i32,
         enabled: bool,
         metadata_source_mode: Option<&str>,
+        local_metadata_access_mode: Option<&str>,
         overrides: Option<LibraryPolicyOverrides<'_>>,
     ) -> Result<i32, LibraryServiceError> {
-        let update = policy_update(profile, enabled, overrides, metadata_source_mode)?;
+        let update = policy_update(
+            profile,
+            enabled,
+            overrides,
+            metadata_source_mode,
+            local_metadata_access_mode,
+        )?;
         LibraryRepository::new(&self.database)
             .update_policy(library_id, expected_version, &update)
             .await
@@ -188,6 +209,7 @@ fn policy_update(
     enabled: bool,
     overrides: Option<LibraryPolicyOverrides<'_>>,
     metadata_source_mode: Option<&str>,
+    local_metadata_access_mode: Option<&str>,
 ) -> Result<LibraryPolicyUpdate, LibraryServiceError> {
     let profile = parse_profile(profile)?;
     let policy = EffectiveScanPolicy::for_profile(profile);
@@ -217,8 +239,14 @@ fn policy_update(
         probe,
         enabled,
     )?;
-    match metadata_source_mode {
-        Some(mode) => update.with_metadata_source_mode(mode).map_err(Into::into),
+    let update = match metadata_source_mode {
+        Some(mode) => update.with_metadata_source_mode(mode)?,
+        None => update,
+    };
+    match local_metadata_access_mode {
+        Some(mode) => update
+            .with_local_metadata_access_mode(mode)
+            .map_err(Into::into),
         None => Ok(update),
     }
 }

@@ -7,11 +7,12 @@ import {
   TextField,
 } from '@heroui/react';
 import { TriangleAlert, UserPlus } from 'lucide-react';
-import { CreateBase, Form } from 'ra-core';
+import { CreateBase, Form, useNotify, useRedirect } from 'ra-core';
 import { useState } from 'react';
 import { Controller, useFormContext, useFormState } from 'react-hook-form';
 
 import type { UserRecord } from '../api/types';
+import { useTranslate } from '../settings/i18n';
 import { PageHeader } from '../ui/PageHeader';
 
 interface UserCreateInput {
@@ -20,14 +21,23 @@ interface UserCreateInput {
 }
 
 export function UserCreate() {
+  const tr = useTranslate();
+  const notify = useNotify();
+  const redirect = useRedirect();
   const [submitError, setSubmitError] = useState<unknown>();
 
   return (
     <CreateBase<UserCreateInput, UserRecord>
       disableAuthentication
       mutationMode="pessimistic"
-      mutationOptions={{ onError: setSubmitError }}
-      redirect="show"
+      mutationOptions={{
+        onError: setSubmitError,
+        onSuccess: (record) => {
+          notify(tr('User created.', '用户已创建。'), { type: 'success' });
+          redirect('show', 'users', record.id);
+        },
+      }}
+      redirect={false}
       resource="users"
     >
       <UserCreateForm
@@ -45,15 +55,16 @@ function UserCreateForm({
   onSubmitStart: () => void;
   submitError: unknown;
 }) {
+  const tr = useTranslate();
   return (
     <div className="space-y-6">
       <PageHeader
         breadcrumbs={[
-          { label: 'Users', to: '/admin/users' },
-          { label: 'Create user' },
+          { label: tr('Users', '用户'), to: '/admin/users' },
+          { label: tr('Create user', '创建用户') },
         ]}
-        description="Create a local account with an initial sign-in credential."
-        title="Create user"
+        description={tr('Create a local account with an initial sign-in credential.', '创建本地账户并设置初始登录密码。')}
+        title={tr('Create user', '创建用户')}
       />
 
       <Form<UserCreateInput>
@@ -74,6 +85,7 @@ function CreateFormContents({
   onSubmitStart: () => void;
   submitError: unknown;
 }) {
+  const tr = useTranslate();
   const { isSubmitting } = useFormState<UserCreateInput>();
   return (
     <>
@@ -86,13 +98,14 @@ function CreateFormContents({
         type="submit"
       >
         <UserPlus aria-hidden="true" className="size-4" />
-        <span className="inline-flex min-h-5 items-center">Create user</span>
+        <span className="inline-flex min-h-5 items-center">{tr('Create user', '创建用户')}</span>
       </Button>
     </>
   );
 }
 
 function CreateFields({ isPending }: { isPending: boolean }) {
+  const tr = useTranslate();
   const { control } = useFormContext<UserCreateInput>();
 
   return (
@@ -101,8 +114,8 @@ function CreateFields({ isPending }: { isPending: boolean }) {
         control={control}
         name="Name"
         rules={{
-          required: 'Name is required.',
-          validate: (value) => value.trim().length > 0 || 'Name is required.',
+          required: tr('Name is required.', '请输入名称。'),
+          validate: (value) => value.trim().length > 0 || tr('Name is required.', '请输入名称。'),
         }}
         render={({ field, fieldState }) => (
           <TextField
@@ -111,7 +124,7 @@ function CreateFields({ isPending }: { isPending: boolean }) {
             isRequired
             name={field.name}
           >
-            <Label>Name</Label>
+            <Label>{tr('Name', '名称')}</Label>
             <Input
               autoComplete="off"
               disabled={isPending}
@@ -128,7 +141,7 @@ function CreateFields({ isPending }: { isPending: boolean }) {
       <Controller
         control={control}
         name="Password"
-        rules={{ required: 'Password is required.' }}
+        rules={{ required: tr('Password is required.', '请输入密码。') }}
         render={({ field, fieldState }) => (
           <TextField
             fullWidth
@@ -136,7 +149,7 @@ function CreateFields({ isPending }: { isPending: boolean }) {
             isRequired
             name={field.name}
           >
-            <Label>Initial password</Label>
+            <Label>{tr('Initial password', '初始密码')}</Label>
             <Input
               autoComplete="new-password"
               disabled={isPending}
@@ -155,12 +168,13 @@ function CreateFields({ isPending }: { isPending: boolean }) {
 }
 
 function CreateError({ error }: { error: unknown }) {
+  const tr = useTranslate();
   const status = statusOf(error);
   const message = status === 400
-    ? 'Check the submitted values and try again.'
+    ? tr('Check the submitted values and try again.', '请检查提交内容后重试。')
     : status === 409
-      ? 'A user with these details already exists.'
-      : 'The server could not create this user.';
+      ? tr('A user with these details already exists.', '具有这些信息的用户已存在。')
+      : tr('The server could not create this user.', '服务器无法创建该用户。');
 
   return (
     <Alert role="alert" status="danger">
@@ -168,7 +182,7 @@ function CreateError({ error }: { error: unknown }) {
         <TriangleAlert aria-hidden="true" className="size-4" />
       </Alert.Indicator>
       <Alert.Content>
-        <Alert.Title>User creation failed</Alert.Title>
+        <Alert.Title>{tr('User creation failed', '用户创建失败')}</Alert.Title>
         <Alert.Description>{message}</Alert.Description>
       </Alert.Content>
     </Alert>

@@ -20,8 +20,8 @@ use tjxy_application::{AuthService, CatalogQueryService, SystemClock};
 use tjxy_common::CatalogItemId;
 use tjxy_credentials::{CredentialCipher, CredentialKey};
 use tjxy_db::{
-    AI_PROVIDER_KEY, AiModelInput, AiReasoningEffort, AiSettingsRepository, AiUsageRepository,
-    UserDataPatch, UserDataRepository,
+    AI_PROVIDER_KEY, AiExecutionInput, AiExecutionOutcome, AiModelInput, AiReasoningEffort,
+    AiSettingsRepository, AiUsageRepository, UserDataPatch, UserDataRepository,
 };
 use tjxy_server::{
     AiAdmissionConfig, AiProviderSession, AiProviderTransport, AiProviderTransportError, AppState,
@@ -314,6 +314,8 @@ async fn configured_app_with_user_count(
             true,
             "https://provider.example.test/v1",
             "Only discuss movies and television using catalog tools.",
+            0,
+            0,
             &[
                 AiModelInput::new(
                     visible_model,
@@ -641,6 +643,76 @@ async fn admission_enforces_daily_quota_before_provider_io_or_analytics() {
         0
     );
     drop(accepted);
+}
+
+#[tokio::test]
+async fn admission_enforces_persisted_daily_token_limits_before_provider_io() {
+    let app = configured_app_with_config(
+        TestProvider::start(),
+        AiAdmissionConfig::new(10, 2, 8, 100).unwrap(),
+    )
+    .await;
+    let day = Local::now().date_naive().to_string();
+    let now = chrono::Utc::now();
+    AiUsageRepository::new(&app.database)
+        .record(
+            &AiExecutionInput::new(
+                app.alice_user_id,
+                app.visible_model,
+                "Cinema Guide",
+                "model-visible",
+                &day,
+                now,
+                now,
+                10,
+                AiExecutionOutcome::Success,
+            )
+            .with_usage(70, 30),
+        )
+        .await
+        .unwrap();
+
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("ai_provider_settings"))
+                    .value(Alias::new("daily_total_token_limit"), 0_i64)
+                    .value(Alias::new("daily_user_token_limit"), 100_i64)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_rejected = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.alice_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&user_rejected);
+
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("ai_provider_settings"))
+                    .value(Alias::new("daily_total_token_limit"), 100_i64)
+                    .value(Alias::new("daily_user_token_limit"), 0_i64)
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    let total_rejected = app
+        .router
+        .clone()
+        .oneshot(chat_request(&app.bob_token, app.visible_model))
+        .await
+        .unwrap();
+    assert_rate_limited(&total_rejected);
+    assert_eq!(app.upstream.hits(), 0);
 }
 
 async fn login(router: axum::Router, username: &str, password: &str) -> String {

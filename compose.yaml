@@ -33,6 +33,8 @@ services:
       TJXY_SETUP_BIND: 0.0.0.0:8096
       TJXY_ASSETS_DIR: /data/assets
       TJXY_ADMIN_DIST_DIR: /app/admin/dist
+      TJXY_LOG_DIR: /data/logs
+      TJXY_LOG_FILE: /data/server.log
     volumes:
       - tjxy-config:/config
       - tjxy-data:/data

@@ -419,6 +419,9 @@ impl SystemSettingsService {
             asset_dir,
         }
     }
+    pub(crate) const fn database(&self) -> &sea_orm::DatabaseConnection {
+        &self.database
+    }
     pub(crate) async fn get(
         &self,
     ) -> Result<Option<SystemSettingsRecord>, SystemSettingsRepositoryError> {

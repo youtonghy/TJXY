@@ -1129,7 +1129,9 @@ async fn source_projection_becomes_visible_only_after_atomic_publish() {
             database.get_database_backend().build(
                 Query::update()
                     .table(Alias::new("libraries"))
-                    .value(Alias::new("metadata_policy"), "full"),
+                    .value(Alias::new("metadata_policy"), "full")
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(Alias::new("local_metadata_access_mode"), "direct"),
             ),
         )
         .await
@@ -1325,6 +1327,14 @@ async fn source_projection_becomes_visible_only_after_atomic_publish() {
     assert_eq!(
         metadata.job().metadata_requirement(),
         Some(MetadataRequirement::Full)
+    );
+    assert_eq!(
+        metadata.job().metadata_source_mode(),
+        Some(tjxy_domain::MetadataSourceMode::LocalOnly)
+    );
+    assert_eq!(
+        metadata.job().local_metadata_access_mode(),
+        Some(tjxy_domain::LocalMetadataAccessMode::Direct)
     );
     let stream_count = count(&database, "media_streams").await;
     assert_eq!(stream_count, 0, "Source Indexing must not perform Probe");

@@ -256,7 +256,9 @@ async fn main() -> Result<(), ImportError> {
                         for (id, result) in results {
                             match result {
                                 Ok(movie) => batch_movies.push(movie),
-                                Err(_) => eprintln!("    Warning: failed to fetch movie {id}"),
+                                Err(_) => {
+                                    tracing::error!("    Warning: failed to fetch movie {id}")
+                                }
                             }
                         }
                     }
@@ -276,7 +278,9 @@ async fn main() -> Result<(), ImportError> {
                         for (id, result) in results {
                             match result {
                                 Ok(series) => batch_series.push(series),
-                                Err(_) => eprintln!("    Warning: failed to fetch series {id}"),
+                                Err(_) => {
+                                    tracing::error!("    Warning: failed to fetch series {id}")
+                                }
                             }
                         }
                     }

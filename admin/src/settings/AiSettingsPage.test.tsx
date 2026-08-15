@@ -19,6 +19,7 @@ const testMock = vi.mocked(testAiConnection);
 const settings = {
   provider: 'OpenAiCompatible' as const, configured: true, enabled: true,
   baseUrl: 'https://ai.example/v1', systemPrompt: 'Movies only', revision: 2,
+  dailyTotalTokenLimit: 500_000, dailyUserTokenLimit: 50_000,
   encryptionAvailable: true,
   models: [{ id: '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11', upstreamId: 'gpt-media', displayName: 'Cinema Guide', reasoningEffort: 'off' as const, isVisible: true, isDefault: true, sortOrder: 0 }],
 };
@@ -39,6 +40,8 @@ it('loads redacted settings and exposes the configured model controls', async ()
   expect(await screen.findByRole('heading', { name: 'AI 运行统计' })).toBeVisible();
   expect(screen.getByLabelText('API key')).toHaveValue('');
   expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
+  expect(screen.getByRole('textbox', { name: 'Daily total limit' })).toHaveValue('500,000');
+  expect(screen.getByRole('textbox', { name: 'Daily limit per user' })).toHaveValue('50,000');
   expect(screen.getByDisplayValue('Cinema Guide')).toBeVisible();
   expect(screen.getByDisplayValue('gpt-media')).toBeVisible();
   expect(screen.getByLabelText('思考强度')).toHaveTextContent('off');
@@ -59,6 +62,19 @@ it('saves the reasoning effort selected for a model', async () => {
     expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({
       models: [expect.objectContaining({ reasoningEffort: 'xhigh' })],
     }));
+  });
+});
+
+it('saves daily total and per-user token limits', async () => {
+  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  const user = userEvent.setup();
+  const total = await screen.findByRole('textbox', { name: 'Daily total limit' });
+  const perUser = screen.getByRole('textbox', { name: 'Daily limit per user' });
+  await user.clear(total); await user.type(total, '750000');
+  await user.clear(perUser); await user.type(perUser, '75000');
+  await user.click(screen.getByRole('button', { name: 'Save settings' }));
+  await waitFor(() => {
+    expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({ dailyTotalTokenLimit: 750_000, dailyUserTokenLimit: 75_000 }));
   });
 });
 

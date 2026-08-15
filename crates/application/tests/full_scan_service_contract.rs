@@ -2417,6 +2417,105 @@ async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
 }
 
 #[tokio::test]
+async fn lazy_profile_does_not_resolve_metadata_during_library_refresh() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+    )
+    .await;
+    seed_root(&database, library).await;
+    advance_library_discovery_watermark(&database, library, 1).await;
+    let (item, _) = seed_indexed_movie_with_source(&database, library).await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_state"), "Partial")
+                    .value(Alias::new("metadata_revision"), 2_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let claimed = claimed_full_scan(&database, library).await;
+
+    assert!(matches!(
+        FullScanService::new(database.clone())
+            .execute(&claimed)
+            .await,
+        Err(FullScanError::ChildrenPending { scheduled: 1 })
+    ));
+    let jobs = WorkJobRepository::new(&database);
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "unexpected-lazy-metadata-before-inventory",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let inventory = jobs
+        .claim_next(
+            &[WorkTaskKind::ScopedStorageSync],
+            "lazy-root-inventory",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let transaction = database.begin().await.unwrap();
+    jobs.complete_in_transaction(
+        &transaction,
+        &inventory,
+        WorkJobResult::success(serde_json::json!({"objects": 0}), Vec::new())
+            .with_sync_revision(1)
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    jobs.retry(&claimed, Duration::zero(), "waiting for root inventory")
+        .await
+        .unwrap();
+    let resumed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "lazy-refresh-parent",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        FullScanService::new(database.clone())
+            .execute(&resumed)
+            .await
+            .unwrap()
+            .scheduled(),
+        0
+    );
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "unexpected-lazy-metadata-after-inventory",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn full_metadata_policy_does_not_accept_a_basic_watermark_at_the_same_revision() {
     let database = database().await;
     let library = seed_library_with_policy(

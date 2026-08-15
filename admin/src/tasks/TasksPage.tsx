@@ -380,7 +380,7 @@ function ManualCommands({
             aria-label={tr('Command target', '命令目标')}
             className="w-full sm:max-w-sm"
             onSelectionChange={(key) => {
-              if (key === 'root' || key === 'item') setCommandTarget(key as 'root' | 'item');
+              if (key === 'root' || key === 'item') setCommandTarget(key);
             }}
             selectedKey={commandTarget}
           >

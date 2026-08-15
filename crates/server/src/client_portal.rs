@@ -859,7 +859,7 @@ fn start_of_day(now: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 fn service_error(context: &str, error: &ClientPortalError) -> Response {
-    eprintln!("Client portal {context} failed: {error}");
+    tracing::error!("Client portal {context} failed: {error}");
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 

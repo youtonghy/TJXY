@@ -6,6 +6,7 @@ mod auth;
 mod cache_invalidation;
 mod catalog;
 mod device_profile;
+mod direct_metadata;
 mod discover;
 mod display_preferences;
 mod filesystem_browser;
@@ -44,6 +45,7 @@ pub use catalog::{
     CatalogQueryService, CatalogServiceError, PlaybackSource, PlaybackStream, PlaybackSubtitle,
 };
 pub use device_profile::DeviceProfile;
+pub use direct_metadata::{DirectMetadataReadError, DirectMetadataReadService, OpenedDirectImage};
 pub use discover::{DiscoverTitlesReport, DiscoverTitlesService, DiscoverTitlesServiceError};
 pub use display_preferences::{DisplayPreferencesService, DisplayPreferencesServiceError};
 pub use filesystem_browser::{

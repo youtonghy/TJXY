@@ -17,6 +17,7 @@ import type {
   EffectiveLibraryPolicy,
   ExpansionPolicy,
   LibraryOption,
+  LocalMetadataAccessMode,
   MetadataPolicy,
   MetadataSourceMode,
   ObjectSelectionScope,
@@ -42,6 +43,7 @@ export interface LibraryPolicyFormProps {
   onAdvancedChange: (advanced: boolean) => void;
   onEnabledChange: (enabled: boolean) => void;
   onMetadataSourceModeChange: (mode: MetadataSourceMode) => void;
+  onLocalMetadataAccessModeChange: (mode: LocalMetadataAccessMode) => void;
   onPolicyChange: (policy: EffectiveLibraryPolicy) => void;
   onProfileChange: (profile: ScanProfile) => void;
   onReloadLatest: () => void;
@@ -49,6 +51,7 @@ export interface LibraryPolicyFormProps {
   policy: EffectiveLibraryPolicy;
   scanProfile: ScanProfile;
   metadataSourceMode: MetadataSourceMode;
+  localMetadataAccessMode: LocalMetadataAccessMode;
 }
 
 const metadataSourceOptions: readonly {
@@ -77,6 +80,7 @@ export function LibraryPolicyForm({
   onAdvancedChange,
   onEnabledChange,
   onMetadataSourceModeChange,
+  onLocalMetadataAccessModeChange,
   onPolicyChange,
   onProfileChange,
   onReloadLatest,
@@ -84,6 +88,7 @@ export function LibraryPolicyForm({
   policy,
   scanProfile,
   metadataSourceMode,
+  localMetadataAccessMode,
 }: LibraryPolicyFormProps) {
   const tr = useTranslate();
   return (
@@ -114,7 +119,11 @@ export function LibraryPolicyForm({
           <RadioGroup
             isDisabled={isPending}
             name="metadata-source-mode"
-            onChange={(value) => { onMetadataSourceModeChange(value as MetadataSourceMode); }}
+            onChange={(value) => {
+              const mode = value as MetadataSourceMode;
+              onMetadataSourceModeChange(mode);
+              if (mode === 'automatic_scrape') onLocalMetadataAccessModeChange('import');
+            }}
             value={metadataSourceMode}
           >
             <Label>{tr('Metadata source', '元数据来源')}</Label>
@@ -136,6 +145,15 @@ export function LibraryPolicyForm({
               ))}
             </div>
           </RadioGroup>
+          {metadataSourceMode === 'local_only' && (
+            <RadioGroup isDisabled={isPending} name="local-metadata-access-mode" onChange={(value) => { onLocalMetadataAccessModeChange(value as LocalMetadataAccessMode); }} value={localMetadataAccessMode}>
+              <Label>{tr('Local metadata access', '本地元数据访问')}</Label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Radio className="rounded-lg border border-border p-4 data-[selected=true]:border-accent data-[selected=true]:bg-accent/5" value="import"><Radio.Content className="w-full items-start gap-3"><Radio.Control className="mt-0.5"><Radio.Indicator /></Radio.Control><span><span className="block font-medium">{tr('Import', '导入')}</span><span className="mt-1 block text-sm text-muted">{tr('Persist parsed metadata and copied artwork.', '保存解析后的元数据与复制的图片。')}</span></span></Radio.Content></Radio>
+                <Radio className="rounded-lg border border-border p-4 data-[selected=true]:border-accent data-[selected=true]:bg-accent/5" value="direct"><Radio.Content className="w-full items-start gap-3"><Radio.Control className="mt-0.5"><Radio.Indicator /></Radio.Control><span><span className="block font-medium">{tr('Direct', '直接读取')}</span><span className="mt-1 block text-sm text-muted">{tr('Use NFO and artwork in place without copying bytes.', '原位使用 NFO 和图片，不复制文件内容。')}</span></span></Radio.Content></Radio>
+              </div>
+            </RadioGroup>
+          )}
 
           <Switch
             aria-label="Enabled"

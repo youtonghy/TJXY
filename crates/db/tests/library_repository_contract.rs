@@ -225,6 +225,48 @@ async fn virtual_folder_create_and_delete_are_atomic_and_reference_safe() {
 }
 
 #[tokio::test]
+async fn direct_mode_requires_local_only_and_a_filesystem_root() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let repository = LibraryRepository::new(&database);
+    let automatic_direct = LibraryPolicyUpdate::new(
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+        true,
+    )
+    .unwrap()
+    .with_local_metadata_access_mode("direct")
+    .unwrap();
+    assert!(matches!(
+        repository
+            .create("Invalid", "movies", &automatic_direct)
+            .await,
+        Err(LibraryRepositoryError::InvalidStoredPolicy)
+    ));
+
+    let local_direct = LibraryPolicyUpdate::new(
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+        true,
+    )
+    .unwrap()
+    .with_metadata_source_mode("local_only")
+    .unwrap()
+    .with_local_metadata_access_mode("direct")
+    .unwrap();
+    assert!(matches!(
+        repository.create("No Root", "movies", &local_direct).await,
+        Err(LibraryRepositoryError::DirectRequiresFilesystemRoot)
+    ));
+}
+
+#[tokio::test]
 async fn virtual_folder_rename_updates_sorting_once_and_rejects_conflicts() {
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();

@@ -11,7 +11,7 @@ use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, LibraryId, LibraryRootBindingId, StorageObjectRecordId, StorageRootId, WorkJobId,
 };
-use tjxy_domain::MetadataSourceMode;
+use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
 
 use crate::{
     ClaimedWorkJob, WorkJobRepository, WorkJobSpec, WorkJobSubmission, WorkScope, WorkStagingRow,
@@ -739,17 +739,29 @@ fn background_unstarted_episode_signal(candidate: &Alias, user: &Alias) -> Selec
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FullScanPolicy {
+    scan_profile: String,
     object_selection_scope: String,
     metadata_policy: String,
     metadata_source_mode: MetadataSourceMode,
+    local_metadata_access_mode: LocalMetadataAccessMode,
     expansion_policy: String,
     probe_policy: String,
 }
 
 impl FullScanPolicy {
     #[must_use]
+    pub fn scan_profile(&self) -> &str {
+        &self.scan_profile
+    }
+
+    #[must_use]
     pub const fn metadata_source_mode(&self) -> MetadataSourceMode {
         self.metadata_source_mode
+    }
+
+    #[must_use]
+    pub const fn local_metadata_access_mode(&self) -> LocalMetadataAccessMode {
+        self.local_metadata_access_mode
     }
 
     #[must_use]
@@ -770,11 +782,16 @@ impl FullScanPolicy {
     pub fn metadata_requirement(
         &self,
     ) -> Result<Option<crate::MetadataRequirement>, FullScanRepositoryError> {
-        match self.metadata_policy.as_str() {
+        let requirement = match self.metadata_policy.as_str() {
             "none" => Ok(None),
             "basic" => Ok(Some(crate::MetadataRequirement::Basic)),
             "full" => Ok(Some(crate::MetadataRequirement::Full)),
             _ => Err(FullScanRepositoryError::InvalidStoredPolicy),
+        }?;
+        if self.scan_profile == "Lazy" {
+            Ok(None)
+        } else {
+            Ok(requirement)
         }
     }
 
@@ -904,6 +921,7 @@ struct RootBindingContext {
     root_id: StorageRootId,
     profile_version: i32,
     metadata_source_mode: MetadataSourceMode,
+    local_metadata_access_mode: LocalMetadataAccessMode,
 }
 
 async fn scan_context(
@@ -917,9 +935,11 @@ async fn scan_context(
                     connection.get_database_backend().build(
                         &Query::select()
                             .columns([
+                                Alias::new("scan_profile"),
                                 Alias::new("object_selection_scope"),
                                 Alias::new("metadata_policy"),
                                 Alias::new("metadata_source_mode"),
+                                Alias::new("local_metadata_access_mode"),
                                 Alias::new("expansion_policy"),
                                 Alias::new("probe_policy"),
                             ])
@@ -937,10 +957,15 @@ async fn scan_context(
                 .await?
                 .ok_or(FullScanRepositoryError::StaleLibrary)?;
             let policy = FullScanPolicy {
+                scan_profile: row.try_get("", "scan_profile")?,
                 object_selection_scope: row.try_get("", "object_selection_scope")?,
                 metadata_policy: row.try_get("", "metadata_policy")?,
                 metadata_source_mode: row
                     .try_get::<String>("", "metadata_source_mode")?
+                    .parse()
+                    .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
+                local_metadata_access_mode: row
+                    .try_get::<String>("", "local_metadata_access_mode")?
                     .parse()
                     .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
                 expansion_policy: row.try_get("", "expansion_policy")?,
@@ -970,9 +995,11 @@ async fn scan_context(
                 binding_id: Some(binding.binding_id),
                 root_id: Some(binding.root_id),
                 policy: FullScanPolicy {
+                    scan_profile: "Full".to_owned(),
                     object_selection_scope: "all_synced_objects".to_owned(),
                     metadata_policy: "full".to_owned(),
                     metadata_source_mode: binding.metadata_source_mode,
+                    local_metadata_access_mode: binding.local_metadata_access_mode,
                     expansion_policy: "eager".to_owned(),
                     probe_policy: "eager".to_owned(),
                 },
@@ -1005,6 +1032,10 @@ async fn root_binding_context(
                         Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
                         Alias::new("metadata_source_mode"),
                     )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
+                        Alias::new("local_metadata_access_mode"),
+                    )
                     .from_as(Alias::new("library_storage_roots"), binding.clone())
                     .join_as(
                         JoinType::InnerJoin,
@@ -1034,6 +1065,10 @@ async fn root_binding_context(
         profile_version: row.try_get("", "profile_version")?,
         metadata_source_mode: row
             .try_get::<String>("", "metadata_source_mode")?
+            .parse()
+            .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
+        local_metadata_access_mode: row
+            .try_get::<String>("", "local_metadata_access_mode")?
             .parse()
             .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
     })
@@ -1068,6 +1103,10 @@ where
                         Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
                         Alias::new("metadata_source_mode"),
                     )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
+                        Alias::new("local_metadata_access_mode"),
+                    )
                     .from_as(Alias::new("library_storage_roots"), binding.clone())
                     .join_as(
                         JoinType::InnerJoin,
@@ -1091,6 +1130,10 @@ where
         profile_version: row.try_get("", "profile_version")?,
         metadata_source_mode: row
             .try_get::<String>("", "metadata_source_mode")?
+            .parse()
+            .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
+        local_metadata_access_mode: row
+            .try_get::<String>("", "local_metadata_access_mode")?
             .parse()
             .map_err(|_| FullScanRepositoryError::InvalidStoredPolicy)?,
     })

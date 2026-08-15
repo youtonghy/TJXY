@@ -6,6 +6,7 @@ export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | '
 export type ObjectSelectionScope = 'all_synced_objects' | 'title_layer' | 'library_roots';
 export type MetadataPolicy = 'full' | 'basic' | 'none';
 export type MetadataSourceMode = 'automatic_scrape' | 'local_only';
+export type LocalMetadataAccessMode = 'import' | 'direct';
 export type ExpansionPolicy = 'eager' | 'on_browse' | 'manual';
 export type ProbePolicy = 'eager' | 'on_playback' | 'manual';
 
@@ -15,6 +16,7 @@ export interface CreateLibraryRequest {
   enabled: boolean;
   scanProfile: ScanProfile;
   metadataSourceMode: MetadataSourceMode;
+  localMetadataAccessMode: LocalMetadataAccessMode;
   filesystemSelection?: FilesystemSelection;
 }
 
@@ -31,6 +33,7 @@ export interface UpdateLibraryPolicyRequest {
   scanProfile: ScanProfile;
   profileVersion: number;
   metadataSourceMode: MetadataSourceMode;
+  localMetadataAccessMode: LocalMetadataAccessMode;
   effectivePolicy?: EffectiveLibraryPolicy;
 }
 
@@ -46,6 +49,7 @@ export interface LibraryOption {
   objectSelectionScope: ObjectSelectionScope;
   metadataPolicy: MetadataPolicy;
   metadataSourceMode: MetadataSourceMode;
+  localMetadataAccessMode: LocalMetadataAccessMode;
   expansionPolicy: ExpansionPolicy;
   probePolicy: ProbePolicy;
 }
@@ -72,6 +76,7 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
         Enabled: request.enabled,
         ScanProfile: request.scanProfile,
         MetadataSourceMode: request.metadataSourceMode,
+        LocalMetadataAccessMode: request.localMetadataAccessMode,
       },
       ...(request.filesystemSelection === undefined ? {} : {
         FilesystemSelection: {
@@ -101,6 +106,7 @@ export async function updateLibraryPolicy(request: UpdateLibraryPolicyRequest): 
     ScanProfile: request.scanProfile,
     ProfileVersion: request.profileVersion,
     MetadataSourceMode: request.metadataSourceMode,
+    LocalMetadataAccessMode: request.localMetadataAccessMode,
   };
   if (request.effectivePolicy !== undefined) {
     options.ObjectSelectionScope = request.effectivePolicy.objectSelectionScope;
@@ -135,6 +141,15 @@ function toLibrary(value: unknown): LibraryOption {
       && isMetadataSourceMode(value.LibraryOptions.MetadataSourceMode)
       ? value.LibraryOptions.MetadataSourceMode
       : null;
+  const localMetadataAccessMode = isRecord(value)
+    && isRecord(value.LibraryOptions)
+    && value.LibraryOptions.LocalMetadataAccessMode === undefined
+    ? 'import'
+    : isRecord(value)
+      && isRecord(value.LibraryOptions)
+      && isLocalMetadataAccessMode(value.LibraryOptions.LocalMetadataAccessMode)
+      ? value.LibraryOptions.LocalMetadataAccessMode
+      : null;
   if (
     !isRecord(value)
     || !validText(value.ItemId)
@@ -148,6 +163,7 @@ function toLibrary(value: unknown): LibraryOption {
     || !isObjectSelectionScope(value.LibraryOptions.ObjectSelectionScope)
     || !isMetadataPolicy(value.LibraryOptions.MetadataPolicy)
     || metadataSourceMode === null
+    || localMetadataAccessMode === null
     || !isExpansionPolicy(value.LibraryOptions.ExpansionPolicy)
     || !isProbePolicy(value.LibraryOptions.ProbePolicy)
   ) {
@@ -165,6 +181,7 @@ function toLibrary(value: unknown): LibraryOption {
     objectSelectionScope: value.LibraryOptions.ObjectSelectionScope,
     metadataPolicy: value.LibraryOptions.MetadataPolicy,
     metadataSourceMode,
+    localMetadataAccessMode,
     expansionPolicy: value.LibraryOptions.ExpansionPolicy,
     probePolicy: value.LibraryOptions.ProbePolicy,
   };
@@ -194,6 +211,10 @@ function isMetadataPolicy(value: unknown): value is MetadataPolicy {
 
 function isMetadataSourceMode(value: unknown): value is MetadataSourceMode {
   return value === 'automatic_scrape' || value === 'local_only';
+}
+
+function isLocalMetadataAccessMode(value: unknown): value is LocalMetadataAccessMode {
+  return value === 'import' || value === 'direct';
 }
 
 function isExpansionPolicy(value: unknown): value is ExpansionPolicy {

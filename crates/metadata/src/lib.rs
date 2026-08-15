@@ -242,6 +242,11 @@ impl NfoDocument {
     }
 
     #[must_use]
+    pub const fn provider_ids(&self) -> &BTreeMap<String, String> {
+        &self.provider_ids
+    }
+
+    #[must_use]
     pub fn genres(&self) -> &[String] {
         &self.genres
     }

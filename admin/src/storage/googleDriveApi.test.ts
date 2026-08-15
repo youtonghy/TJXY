@@ -54,6 +54,7 @@ it('loads the complete persisted library policy contract', async () => {
       objectSelectionScope: 'title_layer',
       metadataPolicy: 'basic',
       metadataSourceMode: 'automatic_scrape',
+      localMetadataAccessMode: 'import',
       expansionPolicy: 'on_browse',
       probePolicy: 'on_playback',
     },

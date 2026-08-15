@@ -7,6 +7,7 @@ mod scan_policy;
 pub use catalog::{CatalogItem, CatalogItemKind, MediaLocation, MediaSource};
 pub use presence::PresenceState;
 pub use scan_policy::{
-    EffectiveScanPolicy, InvalidMetadataSourceMode, MetadataPolicy, MetadataSourceMode,
-    ObjectSelectionScope, ProbePolicy, ScanProfile, StructureExpansionPolicy,
+    EffectiveScanPolicy, InvalidLocalMetadataAccessMode, InvalidMetadataSourceMode,
+    LocalMetadataAccessMode, MetadataPolicy, MetadataSourceMode, ObjectSelectionScope, ProbePolicy,
+    ScanProfile, StructureExpansionPolicy,
 };

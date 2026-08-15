@@ -1,24 +1,13 @@
+import { Spinner } from '@heroui/react';
 import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, type ComponentType } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 
-import { AccessPage } from './access/AccessPage';
-import { AnnouncementsPage } from './announcements/AnnouncementsPage';
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
 import { AdminLoginRedirect } from './auth/AdminLoginRedirect';
 import { AdminLayout } from './layout/AdminLayout';
-import { LibraryEditPage } from './libraries/LibraryEditPage';
-import { LibrariesPage } from './libraries/LibrariesPage';
-import { MetadataSettingsPage } from './settings/MetadataSettingsPage';
-import { AiSettingsPage } from './settings/AiSettingsPage';
 import { SystemLocaleProvider } from './settings/SystemLocaleProvider';
-import { SystemSettingsPage } from './settings/SystemSettingsPage';
-import { ThemeSettingsPage } from './settings/ThemeSettingsPage';
-import { GoogleDrivePage } from './storage/GoogleDrivePage';
-import { OneDrivePage } from './storage/OneDrivePage';
-import { SetupApp } from './setup/SetupApp';
-import { TasksPage } from './tasks/TasksPage';
 import {
   AccessDeniedPage,
   ApplicationError,
@@ -26,11 +15,25 @@ import {
   LoadingPage,
   NotFoundPage,
 } from './ui/SystemPages';
-import { UserCreate } from './users/UserCreate';
-import { UserEdit } from './users/UserEdit';
-import { UserList } from './users/UserList';
-import { UserShow } from './users/UserShow';
-import { ClientApp } from './client/ClientApp';
+
+const AccessPage = lazyComponent(() => import('./access/AccessPage'), 'AccessPage');
+const AiSettingsPage = lazyComponent(() => import('./settings/AiSettingsPage'), 'AiSettingsPage');
+const AnnouncementsPage = lazyComponent(() => import('./announcements/AnnouncementsPage'), 'AnnouncementsPage');
+const ClientApp = lazyComponent(() => import('./client/ClientApp'), 'ClientApp');
+const GoogleDrivePage = lazyComponent(() => import('./storage/GoogleDrivePage'), 'GoogleDrivePage');
+const LibrariesPage = lazyComponent(() => import('./libraries/LibrariesPage'), 'LibrariesPage');
+const LibraryEditPage = lazyComponent(() => import('./libraries/LibraryEditPage'), 'LibraryEditPage');
+const LogsPage = lazyComponent(() => import('./logs/LogsPage'), 'LogsPage');
+const MetadataSettingsPage = lazyComponent(() => import('./settings/MetadataSettingsPage'), 'MetadataSettingsPage');
+const OneDrivePage = lazyComponent(() => import('./storage/OneDrivePage'), 'OneDrivePage');
+const SetupApp = lazyComponent(() => import('./setup/SetupApp'), 'SetupApp');
+const SystemSettingsPage = lazyComponent(() => import('./settings/SystemSettingsPage'), 'SystemSettingsPage');
+const TasksPage = lazyComponent(() => import('./tasks/TasksPage'), 'TasksPage');
+const ThemeSettingsPage = lazyComponent(() => import('./settings/ThemeSettingsPage'), 'ThemeSettingsPage');
+const UserCreate = lazyComponent(() => import('./users/UserCreate'), 'UserCreate');
+const UserEdit = lazyComponent(() => import('./users/UserEdit'), 'UserEdit');
+const UserList = lazyComponent(() => import('./users/UserList'), 'UserList');
+const UserShow = lazyComponent(() => import('./users/UserShow'), 'UserShow');
 
 const DashboardPage = lazy(async () => {
   const module = await import('./dashboard/DashboardPage');
@@ -39,8 +42,28 @@ const DashboardPage = lazy(async () => {
 
 export function App() {
   return (
-    <BrowserRouter><RouteBoundary /></BrowserRouter>
+    <BrowserRouter>
+      <Suspense fallback={<RouteLoading />}><RouteBoundary /></Suspense>
+    </BrowserRouter>
   );
+}
+
+function RouteLoading() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" role="status">
+      <Spinner aria-label="Loading application" color="accent" />
+    </div>
+  );
+}
+
+function lazyComponent<TModule>(
+  load: () => Promise<TModule>,
+  key: keyof TModule,
+) {
+  return lazy(async () => {
+    const module = await load();
+    return { default: module[key] as ComponentType };
+  });
 }
 
 function RouteBoundary() {
@@ -87,6 +110,7 @@ function ApplicationRoutes() {
                 <Route element={<AccessPage />} path="/access" />
                 <Route element={<AnnouncementsPage />} path="/announcements" />
                 <Route element={<TasksPage />} path="/tasks" />
+                <Route element={<LogsPage />} path="/logs" />
                 <Route element={<LibrariesPage />} path="/libraries" />
                 <Route element={<LibraryEditPage />} path="/libraries/:id" />
                 <Route element={<MetadataSettingsPage />} path="/settings/metadata" />

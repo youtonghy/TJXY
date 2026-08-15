@@ -47,7 +47,7 @@ export function LibrariesPage() {
       return () => {
         setLibraries(result.records);
         if (result.records.some((library) => library.enabled && (library.unavailableLocations?.length ?? 0) > 0)) {
-          notify('Some library storage roots are offline. Restore the volumes and restart TJXY.', {
+          notify(tr('Some library storage roots are offline. Restore the volumes and restart TJXY.', '部分媒体库存储根目录离线。请恢复对应存储卷并重启 TJXY。'), {
             type: 'warning',
             autoHideDuration: 8000,
           });
@@ -61,7 +61,7 @@ export function LibrariesPage() {
       return () => { setAuthRedirecting(true); };
     }
     return () => { setLoadError(result.error ?? new Error('Library loading failed.')); };
-  }, [logoutIfAccessDenied, notify]);
+  }, [logoutIfAccessDenied, notify, tr]);
 
   const { isMounted, loading, reload } = useAuthoritativeLoad(fetchLibraries, prepareLoadResult);
 
@@ -72,14 +72,14 @@ export function LibrariesPage() {
     try {
       await createLibrary(request);
       if (!isMounted()) return false;
-      notify('Library created.', { type: 'success' });
+      notify(tr('Library created.', '媒体库已创建。'), { type: 'success' });
       setCreateOpen(false);
       await reload();
       return true;
     } catch (error: unknown) {
       if (!isMounted()) return false;
       if (await logoutIfAccessDenied(error)) return false;
-      if (isMounted()) notify('The library could not be created.', { type: 'error' });
+      if (isMounted()) notify(tr('The library could not be created.', '无法创建媒体库。'), { type: 'error' });
       return false;
     } finally {
       createRef.current = false;
@@ -168,7 +168,7 @@ function LibrariesTable({ libraries }: { libraries: LibraryOption[] }) {
             {libraries.map((library) => (
               <Table.Row id={library.id} key={library.id}>
                 <Table.Cell><LibraryName library={library} /></Table.Cell>
-                <Table.Cell>{collectionLabel(library.collectionType)}</Table.Cell>
+                <Table.Cell>{tr(collectionLabel(library.collectionType))}</Table.Cell>
                 <Table.Cell><LibraryStatus library={library} /></Table.Cell>
                 <Table.Cell>{library.scanProfile}</Table.Cell>
                 <Table.Cell><PolicySummary library={library} /></Table.Cell>
@@ -191,7 +191,7 @@ function LibrariesMobileList({ libraries }: { libraries: LibraryOption[] }) {
         <li aria-label={library.name} className="space-y-4 py-5" key={library.id}>
           <LibraryName library={library} />
           <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
-            <MobileField label={tr('Type', '类型')}>{collectionLabel(library.collectionType)}</MobileField>
+            <MobileField label={tr('Type', '类型')}>{tr(collectionLabel(library.collectionType))}</MobileField>
             <MobileField label={tr('Status', '状态')}><LibraryStatus library={library} /></MobileField>
             <MobileField label={tr('Scan profile', '扫描配置')}>{library.scanProfile}</MobileField>
             <MobileField label={tr('Policy', '策略')}><PolicySummary library={library} /></MobileField>
@@ -226,12 +226,13 @@ function LibraryStatus({ library }: { library: LibraryOption }) {
 }
 
 function PolicySummary({ library }: { library: LibraryOption }) {
+  const tr = useTranslate();
   return (
     <span className="break-words text-sm text-muted">
-      {optionLabel(objectScopeOptions, library.objectSelectionScope)} /{' '}
-      {optionLabel(metadataPolicyOptions, library.metadataPolicy)} /{' '}
-      {optionLabel(expansionPolicyOptions, library.expansionPolicy)} /{' '}
-      {optionLabel(probePolicyOptions, library.probePolicy)}
+      {tr(optionLabel(objectScopeOptions, library.objectSelectionScope))} /{' '}
+      {tr(optionLabel(metadataPolicyOptions, library.metadataPolicy))} /{' '}
+      {tr(optionLabel(expansionPolicyOptions, library.expansionPolicy))} /{' '}
+      {tr(optionLabel(probePolicyOptions, library.probePolicy))}
     </span>
   );
 }

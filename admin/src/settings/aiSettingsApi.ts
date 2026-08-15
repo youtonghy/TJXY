@@ -2,6 +2,7 @@ import { ApiError, apiRequest } from '../api/httpClient';
 import { hasControlCharacters, invalidResponse, isRecord, validDate, validMultilineText, validText, validUuid } from '../api/responseValidation';
 
 const PATH = '/Admin/Ai/Settings';
+export const MAX_AI_DAILY_TOKEN_LIMIT = 100_000_000;
 const reasoningEfforts = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type AiReasoningEffort = typeof reasoningEfforts[number];
 
@@ -21,6 +22,8 @@ export interface AiSettings {
   enabled: boolean;
   baseUrl: string | null;
   systemPrompt: string;
+  dailyTotalTokenLimit: number;
+  dailyUserTokenLimit: number;
   revision: number | null;
   encryptionAvailable: boolean;
   models: AiAdminModel[];
@@ -126,6 +129,8 @@ export async function saveAiSettings(request: SaveAiSettingsRequest): Promise<Ai
   const apiKey = optionalApiKey(request.apiKey);
   if (apiKey !== undefined) body.ApiKey = apiKey;
   body.SystemPrompt = requireMultilineText(request.systemPrompt, 16_000, 'system prompt');
+  body.DailyTotalTokenLimit = requireTokenLimit(request.dailyTotalTokenLimit, 'daily total token limit');
+  body.DailyUserTokenLimit = requireTokenLimit(request.dailyUserTokenLimit, 'daily user token limit');
   if (request.revision !== null) body.Revision = requireRevision(request.revision);
   body.Models = request.models.map((model, index) => toRequestModel(model, index));
   return toSettings(await apiRequest<unknown>(PATH, { method: 'PUT', body: JSON.stringify(body) }));
@@ -159,8 +164,8 @@ export async function deleteAiSettings(revision: number): Promise<void> {
 }
 
 function toSettings(value: unknown): AiSettings {
-  if (!isRecord(value) || !exactKeys(value, ['Provider', 'Configured', 'Enabled', 'BaseUrl', 'SystemPrompt', 'Revision', 'EncryptionAvailable', 'Models']) || value.Provider !== 'OpenAiCompatible' || typeof value.Configured !== 'boolean' || typeof value.Enabled !== 'boolean' || (value.BaseUrl !== null && !validText(value.BaseUrl, 2_048)) || !validMultilineText(value.SystemPrompt, 16_000) || (value.Revision !== null && !validRevision(value.Revision)) || typeof value.EncryptionAvailable !== 'boolean' || !Array.isArray(value.Models)) throw invalidResponse('AI settings');
-  return { provider: value.Provider, configured: value.Configured, enabled: value.Enabled, baseUrl: value.BaseUrl, systemPrompt: value.SystemPrompt, revision: value.Revision, encryptionAvailable: value.EncryptionAvailable, models: value.Models.map(toModel) };
+  if (!isRecord(value) || !exactKeys(value, ['Provider', 'Configured', 'Enabled', 'BaseUrl', 'SystemPrompt', 'DailyTotalTokenLimit', 'DailyUserTokenLimit', 'Revision', 'EncryptionAvailable', 'Models']) || value.Provider !== 'OpenAiCompatible' || typeof value.Configured !== 'boolean' || typeof value.Enabled !== 'boolean' || (value.BaseUrl !== null && !validText(value.BaseUrl, 2_048)) || !validMultilineText(value.SystemPrompt, 16_000) || (value.Revision !== null && !validRevision(value.Revision)) || typeof value.EncryptionAvailable !== 'boolean' || !Array.isArray(value.Models)) throw invalidResponse('AI settings');
+  return { provider: value.Provider, configured: value.Configured, enabled: value.Enabled, baseUrl: value.BaseUrl, systemPrompt: value.SystemPrompt, dailyTotalTokenLimit: tokenLimit(value.DailyTotalTokenLimit), dailyUserTokenLimit: tokenLimit(value.DailyUserTokenLimit), revision: value.Revision, encryptionAvailable: value.EncryptionAvailable, models: value.Models.map(toModel) };
 }
 
 function toAnalyticsWindow(value: Record<string, unknown>): AiAnalytics['window'] {
@@ -225,6 +230,17 @@ function isExecutionOutcome(value: unknown): value is AiExecutionOutcome {
 
 function count(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw invalidResponse('AI analytics count');
+  return value;
+}
+
+function tokenLimit(value: unknown): number {
+  const limit = count(value);
+  if (limit > MAX_AI_DAILY_TOKEN_LIMIT) throw invalidResponse('AI token limit');
+  return limit;
+}
+
+function requireTokenLimit(value: number, subject: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_AI_DAILY_TOKEN_LIMIT) throw new ApiError(400, 'validation', `A valid ${subject} is required.`);
   return value;
 }
 

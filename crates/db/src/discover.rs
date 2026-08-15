@@ -11,6 +11,7 @@ use tjxy_common::{
     CatalogItemId, LibraryRootBindingId, MEDIA_NAME_PARSER_VERSION, SortKey, StorageObjectRecordId,
     StorageRootId, parse_media_name,
 };
+use tjxy_domain::LocalMetadataAccessMode;
 use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
 
@@ -83,6 +84,7 @@ pub struct DiscoveredTitle {
     production_year: Option<i32>,
     metadata_requirement: Option<MetadataRequirement>,
     metadata_source_mode: MetadataSourceMode,
+    local_metadata_access_mode: LocalMetadataAccessMode,
     children_indexed: bool,
     children_revision: i64,
 }
@@ -261,6 +263,10 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 row.try_get::<String>("", "metadata_source_mode")?
                     .parse()
                     .map_err(|_| DiscoverTitlesError::InvalidMetadataSourceMode)?;
+            let local_metadata_access_mode = row
+                .try_get::<String>("", "local_metadata_access_mode")?
+                .parse()
+                .map_err(|_| DiscoverTitlesError::InvalidMetadataSourceMode)?;
             titles.push(DiscoveredTitle {
                 item_id: derived_item(object),
                 library_id: row.try_get("", "library_id")?,
@@ -270,6 +276,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 production_year,
                 metadata_requirement,
                 metadata_source_mode,
+                local_metadata_access_mode,
                 children_indexed: row.try_get("", "children_indexed")?,
                 children_revision: row.try_get("", "children_index_revision")?,
             });
@@ -326,6 +333,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                     )?
                     .with_metadata_requirement(requirement)?
                     .with_metadata_source_mode(title.metadata_source_mode)?
+                    .with_local_metadata_access_mode(title.local_metadata_access_mode)?
                     .with_input_sync_revision(if title.children_indexed {
                         title.children_revision
                     } else {
@@ -1146,6 +1154,10 @@ fn candidate_query(
         .expr_as(
             Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
             Alias::new("metadata_source_mode"),
+        )
+        .expr_as(
+            Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
+            Alias::new("local_metadata_access_mode"),
         )
         .expr_as(
             Expr::col((object.clone(), Alias::new("id"))),

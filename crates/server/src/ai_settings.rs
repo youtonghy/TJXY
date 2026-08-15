@@ -23,6 +23,8 @@ struct PutAiSettingsRequest {
     base_url: String,
     api_key: Option<Zeroizing<String>>,
     system_prompt: String,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
     revision: Option<i64>,
     models: Vec<AiModelRequest>,
 }
@@ -83,6 +85,8 @@ struct AiSettingsDto {
     enabled: bool,
     base_url: Option<String>,
     system_prompt: String,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
     revision: Option<i64>,
     encryption_available: bool,
     models: Vec<AiModelDto>,
@@ -265,6 +269,8 @@ pub(crate) async fn put(
             &request.base_url,
             request.api_key,
             &request.system_prompt,
+            request.daily_total_token_limit,
+            request.daily_user_token_limit,
             &models,
             request.revision,
         )
@@ -442,7 +448,7 @@ pub(crate) async fn analytics(
             .into_response(),
         ),
         Err(error) => {
-            eprintln!("AI analytics failed: {error}");
+            tracing::error!("AI analytics failed: {error}");
             no_store(error_response(&error))
         }
     }
@@ -544,6 +550,8 @@ fn settings_dto(settings: Option<&AiSettingsRecord>, encryption_available: bool)
             enabled: false,
             base_url: None,
             system_prompt: default_system_prompt().to_owned(),
+            daily_total_token_limit: 0,
+            daily_user_token_limit: 0,
             revision: None,
             encryption_available,
             models: Vec::new(),
@@ -555,6 +563,8 @@ fn settings_dto(settings: Option<&AiSettingsRecord>, encryption_available: bool)
         enabled: settings.enabled(),
         base_url: Some(settings.base_url().to_owned()),
         system_prompt: settings.system_prompt().to_owned(),
+        daily_total_token_limit: settings.daily_total_token_limit(),
+        daily_user_token_limit: settings.daily_user_token_limit(),
         revision: Some(settings.revision()),
         encryption_available,
         models: settings.models().iter().map(model_dto).collect(),

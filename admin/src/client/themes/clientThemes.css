@@ -1,11 +1,84 @@
 html[data-tjxy-surface='client'][data-client-theme='cinema'] {
-  --client-cinema-rail: oklch(17% 0.018 25);
-  --client-cinema-feature: oklch(21% 0.055 28);
+  --radius: 2px;
+  --field-radius: 2px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+  --background: #f5f5f5;
+  --background-secondary: #ebebeb;
+  --background-tertiary: #e1e1e1;
+  --foreground: #18181b;
+  --muted: #727272;
+  --overlay: #ffffff;
+  --overlay-foreground: #18181b;
+  --surface: #ffffff;
+  --surface-foreground: #18181b;
+  --surface-secondary: #efefef;
+  --surface-tertiary: #eaeaea;
+  --default: #ebebeb;
+  --default-foreground: #18181b;
+  --default-hover: #e1e1e2;
+  --border: #dedede;
+  --separator: #e4e4e4;
+  --success: #91bb00;
+  --success-foreground: #18181b;
+  --warning: #ff945b;
+  --warning-foreground: #18181b;
+  --danger: #f6368e;
+  --danger-foreground: #fcfcfc;
+  --field-background: #ffffff;
+  --field-foreground: #18181b;
+  --field-placeholder: #727272;
+  --field-border: #dedede;
+  --focus: #e50914;
+  --client-cinema-feature: #181818;
+  --client-cinema-screen: #272727;
+  --shadow-surface: 0 2px 4px rgb(0 0 0 / 0.04), 0 1px 2px rgb(0 0 0 / 0.06), 0 0 1px rgb(0 0 0 / 0.06);
+  --shadow-overlay: 0 2px 8px rgb(0 0 0 / 0.06), 0 -6px 12px rgb(0 0 0 / 0.03), 0 14px 28px rgb(0 0 0 / 0.08);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'][data-theme='dark'] {
+  --background: #060606;
+  --background-secondary: #0d0d0d;
+  --background-tertiary: #141414;
+  --foreground: #fcfcfc;
+  --muted: #a0a0a0;
+  --overlay: #181818;
+  --overlay-foreground: #fcfcfc;
+  --surface: #181818;
+  --surface-foreground: #fcfcfc;
+  --surface-secondary: #232323;
+  --surface-tertiary: #272727;
+  --default: #272727;
+  --default-foreground: #fcfcfc;
+  --default-hover: #2e2e2e;
+  --border: #292929;
+  --separator: #222222;
+  --success: #91bb00;
+  --success-foreground: #18181b;
+  --warning: #ffa86f;
+  --warning-foreground: #18181b;
+  --danger: #d33a7f;
+  --danger-foreground: #fcfcfc;
+  --field-background: #181818;
+  --field-foreground: #fcfcfc;
+  --field-placeholder: #a0a0a0;
+  --field-border: #292929;
+  --client-cinema-feature: #181818;
+  --client-cinema-screen: #272727;
 }
 
 html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent='crimson'] {
-  --accent: oklch(57% 0.19 25);
-  --accent-foreground: oklch(98% 0.005 25);
+  --accent: #e50914;
+  --accent-foreground: #fcfcfc;
+  --accent-hover: #eb3d35;
+  --accent-soft: rgb(229 9 20 / 0.15);
+  --accent-soft-foreground: #a32420;
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'][data-theme='dark'][data-client-accent='crimson'] {
+  --accent-soft: rgb(229 9 20 / 0.12);
+  --accent-soft-foreground: #f46b5e;
 }
 
 html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent='gold'] {
@@ -20,13 +93,42 @@ html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent=
 
 html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-rail,
 html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-mobile-header {
-  background: color-mix(in oklch, var(--client-cinema-rail) 92%, var(--surface));
-  color: oklch(96% 0.006 30);
+  background: color-mix(in srgb, var(--background) 96%, var(--surface));
+  color: var(--foreground);
 }
 
 html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__feature {
   background: var(--client-cinema-feature);
   color: white;
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-nav-item.is-active {
+  box-shadow: inset 2px 0 0 var(--accent), var(--shadow-surface);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__frame {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  box-shadow: var(--shadow-overlay);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__screen {
+  position: absolute;
+  inset: 12% 9% auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  height: 42%;
+  padding: 3px;
+  background: rgb(255 255 255 / 0.16);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__screen span {
+  background: var(--client-cinema-screen);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__screen span:nth-child(2) {
+  background: color-mix(in srgb, var(--accent) 38%, var(--client-cinema-screen));
 }
 
 .theme-preview {
@@ -36,17 +138,18 @@ html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__feat
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--background);
+  border-radius: 2px;
 }
 
 .theme-preview--classic .theme-preview__topbar { height: 18%; background: var(--surface); border-bottom: 1px solid var(--border); }
 .theme-preview--classic .theme-preview__content { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6%; margin: 12% auto 0; }
 .theme-preview--classic .theme-preview__content span { aspect-ratio: 2 / 3; background: var(--surface-secondary); }
-.theme-preview--cinema { display: grid; grid-template-columns: 22% 1fr; background: oklch(14% 0.016 25); }
-.theme-preview__rail { background: oklch(20% 0.025 25); border-right: 1px solid oklch(35% 0.025 25); }
+.theme-preview--cinema { display: grid; grid-template-columns: 22% 1fr; background: #060606; }
+.theme-preview__rail { background: #181818; border-right: 1px solid #292929; }
 .theme-preview__stage { padding: 7%; }
-.theme-preview__hero { height: 42%; background: oklch(32% 0.05 25); }
+.theme-preview__hero { height: 42%; background: #272727; }
 .theme-preview__posters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5%; margin-top: 7%; }
-.theme-preview__posters span { aspect-ratio: 2 / 3; background: oklch(26% 0.03 25); }
-.theme-preview--crimson .theme-preview__hero { border-left: 5px solid oklch(62% 0.2 25); }
+.theme-preview__posters span { aspect-ratio: 2 / 3; background: #232323; }
+.theme-preview--crimson .theme-preview__hero { border-left: 5px solid #e50914; }
 .theme-preview--gold .theme-preview__hero { border-left: 5px solid oklch(75% 0.14 78); }
 .theme-preview--teal .theme-preview__hero { border-left: 5px solid oklch(70% 0.12 180); }

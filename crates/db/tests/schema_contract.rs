@@ -4,10 +4,7 @@ use sea_orm::{
 };
 use sea_orm_migration::{MigratorTrait, SchemaManager};
 use tjxy_common::Username;
-use tjxy_db::{
-    AuthRepository, LibraryPolicyUpdate, LibraryRepository, Migrator, SchemaMigrationError,
-    migrate_database,
-};
+use tjxy_db::{AuthRepository, Migrator, SchemaMigrationError, migrate_database};
 use tjxy_test_support::test_database;
 
 const AI_MESSAGE_SEQUENCE_MIGRATION_POSITION: u32 = 55;
@@ -126,31 +123,39 @@ async fn hybrid_libraries_are_migrated_to_lazy_without_losing_other_policy_value
     Migrator::up(&database, Some(HYBRID_REMOVAL_MIGRATION_POSITION - 1))
         .await
         .unwrap();
-    let library = LibraryRepository::new(&database)
-        .create(
-            "Legacy Hybrid",
-            "movies",
-            &LibraryPolicyUpdate::new(
-                "Lazy",
-                "title_layer",
-                "full",
-                "on_browse",
-                "on_playback",
-                true,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let library = tjxy_common::LibraryId::new();
     let backend = database.get_database_backend();
     database
         .execute(
             backend.build(
-                Query::update()
-                    .table(Alias::new("libraries"))
-                    .value(Alias::new("scan_profile"), "Hybrid")
-                    .value(Alias::new("expansion_policy"), "background")
-                    .and_where(Expr::col(Alias::new("id")).eq(library.as_uuid())),
+                Query::insert()
+                    .into_table(Alias::new("libraries"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("name"),
+                        Alias::new("scan_profile"),
+                        Alias::new("object_selection_scope"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("probe_policy"),
+                        Alias::new("profile_version"),
+                        Alias::new("collection_type"),
+                        Alias::new("sort_key"),
+                        Alias::new("is_enabled"),
+                    ])
+                    .values_panic([
+                        library.as_uuid().into(),
+                        "Legacy Hybrid".into(),
+                        "Hybrid".into(),
+                        "title_layer".into(),
+                        "full".into(),
+                        "background".into(),
+                        "on_playback".into(),
+                        1_i32.into(),
+                        "movies".into(),
+                        b"legacy hybrid".to_vec().into(),
+                        true.into(),
+                    ]),
             ),
         )
         .await
@@ -605,6 +610,15 @@ async fn phase_zero_schema_contains_catalog_storage_cache_and_job_boundaries() {
             .await
             .unwrap()
     );
+    for column in ["daily_total_token_limit", "daily_user_token_limit"] {
+        assert!(
+            schema
+                .has_column("ai_provider_settings", column)
+                .await
+                .unwrap(),
+            "ai_provider_settings missing {column}"
+        );
+    }
     assert!(schema.has_table("ai_execution_records").await.unwrap());
     for column in [
         "day_key",

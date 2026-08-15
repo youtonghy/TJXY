@@ -37,6 +37,7 @@ it('submits the approved defaults and resets the draft after success', async () 
     enabled: true,
     scanProfile: 'Lazy',
     metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
     filesystemSelection: { rootId: 'root-1', relativePath: 'Shows' },
   });
 

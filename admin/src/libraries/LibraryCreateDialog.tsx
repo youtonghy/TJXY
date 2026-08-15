@@ -18,6 +18,7 @@ import type { FilesystemSelection } from './filesystemApi';
 import type {
   CreateLibraryRequest,
   LibraryCollectionType,
+  LocalMetadataAccessMode,
   MetadataSourceMode,
   ScanProfile,
 } from './libraryApi';
@@ -42,6 +43,7 @@ export function LibraryCreateDialog({
   const [collectionType, setCollectionType] = useState<LibraryCollectionType>('movies');
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
   const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
+  const [localMetadataAccessMode, setLocalMetadataAccessMode] = useState<LocalMetadataAccessMode>('import');
   const [filesystemSelection, setFilesystemSelection] = useState<FilesystemSelection | null>(null);
   const [folderLabel, setFolderLabel] = useState('');
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
@@ -52,6 +54,7 @@ export function LibraryCreateDialog({
     setCollectionType('movies');
     setScanProfile('Lazy');
     setMetadataSourceMode('automatic_scrape');
+    setLocalMetadataAccessMode('import');
     setFilesystemSelection(null);
     setFolderLabel('');
     setFolderPickerOpen(false);
@@ -74,6 +77,7 @@ export function LibraryCreateDialog({
       enabled,
       scanProfile,
       metadataSourceMode,
+      localMetadataAccessMode,
       filesystemSelection,
     })) {
       reset();
@@ -125,7 +129,11 @@ export function LibraryCreateDialog({
                 </div>
                 <RadioGroup
                   isDisabled={isPending}
-                  onChange={(value) => { setMetadataSourceMode(value as MetadataSourceMode); }}
+                  onChange={(value) => {
+                    const mode = value as MetadataSourceMode;
+                    setMetadataSourceMode(mode);
+                    if (mode === 'automatic_scrape') setLocalMetadataAccessMode('import');
+                  }}
                   value={metadataSourceMode}
                 >
                   <Label>{tr('Metadata source', '元数据来源')}</Label>
@@ -144,6 +152,17 @@ export function LibraryCreateDialog({
                     </Radio.Content>
                   </Radio>
                 </RadioGroup>
+                {metadataSourceMode === 'local_only' && (
+                  <RadioGroup
+                    isDisabled={isPending}
+                    onChange={(value) => { setLocalMetadataAccessMode(value as LocalMetadataAccessMode); }}
+                    value={localMetadataAccessMode}
+                  >
+                    <Label>{tr('Local metadata access', '本地元数据访问')}</Label>
+                    <Radio value="import"><Radio.Control><Radio.Indicator /></Radio.Control><Radio.Content><span className="font-medium">{tr('Import', '导入')}</span><span className="text-sm text-muted">{tr('Store parsed metadata and copied artwork in TJXY.', '在 TJXY 中保存解析后的元数据和复制的图片。')}</span></Radio.Content></Radio>
+                    <Radio value="direct"><Radio.Control><Radio.Indicator /></Radio.Control><Radio.Content><span className="font-medium">{tr('Direct', '直接读取')}</span><span className="text-sm text-muted">{tr('Read NFO and artwork from the media folder without copying them.', '直接从媒体文件夹读取 NFO 和图片，不复制文件。')}</span></Radio.Content></Radio>
+                  </RadioGroup>
+                )}
                 <OptionSelect
                   isDisabled={isPending}
                   label={tr('Scan profile', '扫描配置')}
@@ -201,6 +220,7 @@ function OptionSelect<T extends string>({
   options: readonly { value: T; label: string }[];
   value: T;
 }) {
+  const tr = useTranslate();
   return (
     <Select
       fullWidth
@@ -216,8 +236,8 @@ function OptionSelect<T extends string>({
       <Select.Popover>
         <ListBox>
           {options.map((option) => (
-            <ListBox.Item id={option.value} key={option.value} textValue={option.label}>
-              {option.label}
+            <ListBox.Item id={option.value} key={option.value} textValue={tr(option.label)}>
+              {tr(option.label)}
               <ListBox.ItemIndicator />
             </ListBox.Item>
           ))}

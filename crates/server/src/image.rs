@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use tjxy_application::{AssetReadError, OpenedAsset};
+use tjxy_application::{AssetReadError, DirectMetadataReadError, OpenedAsset, OpenedDirectImage};
 use tjxy_common::{CatalogItemId, ImageType};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
@@ -74,7 +74,24 @@ async fn original(
         .await
     {
         Ok(Some(asset)) => asset,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "image was not found"),
+        Ok(None) => {
+            let Some(direct) = state.direct_metadata.as_ref() else {
+                return error(StatusCode::NOT_FOUND, "image was not found");
+            };
+            return match direct
+                .image(CatalogItemId::from_uuid(item_id), image_type, 0)
+                .await
+            {
+                Ok(Some(image)) => direct_image_response(image, headers, head_only),
+                Ok(None) => error(StatusCode::NOT_FOUND, "image was not found"),
+                Err(DirectMetadataReadError::Query(_))
+                | Err(DirectMetadataReadError::BackendUnavailable) => error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "image service is unavailable",
+                ),
+                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "image data is invalid"),
+            };
+        }
         Err(AssetReadError::Query(_)) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -84,6 +101,39 @@ async fn original(
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "asset data is invalid"),
     };
     asset_response(asset, headers, head_only)
+}
+
+fn direct_image_response(
+    image: OpenedDirectImage,
+    request_headers: &HeaderMap,
+    head_only: bool,
+) -> Response {
+    let etag = format!("\"{}\"", image.etag());
+    if etag_matches(request_headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+            .body(Body::empty())
+            .unwrap_or_else(|_| {
+                error(StatusCode::INTERNAL_SERVER_ERROR, "invalid image metadata")
+            });
+    }
+    let mime_type = image.mime_type();
+    let size = image.size();
+    let body = if head_only {
+        Body::empty()
+    } else {
+        Body::from_stream(image.into_stream())
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime_type)
+        .header(header::CONTENT_LENGTH, size)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+        .body(body)
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "invalid image metadata"))
 }
 
 fn valid_query(raw_query: Option<&str>) -> bool {

@@ -15,6 +15,7 @@ mod catalog_visibility;
 mod dashboard;
 mod demo_catalog;
 mod device;
+mod direct_metadata;
 mod discover;
 mod display_preferences;
 mod full_scan;
@@ -24,6 +25,7 @@ mod import_publication;
 mod import_runtime;
 mod installation;
 mod library;
+mod logging_settings;
 mod manual_probe;
 mod media_collection;
 mod metadata;
@@ -98,6 +100,7 @@ pub use demo_catalog::{
     DemoCatalogRepository, demo_catalog_item_id,
 };
 pub use device::{DeviceOptionsRecord, DeviceRecord, DeviceRepository, DeviceRepositoryError};
+pub use direct_metadata::{DirectMetadataObjectRecord, DirectMetadataRepository};
 #[doc(hidden)]
 pub use discover::enqueue_after_root_sync as enqueue_discovery_after_root_sync;
 pub use discover::{
@@ -128,6 +131,10 @@ pub use library::{
     CreatedFilesystemLibrary, DisabledStorageRuntime, FilesystemRootConfiguration,
     FilesystemRootDraft, LibraryPolicyUpdate, LibraryRepository, LibraryRepositoryError,
     VirtualFolderRecord, VirtualFolderRoot,
+};
+pub use logging_settings::{
+    DEFAULT_LOG_RETENTION_DAYS, LogMode, LoggingSettingsInput, LoggingSettingsRecord,
+    LoggingSettingsRepository, LoggingSettingsRepositoryError,
 };
 pub use manual_probe::{ManualProbeError, ManualProbeRepository, ManualProbeSubmission};
 pub use media_collection::{

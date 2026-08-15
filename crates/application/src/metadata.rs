@@ -11,7 +11,7 @@ use tjxy_db::{
     MetadataPublicationRepository, MetadataWorkError, MetadataWorkRepository,
     StorageSyncRepositoryError, WorkScope,
 };
-use tjxy_domain::MetadataSourceMode;
+use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
 use tjxy_metadata::{
     MetadataError, MetadataImageReference, MetadataItemKind, MetadataProvider,
     MetadataProviderError, MetadataResolution, MetadataResolver, MetadataState, NfoDocument,
@@ -330,6 +330,24 @@ impl MetadataResolveService {
     ) -> Result<MetadataResolveReport, MetadataResolveError> {
         let repository = MetadataWorkRepository::new(&self.database);
         let snapshot = repository.snapshot(claimed).await?;
+        if claimed.job().local_metadata_access_mode() == Some(LocalMetadataAccessMode::Direct) {
+            if claimed.job().metadata_source_mode() != Some(MetadataSourceMode::LocalOnly) {
+                return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
+            }
+            let publication = repository.commit_direct(claimed, &snapshot).await?;
+            tracing::debug!(
+                job_id = %claimed.job().id().as_uuid(),
+                scope_id = %claimed.job().scope().id(),
+                nfo = snapshot.sidecar().is_some(),
+                images = snapshot.images().len(),
+                "indexed direct local metadata references"
+            );
+            return Ok(MetadataResolveReport {
+                changed: publication.changed(),
+                state: MetadataState::Partial,
+                used_nfo: false,
+            });
+        }
         let providers = match claimed.job().metadata_source_mode() {
             Some(MetadataSourceMode::AutomaticScrape) => self.providers.clone(),
             Some(MetadataSourceMode::LocalOnly) => Vec::new(),

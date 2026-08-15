@@ -173,6 +173,14 @@ fn run(terminal: &mut DefaultTerminal, project: &Project) -> io::Result<()> {
             KeyCode::Char('3') => {
                 dispatch_action(ServiceAction::Restart, project, &mut state, &action_sender);
             }
+            KeyCode::Char('4') => {
+                dispatch_action(
+                    ServiceAction::BuildAndRestart,
+                    project,
+                    &mut state,
+                    &action_sender,
+                );
+            }
             _ => {}
         }
     }
@@ -609,6 +617,8 @@ fn footer_line(state: &UiState, snapshot: &StatusSnapshot) -> Line<'static> {
             spans.push(key_hint(" 1 "));
             spans.push(Span::raw(language.text(" 启动", " start")));
         }
+        spans.push(key_hint(" 4 "));
+        spans.push(Span::raw(language.text(" 编译并重启", " build + restart")));
         if let Some(report) = &state.report {
             spans.push(Span::raw("  |  "));
             spans.push(Span::styled(
@@ -630,6 +640,9 @@ fn pending_label(action: ServiceAction, language: Language) -> &'static str {
         ServiceAction::Start => language.text("正在启动…", "starting..."),
         ServiceAction::Stop => language.text("正在关闭…", "stopping..."),
         ServiceAction::Restart => language.text("正在重启…", "restarting..."),
+        ServiceAction::BuildAndRestart => {
+            language.text("正在编译并重启…", "building and restarting...")
+        }
     }
 }
 
@@ -655,6 +668,9 @@ fn action_report_label(report: &ActionReport, language: Language) -> String {
             "关闭超时，未强制终止",
             "stop timed out; process was not killed",
         ),
+        ActionMessage::BuildFailed => {
+            language.text("编译失败，服务未修改", "build failed; service unchanged")
+        }
     };
     let mut value = message.to_owned();
     if let Some(pid) = report.pid {

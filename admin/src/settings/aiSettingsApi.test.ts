@@ -19,8 +19,8 @@ const model = { id: '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11', upstreamId: 'gpt-med
 beforeEach(() => { requestMock.mockReset(); });
 
 it('loads a strict redacted provider contract', async () => {
-  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only', Revision: 3, EncryptionAvailable: true, Models: [{ Id: model.id, UpstreamId: model.upstreamId, DisplayName: model.displayName, ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] });
-  await expect(getAiSettings()).resolves.toEqual({ provider: 'OpenAiCompatible', configured: true, enabled: true, baseUrl: 'https://ai.example/v1', systemPrompt: 'Movies only', revision: 3, encryptionAvailable: true, models: [model] });
+  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only', DailyTotalTokenLimit: 500000, DailyUserTokenLimit: 50000, Revision: 3, EncryptionAvailable: true, Models: [{ Id: model.id, UpstreamId: model.upstreamId, DisplayName: model.displayName, ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] });
+  await expect(getAiSettings()).resolves.toEqual({ provider: 'OpenAiCompatible', configured: true, enabled: true, baseUrl: 'https://ai.example/v1', systemPrompt: 'Movies only', dailyTotalTokenLimit: 500000, dailyUserTokenLimit: 50000, revision: 3, encryptionAvailable: true, models: [model] });
 });
 
 it('loads strict AI usage analytics without message content', async () => {
@@ -46,11 +46,11 @@ it('rejects AI analytics response key drift', async () => {
 });
 
 it('saves only explicit settings fields and keeps the API key write-only', async () => {
-  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only\nUse library context', Revision: 4, EncryptionAvailable: true, Models: [{ Id: model.id, UpstreamId: model.upstreamId, DisplayName: model.displayName, ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] });
-  await saveAiSettings({ enabled: true, baseUrl: 'https://ai.example/v1', apiKey: 'draft-secret', systemPrompt: 'Movies only\nUse library context', revision: 3, models: [model] });
+  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only\nUse library context', DailyTotalTokenLimit: 500000, DailyUserTokenLimit: 50000, Revision: 4, EncryptionAvailable: true, Models: [{ Id: model.id, UpstreamId: model.upstreamId, DisplayName: model.displayName, ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] });
+  await saveAiSettings({ enabled: true, baseUrl: 'https://ai.example/v1', apiKey: 'draft-secret', systemPrompt: 'Movies only\nUse library context', dailyTotalTokenLimit: 500000, dailyUserTokenLimit: 50000, revision: 3, models: [model] });
   expect(requestMock).toHaveBeenCalledWith('/Admin/Ai/Settings', {
     method: 'PUT',
-    body: JSON.stringify({ Enabled: true, BaseUrl: 'https://ai.example/v1', ApiKey: 'draft-secret', SystemPrompt: 'Movies only\nUse library context', Revision: 3, Models: [{ Id: model.id, UpstreamId: 'gpt-media', DisplayName: 'Cinema Guide', ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] }),
+    body: JSON.stringify({ Enabled: true, BaseUrl: 'https://ai.example/v1', ApiKey: 'draft-secret', SystemPrompt: 'Movies only\nUse library context', DailyTotalTokenLimit: 500000, DailyUserTokenLimit: 50000, Revision: 3, Models: [{ Id: model.id, UpstreamId: 'gpt-media', DisplayName: 'Cinema Guide', ReasoningEffort: 'high', IsVisible: true, IsDefault: true, SortOrder: 0 }] }),
   });
 });
 
@@ -77,11 +77,11 @@ it('rejects malformed discovered model contracts', async () => {
 });
 
 it('rejects response key drift and secret leakage', async () => {
-  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only', Revision: 3, EncryptionAvailable: true, Models: [], ApiKey: 'leaked' });
+  requestMock.mockResolvedValue({ Provider: 'OpenAiCompatible', Configured: true, Enabled: true, BaseUrl: 'https://ai.example/v1', SystemPrompt: 'Movies only', DailyTotalTokenLimit: 0, DailyUserTokenLimit: 0, Revision: 3, EncryptionAvailable: true, Models: [], ApiKey: 'leaked' });
   await expect(getAiSettings()).rejects.toMatchObject({ category: 'invalid-response' });
 });
 
 it('matches the database model length limits before sending', async () => {
-  await expect(saveAiSettings({ enabled: true, baseUrl: 'https://ai.example/v1', apiKey: '', systemPrompt: 'Movies only', revision: 3, models: [{ ...model, upstreamId: 'x'.repeat(256) }] })).rejects.toMatchObject({ category: 'validation' });
+  await expect(saveAiSettings({ enabled: true, baseUrl: 'https://ai.example/v1', apiKey: '', systemPrompt: 'Movies only', dailyTotalTokenLimit: 0, dailyUserTokenLimit: 0, revision: 3, models: [{ ...model, upstreamId: 'x'.repeat(256) }] })).rejects.toMatchObject({ category: 'validation' });
   expect(requestMock).not.toHaveBeenCalled();
 });

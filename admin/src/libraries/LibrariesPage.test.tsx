@@ -42,6 +42,7 @@ const movies = {
   objectSelectionScope: 'title_layer',
   metadataPolicy: 'basic',
   metadataSourceMode: 'automatic_scrape',
+  localMetadataAccessMode: 'import',
   expansionPolicy: 'on_browse',
   probePolicy: 'on_playback',
 } satisfies LibraryOption;
@@ -169,6 +170,7 @@ it('creates with approved defaults, closes the modal, and reloads the authoritat
     enabled: true,
     scanProfile: 'Lazy',
     metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
     filesystemSelection: { rootId: 'root-1', relativePath: 'Shows' },
   });
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });

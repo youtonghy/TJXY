@@ -39,6 +39,7 @@ pub enum ServiceAction {
     Start,
     Stop,
     Restart,
+    BuildAndRestart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub enum ActionMessage {
     StartFailed,
     StopFailed,
     StopTimedOut,
+    BuildFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +286,67 @@ impl Project {
                     }
                 }
             }
+            ServiceAction::BuildAndRestart => self.build_and_restart(),
         }
+    }
+
+    fn build_and_restart(&self) -> ActionReport {
+        if let Err(error) = self.run_build_command("npm", &["--prefix", "admin", "run", "build"]) {
+            return ActionReport::error(ActionMessage::BuildFailed, None, Some(error));
+        }
+        if let Err(error) = self.run_build_command(
+            "cargo",
+            &[
+                "build",
+                "--release",
+                "--locked",
+                "-p",
+                "tjxy-server",
+                "--bin",
+                "tjxy-server",
+                "-p",
+                "tjxy-tui",
+            ],
+        ) {
+            return ActionReport::error(ActionMessage::BuildFailed, None, Some(error));
+        }
+
+        let servers = discover_observed_servers(self);
+        if !servers.is_empty() {
+            let stopped = self.stop_server();
+            if !stopped.ok {
+                return stopped;
+            }
+        }
+        self.start_server(ActionMessage::Restarted)
+    }
+
+    fn run_build_command(&self, program: &str, args: &[&str]) -> Result<(), String> {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .map_err(|error| format!("{program} could not start: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = stderr
+            .lines()
+            .rev()
+            .chain(stdout.lines().rev())
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Err(format!(
+            "{program} {} exited with {}; {detail}",
+            args.join(" "),
+            output.status
+        ))
     }
 
     fn start_server(&self, success_message: ActionMessage) -> ActionReport {

@@ -27,6 +27,7 @@ it('creates a library from an opaque filesystem selection and metadata source mo
     enabled: true,
     scanProfile: 'Lazy',
     metadataSourceMode: 'local_only',
+    localMetadataAccessMode: 'direct',
     filesystemSelection: { rootId: 'root-1', relativePath: 'Movies' },
   });
 
@@ -39,6 +40,7 @@ it('creates a library from an opaque filesystem selection and metadata source mo
           Enabled: true,
           ScanProfile: 'Lazy',
           MetadataSourceMode: 'local_only',
+          LocalMetadataAccessMode: 'direct',
         },
         FilesystemSelection: { RootId: 'root-1', RelativePath: 'Movies' },
       }),
@@ -115,6 +117,7 @@ it('updates the complete effective policy with the current profile version', asy
     scanProfile: 'Full',
     profileVersion: 3,
     metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
     effectivePolicy: {
       objectSelectionScope: 'title_layer',
       metadataPolicy: 'full',
@@ -132,6 +135,7 @@ it('updates the complete effective policy with the current profile version', asy
         ScanProfile: 'Full',
         ProfileVersion: 3,
         MetadataSourceMode: 'automatic_scrape',
+        LocalMetadataAccessMode: 'import',
         ObjectSelectionScope: 'title_layer',
         MetadataPolicy: 'full',
         ExpansionPolicy: 'eager',

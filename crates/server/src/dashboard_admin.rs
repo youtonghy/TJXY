@@ -84,7 +84,7 @@ pub(crate) async fn summary(
     match service.summary(query).await {
         Ok(summary) => Json(summary).into_response(),
         Err(error) => {
-            eprintln!("Dashboard summary query failed: {error}");
+            tracing::error!("Dashboard summary query failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -109,7 +109,7 @@ pub(crate) async fn now_playing(
     match service.now_playing(active_within_seconds).await {
         Ok(items) => Json(items).into_response(),
         Err(error) => {
-            eprintln!("Dashboard now-playing query failed: {error}");
+            tracing::error!("Dashboard now-playing query failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -134,7 +134,7 @@ pub(crate) async fn login_history(
     match service.login_history(page).await {
         Ok(items) => Json(items).into_response(),
         Err(error) => {
-            eprintln!("Dashboard login-history query failed: {error}");
+            tracing::error!("Dashboard login-history query failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -159,7 +159,7 @@ pub(crate) async fn watch_history(
     match service.watch_history(page).await {
         Ok(items) => Json(items).into_response(),
         Err(error) => {
-            eprintln!("Dashboard watch-history query failed: {error}");
+            tracing::error!("Dashboard watch-history query failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }

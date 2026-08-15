@@ -5,11 +5,11 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
-    CatalogQueryService, DisplayPreferencesService, FilesystemBrowser, FilesystemBrowserError,
-    LibraryService, MediaCollectionService, MediaReadService, MetadataImageFetchError,
-    MetadataImportService, MetadataResolveService, PlaybackTicketService, PlaystateService,
-    ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry, SystemClock, TaskService,
-    UserDataService,
+    CatalogQueryService, DirectMetadataReadService, DisplayPreferencesService, FilesystemBrowser,
+    FilesystemBrowserError, LibraryService, MediaCollectionService, MediaReadService,
+    MetadataImageFetchError, MetadataImportService, MetadataResolveService, PlaybackTicketService,
+    PlaystateService, ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry,
+    SystemClock, TaskService, UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
@@ -94,6 +94,7 @@ pub struct StartupOptions {
     musicbrainz_provider_factory: Arc<crate::metadata_settings_admin::MusicProviderFactory>,
     media_refresh_interval: Option<StdDuration>,
     ai_admission: AiAdmissionConfig,
+    logging_runtime: Option<Arc<crate::LoggingRuntime>>,
 }
 
 struct ConfiguredStorageBackend {
@@ -208,6 +209,7 @@ impl StartupOptions {
             }),
             media_refresh_interval: None,
             ai_admission: AiAdmissionConfig::default(),
+            logging_runtime: None,
         }
     }
 
@@ -226,6 +228,12 @@ impl StartupOptions {
     #[must_use]
     pub const fn with_ai_admission_config(mut self, config: AiAdmissionConfig) -> Self {
         self.ai_admission = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_logging_runtime(mut self, runtime: Arc<crate::LoggingRuntime>) -> Self {
+        self.logging_runtime = Some(runtime);
         self
     }
 
@@ -470,6 +478,22 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         database.close().await?;
         database = Database::connect(&options.database_url).await?;
     }
+    if let Some(runtime) = options.logging_runtime.as_ref() {
+        let settings = tjxy_db::LoggingSettingsRepository::new(&database)
+            .get()
+            .await?;
+        let mode = settings
+            .as_ref()
+            .map_or(tjxy_db::LogMode::Error, |value| value.mode());
+        let retention_days = settings
+            .as_ref()
+            .map_or(tjxy_db::DEFAULT_LOG_RETENTION_DAYS, |value| {
+                value.retention_days()
+            });
+        runtime.set_mode(mode)?;
+        runtime.cleanup(retention_days)?;
+        tokio::spawn(Arc::clone(runtime).run_retention_scheduler());
+    }
     if options.assets_dir_source == "Default" {
         let roots = tjxy_db::AssetStorageRepository::new(&database)
             .roots()
@@ -499,7 +523,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let (filesystem_browser, invalid_root_indexes) =
         FilesystemBrowser::from_available_roots(filesystem_browser_roots).await;
     if !invalid_root_indexes.is_empty() {
-        eprintln!(
+        tracing::error!(
             "Filesystem browser skipped unavailable root indexes: {}",
             invalid_root_indexes
                 .iter()
@@ -596,18 +620,6 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let auth = Arc::new(auth);
     let cache_config = options.redis_cache;
     let cache = Arc::new(CacheRuntime::connect(cache_config.clone()).await?);
-    let mut catalog = CatalogQueryService::new(database.clone())
-        .with_lazy_wait_timeout(options.lazy_wait_timeout);
-    if cache.is_enabled() {
-        catalog = catalog.with_cache_ttls(
-            cache.clone(),
-            cache_config.keys().clone(),
-            cache_config.home_ttl(),
-            cache_config.item_ttl(),
-            cache_config.empty_expansion_ttl(),
-        );
-    }
-    let catalog = Arc::new(catalog);
     let libraries = Arc::new(LibraryService::new(database.clone()));
     let branding_assets_dir = options.assets_dir.join("branding");
     let asset_writer = Arc::new(if options.assets_dir_source == "Environment" {
@@ -625,7 +637,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let (filesystem_backends, unavailable_filesystem_accounts) =
         prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled).await;
     if !unavailable_filesystem_accounts.is_empty() {
-        eprintln!(
+        tracing::error!(
             "{} filesystem storage account(s) remain offline until their roots are restored and TJXY is restarted",
             unavailable_filesystem_accounts.len()
         );
@@ -640,7 +652,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         Arc::clone(&the_audio_db_provider) as Arc<dyn MetadataProvider>,
     );
     metadata_providers.insert(0, Arc::clone(&tmdb_provider) as Arc<dyn MetadataProvider>);
-    let (media, storage_runtime) = configure_storage(
+    let (media, direct_metadata, storage_runtime) = configure_storage(
         &database,
         filesystem_backends,
         storage_backends,
@@ -649,6 +661,20 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         image_fetcher,
         options.filesystem_realtime_enabled,
     )?;
+    let direct_metadata = Arc::new(direct_metadata);
+    let mut catalog = CatalogQueryService::new(database.clone())
+        .with_lazy_wait_timeout(options.lazy_wait_timeout)
+        .with_direct_metadata(Arc::clone(&direct_metadata));
+    if cache.is_enabled() {
+        catalog = catalog.with_cache_ttls(
+            cache.clone(),
+            cache_config.keys().clone(),
+            cache_config.home_ttl(),
+            cache_config.item_ttl(),
+            cache_config.empty_expansion_ttl(),
+        );
+    }
+    let catalog = Arc::new(catalog);
     let realtime_events = Arc::new(crate::socket::RealtimeEvents::new());
     worker::spawn_cache_invalidation_worker(
         database.clone(),
@@ -714,6 +740,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_catalog(catalog.clone())
     .with_libraries(libraries)
     .with_assets(assets)
+    .with_direct_metadata(direct_metadata)
     .with_media(media)
     .with_playback_tickets(playback_tickets)
     .with_media_collections(media_collections)
@@ -729,6 +756,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_metadata_settings_admin(metadata_settings_admin)
     .with_local_metadata_admin(local_metadata_admin)
     .with_system_settings_assets(database.clone(), branding_assets_dir)
+    .with_logging_runtime(options.logging_runtime)
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)
     .with_realtime_events(realtime_events)
@@ -958,7 +986,7 @@ async fn prepare_filesystem_backends(
             }),
             Err(error) => {
                 unavailable.push(account_id);
-                eprintln!(
+                tracing::error!(
                     "Filesystem storage account {account_id} is offline ({})",
                     backend_error_category(&error)
                 );
@@ -988,12 +1016,15 @@ fn configure_storage(
 ) -> Result<
     (
         MediaReadService,
+        DirectMetadataReadService,
         Arc<crate::runtime_storage::RuntimeStorageManager>,
     ),
     crate::runtime_storage::RuntimeStorageError,
 > {
     let backends = StorageBackendRegistry::new();
     let media = MediaReadService::new(database.clone()).with_backend_registry(backends.clone());
+    let direct_metadata =
+        DirectMetadataReadService::new(database.clone()).with_backend_registry(backends.clone());
     let probe = ProbeService::new(database.clone()).with_backend_registry(backends.clone());
     let mut metadata = MetadataResolveService::new(database.clone())
         .with_backend_registry(backends.clone())
@@ -1020,7 +1051,7 @@ fn configure_storage(
     }
     worker::spawn_probe_worker(database.clone(), Arc::new(probe));
     worker::spawn_metadata_worker(database.clone(), Arc::new(metadata));
-    Ok((media, runtime))
+    Ok((media, direct_metadata, runtime))
 }
 
 fn validate_storage_backends(
@@ -1115,6 +1146,10 @@ pub enum InitializationError {
     FilesystemConfiguration(#[from] LibraryRepositoryError),
     #[error("system settings query failed: {0}")]
     SystemSettings(#[from] SystemSettingsRepositoryError),
+    #[error("logging settings query failed: {0}")]
+    LoggingSettings(#[from] tjxy_db::LoggingSettingsRepositoryError),
+    #[error("logging runtime update failed: {0}")]
+    LoggingRuntime(#[from] crate::LoggingRuntimeError),
     #[error("authentication initialization failed: {0}")]
     Authentication(#[from] AuthError),
     #[error("API key validation failed")]

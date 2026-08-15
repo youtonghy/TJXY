@@ -98,7 +98,7 @@ function validatePath(path: string): void {
   }
 }
 
-function mediaBrowserTokenHeader(): string {
+export function mediaBrowserTokenHeader(): string {
   const token = getAccessToken();
   if (
     token === null

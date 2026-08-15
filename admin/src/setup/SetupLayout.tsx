@@ -70,7 +70,7 @@ export function SetupLayout({
           </header>
           {activeStep !== null && <div className="px-5 pt-5 lg:hidden"><SetupStepper compact locale={locale} orientation="horizontal" step={activeStep} /></div>}
           <main className="flex flex-1 justify-center px-5 py-8 lg:px-10 lg:py-12">
-            <section aria-labelledby={titleId} className="w-full max-w-[720px]" ref={contentRef} tabIndex={-1}>
+            <section aria-labelledby={titleId} className="w-full max-w-[720px] focus:outline-none" ref={contentRef} tabIndex={-1}>
               <div className="mb-7"><p className="text-xs font-medium uppercase text-accent">{step > 0 ? tr(`Step ${String(step)} of 4`, `第 ${String(step)} 步，共 4 步`) : 'TJXY Setup'}</p><h1 className="mt-2 text-2xl font-semibold sm:text-3xl" id={titleId}>{title}</h1>{description && <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{description}</p>}</div>
               {children}
             </section>

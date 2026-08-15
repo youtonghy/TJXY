@@ -1,4 +1,4 @@
-use chrono::{Local, Utc};
+use chrono::{Local, TimeZone, Utc};
 use std::{
     collections::{BTreeSet, HashSet},
     convert::Infallible,
@@ -105,6 +105,8 @@ impl AiService {
         base_url: &str,
         api_key: Option<Zeroizing<String>>,
         system_prompt: &str,
+        daily_total_token_limit: u64,
+        daily_user_token_limit: u64,
         models: &[AiModelInput],
         revision: Option<i64>,
     ) -> Result<AiSettingsRecord, AiServiceError> {
@@ -147,6 +149,8 @@ impl AiService {
                 enabled,
                 base_url.as_str().trim_end_matches('/'),
                 system_prompt.trim(),
+                daily_total_token_limit,
+                daily_user_token_limit,
                 models,
                 revision,
             )
@@ -451,8 +455,43 @@ pub(crate) async fn chat(
             ));
         }
         Err(error) => {
-            eprintln!("AI daily quota check failed: {error}");
+            tracing::error!("AI daily quota check failed: {error}");
             return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        }
+    }
+    let usage_repository = AiUsageRepository::new(&service.database);
+    let token_now = Local::now();
+    let token_day = token_now.date_naive();
+    if prepared.daily_total_token_limit > 0 {
+        match usage_repository.daily_total_token_usage(token_day).await {
+            Ok(used) if used >= prepared.daily_total_token_limit => {
+                return admission_error_response(AiAdmissionError::Rejected(
+                    AiAdmissionRejection::DailyQuota {
+                        retry_after_seconds: local_daily_retry_after_seconds(token_now),
+                    },
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!("AI daily token quota check failed: {error}");
+                return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+            }
+        }
+    }
+    if prepared.daily_user_token_limit > 0 {
+        match usage_repository.daily_token_usage(user_id, token_day).await {
+            Ok(used) if used >= prepared.daily_user_token_limit => {
+                return admission_error_response(AiAdmissionError::Rejected(
+                    AiAdmissionRejection::DailyQuota {
+                        retry_after_seconds: local_daily_retry_after_seconds(token_now),
+                    },
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!("AI daily user token quota check failed: {error}");
+                return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
+            }
         }
     }
     let permit = admission.commit();
@@ -540,7 +579,7 @@ fn agent_stream_response(request: ChatStreamRequest) -> Response {
                 {
                     Ok(conversation_id) => conversation_id,
                     Err(error) => {
-                        eprintln!("AI conversation persistence failed: {error}");
+                        tracing::error!("AI conversation persistence failed: {error}");
                         record_execution(
                             &service,
                             user_id,
@@ -585,7 +624,7 @@ fn agent_stream_response(request: ChatStreamRequest) -> Response {
                 yield Ok(event("done", &json!({"ConversationId": conversation_id})));
             }
             Err(error) => {
-                eprintln!("AI chat failed: {error}");
+                tracing::error!("AI chat failed: {error}");
                 let outcome = execution_outcome(&error);
                 record_execution(
                     &service,
@@ -651,7 +690,7 @@ async fn record_execution(
         .record(&input)
         .await
     {
-        eprintln!("AI usage recording failed: {error}");
+        tracing::error!("AI usage recording failed: {error}");
     }
 }
 
@@ -755,6 +794,8 @@ impl AiService {
             model_display_name: model.display_name().to_owned(),
             reasoning_effort: model.reasoning_effort(),
             system_prompt: server_system_prompt(settings.system_prompt()),
+            daily_total_token_limit: settings.daily_total_token_limit(),
+            daily_user_token_limit: settings.daily_user_token_limit(),
         })
     }
 
@@ -1122,6 +1163,8 @@ struct PreparedChat {
     model_display_name: String,
     reasoning_effort: AiReasoningEffort,
     system_prompt: String,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
 }
 
 fn completion_payload(prepared: &PreparedChat, messages: &[Value]) -> Value {
@@ -1743,7 +1786,7 @@ fn conversation_error_response(error: &AiConversationRepositoryError) -> Respons
         AiConversationRepositoryError::MessageSequenceExhausted
         | AiConversationRepositoryError::Database(_)
         | AiConversationRepositoryError::RollbackFailed { .. } => {
-            eprintln!("AI conversation operation failed: {error}");
+            tracing::error!("AI conversation operation failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -1792,6 +1835,21 @@ fn daily_retry_after_seconds(now: chrono::DateTime<Utc>) -> u64 {
         .max(1)
 }
 
+fn local_daily_retry_after_seconds(now: chrono::DateTime<Local>) -> u64 {
+    let Some(next_day) = now.date_naive().succ_opt() else {
+        return 1;
+    };
+    let Some(next_midnight) = next_day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|value| Local.from_local_datetime(&value).earliest())
+    else {
+        return 1;
+    };
+    u64::try_from(next_midnight.signed_duration_since(now).num_seconds())
+        .unwrap_or(1)
+        .max(1)
+}
+
 fn serialized_context_size(messages: &[Value]) -> Result<usize, AiServiceError> {
     messages.iter().try_fold(0usize, |total, message| {
         let bytes = serde_json::to_vec(message).map_err(|_| AiServiceError::InvalidToolResponse)?;
@@ -1824,7 +1882,7 @@ fn chat_error_response(error: &AiServiceError) -> Response {
             StatusCode::BAD_GATEWAY.into_response()
         }
         _ => {
-            eprintln!("AI chat setup failed: {error}");
+            tracing::error!("AI chat setup failed: {error}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -2018,6 +2076,8 @@ mod tests {
             model_display_name: "Movie model".to_owned(),
             reasoning_effort: AiReasoningEffort::Off,
             system_prompt: "Movies only".to_owned(),
+            daily_total_token_limit: 0,
+            daily_user_token_limit: 0,
         };
         let messages = [json!({"role": "user", "content": "Recommend a film"})];
         assert!(

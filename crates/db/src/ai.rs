@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub const AI_PROVIDER_KEY: &str = "openai-compatible";
 const MAX_MODELS: usize = 64;
 const MAX_CONVERSATION_MESSAGES: u64 = 200;
+pub const MAX_AI_DAILY_TOKEN_LIMIT: u64 = 100_000_000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -160,6 +161,8 @@ pub struct AiSettingsRecord {
     enabled: bool,
     base_url: String,
     system_prompt: String,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
     credential_id: Uuid,
     envelope: CredentialEnvelope,
     revision: i64,
@@ -183,6 +186,14 @@ impl AiSettingsRecord {
     #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+    #[must_use]
+    pub const fn daily_total_token_limit(&self) -> u64 {
+        self.daily_total_token_limit
+    }
+    #[must_use]
+    pub const fn daily_user_token_limit(&self) -> u64 {
+        self.daily_user_token_limit
     }
     #[must_use]
     pub const fn credential_id(&self) -> Uuid {
@@ -251,10 +262,20 @@ impl<'a> AiSettingsRepository<'a> {
         enabled: bool,
         base_url: &str,
         system_prompt: &str,
+        daily_total_token_limit: u64,
+        daily_user_token_limit: u64,
         models: &[AiModelInput],
         expected_revision: Option<i64>,
     ) -> Result<AiSettingsRecord, AiSettingsRepositoryError> {
-        validate_settings(sealed, base_url, system_prompt, models, expected_revision)?;
+        validate_settings(
+            sealed,
+            base_url,
+            system_prompt,
+            daily_total_token_limit,
+            daily_user_token_limit,
+            models,
+            expected_revision,
+        )?;
         let transaction = self.database.begin().await?;
         let result = put_settings(
             &transaction,
@@ -262,6 +283,8 @@ impl<'a> AiSettingsRepository<'a> {
             enabled,
             base_url,
             system_prompt,
+            daily_total_token_limit,
+            daily_user_token_limit,
             models,
             expected_revision,
         )
@@ -612,12 +635,16 @@ fn validate_settings(
     sealed: &SealedCredential,
     base_url: &str,
     prompt: &str,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
     models: &[AiModelInput],
     revision: Option<i64>,
 ) -> Result<(), AiSettingsRepositoryError> {
     if sealed.provider() != AI_PROVIDER_KEY
         || !valid_text(base_url, 2_048)
         || !valid_text(prompt, 16_000)
+        || daily_total_token_limit > MAX_AI_DAILY_TOKEN_LIMIT
+        || daily_user_token_limit > MAX_AI_DAILY_TOKEN_LIMIT
     {
         return Err(AiSettingsRepositoryError::InvalidSettings);
     }
@@ -655,6 +682,8 @@ async fn put_settings(
     enabled: bool,
     base_url: &str,
     prompt: &str,
+    daily_total_token_limit: u64,
+    daily_user_token_limit: u64,
     models: &[AiModelInput],
     revision: Option<i64>,
 ) -> Result<AiSettingsRecord, AiSettingsRepositoryError> {
@@ -672,6 +701,8 @@ async fn put_settings(
                     Alias::new("enabled"),
                     Alias::new("base_url"),
                     Alias::new("system_prompt"),
+                    Alias::new("daily_total_token_limit"),
+                    Alias::new("daily_user_token_limit"),
                     Alias::new("credential_id"),
                     Alias::new("encrypted_payload"),
                     Alias::new("key_version"),
@@ -684,6 +715,12 @@ async fn put_settings(
                     enabled.into(),
                     base_url.into(),
                     prompt.into(),
+                    i64::try_from(daily_total_token_limit)
+                        .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?
+                        .into(),
+                    i64::try_from(daily_user_token_limit)
+                        .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?
+                        .into(),
                     sealed.credential_id().into(),
                     sealed.envelope().payload().to_vec().into(),
                     sealed.envelope().key_version().into(),
@@ -712,6 +749,16 @@ async fn put_settings(
                 .value(Alias::new("enabled"), enabled)
                 .value(Alias::new("base_url"), base_url)
                 .value(Alias::new("system_prompt"), prompt)
+                .value(
+                    Alias::new("daily_total_token_limit"),
+                    i64::try_from(daily_total_token_limit)
+                        .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?,
+                )
+                .value(
+                    Alias::new("daily_user_token_limit"),
+                    i64::try_from(daily_user_token_limit)
+                        .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?,
+                )
                 .value(
                     Alias::new("encrypted_payload"),
                     sealed.envelope().payload().to_vec(),
@@ -785,6 +832,8 @@ async fn get_settings<C: ConnectionTrait>(
             Alias::new("enabled"),
             Alias::new("base_url"),
             Alias::new("system_prompt"),
+            Alias::new("daily_total_token_limit"),
+            Alias::new("daily_user_token_limit"),
             Alias::new("credential_id"),
             Alias::new("encrypted_payload"),
             Alias::new("key_version"),
@@ -805,11 +854,17 @@ async fn get_settings<C: ConnectionTrait>(
         row.try_get("", "encrypted_payload")?,
     )
     .map_err(|_| AiSettingsRepositoryError::InvalidStoredEnvelope)?;
+    let daily_total_token_limit = row.try_get::<i64>("", "daily_total_token_limit")?;
+    let daily_user_token_limit = row.try_get::<i64>("", "daily_user_token_limit")?;
     Ok(Some(AiSettingsRecord {
         provider: row.try_get("", "provider")?,
         enabled: row.try_get("", "enabled")?,
         base_url: row.try_get("", "base_url")?,
         system_prompt: row.try_get("", "system_prompt")?,
+        daily_total_token_limit: u64::try_from(daily_total_token_limit)
+            .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?,
+        daily_user_token_limit: u64::try_from(daily_user_token_limit)
+            .map_err(|_| AiSettingsRepositoryError::InvalidSettings)?,
         credential_id: row.try_get("", "credential_id")?,
         envelope,
         revision: row.try_get("", "revision")?,

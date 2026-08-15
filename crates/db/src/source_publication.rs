@@ -12,6 +12,7 @@ use tjxy_common::{
     CatalogItemId, MEDIA_NAME_PARSER_VERSION, MediaLocationId, MediaSourceId, PresentationKey,
     PublicationId, StorageObjectRecordId, StorageRootId, SubtitleId,
 };
+use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
 use uuid::Uuid;
 
 use crate::{
@@ -1758,8 +1759,8 @@ async fn publish_sources(
     let previous: Option<Uuid> = owner_row.try_get("", "active_source_publication_id")?;
     let metadata_revision: i64 = owner_row.try_get("", "metadata_revision")?;
     let input_sync_revision = claimed.job().input_sync_revision();
-    let metadata_requirement = if input_sync_revision.is_some() {
-        metadata_requirement_for_item(transaction, owner).await?
+    let metadata_policy = if input_sync_revision.is_some() {
+        metadata_policy_for_item(transaction, owner).await?
     } else {
         None
     };
@@ -1772,7 +1773,7 @@ async fn publish_sources(
         )
         .value(Alias::new("source_state"), "Indexed")
         .value(Alias::new("last_error"), Option::<String>::None);
-    if metadata_requirement.is_some() {
+    if metadata_policy.is_some() {
         switch
             .value(Alias::new("metadata_state"), "Resolving")
             .value(
@@ -1803,8 +1804,8 @@ async fn publish_sources(
         now,
     )
     .await?;
-    if let (Some(input_sync_revision), Some(metadata_requirement)) =
-        (input_sync_revision, metadata_requirement)
+    if let (Some(input_sync_revision), Some(metadata_policy)) =
+        (input_sync_revision, metadata_policy)
     {
         let mut spec = WorkJobSpec::new(
             WorkTaskKind::ResolveMetadata,
@@ -1812,7 +1813,9 @@ async fn publish_sources(
             metadata_revision + 1,
             claimed.job().priority(),
         )?
-        .with_metadata_requirement(metadata_requirement)?
+        .with_metadata_requirement(metadata_policy.requirement)?
+        .with_metadata_source_mode(metadata_policy.source_mode)?
+        .with_local_metadata_access_mode(metadata_policy.access_mode)?
         .with_input_sync_revision(input_sync_revision)?;
         if let Some(root_id) = claimed.job().storage_root_affinity() {
             spec = spec.with_storage_root_affinity(root_id)?;
@@ -1831,10 +1834,17 @@ async fn publish_sources(
     Ok(generation)
 }
 
-async fn metadata_requirement_for_item(
+#[derive(Clone, Copy)]
+struct EffectiveMetadataPolicy {
+    requirement: MetadataRequirement,
+    source_mode: MetadataSourceMode,
+    access_mode: LocalMetadataAccessMode,
+}
+
+async fn metadata_policy_for_item(
     transaction: &DatabaseTransaction,
     owner: CatalogItemId,
-) -> Result<Option<MetadataRequirement>, CatalogPublicationError> {
+) -> Result<Option<EffectiveMetadataPolicy>, CatalogPublicationError> {
     let item = Alias::new("metadata_policy_item");
     let membership = Alias::new("metadata_policy_membership");
     let library = Alias::new("metadata_policy_library");
@@ -1842,6 +1852,14 @@ async fn metadata_requirement_for_item(
         .expr_as(
             Expr::col((library.clone(), Alias::new("metadata_policy"))),
             Alias::new("metadata_policy"),
+        )
+        .expr_as(
+            Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
+            Alias::new("metadata_source_mode"),
+        )
+        .expr_as(
+            Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
+            Alias::new("local_metadata_access_mode"),
         )
         .from_as(Alias::new("catalog_items"), item.clone())
         .join_as(
@@ -1870,6 +1888,8 @@ async fn metadata_requirement_for_item(
         .to_owned();
     let backend = transaction.get_database_backend();
     let mut requirement = None;
+    let mut source_mode = MetadataSourceMode::LocalOnly;
+    let mut access_mode = LocalMetadataAccessMode::Direct;
     for row in transaction.query_all(backend.build(&query)).await? {
         let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
             "none" => None,
@@ -1878,8 +1898,27 @@ async fn metadata_requirement_for_item(
             _ => return Err(CatalogPublicationError::InvalidMetadataPolicy),
         };
         requirement = requirement.max(current);
+        if current.is_some() {
+            match row.try_get::<String>("", "metadata_source_mode")?.as_str() {
+                "automatic_scrape" => source_mode = MetadataSourceMode::AutomaticScrape,
+                "local_only" => {}
+                _ => return Err(CatalogPublicationError::InvalidMetadataPolicy),
+            }
+            match row
+                .try_get::<String>("", "local_metadata_access_mode")?
+                .as_str()
+            {
+                "import" => access_mode = LocalMetadataAccessMode::Import,
+                "direct" => {}
+                _ => return Err(CatalogPublicationError::InvalidMetadataPolicy),
+            }
+        }
     }
-    Ok(requirement)
+    Ok(requirement.map(|requirement| EffectiveMetadataPolicy {
+        requirement,
+        source_mode,
+        access_mode,
+    }))
 }
 
 struct StoredSourcePublication {

@@ -64,6 +64,8 @@ async fn settings_store_encrypted_credentials_models_and_revision_fences() {
             true,
             "https://ai.example.test/v1",
             "Only discuss media.",
+            80_000,
+            8_000,
             &model_inputs,
             None,
         )
@@ -74,6 +76,8 @@ async fn settings_store_encrypted_credentials_models_and_revision_fences() {
     assert!(created.enabled());
     assert_eq!(created.base_url(), "https://ai.example.test/v1");
     assert_eq!(created.system_prompt(), "Only discuss media.");
+    assert_eq!(created.daily_total_token_limit(), 80_000);
+    assert_eq!(created.daily_user_token_limit(), 8_000);
     assert_eq!(created.revision(), 1);
     assert_eq!(created.models().len(), 3);
     assert_eq!(created.visible_models().len(), 2);
@@ -104,6 +108,8 @@ async fn settings_store_encrypted_credentials_models_and_revision_fences() {
             false,
             "https://other.example.test/v1",
             "Changed",
+            90_000,
+            9_000,
             &model_inputs,
             Some(2),
         )
@@ -142,6 +148,8 @@ async fn settings_require_one_visible_default_and_unique_model_identifiers() {
                 true,
                 "https://ai.example.test/v1",
                 "Only discuss media.",
+                0,
+                0,
                 &no_default,
                 None,
             )
@@ -161,6 +169,8 @@ async fn settings_require_one_visible_default_and_unique_model_identifiers() {
                 true,
                 "https://ai.example.test/v1",
                 "Only discuss media.",
+                0,
+                0,
                 &duplicates,
                 None,
             )

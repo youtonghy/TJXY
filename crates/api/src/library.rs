@@ -55,6 +55,7 @@ pub struct LibraryOptionsDto {
     object_selection_scope: String,
     metadata_policy: String,
     metadata_source_mode: String,
+    local_metadata_access_mode: String,
     expansion_policy: String,
     probe_policy: String,
 }
@@ -69,6 +70,7 @@ impl LibraryOptionsDto {
         object_selection_scope: impl Into<String>,
         metadata_policy: impl Into<String>,
         metadata_source_mode: impl Into<String>,
+        local_metadata_access_mode: impl Into<String>,
         expansion_policy: impl Into<String>,
         probe_policy: impl Into<String>,
     ) -> Self {
@@ -81,6 +83,7 @@ impl LibraryOptionsDto {
             object_selection_scope: object_selection_scope.into(),
             metadata_policy: metadata_policy.into(),
             metadata_source_mode: metadata_source_mode.into(),
+            local_metadata_access_mode: local_metadata_access_mode.into(),
             expansion_policy: expansion_policy.into(),
             probe_policy: probe_policy.into(),
         }
@@ -170,6 +173,8 @@ pub struct CreateLibraryOptions {
     scan_profile: String,
     #[serde(default = "default_metadata_source_mode")]
     metadata_source_mode: String,
+    #[serde(default = "default_local_metadata_access_mode")]
+    local_metadata_access_mode: String,
 }
 
 impl CreateLibraryOptions {
@@ -187,6 +192,11 @@ impl CreateLibraryOptions {
     pub fn metadata_source_mode(&self) -> &str {
         &self.metadata_source_mode
     }
+
+    #[must_use]
+    pub fn local_metadata_access_mode(&self) -> &str {
+        &self.local_metadata_access_mode
+    }
 }
 
 const fn default_true() -> bool {
@@ -199,6 +209,10 @@ fn default_scan_profile() -> String {
 
 fn default_metadata_source_mode() -> String {
     "automatic_scrape".to_owned()
+}
+
+fn default_local_metadata_access_mode() -> String {
+    "import".to_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -229,6 +243,7 @@ pub struct UpdateLibraryOptions {
     object_selection_scope: Option<String>,
     metadata_policy: Option<String>,
     metadata_source_mode: Option<String>,
+    local_metadata_access_mode: Option<String>,
     expansion_policy: Option<String>,
     probe_policy: Option<String>,
 }
@@ -262,6 +277,11 @@ impl UpdateLibraryOptions {
     #[must_use]
     pub fn metadata_source_mode(&self) -> Option<&str> {
         self.metadata_source_mode.as_deref()
+    }
+
+    #[must_use]
+    pub fn local_metadata_access_mode(&self) -> Option<&str> {
+        self.local_metadata_access_mode.as_deref()
     }
 
     #[must_use]

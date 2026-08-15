@@ -8,6 +8,46 @@ pub enum MetadataSourceMode {
     LocalOnly,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LocalMetadataAccessMode {
+    #[default]
+    Import,
+    Direct,
+}
+
+impl LocalMetadataAccessMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+impl FromStr for LocalMetadataAccessMode {
+    type Err = InvalidLocalMetadataAccessMode;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "import" => Ok(Self::Import),
+            "direct" => Ok(Self::Direct),
+            _ => Err(InvalidLocalMetadataAccessMode),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidLocalMetadataAccessMode;
+
+impl fmt::Display for InvalidLocalMetadataAccessMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid local metadata access mode")
+    }
+}
+
+impl std::error::Error for InvalidLocalMetadataAccessMode {}
+
 impl MetadataSourceMode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

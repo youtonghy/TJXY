@@ -292,6 +292,50 @@ impl<'a> AiUsageRepository<'a> {
         unsigned(row.try_get("", "request_count")?)
     }
 
+    /// Returns the recorded token usage for a user on one UTC day.
+    pub async fn daily_token_usage(
+        &self,
+        user_id: UserId,
+        usage_day: NaiveDate,
+    ) -> Result<u64, AiUsageRepositoryError> {
+        self.token_usage(Some(user_id), usage_day).await
+    }
+
+    /// Returns the recorded token usage across all users on one UTC day.
+    pub async fn daily_total_token_usage(
+        &self,
+        usage_day: NaiveDate,
+    ) -> Result<u64, AiUsageRepositoryError> {
+        self.token_usage(None, usage_day).await
+    }
+
+    async fn token_usage(
+        &self,
+        user_id: Option<UserId>,
+        usage_day: NaiveDate,
+    ) -> Result<u64, AiUsageRepositoryError> {
+        let mut query = Query::select()
+            .expr_as(
+                Expr::col(Alias::new("total_tokens")).sum(),
+                Alias::new("token_total"),
+            )
+            .from(Alias::new("ai_execution_records"))
+            .and_where(Expr::col(Alias::new("day_key")).eq(usage_day.to_string()))
+            .to_owned();
+        if let Some(user_id) = user_id {
+            query.and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()));
+        }
+        let Some(row) = self
+            .database
+            .query_one(self.database.get_database_backend().build(&query))
+            .await?
+        else {
+            return Ok(0);
+        };
+        let value: Option<i64> = row.try_get("", "token_total")?;
+        value.map_or(Ok(0), unsigned)
+    }
+
     /// Aggregates a bounded local-day window for the administrator analytics view.
     ///
     /// # Errors

@@ -1,0 +1,7 @@
+services:
+  tjxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
+      additional_contexts:
+        frontend: ./admin/dist

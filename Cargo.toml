@@ -51,7 +51,11 @@ sea-orm = { version = "1.1.14", default-features = false, features = ["macros", 
 sea-orm-migration = { version = "1.1.14", default-features = false, features = ["runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 thiserror = "2.0.12"
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7.16", features = ["io"] }
 toml = "0.9.8"
 tower = "0.5.3"
 tempfile = "3.20.0"

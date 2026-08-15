@@ -80,6 +80,7 @@ pub(crate) async fn virtual_folders(
                             folder.object_selection_scope(),
                             folder.metadata_policy(),
                             folder.metadata_source_mode(),
+                            folder.local_metadata_access_mode(),
                             folder.expansion_policy(),
                             folder.probe_policy(),
                         ),
@@ -119,16 +120,16 @@ pub(crate) async fn add_virtual_folder(
     let Some(libraries) = state.libraries.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let (profile, enabled, metadata_source_mode) =
-        request
-            .library_options()
-            .map_or(("Lazy", true, "automatic_scrape"), |options| {
-                (
-                    options.scan_profile(),
-                    options.enabled(),
-                    options.metadata_source_mode(),
-                )
-            });
+    let (profile, enabled, metadata_source_mode, local_metadata_access_mode) = request
+        .library_options()
+        .map_or(("Lazy", true, "automatic_scrape", "import"), |options| {
+            (
+                options.scan_profile(),
+                options.enabled(),
+                options.metadata_source_mode(),
+                options.local_metadata_access_mode(),
+            )
+        });
     let selection = request.filesystem_selection();
     let result = if let Some(selection) = selection {
         let Ok((backend, draft)) = browser_filesystem_root(&state, selection).await else {
@@ -141,6 +142,7 @@ pub(crate) async fn add_virtual_folder(
                 profile,
                 enabled,
                 metadata_source_mode,
+                local_metadata_access_mode,
                 &draft,
             )
             .await;
@@ -171,6 +173,7 @@ pub(crate) async fn add_virtual_folder(
                 profile,
                 enabled,
                 metadata_source_mode,
+                local_metadata_access_mode,
                 &draft,
             )
             .await;
@@ -202,6 +205,7 @@ pub(crate) async fn add_virtual_folder(
                 profile,
                 enabled,
                 metadata_source_mode,
+                local_metadata_access_mode,
             )
             .await
             .map(|_| ())
@@ -535,6 +539,7 @@ pub(crate) async fn update_library_options(
             options.profile_version(),
             options.enabled(),
             options.metadata_source_mode(),
+            options.local_metadata_access_mode(),
             overrides,
         )
         .await
@@ -552,7 +557,8 @@ fn library_error_response(error: &LibraryServiceError) -> Response {
             | LibraryRepositoryError::InvalidCollectionType
             | LibraryRepositoryError::InvalidFilesystemRoot
             | LibraryRepositoryError::InvalidProfileVersion
-            | LibraryRepositoryError::InvalidStoredPolicy,
+            | LibraryRepositoryError::InvalidStoredPolicy
+            | LibraryRepositoryError::DirectRequiresFilesystemRoot,
         ) => StatusCode::BAD_REQUEST.into_response(),
         LibraryServiceError::Repository(
             LibraryRepositoryError::NotFound | LibraryRepositoryError::RootNotAttached,

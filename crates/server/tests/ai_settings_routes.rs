@@ -115,6 +115,8 @@ async fn models_fail_closed_without_encryption_and_delete_uses_a_revision_fence(
             true,
             "https://ai.example.test/v1",
             "Only discuss media.",
+            80_000,
+            8_000,
             &[AiModelInput::new(
                 Uuid::new_v4(),
                 "media-model",
@@ -145,10 +147,10 @@ async fn models_fail_closed_without_encryption_and_delete_uses_a_revision_fence(
         .await
         .unwrap();
     assert_eq!(settings.status(), StatusCode::OK);
-    assert_eq!(
-        json_body(settings).await["Models"][0]["ReasoningEffort"],
-        "off"
-    );
+    let settings = json_body(settings).await;
+    assert_eq!(settings["Models"][0]["ReasoningEffort"], "off");
+    assert_eq!(settings["DailyTotalTokenLimit"], 80_000);
+    assert_eq!(settings["DailyUserTokenLimit"], 8_000);
     let models = router_without_key
         .clone()
         .oneshot(authenticated_request(
@@ -211,6 +213,8 @@ async fn administrators_can_discover_sorted_models_with_the_saved_credential() {
             true,
             base_url,
             "Only discuss media.",
+            0,
+            0,
             &[AiModelInput::new(
                 Uuid::new_v4(),
                 "existing-model",

@@ -1640,7 +1640,7 @@ fn service_error(error_value: &CatalogServiceError) -> Response {
         | CatalogServiceError::Publication(_)
         | CatalogServiceError::Playstate(_)
         | CatalogServiceError::InvalidLazyTask => {
-            eprintln!("Catalog request failed: {error_value}");
+            tracing::error!("Catalog request failed: {error_value}");
             error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable")
         }
     }

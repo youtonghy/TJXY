@@ -18,6 +18,7 @@ fn virtual_folder_uses_jellyfin_fields_and_tjxy_effective_policy_extensions() {
             "title_layer",
             "basic",
             "local_only",
+            "direct",
             "on_browse",
             "on_playback",
         ),
@@ -39,6 +40,7 @@ fn virtual_folder_uses_jellyfin_fields_and_tjxy_effective_policy_extensions() {
                 "ObjectSelectionScope": "title_layer",
                 "MetadataPolicy": "basic",
                 "MetadataSourceMode": "local_only",
+                "LocalMetadataAccessMode": "direct",
                 "ExpansionPolicy": "on_browse",
                 "ProbePolicy": "on_playback"
             },
@@ -60,6 +62,7 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
             "ScanProfile": "Lazy",
             "ProfileVersion": 3,
             "MetadataSourceMode": "local_only",
+            "LocalMetadataAccessMode": "direct",
             "EnableRealtimeMonitor": true
         }
     }))
@@ -71,6 +74,10 @@ fn library_options_update_accepts_the_versioned_tjxy_profile_contract() {
     assert_eq!(
         payload.library_options().metadata_source_mode(),
         Some("local_only")
+    );
+    assert_eq!(
+        payload.library_options().local_metadata_access_mode(),
+        Some("direct")
     );
 }
 
@@ -90,4 +97,5 @@ fn virtual_folder_create_accepts_jellyfin_options_and_tjxy_profile_extensions() 
     assert!(!options.enabled());
     assert_eq!(options.scan_profile(), "Manual");
     assert_eq!(options.metadata_source_mode(), "automatic_scrape");
+    assert_eq!(options.local_metadata_access_mode(), "import");
 }

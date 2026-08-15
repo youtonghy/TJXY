@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
+import { useTranslate } from '../settings/i18n';
 import type { FilesystemDirectory, FilesystemRoot, FilesystemSelection } from './filesystemApi';
 import { listFilesystemDirectories, listFilesystemRoots } from './filesystemApi';
 
@@ -33,6 +34,7 @@ export function FolderPickerDialog({
   onClose,
   onSelect,
 }: FolderPickerDialogProps) {
+  const tr = useTranslate();
   const [roots, setRoots] = useState<FilesystemRoot[]>([]);
   const [root, setRoot] = useState<FilesystemRoot | null>(null);
   const [trail, setTrail] = useState<TrailEntry[]>([]);
@@ -129,29 +131,29 @@ export function FolderPickerDialog({
       <Modal.Backdrop isDismissable={!isDisabled} isKeyboardDismissDisabled={isDisabled}>
         <Modal.Container placement="center" size="lg">
           <Modal.Dialog className="max-h-[min(48rem,calc(100vh-2rem))]">
-            <Modal.CloseTrigger aria-label="Close folder picker" isDisabled={isDisabled} />
+            <Modal.CloseTrigger aria-label={tr('Close folder picker', '关闭文件夹选择器')} isDisabled={isDisabled} />
             <Modal.Header>
-              <Modal.Heading>Select media folder</Modal.Heading>
+              <Modal.Heading>{tr('Select media folder', '选择媒体文件夹')}</Modal.Heading>
             </Modal.Header>
             <Modal.Body className="min-h-0">
               {error && (
                 <Alert role="alert" status="danger">
                   <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
                   <Alert.Content>
-                    <Alert.Title>The folder list could not be loaded</Alert.Title>
-                    <Alert.Description>Check that the server media roots are available.</Alert.Description>
+                    <Alert.Title>{tr('The folder list could not be loaded', '无法加载文件夹列表')}</Alert.Title>
+                    <Alert.Description>{tr('Check that the server media roots are available.', '请检查服务器媒体根目录是否可用。')}</Alert.Description>
                   </Alert.Content>
                   <Button onPress={retry} size="sm" variant="tertiary">
-                    <RefreshCw aria-hidden="true" className="size-4" /> Retry
+                    <RefreshCw aria-hidden="true" className="size-4" /> {tr('Retry', '重试')}
                   </Button>
                 </Alert>
               )}
 
               <div className="grid min-h-96 overflow-hidden border border-border md:grid-cols-[15rem_minmax(0,1fr)]">
                 <aside className="min-h-0 overflow-auto border-b border-border bg-surface-secondary p-3 md:border-b-0 md:border-r">
-                  <p className="mb-2 px-2 text-xs font-semibold uppercase text-muted">Server folders</p>
+                  <p className="mb-2 px-2 text-xs font-semibold uppercase text-muted">{tr('Server folders', '服务器文件夹')}</p>
                   <FileTree
-                    aria-label="Server folder tree"
+                    aria-label={tr('Server folder tree', '服务器文件夹树')}
                     className="min-w-0"
                     expandedKeys={root === null ? [] : [
                       `root:${root.id}`,
@@ -179,11 +181,11 @@ export function FolderPickerDialog({
                   </FileTree>
                 </aside>
 
-                <section aria-label="Folder contents" className="flex min-h-0 min-w-0 flex-col">
+                <section aria-label={tr('Folder contents', '文件夹内容')} className="flex min-h-0 min-w-0 flex-col">
                   <div className="flex min-h-14 items-center gap-2 border-b border-border px-3">
                     <Tooltip>
                       <Button
-                        aria-label="Go to parent folder"
+                        aria-label={tr('Go to parent folder', '返回上级文件夹')}
                         isDisabled={trail.length === 0 || loading}
                         isIconOnly
                         onPress={goBack}
@@ -192,10 +194,10 @@ export function FolderPickerDialog({
                       >
                         <ArrowLeft aria-hidden="true" className="size-4" />
                       </Button>
-                      <Tooltip.Content>Parent folder</Tooltip.Content>
+                      <Tooltip.Content>{tr('Parent folder', '上级文件夹')}</Tooltip.Content>
                     </Tooltip>
                     <div className="min-w-0 flex-1 overflow-x-auto">
-                      <Breadcrumbs aria-label="Selected folder path" className="min-w-max flex-nowrap">
+                      <Breadcrumbs aria-label={tr('Selected folder path', '所选文件夹路径')} className="min-w-max flex-nowrap">
                         {root !== null && (
                           <Breadcrumbs.Item isDisabled={trail.length === 0} onPress={() => { navigateToRoot(root); }}>
                             {root.name}
@@ -214,7 +216,7 @@ export function FolderPickerDialog({
                     </div>
                     <Tooltip>
                       <Button
-                        aria-label="Refresh folder"
+                        aria-label={tr('Refresh folder', '刷新文件夹')}
                         isDisabled={root === null}
                         isIconOnly
                         isPending={loading}
@@ -224,25 +226,25 @@ export function FolderPickerDialog({
                       >
                         <RefreshCw aria-hidden="true" className={`size-4${loading ? ' animate-spin' : ''}`} />
                       </Button>
-                      <Tooltip.Content>Refresh folder</Tooltip.Content>
+                      <Tooltip.Content>{tr('Refresh folder', '刷新文件夹')}</Tooltip.Content>
                     </Tooltip>
                   </div>
                   <div className="min-h-0 flex-1 overflow-auto p-2">
                     {loading ? (
-                      <div aria-label="Loading folder contents" className="space-y-2 p-2" role="status">
+                      <div aria-label={tr('Loading folder contents', '正在加载文件夹内容')} className="space-y-2 p-2" role="status">
                         <Skeleton className="h-12 w-full" />
                         <Skeleton className="h-12 w-full" />
                         <Skeleton className="h-12 w-full" />
                       </div>
                     ) : (
                       <ListView
-                        aria-label="Folder list view"
+                        aria-label={tr('Folder list view', '文件夹列表')}
                         onAction={(key) => {
                           const directory = directories.find((item) => item.relativePath === String(key));
                           if (directory !== undefined) openDirectory(directory);
                         }}
                         renderEmptyState={() => (
-                          <p className="py-12 text-center text-sm text-muted">This folder has no child folders.</p>
+                          <p className="py-12 text-center text-sm text-muted">{tr('This folder has no child folders.', '该文件夹没有子文件夹。')}</p>
                         )}
                         selectionMode="none"
                         variant="secondary"
@@ -252,7 +254,7 @@ export function FolderPickerDialog({
                             <Folder aria-hidden="true" className="size-5 shrink-0 text-accent" />
                             <ListView.ItemContent>
                               <ListView.Title>{directory.name}</ListView.Title>
-                              <ListView.Description>{formatModified(directory.modifiedAt)}</ListView.Description>
+                              <ListView.Description>{formatModified(directory.modifiedAt, tr)}</ListView.Description>
                             </ListView.ItemContent>
                             <ListView.ItemAction><ChevronRight aria-hidden="true" className="size-4 text-muted" /></ListView.ItemAction>
                           </ListView.Item>
@@ -264,9 +266,9 @@ export function FolderPickerDialog({
               </div>
             </Modal.Body>
             <Modal.Footer>
-              <Button isDisabled={isDisabled} onPress={onClose} variant="tertiary">Cancel</Button>
+              <Button isDisabled={isDisabled} onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button>
               <Button isDisabled={root === null || loading || isDisabled} onPress={select}>
-                <FolderOpen aria-hidden="true" className="size-4" /> Select folder
+                <FolderOpen aria-hidden="true" className="size-4" /> {tr('Select folder', '选择文件夹')}
               </Button>
             </Modal.Footer>
           </Modal.Dialog>
@@ -291,8 +293,13 @@ function renderTrail(rootId: string, trail: TrailEntry[], index: number): ReactN
   );
 }
 
-function formatModified(value: string | null): string {
-  if (value === null) return 'Folder';
+function formatModified(
+  value: string | null,
+  tr: (english: string, chinese: string) => string,
+): string {
+  if (value === null) return tr('Folder', '文件夹');
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Folder' : `Modified ${date.toLocaleDateString()}`;
+  return Number.isNaN(date.getTime())
+    ? tr('Folder', '文件夹')
+    : tr(`Modified ${date.toLocaleDateString()}`, `修改于 ${date.toLocaleDateString()}`);
 }

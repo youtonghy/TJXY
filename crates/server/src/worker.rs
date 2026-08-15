@@ -1,4 +1,9 @@
-use std::{pin::pin, sync::Arc, time::Duration as StdDuration};
+use std::{
+    future::Future,
+    pin::pin,
+    sync::Arc,
+    time::{Duration as StdDuration, Instant},
+};
 
 use chrono::Duration;
 use sea_orm::DatabaseConnection;
@@ -23,6 +28,7 @@ use tjxy_db::{
 use tjxy_import::{EmbyApiCredentials, EmbyApiImporter, EmbyImportError};
 use tjxy_storage::{BackendError, StorageBackend};
 use tjxy_storage_filesystem::FilesystemBackend;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::socket::RealtimeEvents;
@@ -33,6 +39,42 @@ const FILESYSTEM_EVENT_PRIORITY: i32 = 90;
 const FILESYSTEM_EVENT_QUIET_WINDOW: StdDuration = StdDuration::from_millis(500);
 const HOME_CACHE_WARM_USER_LIMIT: u64 = 128;
 
+fn job_span(claimed: &tjxy_db::ClaimedWorkJob) -> tracing::Span {
+    let job = claimed.job();
+    let scope = job.scope();
+    tracing::debug_span!(
+        "work_job",
+        job_id = %job.id().as_uuid(),
+        task_kind = job.task_kind().as_str(),
+        scope_type = scope.scope_type(),
+        scope_id = %scope.id(),
+        expected_revision = job.expected_revision(),
+        attempt_count = job.attempt_count(),
+    )
+}
+
+async fn execute_logged<T, Error, Work>(
+    claimed: &tjxy_db::ClaimedWorkJob,
+    work: Work,
+) -> Result<T, Error>
+where
+    Error: std::fmt::Display,
+    Work: Future<Output = Result<T, Error>>,
+{
+    async move {
+        let started = Instant::now();
+        tracing::debug!("work job started");
+        let outcome = work.await;
+        match &outcome {
+            Ok(_) => tracing::debug!(duration_ms = started.elapsed().as_millis(), outcome = "completed", "work job finished"),
+            Err(error) => tracing::debug!(duration_ms = started.elapsed().as_millis(), outcome = "deferred_or_failed", error = %error, "work job finished"),
+        }
+        outcome
+    }
+    .instrument(job_span(claimed))
+    .await
+}
+
 pub(crate) fn spawn_media_refresh_scheduler(tasks: Arc<TaskService>, interval: StdDuration) {
     tokio::spawn(async move {
         let mut schedule = tokio::time::interval(interval);
@@ -41,7 +83,7 @@ pub(crate) fn spawn_media_refresh_scheduler(tasks: Arc<TaskService>, interval: S
         loop {
             schedule.tick().await;
             if let Err(error) = tasks.schedule_periodic_library_refresh().await {
-                eprintln!("Periodic media refresh could not enqueue work: {error}");
+                tracing::error!("Periodic media refresh could not enqueue work: {error}");
             }
         }
     });
@@ -55,13 +97,13 @@ pub(crate) fn spawn_home_cache_warm_worker(
         let users = match auth.enabled_user_ids(HOME_CACHE_WARM_USER_LIMIT).await {
             Ok(users) => users,
             Err(error) => {
-                eprintln!("Home cache warmup could not select enabled users: {error}");
+                tracing::error!("Home cache warmup could not select enabled users: {error}");
                 return;
             }
         };
         for user in users {
             if let Err(error) = catalog.warm_home(&[user]).await {
-                eprintln!("Home cache warmup failed for user {user}: {error}");
+                tracing::error!("Home cache warmup failed for user {user}: {error}");
             }
         }
     });
@@ -86,7 +128,9 @@ async fn run_filesystem_event_worker(
         match backend.watch_events(FILESYSTEM_EVENT_QUIET_WINDOW) {
             Ok(monitor) => break monitor,
             Err(error) => {
-                eprintln!("Filesystem event monitor startup failed and will be retried: {error}");
+                tracing::error!(
+                    "Filesystem event monitor startup failed and will be retried: {error}"
+                );
                 tokio::time::sleep(StdDuration::from_secs(5)).await;
             }
         }
@@ -104,17 +148,17 @@ async fn run_filesystem_event_worker(
                         )
                         .await
                     {
-                        eprintln!("Filesystem event scopes could not be enqueued: {error}");
+                        tracing::error!("Filesystem event scopes could not be enqueued: {error}");
                         tokio::time::sleep(StdDuration::from_secs(1)).await;
                     }
                 }
                 Err(error) => {
-                    eprintln!("Filesystem event scopes could not be resolved: {error}");
+                    tracing::error!("Filesystem event scopes could not be resolved: {error}");
                     tokio::time::sleep(StdDuration::from_secs(1)).await;
                 }
             },
             Err(error) => {
-                eprintln!("Filesystem event monitor failed and will be restarted: {error}");
+                tracing::error!("Filesystem event monitor failed and will be restarted: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
                 loop {
                     match backend.watch_events(FILESYSTEM_EVENT_QUIET_WINDOW) {
@@ -123,7 +167,9 @@ async fn run_filesystem_event_worker(
                             break;
                         }
                         Err(restart_error) => {
-                            eprintln!("Filesystem event monitor restart failed: {restart_error}");
+                            tracing::error!(
+                                "Filesystem event monitor restart failed: {restart_error}"
+                            );
                             tokio::time::sleep(StdDuration::from_secs(5)).await;
                         }
                     }
@@ -152,13 +198,15 @@ pub(crate) fn spawn_cache_invalidation_worker(
                     generation,
                     failure,
                 }) => {
-                    eprintln!(
+                    tracing::error!(
                         "Cache invalidation for generation {generation} was deferred: {failure}"
                     );
                     StdDuration::from_millis(250)
                 }
                 Err(error) => {
-                    eprintln!("Cache invalidation worker could not persist progress: {error}");
+                    tracing::error!(
+                        "Cache invalidation worker could not persist progress: {error}"
+                    );
                     StdDuration::from_secs(1)
                 }
             };
@@ -174,7 +222,7 @@ pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
             let delay = match reconciler.run_once().await {
                 Ok(report) => {
                     for failure in report.failures() {
-                        eprintln!(
+                        tracing::error!(
                             "Storage change reconciliation failed for root {}: {}",
                             failure.root_id(),
                             failure.error()
@@ -187,7 +235,9 @@ pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Storage change reconciler could not enumerate backlog: {error}");
+                    tracing::error!(
+                        "Storage change reconciler could not enumerate backlog: {error}"
+                    );
                     StdDuration::from_secs(1)
                 }
             };
@@ -210,7 +260,7 @@ pub(crate) fn spawn_import_worker(database: DatabaseConnection, cipher: Arc<Cred
                 }
                 Ok(None) => tokio::time::sleep(StdDuration::from_millis(250)).await,
                 Err(error) => {
-                    eprintln!("Emby import worker could not claim work: {error}");
+                    tracing::error!("Emby import worker could not claim work: {error}");
                     tokio::time::sleep(StdDuration::from_secs(1)).await;
                 }
             }
@@ -224,7 +274,15 @@ async fn run_claimed_import(
     jobs: &ImportJobRepository<'_>,
     claimed: &ClaimedImportJob,
 ) {
-    let execution = execute_import(database, cipher, claimed);
+    let started = Instant::now();
+    let span = tracing::debug_span!(
+        "import_job",
+        import_job_id = %claimed.id(),
+        adapter_kind = claimed.job().adapter_kind(),
+        attempt_count = claimed.job().attempt_count(),
+    );
+    tracing::debug!(parent: &span, "import job started");
+    let execution = execute_import(database, cipher, claimed).instrument(span.clone());
     let mut execution = pin!(execution);
     let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
     renewal.tick().await;
@@ -238,7 +296,11 @@ async fn run_claimed_import(
             }
         }
     };
-    let Err(error) = outcome else { return };
+    let Err(error) = outcome else {
+        tracing::debug!(parent: &span, duration_ms = started.elapsed().as_millis(), outcome = "completed", "import job finished");
+        return;
+    };
+    tracing::debug!(parent: &span, duration_ms = started.elapsed().as_millis(), outcome = "failed", error = %error, "import job finished");
     if matches!(
         error,
         ImportWorkerError::Staging(ImportStagingRepositoryError::LostLease)
@@ -252,12 +314,13 @@ async fn run_claimed_import(
     let result = if import_error_is_retryable(&error) {
         jobs.retry(claimed, Duration::seconds(5), &message).await
     } else {
+        tracing::error!(parent: &span, error = %error, "import job failed terminally");
         jobs.fail_terminal(claimed, &message).await
     };
     if let Err(update_error) = result
         && !matches!(update_error, ImportStagingRepositoryError::LostLease)
     {
-        eprintln!("Emby import worker could not persist failure: {update_error}");
+        tracing::error!("Emby import worker could not persist failure: {update_error}");
     }
 }
 
@@ -332,7 +395,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                 .await
             {
                 Ok(Some(claimed)) => {
-                    let execution = service.execute(&claimed);
+                    let execution = execute_logged(&claimed, service.execute(&claimed));
                     let mut execution = pin!(execution);
                     let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                     renewal.tick().await;
@@ -342,7 +405,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                             _ = renewal.tick() => {
                                 if let Err(error) = jobs.renew(&claimed, LEASE_DURATION).await {
                                     if !matches!(error, WorkJobRepositoryError::LostLease) {
-                                        eprintln!("Discover worker could not renew lease: {error}");
+                                        tracing::error!("Discover worker could not renew lease: {error}");
                                     }
                                     continue 'worker;
                                 }
@@ -352,6 +415,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                     if let Err(error) = outcome {
                         let message = truncate_error(&error.to_string());
                         let result = if discover_error_is_terminal(&error) {
+                            tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "title discovery failed terminally");
                             jobs.fail_terminal(&claimed, &message).await
                         } else {
                             jobs.retry(&claimed, Duration::seconds(5), &message).await
@@ -359,13 +423,15 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                         if let Err(update_error) = result
                             && !matches!(update_error, WorkJobRepositoryError::LostLease)
                         {
-                            eprintln!("Discover worker could not persist failure: {update_error}");
+                            tracing::error!(
+                                "Discover worker could not persist failure: {update_error}"
+                            );
                         }
                     }
                 }
                 Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
                 Err(error) => {
-                    eprintln!("Discover worker could not claim work: {error}");
+                    tracing::error!("Discover worker could not claim work: {error}");
                     tokio::time::sleep(StdDuration::from_secs(1)).await;
                 }
             }
@@ -447,7 +513,7 @@ where
             {
                 Ok(_) => StdDuration::from_secs(30),
                 Err(error) => {
-                    eprintln!("Storage Changes worker could not sync roots: {error}");
+                    tracing::error!("Storage Changes worker could not sync roots: {error}");
                     storage_change_retry_delay(&error)
                 }
             };
@@ -502,7 +568,7 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = service.execute(&claimed);
+                let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -522,7 +588,7 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Full scan worker could not claim work: {error}");
+                tracing::error!("Full scan worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -543,6 +609,7 @@ async fn handle_full_scan_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if full_scan_error_is_terminal(&error) {
+        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "full scan failed terminally");
         jobs.fail_terminal(claimed, &message).await
     } else {
         let delay = if matches!(error, FullScanError::ChildrenPending { .. }) {
@@ -553,7 +620,7 @@ async fn handle_full_scan_outcome(
         jobs.retry(claimed, delay, &message).await
     };
     if let Err(update_error) = result {
-        eprintln!("Full scan worker could not persist failure outcome: {update_error}");
+        tracing::error!("Full scan worker could not persist failure outcome: {update_error}");
     }
 }
 
@@ -609,7 +676,7 @@ async fn run_series_expand_worker(database: DatabaseConnection, service: SeriesE
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = service.execute(&claimed);
+                let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -631,7 +698,7 @@ async fn run_series_expand_worker(database: DatabaseConnection, service: SeriesE
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Series expand worker could not claim work: {error}");
+                tracing::error!("Series expand worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -654,6 +721,7 @@ async fn handle_series_expand_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if series_expand_error_is_terminal(&error) {
+        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "series expansion failed terminally");
         jobs.fail_terminal(claimed, &message).await
     } else {
         let delay = if matches!(error, SeriesExpandError::InventoryPending { .. }) {
@@ -664,7 +732,7 @@ async fn handle_series_expand_outcome(
         jobs.retry(claimed, delay, &message).await
     };
     if let Err(update_error) = result {
-        eprintln!("Series expand worker could not persist failure outcome: {update_error}");
+        tracing::error!("Series expand worker could not persist failure outcome: {update_error}");
     }
 }
 
@@ -709,7 +777,7 @@ async fn run_source_index_worker(database: DatabaseConnection, service: SourceIn
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = service.execute(&claimed);
+                let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -731,7 +799,7 @@ async fn run_source_index_worker(database: DatabaseConnection, service: SourceIn
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Source index worker could not claim work: {error}");
+                tracing::error!("Source index worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -754,12 +822,13 @@ async fn handle_source_index_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if source_index_error_is_terminal(&error) {
+        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "media source indexing failed terminally");
         jobs.fail_terminal(claimed, &message).await
     } else {
         jobs.retry(claimed, Duration::seconds(5), &message).await
     };
     if let Err(update_error) = result {
-        eprintln!("Source index worker could not persist failure outcome: {update_error}");
+        tracing::error!("Source index worker could not persist failure outcome: {update_error}");
     }
 }
 
@@ -816,7 +885,7 @@ async fn run_storage_worker<Backend>(
         };
         match claim {
             Ok(Some(claimed)) => {
-                let execution = async {
+                let execution = execute_logged(&claimed, async {
                     if claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot {
                         validation
                             .run_claimed(&claimed, account_id)
@@ -830,7 +899,7 @@ async fn run_storage_worker<Backend>(
                             .map(|_| ())
                             .map_err(StorageWorkerError::Scoped)
                     }
-                };
+                });
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -848,7 +917,7 @@ async fn run_storage_worker<Backend>(
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Storage worker could not claim work: {error}");
+                tracing::error!("Storage worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -877,8 +946,11 @@ async fn handle_storage_outcome<Backend>(
         StorageWorkerError::Scoped(error) => {
             let message = truncate_error(&error.to_string());
             if storage_error_is_terminal(&error) {
+                tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage synchronization failed terminally");
                 if let Err(update_error) = service.fail_terminal(claimed, &message).await {
-                    eprintln!("Storage worker could not persist terminal outcome: {update_error}");
+                    tracing::error!(
+                        "Storage worker could not persist terminal outcome: {update_error}"
+                    );
                 }
             } else if let Err(update_error) = jobs
                 .retry(
@@ -888,12 +960,13 @@ async fn handle_storage_outcome<Backend>(
                 )
                 .await
             {
-                eprintln!("Storage worker could not persist failure outcome: {update_error}");
+                tracing::error!("Storage worker could not persist failure outcome: {update_error}");
             }
         }
         StorageWorkerError::Validation(error) => {
             let message = truncate_error(&error.to_string());
             let result = if validation_error_is_terminal(&error) {
+                tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage validation failed terminally");
                 jobs.fail_terminal(claimed, &message).await
             } else {
                 jobs.retry(
@@ -904,7 +977,9 @@ async fn handle_storage_outcome<Backend>(
                 .await
             };
             if let Err(update_error) = result {
-                eprintln!("Storage validation worker could not persist outcome: {update_error}");
+                tracing::error!(
+                    "Storage validation worker could not persist outcome: {update_error}"
+                );
             }
         }
     }
@@ -1025,7 +1100,7 @@ async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeServic
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = service.execute(&claimed);
+                let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -1047,7 +1122,7 @@ async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeServic
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Probe worker could not claim work: {error}");
+                tracing::error!("Probe worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -1063,7 +1138,7 @@ async fn run_metadata_worker(database: DatabaseConnection, service: Arc<Metadata
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = service.execute(&claimed);
+                let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
                 renewal.tick().await;
@@ -1083,7 +1158,7 @@ async fn run_metadata_worker(database: DatabaseConnection, service: Arc<Metadata
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
-                eprintln!("Metadata worker could not claim work: {error}");
+                tracing::error!("Metadata worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
             }
         }
@@ -1104,6 +1179,7 @@ async fn handle_metadata_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if metadata_error_is_terminal(&error) {
+        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "metadata resolution failed terminally");
         jobs.fail_terminal(claimed, &message).await
     } else {
         jobs.retry(claimed, Duration::seconds(5), &message).await
@@ -1111,7 +1187,7 @@ async fn handle_metadata_outcome(
     if let Err(update_error) = result
         && !matches!(update_error, WorkJobRepositoryError::LostLease)
     {
-        eprintln!("Metadata worker could not persist failure outcome: {update_error}");
+        tracing::error!("Metadata worker could not persist failure outcome: {update_error}");
     }
 }
 
@@ -1155,18 +1231,18 @@ async fn handle_outcome(
     outcome: Result<i64, ProbeServiceError>,
 ) {
     match outcome {
-        Ok(_)
-        | Err(
-            ProbeServiceError::InspectionFailed(_)
-            | ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(
-                WorkJobRepositoryError::LostLease,
-            )),
-        ) => {}
+        Ok(_) => {}
+        Err(ProbeServiceError::InspectionFailed(error)) => {
+            tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "media probe inspection failed");
+        }
+        Err(ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(
+            WorkJobRepositoryError::LostLease,
+        ))) => {}
         Err(error) => {
             let message = error.to_string();
             let message = truncate_error(&message);
             if let Err(retry_error) = jobs.retry(claimed, Duration::seconds(5), &message).await {
-                eprintln!("Probe worker could not schedule a retry: {retry_error}");
+                tracing::error!("Probe worker could not schedule a retry: {retry_error}");
             }
         }
     }

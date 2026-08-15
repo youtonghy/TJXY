@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Checkbox, ComboBox, Input, Label, ListBox, Radio, RadioGroup, Select, Skeleton, Switch, TextArea, TextField, Tooltip } from '@heroui/react';
+import { Alert, Button, Card, Checkbox, ComboBox, Description, Input, Label, ListBox, NumberField, Radio, RadioGroup, Select, Skeleton, Switch, TextArea, TextField, Tooltip } from '@heroui/react';
 import { ArrowDown, ArrowUp, Bot, Download, Eye, EyeOff, FlaskConical, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
 import { useCallback, useContext, useRef, useState } from 'react';
@@ -21,6 +21,7 @@ import {
   type AiAnalytics,
   type AiReasoningEffort,
   type AiSettings,
+  MAX_AI_DAILY_TOKEN_LIMIT,
   isReasoningEffort,
 } from './aiSettingsApi';
 
@@ -41,6 +42,8 @@ export function AiSettingsPage() {
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [dailyTotalTokenLimit, setDailyTotalTokenLimit] = useState(0);
+  const [dailyUserTokenLimit, setDailyUserTokenLimit] = useState(0);
   const [models, setModels] = useState<AiAdminModel[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [operation, setOperation] = useState<Operation>(null);
@@ -53,7 +56,8 @@ export function AiSettingsPage() {
 
   const applySettings = useCallback((value: AiSettings) => {
     setSettings(value); setEnabled(value.enabled); setBaseUrl(value.baseUrl ?? '');
-    setSystemPrompt(value.systemPrompt); setModels(value.models); setApiKey('');
+    setSystemPrompt(value.systemPrompt); setDailyTotalTokenLimit(value.dailyTotalTokenLimit);
+    setDailyUserTokenLimit(value.dailyUserTokenLimit); setModels(value.models); setApiKey('');
     setShowKey(false); setConflict(false); setError(null);
   }, []);
 
@@ -91,7 +95,7 @@ export function AiSettingsPage() {
 
   const save = () => run('save', async () => {
     try {
-      const value = await saveAiSettings({ enabled, baseUrl, apiKey, systemPrompt, revision: settings?.revision ?? null, models });
+      const value = await saveAiSettings({ enabled, baseUrl, apiKey, systemPrompt, dailyTotalTokenLimit, dailyUserTokenLimit, revision: settings?.revision ?? null, models });
       if (!isMounted()) return;
       applySettings(value); notify(tr('AI assistant settings saved.', 'AI 助手设置已保存。'), { type: 'success' });
     } catch (failure: unknown) {
@@ -178,7 +182,6 @@ export function AiSettingsPage() {
         description={tr('Configure the server-side provider, media policy, and models visible in the client.', '配置服务端 AI 提供商、媒体策略和前台可见模型。')}
         title={tr('AI assistant', 'AI 助手')}
       />
-      <AiAnalyticsPanel analytics={analytics} error={analyticsError} loading={analyticsLoading} onRetry={() => { void loadAnalytics(); }} />
       {loading && settings === null ? <SettingsSkeleton /> : error !== null && settings === null ? <PageError error={error} headingLevel={2} onRetry={() => { void load(); }} /> : settings !== null ? (
         <Card>
           <Card.Header className="flex items-start gap-3 p-5 sm:p-6"><span className="grid size-9 place-items-center rounded-lg bg-accent text-accent-foreground"><Bot aria-hidden="true" className="size-5" /></span><div><Card.Title>{tr('Provider and policy', '提供商与策略')}</Card.Title><Card.Description>{tr('The API key stays on the server and is never returned after saving.', 'API 密钥仅保存在服务器上，保存后不会再次返回。')}</Card.Description></div></Card.Header>
@@ -191,6 +194,21 @@ export function AiSettingsPage() {
               <TextField fullWidth><Label>{tr('API key', 'API 密钥')}</Label><div className="relative"><Input autoComplete="new-password" className="pr-11" fullWidth type={showKey ? 'text' : 'password'} value={apiKey} onChange={(event) => { setApiKey(event.currentTarget.value); }} placeholder={settings.configured ? tr('Leave blank to keep the saved key', '留空以保留已保存的密钥') : tr('Enter API key', '输入 API 密钥')} /><Button aria-label={showKey ? tr('Hide API key', '隐藏 API 密钥') : tr('Show API key', '显示 API 密钥')} className="absolute right-1 top-1/2 -translate-y-1/2" isIconOnly onPress={() => { setShowKey((value) => !value); }} size="sm" variant="ghost">{showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button></div></TextField>
             </div>
             <TextField fullWidth><Label>{tr('System prompt', '系统提示词')}</Label><TextArea className="min-h-32" value={systemPrompt} onChange={(event) => { setSystemPrompt(event.currentTarget.value); }} /></TextField>
+            <div className="border-t border-border pt-5">
+              <div className="mb-4"><h2 className="text-base font-semibold">{tr('Usage limits', '用量上限')}</h2><p className="text-sm text-muted">{tr('Limits reset at server-local midnight and use the provider\'s reported token usage.', '上限在服务器本地时间午夜重置，并采用上游返回的真实 Token 用量。')}</p></div>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <NumberField fullWidth maxValue={MAX_AI_DAILY_TOKEN_LIMIT} minValue={0} name="daily-total-token-limit" onChange={setDailyTotalTokenLimit} step={1_000} value={dailyTotalTokenLimit}>
+                  <Label>{tr('Daily total limit', '每日总上限')}</Label>
+                  <NumberField.Group><NumberField.DecrementButton /><NumberField.Input /><NumberField.IncrementButton /></NumberField.Group>
+                  <Description>{tr('Tokens across all users. Set to 0 for unlimited.', '所有用户合计 Token；设为 0 表示不限制。')}</Description>
+                </NumberField>
+                <NumberField fullWidth maxValue={MAX_AI_DAILY_TOKEN_LIMIT} minValue={0} name="daily-user-token-limit" onChange={setDailyUserTokenLimit} step={1_000} value={dailyUserTokenLimit}>
+                  <Label>{tr('Daily limit per user', '每位用户每日上限')}</Label>
+                  <NumberField.Group><NumberField.DecrementButton /><NumberField.Input /><NumberField.IncrementButton /></NumberField.Group>
+                  <Description>{tr('Tokens available to each user. Set to 0 for unlimited.', '每位用户可用 Token；设为 0 表示不限制。')}</Description>
+                </NumberField>
+              </div>
+            </div>
             <div className="border-t border-border pt-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-base font-semibold">{tr('Client models', '前台模型')}</h2><p className="text-sm text-muted">{tr('Display names are shown to users; upstream IDs stay in the administrator workspace.', '显示名称会展示给用户，上游模型 ID 仅在管理后台可见。')}</p></div><Button onPress={() => { setModels((current) => [...current, newModel(current.length)]); }} size="sm" variant="secondary"><Plus className="size-4" />{tr('Add model', '添加模型')}</Button></div>
               <RadioGroup aria-label="默认模型" onChange={selectDefault} value={models.find((model) => model.isDefault)?.id ?? ''}>
@@ -259,6 +277,7 @@ export function AiSettingsPage() {
           <Card.Footer className="flex flex-wrap justify-between gap-3 border-t border-border p-5 sm:p-6"><ConfirmDialog confirmLabel={tr('Remove settings', '移除设置')} description={tr('Delete the encrypted provider key, model aliases, and assistant policy. Existing user conversations are retained, but the assistant will be unavailable until it is configured again.', '删除加密的提供商密钥、模型别名和助手策略。已有用户对话会保留，但重新配置前助手将不可用。')} errorDescription={tr('The AI settings remain active. Reload the latest revision and try again.', 'AI 设置仍然有效，请加载最新版本后重试。')} isPending={operation === 'delete'} onConfirm={remove} title={tr('Remove AI assistant settings?', '移除 AI 助手设置？')} trigger={<Button isDisabled={!settings.configured || locked} variant="danger-soft"><Trash2 className="size-4" />{tr('Remove settings', '移除设置')}</Button>} /><div className="flex gap-2"><Button isDisabled={locked} isPending={operation === 'test'} onPress={() => { void test(); }} variant="secondary"><FlaskConical className="size-4" />{tr('Test connection', '测试连接')}</Button><Button isDisabled={locked || !settings.encryptionAvailable || error !== null || conflict} isPending={operation === 'save'} onPress={() => { void save(); }}><Save className="size-4" />{tr('Save settings', '保存设置')}</Button></div></Card.Footer>
         </Card>
       ) : null}
+      <AiAnalyticsPanel analytics={analytics} error={analyticsError} loading={analyticsLoading} onRetry={() => { void loadAnalytics(); }} />
     </div>
   );
 }

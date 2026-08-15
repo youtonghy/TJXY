@@ -33,6 +33,12 @@ impl FullScanService {
         let scans = FullScanRepository::new(&self.database);
         let policy = scans.policy(claimed).await?;
         let targets = scans.targets(claimed).await?;
+        tracing::debug!(
+            scan_profile = policy.scan_profile(),
+            target_count = targets.len(),
+            batch_metadata = policy.metadata_requirement()?.is_some(),
+            "full scan policy loaded"
+        );
         let storage_root_scope = scans.storage_root_scope(claimed).await?;
         let query = CatalogQueryRepository::new(&self.database);
         let jobs = WorkJobRepository::new(&self.database);
@@ -57,6 +63,7 @@ impl FullScanService {
                     target,
                     requirement,
                     policy.metadata_source_mode(),
+                    policy.local_metadata_access_mode(),
                     claimed.job().priority(),
                     storage_root_scope,
                 )?;
@@ -430,6 +437,7 @@ fn metadata_child_spec(
     target: LazyCatalogWorkTarget,
     requirement: MetadataRequirement,
     metadata_source_mode: MetadataSourceMode,
+    local_metadata_access_mode: tjxy_domain::LocalMetadataAccessMode,
     priority: i32,
     storage_root_scope: Option<StorageRootId>,
 ) -> Result<(String, WorkJobSpec), FullScanError> {
@@ -444,14 +452,16 @@ fn metadata_child_spec(
     )?
     .with_metadata_requirement(requirement)?
     .with_metadata_source_mode(metadata_source_mode)?
+    .with_local_metadata_access_mode(local_metadata_access_mode)?
     .with_input_sync_revision(scope.metadata_input_revision())?;
     let spec = root_affine_spec(spec, storage_root_scope.or(Some(scope.storage_root_id())))?;
     Ok((
         format!(
-            "ResolveMetadata:{item}:{}:{}:{}",
+            "ResolveMetadata:{item}:{}:{}:{}:{}",
             target.metadata_revision(),
             requirement.as_i32(),
-            metadata_source_mode.as_str()
+            metadata_source_mode.as_str(),
+            local_metadata_access_mode.as_str()
         ),
         spec,
     ))

@@ -106,7 +106,7 @@ export function ApiKeysPanel() {
     try {
       await deleteApiKey(key.accessToken);
       if (!isMounted()) return;
-      notify(`API key deleted for ${key.appName}.`, { type: 'success' });
+      notify(tr(`API key deleted for ${key.appName}.`, `已删除 ${key.appName} 的 API 密钥。`), { type: 'success' });
       await reload();
       window.setTimeout(() => { headingRef.current?.focus(); }, 0);
     } catch (caught: unknown) {

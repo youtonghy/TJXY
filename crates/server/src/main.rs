@@ -8,16 +8,18 @@ use tjxy_metadata::{
 use tjxy_server::{
     AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin,
     GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
-    InstallationConfigStore, InstallationState, MicrosoftOneDriveOAuthConfiguration,
-    ServerIdentity, SetupCoordinator, SetupError, SetupValidator, StartupOptions,
-    build_router_with_admin_dist, build_setup_router_with_admin_dist_and_assets, initialize,
-    parse_credential_keyring,
+    InstallationConfigStore, InstallationState, LoggingRuntime,
+    MicrosoftOneDriveOAuthConfiguration, ServerIdentity, SetupCoordinator, SetupError,
+    SetupValidator, StartupOptions, build_router_with_admin_dist,
+    build_setup_router_with_admin_dist_and_assets, initialize, parse_credential_keyring,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 enum StartupError {
+    #[error("logging initialization failed: {0}")]
+    Logging(#[source] tjxy_server::LoggingRuntimeError),
     #[error("TJXY_SERVER_ID must contain a persistent UUID")]
     MissingServerId,
     #[error("TJXY_SERVER_ID is not a valid UUID: {0}")]
@@ -89,16 +91,24 @@ enum StartupError {
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // Environment-backed startup intentionally composes one service instance.
 async fn main() -> Result<(), StartupError> {
+    let log_directory =
+        env::var_os("TJXY_LOG_DIR").map_or_else(|| PathBuf::from("./data/logs"), PathBuf::from);
+    let (logging, _logging_guard) =
+        LoggingRuntime::initialize(log_directory).map_err(StartupError::Logging)?;
+    let logging = Arc::new(logging);
     let config_store = InstallationConfigStore::discover()?;
     let installation_state = config_store.load()?;
     if !matches!(installation_state, InstallationState::Completed(_)) {
         serve_setup(config_store.clone()).await?;
     }
-    serve_application(config_store).await
+    serve_application(config_store, logging).await
 }
 
 #[allow(clippy::too_many_lines)] // Environment-backed startup intentionally composes one service instance.
-async fn serve_application(config_store: InstallationConfigStore) -> Result<(), StartupError> {
+async fn serve_application(
+    config_store: InstallationConfigStore,
+    logging: Arc<LoggingRuntime>,
+) -> Result<(), StartupError> {
     let installation_state = config_store.load()?;
     let completed = match &installation_state {
         InstallationState::Completed(completed) => Some(completed),
@@ -133,6 +143,7 @@ async fn serve_application(config_store: InstallationConfigStore) -> Result<(), 
     let the_audio_db = Arc::new(ReloadableMetadataProvider::new("TheAudioDB"));
     let musicbrainz = Arc::new(ReloadableMetadataProvider::new("MusicBrainz"));
     let mut startup = StartupOptions::new(database_url, identity)
+        .with_logging_runtime(logging)
         .with_tmdb_provider(Arc::clone(&tmdb))
         .with_theaudiodb_provider(Arc::clone(&the_audio_db))
         .with_musicbrainz_provider(Arc::clone(&musicbrainz));

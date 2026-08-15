@@ -20,6 +20,8 @@ mod import_admin;
 mod installation_config;
 mod library;
 mod local_metadata_admin;
+mod logging_admin;
+mod logging_runtime;
 mod media_collection;
 mod metadata_admin;
 mod metadata_settings_admin;
@@ -58,10 +60,10 @@ use axum::{
 };
 use tjxy_api::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
 use tjxy_application::{
-    AssetReadService, AuthService, CatalogQueryService, DisplayPreferencesService,
-    FilesystemBrowser, LibraryService, MediaCollectionService, MediaReadService,
-    MetadataImportService, PlaybackTicketService, PlaystateService, SystemClock, TaskService,
-    UserDataService,
+    AssetReadService, AuthService, CatalogQueryService, DirectMetadataReadService,
+    DisplayPreferencesService, FilesystemBrowser, LibraryService, MediaCollectionService,
+    MediaReadService, MetadataImportService, PlaybackTicketService, PlaystateService, SystemClock,
+    TaskService, UserDataService,
 };
 use uuid::Uuid;
 
@@ -77,6 +79,7 @@ pub use installation_config::{
     InstallationConfigStore, InstallationProfile, InstallationState, NetworkConfiguration,
     PendingInstallation, SecretString,
 };
+pub use logging_runtime::{LoggingRuntime, LoggingRuntimeError};
 pub use runtime_storage::RuntimeStorageError;
 pub use setup::{
     CompleteSetupInput, DatabaseBackend, DatabaseDraft, DatabaseTestResult, SetupCompletion,
@@ -155,6 +158,7 @@ pub struct AppState {
     libraries: Option<Arc<LibraryService>>,
     filesystem_browser: Option<Arc<FilesystemBrowser>>,
     assets: Option<Arc<AssetReadService>>,
+    direct_metadata: Option<Arc<DirectMetadataReadService>>,
     media: Option<Arc<MediaReadService>>,
     playback_tickets: Option<Arc<PlaybackTicketService<SystemClock>>>,
     media_collections: Option<Arc<MediaCollectionService>>,
@@ -167,6 +171,7 @@ pub struct AppState {
     metadata_settings_admin: Option<Arc<metadata_settings_admin::MetadataSettingsAdminService>>,
     local_metadata_admin: Option<Arc<local_metadata_admin::LocalMetadataAdminService>>,
     system_settings: Option<Arc<system_settings::SystemSettingsService>>,
+    logging_runtime: Option<Arc<LoggingRuntime>>,
     restart: RestartController,
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
     storage_runtime: Option<Arc<runtime_storage::RuntimeStorageManager>>,
@@ -191,6 +196,7 @@ impl AppState {
             libraries: None,
             filesystem_browser: None,
             assets: None,
+            direct_metadata: None,
             media: None,
             playback_tickets: None,
             media_collections: None,
@@ -203,6 +209,7 @@ impl AppState {
             metadata_settings_admin: None,
             local_metadata_admin: None,
             system_settings: None,
+            logging_runtime: None,
             restart: RestartController::default(),
             relink_admin: None,
             storage_runtime: None,
@@ -329,6 +336,12 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn with_direct_metadata(mut self, service: Arc<DirectMetadataReadService>) -> Self {
+        self.direct_metadata = Some(service);
+        self
+    }
+
+    #[must_use]
     pub fn with_media(mut self, media: Arc<MediaReadService>) -> Self {
         self.media = Some(media);
         self
@@ -441,6 +454,12 @@ impl AppState {
         self.system_settings = Some(Arc::new(system_settings::SystemSettingsService::new(
             database, asset_dir,
         )));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_logging_runtime(mut self, runtime: Option<Arc<LoggingRuntime>>) -> Self {
+        self.logging_runtime = runtime;
         self
     }
 
@@ -736,6 +755,16 @@ pub fn build_router(state: AppState) -> Router {
             put(system_settings::upload_asset),
         )
         .route("/Admin/System/Restart", post(system_settings::restart))
+        .route(
+            "/Admin/Logs/Settings",
+            get(logging_admin::get_settings).put(logging_admin::put_settings),
+        )
+        .route("/Admin/Logs", get(logging_admin::list_files))
+        .route("/Admin/Logs/{date}", get(logging_admin::read_file))
+        .route(
+            "/Admin/Logs/{date}/Download",
+            get(logging_admin::download_file),
+        )
         .route(
             "/Admin/Imports/{job_id}/Publish",
             post(import_admin::publish),

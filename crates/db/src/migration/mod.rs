@@ -59,6 +59,9 @@ mod m20260811_000058_site_theme_settings;
 mod m20260811_000059_media_name_parser;
 mod m20260812_000060_metadata_payload_version;
 mod m20260812_000061_asset_storage_roots;
+mod m20260813_000062_logging_settings;
+mod m20260813_000063_direct_local_metadata;
+mod m20260815_000064_ai_token_limits;
 
 use std::collections::HashSet;
 
@@ -180,6 +183,8 @@ async fn validate_current_schema(
         "announcements",
         "installation_records",
         "asset_storage_roots",
+        "logging_settings",
+        "direct_metadata_refs",
     ] {
         if !manager.has_table(table).await? {
             missing.push(format!("table {table}"));
@@ -188,6 +193,8 @@ async fn validate_current_schema(
     }
     for (table, column) in [
         ("libraries", "metadata_source_mode"),
+        ("libraries", "local_metadata_access_mode"),
+        ("work_jobs", "local_metadata_access_mode"),
         ("library_storage_roots", "naming_parser_version"),
         ("catalog_items", "naming_parser_version"),
         ("catalog_items", "metadata_payload_version"),
@@ -202,6 +209,8 @@ async fn validate_current_schema(
         ("site_theme_settings", "revision"),
         ("ai_models", "reasoning_effort"),
         ("ai_messages", "sequence_number"),
+        ("ai_provider_settings", "daily_total_token_limit"),
+        ("ai_provider_settings", "daily_user_token_limit"),
     ] {
         if !missing_tables.contains(table) && !manager.has_column(table, column).await? {
             missing.push(format!("column {table}.{column}"));
@@ -286,6 +295,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260811_000059_media_name_parser::Migration),
             Box::new(m20260812_000060_metadata_payload_version::Migration),
             Box::new(m20260812_000061_asset_storage_roots::Migration),
+            Box::new(m20260813_000062_logging_settings::Migration),
+            Box::new(m20260813_000063_direct_local_metadata::Migration),
+            Box::new(m20260815_000064_ai_token_limits::Migration),
         ]
     }
 }

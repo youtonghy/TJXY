@@ -76,6 +76,11 @@ impl MetadataSidecarCandidate {
     pub fn remote_revision(&self) -> Option<&str> {
         self.remote_revision.as_deref()
     }
+
+    #[must_use]
+    pub const fn observed_sync_revision(&self) -> i64 {
+        self.observed_sync_revision
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +123,11 @@ impl MetadataWorkSnapshot {
     #[must_use]
     pub fn images(&self) -> &[MetadataImageCandidate] {
         &self.images
+    }
+
+    #[must_use]
+    pub const fn storage_root_id(&self) -> StorageRootId {
+        self.scope.storage_root_id()
     }
 }
 
@@ -402,6 +412,211 @@ impl<'connection> MetadataWorkRepository<'connection> {
             }
         }
     }
+
+    /// Publishes only source-object references for Direct mode without importing metadata bytes.
+    pub async fn commit_direct(
+        &self,
+        claimed: &ClaimedWorkJob,
+        snapshot: &MetadataWorkSnapshot,
+    ) -> Result<MetadataWorkCommitReport, MetadataWorkError> {
+        let WorkScope::CatalogItem(item_id) = claimed.job().scope() else {
+            return Err(MetadataWorkError::InvalidClaim);
+        };
+        let input_revision = claimed
+            .job()
+            .input_sync_revision()
+            .ok_or(MetadataWorkError::MissingSyncRevision)?;
+        let transaction = self.database.begin().await?;
+        let result = async {
+            let requirement = fence_metadata_requirement(&transaction, claimed).await?;
+            fence_metadata_revision(&transaction, item_id, claimed.job().expected_revision())
+                .await?;
+            let scope = metadata_storage_scope(
+                &transaction,
+                item_id,
+                claimed.job().storage_root_affinity(),
+            )
+            .await?;
+            if !scope.has_same_inventory(snapshot.scope)
+                || !scope.accepts_metadata_input(input_revision)
+            {
+                return Err(MetadataWorkError::StaleOrUnavailable);
+            }
+            revalidate_metadata_snapshot(&transaction, item_id, scope, input_revision, snapshot)
+                .await?;
+            let library_ids =
+                direct_library_ids(&transaction, item_id, scope.storage_root_id()).await?;
+            replace_direct_refs(
+                &transaction,
+                item_id,
+                &library_ids,
+                snapshot,
+                input_revision,
+            )
+            .await?;
+            advance_metadata_watermark(
+                &transaction,
+                item_id,
+                claimed.job().expected_revision(),
+                requirement,
+            )
+            .await?;
+            WorkJobRepository::new(self.database)
+                .complete_in_transaction(
+                    &transaction,
+                    claimed,
+                    WorkJobResult::success(
+                        json!({
+                            "changed": true,
+                            "direct": true,
+                            "references": library_ids.len()
+                                * (usize::from(snapshot.sidecar.is_some()) + snapshot.images.len())
+                        }),
+                        Vec::new(),
+                    ),
+                )
+                .await?;
+            crate::advance_catalog_generation(&transaction).await?;
+            Ok(MetadataWorkCommitReport {
+                changed: true,
+                asset_changed: !snapshot.images.is_empty(),
+            })
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn direct_library_ids(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    root_id: StorageRootId,
+) -> Result<Vec<Uuid>, DbErr> {
+    let membership = Alias::new("direct_membership");
+    let library = Alias::new("direct_library");
+    let binding = Alias::new("direct_binding");
+    let query = Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((library.clone(), Alias::new("id"))),
+            Alias::new("library_id"),
+        )
+        .from_as(Alias::new("library_catalog_items"), membership.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership.clone(), Alias::new("library_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            binding.clone(),
+            Expr::col((binding.clone(), Alias::new("library_id")))
+                .equals((library.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .and_where(Expr::col((binding, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
+        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
+        .and_where(
+            Expr::col((library.clone(), Alias::new("metadata_source_mode"))).eq("local_only"),
+        )
+        .and_where(Expr::col((library, Alias::new("local_metadata_access_mode"))).eq("direct"))
+        .to_owned();
+    connection
+        .query_all(connection.get_database_backend().build(&query))
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("", "library_id"))
+        .collect()
+}
+
+async fn replace_direct_refs(
+    transaction: &sea_orm::DatabaseTransaction,
+    item_id: CatalogItemId,
+    library_ids: &[Uuid],
+    snapshot: &MetadataWorkSnapshot,
+    input_revision: i64,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    transaction
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("direct_metadata_refs"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()))
+                    .and_where(
+                        Expr::col(Alias::new("storage_root_id"))
+                            .eq(snapshot.storage_root_id().as_uuid()),
+                    ),
+            ),
+        )
+        .await?;
+    for library_id in library_ids {
+        let mut primary_priority = 0_i32;
+        let mut backdrop_priority = 0_i32;
+        let image_resources = snapshot.images.iter().map(|image| {
+            let (kind, priority) = match image.image_type() {
+                ImageType::Primary => {
+                    let value = primary_priority;
+                    primary_priority = primary_priority.saturating_add(1);
+                    ("Primary", value)
+                }
+                _ => {
+                    let value = backdrop_priority;
+                    backdrop_priority = backdrop_priority.saturating_add(1);
+                    ("Backdrop", value)
+                }
+            };
+            (image.file(), kind, priority)
+        });
+        let resources = snapshot
+            .sidecar
+            .iter()
+            .map(|file| (file, "Nfo", 0_i32))
+            .chain(image_resources);
+        for (file, kind, priority) in resources {
+            transaction
+                .execute(
+                    backend.build(
+                        Query::insert()
+                            .into_table(Alias::new("direct_metadata_refs"))
+                            .columns([
+                                Alias::new("id"),
+                                Alias::new("library_id"),
+                                Alias::new("catalog_item_id"),
+                                Alias::new("storage_root_id"),
+                                Alias::new("storage_object_id"),
+                                Alias::new("resource_kind"),
+                                Alias::new("priority"),
+                                Alias::new("input_revision"),
+                            ])
+                            .values_panic([
+                                Uuid::new_v4().into(),
+                                (*library_id).into(),
+                                item_id.as_uuid().into(),
+                                snapshot.storage_root_id().as_uuid().into(),
+                                file.record_id().as_uuid().into(),
+                                kind.into(),
+                                priority.into(),
+                                input_revision.into(),
+                            ]),
+                    ),
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn storage_object_stem(

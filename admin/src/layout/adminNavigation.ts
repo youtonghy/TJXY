@@ -3,6 +3,7 @@ import {
   DatabaseZap,
   FolderKanban,
   ListTodo,
+  Logs,
   LayoutDashboard,
   Megaphone,
   Palette,
@@ -37,6 +38,7 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
     labelKey: 'admin.navigation.operations',
     items: [
       { labelKey: 'admin.navigation.tasks', to: '/admin/tasks', icon: ListTodo },
+      { labelKey: 'admin.navigation.logs', to: '/admin/logs', icon: Logs },
     ],
   },
   {

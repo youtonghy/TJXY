@@ -51,6 +51,7 @@ const movies = {
   objectSelectionScope: 'title_layer',
   metadataPolicy: 'basic',
   metadataSourceMode: 'automatic_scrape',
+  localMetadataAccessMode: 'import',
   expansionPolicy: 'on_browse',
   probePolicy: 'on_playback',
 } satisfies LibraryOption;
@@ -220,6 +221,7 @@ it('saves a named profile with the loaded version and omits advanced overrides',
     scanProfile: 'Manual',
     profileVersion: 3,
     metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
   });
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
   expect(await screen.findByText('4', { selector: 'dd' })).toBeVisible();
@@ -242,6 +244,7 @@ it('sends all advanced policy values as one versioned update', async () => {
     scanProfile: 'Lazy',
     profileVersion: 3,
     metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
     effectivePolicy: {
       objectSelectionScope: 'library_roots',
       metadataPolicy: 'full',

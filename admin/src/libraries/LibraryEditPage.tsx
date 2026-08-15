@@ -28,6 +28,7 @@ import { attachFilesystemFolder } from './filesystemApi';
 import type {
   EffectiveLibraryPolicy,
   LibraryOption,
+  LocalMetadataAccessMode,
   MetadataSourceMode,
   ScanProfile,
 } from './libraryApi';
@@ -60,6 +61,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
   const [enabled, setEnabled] = useState(false);
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
   const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
+  const [localMetadataAccessMode, setLocalMetadataAccessMode] = useState<LocalMetadataAccessMode>('import');
   const [advanced, setAdvanced] = useState(false);
   const [policy, setPolicy] = useState<EffectiveLibraryPolicy>(defaultPolicy);
   const [policyConflict, setPolicyConflict] = useState(false);
@@ -96,6 +98,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
           setEnabled(result.record.enabled);
           setScanProfile(result.record.scanProfile);
           setMetadataSourceMode(result.record.metadataSourceMode);
+          setLocalMetadataAccessMode(result.record.localMetadataAccessMode);
           setAdvanced(false);
           setPolicy(policyFromLibrary(result.record));
         }
@@ -149,6 +152,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
         scanProfile,
         profileVersion: library.profileVersion,
         metadataSourceMode,
+        localMetadataAccessMode,
         ...(advanced ? { effectivePolicy: policy } : {}),
       });
       if (!isMounted()) return;
@@ -269,6 +273,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
               onAdvancedChange={setAdvanced}
               onEnabledChange={setEnabled}
               onMetadataSourceModeChange={setMetadataSourceMode}
+              onLocalMetadataAccessModeChange={setLocalMetadataAccessMode}
               onPolicyChange={setPolicy}
               onProfileChange={setScanProfile}
               onReloadLatest={reloadAll}
@@ -276,6 +281,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
               policy={policy}
               scanProfile={scanProfile}
               metadataSourceMode={metadataSourceMode}
+              localMetadataAccessMode={localMetadataAccessMode}
             />
             <StorageFoldersSection
               isPending={attachPending}

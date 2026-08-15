@@ -22,7 +22,7 @@ use tjxy_db::{
     MetadataPublicationRepository, MetadataRequirement, MetadataWorkError, MetadataWorkRepository,
     WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
-use tjxy_domain::MetadataSourceMode;
+use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
 use tjxy_metadata::{MetadataCandidate, MetadataResolution, MetadataSource};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
@@ -605,6 +605,113 @@ async fn local_only_metadata_uses_nfo_without_invoking_configured_remote_provide
 
     assert!(report.used_nfo());
     assert_eq!(report.state().as_str(), "Ready");
+}
+
+#[tokio::test]
+async fn direct_local_metadata_indexes_refs_without_importing_catalog_or_asset_bytes() {
+    let fixture = fixture().await;
+    let backend = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(Alias::new("local_metadata_access_mode"), "direct"),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+        .unwrap()
+        .with_local_metadata_access_mode(LocalMetadataAccessMode::Direct)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "direct-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let report = MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(ForbiddenRemoteProvider))
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    assert!(!report.used_nfo());
+    let item = fixture
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("name"), Alias::new("metadata_state")])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        item.try_get::<String>("", "name").unwrap(),
+        "Arrival (2016)"
+    );
+    assert_eq!(
+        item.try_get::<String>("", "metadata_state").unwrap(),
+        "Empty"
+    );
+    let refs = fixture
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("resource_kind"))
+                    .from(Alias::new("direct_metadata_refs"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(
+        refs[0].try_get::<String>("", "resource_kind").unwrap(),
+        "Nfo"
+    );
+    assert!(
+        fixture
+            .database
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("id"))
+                        .from(Alias::new("asset_blobs"))
+                        .limit(1)
+                )
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
