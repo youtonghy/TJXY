@@ -10,6 +10,8 @@ export class ClientApiError extends Error {
   }
 }
 
+export const CLIENT_AUTH_INVALIDATED_EVENT = 'tjxy-client-auth-invalidated';
+
 export async function clientRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await clientFetch(path, options);
   if (!response.ok) throw new ClientApiError(response.status, errorKind(response.status));
@@ -40,7 +42,10 @@ export async function clientFetch(path: string, options: RequestInit = {}): Prom
     response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, headers });
   }
   catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; if (error instanceof ClientApiError) throw error; throw new ClientApiError(0, 'network'); }
-  if (response.status === 401 && token) clearClientToken();
+  if (response.status === 401 && token) {
+    clearClientToken();
+    window.dispatchEvent(new Event(CLIENT_AUTH_INVALIDATED_EVENT));
+  }
   return response;
 }
 
@@ -52,4 +57,3 @@ function errorKind(status: number): ClientErrorKind {
   if (status >= 500) return 'unavailable';
   return 'unexpected';
 }
-

@@ -120,6 +120,7 @@ it('switches sources, loads subtitles, and reports the playback lifecycle', asyn
 
   const video = await screen.findByLabelText('Playing Arrival');
   expect(video).toHaveAttribute('src', '/stream/1080');
+  expect(video).toHaveAttribute('autoplay');
   expect(playback.getSubtitleBlob).toHaveBeenCalledTimes(2);
 
   Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 2 });

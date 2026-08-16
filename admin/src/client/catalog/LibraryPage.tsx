@@ -4,7 +4,7 @@ import { RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
-import { getItems, getLibraryFilterFacets, type ItemPage, type LibraryFilterFacets } from '../api/catalogApi';
+import { getItems, getLibraries, getLibraryFilterFacets, type ItemPage, type LibraryFilterFacets } from '../api/catalogApi';
 import { MediaTile } from '../ui/MediaTile';
 import { useTranslate } from '../../settings/i18n';
 
@@ -24,6 +24,7 @@ export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState<ItemPage>();
   const [facets, setFacets] = useState<LibraryFilterFacets>({ Genres: [], ProductionYears: [] });
+  const [libraryTitle, setLibraryTitle] = useState<{ id: string; name?: string }>();
   const tr = useTranslate();
   const mediaType = searchParams.get('type') ?? '';
   const genre = searchParams.get('genre') ?? '';
@@ -55,6 +56,9 @@ export function LibraryPage() {
     if (!id) return;
     let active = true;
     void getLibraryFilterFacets(id).then((nextFacets) => { if (active) setFacets(nextFacets); });
+    void getLibraries().then((libraries) => {
+      if (active) setLibraryTitle({ id, name: libraries.find((library) => library.Id === id)?.Name });
+    });
     return () => { active = false; };
   }, [id]);
 
@@ -86,6 +90,7 @@ export function LibraryPage() {
   }));
   const totalPages = Math.max(1, Math.ceil((page?.TotalRecordCount ?? 0) / pageSize));
   const hasFilters = Boolean(mediaType || genre || year || sort !== sortOptions[0].value);
+  const libraryName = libraryTitle && libraryTitle.id === id ? libraryTitle.name : undefined;
 
   if (!id) return <p>{tr('Library not found.', '找不到媒体库。')}</p>;
 
@@ -100,8 +105,8 @@ export function LibraryPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3 text-sm text-muted"><Link to="/app/">{tr('Home', '首页')}</Link><span>/</span><span>{tr('Library', '媒体库')}</span></div>
-      <div><h1 className="text-3xl font-semibold">{tr('Library', '媒体库')}</h1><p className="mt-1 text-muted">{tr('Browse movies, series, and audio in this collection.', '浏览此媒体库中的电影、剧集和音频。')}</p></div>
+      <div className="flex items-center gap-3 text-sm text-muted"><Link to="/app/">{tr('Home', '首页')}</Link><span>/</span><span>{libraryName ?? tr('Library', '媒体库')}</span></div>
+      <div><h1 className="text-3xl font-semibold">{libraryName ?? tr('Library', '媒体库')}</h1><p className="mt-1 text-muted">{tr('Browse movies, series, and audio in this collection.', '浏览此媒体库中的电影、剧集和音频。')}</p></div>
 
       <section aria-label={tr('Library filters', '媒体库筛选')}>
         <DisclosureGroup className="overflow-hidden rounded-lg border border-border bg-surface">
@@ -144,9 +149,9 @@ export function LibraryPage() {
           <div className="flex justify-center">
             <Pagination aria-label={tr('Library pagination', '媒体库分页')}>
               <Pagination.Content>
-                <Pagination.Item><Pagination.Previous isDisabled={currentPage === 1} onPress={() => { setFilter('page', String(currentPage - 1)); }}><Pagination.PreviousIcon /></Pagination.Previous></Pagination.Item>
-                <Pagination.Item><Pagination.Link isActive isDisabled>{currentPage}</Pagination.Link></Pagination.Item>
-                <Pagination.Item><Pagination.Next isDisabled={currentPage >= totalPages} onPress={() => { setFilter('page', String(currentPage + 1)); }}><Pagination.NextIcon /></Pagination.Next></Pagination.Item>
+                <Pagination.Item><Pagination.Previous aria-label={tr('Previous page', '上一页')} isDisabled={currentPage === 1} onPress={() => { setFilter('page', String(currentPage - 1)); }}><Pagination.PreviousIcon /></Pagination.Previous></Pagination.Item>
+                <Pagination.Item><Pagination.Link aria-label={`${tr('Page', '第')} ${String(currentPage)} ${tr('', '页')}`} isActive isDisabled>{currentPage}</Pagination.Link></Pagination.Item>
+                <Pagination.Item><Pagination.Next aria-label={tr('Next page', '下一页')} isDisabled={currentPage >= totalPages} onPress={() => { setFilter('page', String(currentPage + 1)); }}><Pagination.NextIcon /></Pagination.Next></Pagination.Item>
               </Pagination.Content>
             </Pagination>
           </div>

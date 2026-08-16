@@ -5,6 +5,16 @@ export type InsightRange = 'today' | '7d' | '30d' | 'all';
 export type TmdbMediaType = 'Movie' | 'Series';
 
 export interface UserProfile { Username: string; Bio: string }
+export interface PersonalSession {
+  Id: string;
+  DeviceId: string;
+  DeviceName: string;
+  ClientName: string;
+  ApplicationVersion: string;
+  CreatedAt: string;
+  LastActivityDate: string;
+  IsCurrent: boolean;
+}
 export interface UpdateProfileRequest { Username: string; Bio: string; CurrentPassword: string; NewPassword?: string }
 export interface ChangePasswordRequest { CurrentPassword: string; NewPassword: string }
 export interface InsightDailyPoint { Date: string; WatchedTicks: number }
@@ -61,6 +71,14 @@ export function updateProfile(request: UpdateProfileRequest): Promise<UserProfil
 
 export function changePassword(request: ChangePasswordRequest): Promise<void> {
   return clientRequest('/Users/Me/Password', { body: JSON.stringify(request), method: 'POST' });
+}
+
+export function listPersonalSessions(signal?: AbortSignal): Promise<PersonalSession[]> {
+  return clientRequest<PersonalSession[]>('/Users/Me/Sessions', signal === undefined ? {} : { signal });
+}
+
+export function revokePersonalSession(id: string): Promise<void> {
+  return clientRequest(`/Users/Me/Sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function getUserInsights(range: InsightRange): Promise<UserInsights> {

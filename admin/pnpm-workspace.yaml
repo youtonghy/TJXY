@@ -1,0 +1,3 @@
+allowBuilds:
+  '@heroui-pro/react': set this to true or false
+  '@zowe/secrets-for-zowe-sdk': set this to true or false

@@ -27,6 +27,7 @@ mod metadata_admin;
 mod metadata_settings_admin;
 mod playback_ticket;
 mod playstate;
+mod qr;
 mod relink_admin;
 mod runtime_storage;
 mod session;
@@ -176,6 +177,7 @@ pub struct AppState {
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
     storage_runtime: Option<Arc<runtime_storage::RuntimeStorageManager>>,
     realtime_events: Arc<socket::RealtimeEvents>,
+    qr_login: qr::QrLoginStore,
     legacy_auth_enabled: bool,
 }
 
@@ -214,6 +216,7 @@ impl AppState {
             relink_admin: None,
             storage_runtime: None,
             realtime_events: Arc::new(socket::RealtimeEvents::new()),
+            qr_login: qr::QrLoginStore::default(),
             legacy_auth_enabled: true,
         }
     }
@@ -634,6 +637,15 @@ pub fn build_router(state: AppState) -> Router {
             post(browse::full_capabilities),
         )
         .route("/Sessions", get(session::list))
+        .route("/Users/Me/Sessions", get(session::list_personal))
+        .route(
+            "/Users/Me/Sessions/{session_id}",
+            delete(session::revoke_personal),
+        )
+        .route("/Auth/Qr/Challenges", post(qr::create))
+        .route("/Auth/Qr/Challenges/{challenge_id}/Poll", post(qr::poll))
+        .route("/Auth/Qr/Preview", post(qr::preview))
+        .route("/Auth/Qr/Approve", post(qr::approve))
         .route("/Admin/Dashboard/Summary", get(dashboard_admin::summary))
         .route(
             "/Admin/Dashboard/NowPlaying",

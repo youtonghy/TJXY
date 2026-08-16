@@ -74,6 +74,7 @@ impl ClientPortalService {
                     name: session.name.clone(),
                     item_type: session.item_type.clone(),
                     production_year: session.production_year,
+                    primary_image_tag: None,
                 });
             }
         }
@@ -520,7 +521,8 @@ impl ClientPortalService {
             .order_by((items, Alias::new("name")), Order::Asc)
             .limit(limit)
             .to_owned();
-        self.database
+        let mut results = self
+            .database
             .query_all(self.database.get_database_backend().build(&query))
             .await?
             .iter()
@@ -536,7 +538,11 @@ impl ClientPortalService {
                     unique_viewers: 0,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, DbErr>>()?;
+        DashboardRepository::new(&self.database)
+            .attach_primary_image_tags(&mut results)
+            .await?;
+        Ok(results)
     }
 
     async fn tmdb_rankings(
@@ -999,6 +1005,7 @@ struct MediaItemDto {
     #[serde(rename = "Type")]
     item_type: String,
     production_year: Option<i32>,
+    primary_image_tag: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1020,6 +1027,7 @@ impl ItemPageDto {
                     name: item.name,
                     item_type: item.item_type,
                     production_year: item.production_year,
+                    primary_image_tag: item.primary_image_tag,
                 })
                 .collect(),
             total_record_count,

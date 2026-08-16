@@ -314,9 +314,10 @@ impl<'a> AiUsageRepository<'a> {
         user_id: Option<UserId>,
         usage_day: NaiveDate,
     ) -> Result<u64, AiUsageRepositoryError> {
+        let backend = self.database.get_database_backend();
         let mut query = Query::select()
             .expr_as(
-                Expr::col(Alias::new("total_tokens")).sum(),
+                integer_sum("SUM(total_tokens)", backend),
                 Alias::new("token_total"),
             )
             .from(Alias::new("ai_execution_records"))
@@ -325,11 +326,7 @@ impl<'a> AiUsageRepository<'a> {
         if let Some(user_id) = user_id {
             query.and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()));
         }
-        let Some(row) = self
-            .database
-            .query_one(self.database.get_database_backend().build(&query))
-            .await?
-        else {
+        let Some(row) = self.database.query_one(backend.build(&query)).await? else {
             return Ok(0);
         };
         let value: Option<i64> = row.try_get("", "token_total")?;

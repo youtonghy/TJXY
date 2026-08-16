@@ -447,7 +447,7 @@ pub(crate) fn request_query_pairs(query: Option<&str>) -> Result<Vec<(String, St
         .map_err(|_| ())
 }
 
-fn user_dto(user: &AuthUser, server_id: uuid::Uuid) -> UserDto {
+pub(crate) fn user_dto(user: &AuthUser, server_id: uuid::Uuid) -> UserDto {
     UserDto::new(
         user.id().as_uuid(),
         user.name(),
@@ -488,6 +488,13 @@ fn admin_error_response(error: &AuthError) -> Response {
         AuthError::Forbidden => StatusCode::FORBIDDEN.into_response(),
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+pub(crate) fn client_identity_response(
+    headers: &HeaderMap,
+    legacy_enabled: bool,
+) -> Result<ClientIdentity, Response> {
+    client_identity(headers, legacy_enabled).map_err(IntoResponse::into_response)
 }
 
 fn client_identity(

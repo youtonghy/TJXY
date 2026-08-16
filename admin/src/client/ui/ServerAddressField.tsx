@@ -33,7 +33,7 @@ export function ServerAddressField({
       </TextField>
       {error && <Alert status="danger"><Alert.Content><Alert.Description>{error}</Alert.Description></Alert.Content></Alert>}
       {ok && <p className="text-sm text-success">{tr('Server is reachable.', '服务器可访问。')}</p>}
-      <Button isDisabled={pending || !value.trim()} type="button" variant="secondary" onPress={onSave}>
+      <Button isDisabled={(pending ?? false) || !value.trim()} type="button" variant="secondary" onPress={onSave}>
         {pending ? tr('Checking…', '正在检查…') : tr('Save server', '保存服务器')}
       </Button>
     </div>

@@ -1,0 +1,12 @@
+export declare const supportsLinear: boolean;
+export declare const supportsMod: boolean;
+export declare const prefersReducedMotion: MediaQueryList | null;
+export declare const opacityDeltaVar = "--_number-flow-d-opacity";
+export declare const widthDeltaVar = "--_number-flow-d-width";
+export declare const dxVar = "--_number-flow-dx";
+export declare const deltaVar = "--_number-flow-d";
+export declare const supportsAtProperty: boolean;
+export declare const halfMaskHeight = "round(nearest, calc(var(--number-flow-mask-height, 0.25em) / 2), 1px)";
+export declare const maskHeight = "calc(round(nearest, calc(var(--number-flow-mask-height, 0.25em) / 2), 1px) * 2)";
+declare const styles: string;
+export default styles;

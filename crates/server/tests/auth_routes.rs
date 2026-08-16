@@ -137,6 +137,89 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
 }
 
 #[tokio::test]
+async fn qr_login_requires_an_authenticated_approval_and_is_consumed_once() {
+    let app = app().await;
+    let approver = json_response(login(app.clone(), "correct horse").await).await;
+    let approver_token = approver["AccessToken"].as_str().unwrap();
+    let target_identity = r#"MediaBrowser Client="TJXY Web", Device="Browser", DeviceId="qr-target", Version="0.1.0""#;
+    let challenge_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/Auth/Qr/Challenges")
+                .header(header::AUTHORIZATION, target_identity)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(challenge_response.status(), StatusCode::OK);
+    assert_eq!(
+        challenge_response.headers()[header::CACHE_CONTROL],
+        "no-store"
+    );
+    let challenge = json_response(challenge_response).await;
+    let challenge_id = challenge["ChallengeId"].as_str().unwrap();
+    let poll_token = challenge["PollToken"].as_str().unwrap();
+    let approval_token = challenge["QrPayload"]
+        .as_str()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap();
+
+    let preview = token_request(
+        app.clone(),
+        Method::POST,
+        "/Auth/Qr/Preview",
+        approver_token,
+        Some(json!({"Token": approval_token})),
+    )
+    .await;
+    assert_eq!(preview.status(), StatusCode::OK);
+    let approved = token_request(
+        app.clone(),
+        Method::POST,
+        "/Auth/Qr/Approve",
+        approver_token,
+        Some(json!({"Token": approval_token})),
+    )
+    .await;
+    assert_eq!(approved.status(), StatusCode::NO_CONTENT);
+
+    let issued = token_request(
+        app.clone(),
+        Method::POST,
+        format!("/Auth/Qr/Challenges/{challenge_id}/Poll"),
+        "not-used",
+        Some(json!({"Token": poll_token})),
+    )
+    .await;
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued_body = json_response(issued).await;
+    assert_eq!(issued_body["State"], "Approved");
+    assert_eq!(
+        issued_body["Authentication"]["AccessToken"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
+    let consumed = token_request(
+        app,
+        Method::POST,
+        format!("/Auth/Qr/Challenges/{challenge_id}/Poll"),
+        "not-used",
+        Some(json!({"Token": poll_token})),
+    )
+    .await;
+    assert_eq!(consumed.status(), StatusCode::GONE);
+}
+
+#[tokio::test]
 async fn current_user_can_read_and_update_their_profile_with_password_confirmation() {
     let app = app().await;
     let authentication = json_response(login(app.clone(), "correct horse").await).await;

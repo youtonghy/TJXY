@@ -120,5 +120,5 @@ it('logout clears the shared token and retains the stable device identity', asyn
 
   expect(sessionStorage.getItem('tjxy.web.token')).toBeNull();
   expect(localStorage.getItem('tjxy.web.deviceId')).toBe('device-id');
-  expect(requestMock).not.toHaveBeenCalled();
+  expect(requestMock).toHaveBeenCalledWith('/Sessions/Logout', { method: 'POST' });
 });

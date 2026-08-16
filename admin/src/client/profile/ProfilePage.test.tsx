@@ -8,6 +8,8 @@ const api = vi.hoisted(() => ({
   changePassword: vi.fn(),
   getProfile: vi.fn(),
   getUserInsights: vi.fn(),
+  listPersonalSessions: vi.fn(),
+  revokePersonalSession: vi.fn(),
   updateProfile: vi.fn(),
 }));
 
@@ -17,6 +19,7 @@ vi.mock('../auth/ClientAuthContext', () => ({ useClientAuth: () => ({ signOut: v
 beforeEach(() => {
   api.updateProfile.mockResolvedValue({ Bio: 'Updated.', Username: 'Admin Two' });
   api.getProfile.mockResolvedValue({ Bio: 'Film lover.', Username: 'Admin' });
+  api.listPersonalSessions.mockResolvedValue([]);
   api.getUserInsights.mockResolvedValue({
     Daily: [{ Date: '2026-07-31', WatchedTicks: 18_000_000_000 }],
     Genres: [{ Name: 'Drama', WatchedTicks: 18_000_000_000 }],

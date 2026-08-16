@@ -15,6 +15,20 @@ import {
   type SystemSettings,
 } from './systemSettingsApi';
 import type { SystemLocale } from './systemLanguageApi';
+import {
+  API_BASE_CHANGED_EVENT,
+  getStoredApiBaseUrl,
+  isDesktopShell,
+  resolvePublicAssetUrl,
+} from '../client/api/apiBase';
+
+const SYSTEM_LOCALE_KEY = 'tjxy-system-locale';
+const DEVICE_LOCALE_KEY = 'tjxy-device-locale';
+
+function storedLocale(key: string): SystemLocale | undefined {
+  const value = window.localStorage.getItem(key);
+  return value === 'en-US' || value === 'zh-CN' ? value : undefined;
+}
 
 interface SystemLocaleContextValue {
   locale: SystemLocale;
@@ -43,7 +57,7 @@ const SystemLocaleContext = createContext<SystemLocaleContextValue>(fallback);
 
 export function SystemLocaleProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<SystemSettings>(() => ({
-    locale: window.localStorage.getItem('tjxy-system-locale') === 'en-US' ? 'en-US' : 'zh-CN',
+    locale: storedLocale(DEVICE_LOCALE_KEY) ?? storedLocale(SYSTEM_LOCALE_KEY) ?? 'zh-CN',
     siteTitle: 'TJXY',
     siteSubtitle: 'Your media library',
     logoUrl: '/brand/tjxy-mark.webp',
@@ -65,26 +79,45 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
   }));
   const [isLoading, setIsLoading] = useState(true);
   const [settingsLoadFailed, setSettingsLoadFailed] = useState(false);
+  const logoUrl = resolvePublicAssetUrl(settings.logoUrl);
+  const iconUrl = resolvePublicAssetUrl(settings.iconUrl);
 
   useEffect(() => {
     document.documentElement.lang = settings.locale;
     document.title = settings.siteTitle;
     for (const icon of document.querySelectorAll<HTMLLinkElement>('link[rel~="icon"]')) {
-      icon.href = settings.iconUrl;
+      icon.href = iconUrl;
     }
-  }, [settings.iconUrl, settings.locale, settings.siteTitle]);
+  }, [iconUrl, settings.locale, settings.siteTitle]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void getPublicSystemSettings(controller.signal)
-      .then((value) => {
-        setSettings(value);
+    let controller: AbortController | undefined;
+    const loadSettings = () => {
+      controller?.abort();
+      if (isDesktopShell() && !getStoredApiBaseUrl()) {
         setSettingsLoadFailed(false);
-        window.localStorage.setItem('tjxy-system-locale', value.locale);
-      })
-      .catch(() => { if (!controller.signal.aborted) setSettingsLoadFailed(true); })
-      .finally(() => { if (!controller.signal.aborted) setIsLoading(false); });
-    return () => { controller.abort(); };
+        setIsLoading(false);
+        return;
+      }
+      controller = new AbortController();
+      const request = controller;
+      setIsLoading(true);
+      void getPublicSystemSettings(request.signal)
+        .then((value) => {
+          const locale = storedLocale(DEVICE_LOCALE_KEY) ?? value.locale;
+          setSettings({ ...value, locale });
+          setSettingsLoadFailed(false);
+          window.localStorage.setItem(SYSTEM_LOCALE_KEY, locale);
+        })
+        .catch(() => { if (!request.signal.aborted) setSettingsLoadFailed(true); })
+        .finally(() => { if (!request.signal.aborted) setIsLoading(false); });
+    };
+    loadSettings();
+    window.addEventListener(API_BASE_CHANGED_EVENT, loadSettings);
+    return () => {
+      controller?.abort();
+      window.removeEventListener(API_BASE_CHANGED_EVENT, loadSettings);
+    };
   }, []);
 
   useEffect(() => {
@@ -92,7 +125,7 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
       const detail = (event as CustomEvent<SystemSettings>).detail;
       setSettings((current) => ({
         ...current,
-        locale: detail.locale,
+        locale: storedLocale(DEVICE_LOCALE_KEY) ?? detail.locale,
         siteTitle: detail.siteTitle,
         siteSubtitle: detail.siteSubtitle,
         logoUrl: detail.logoUrl,
@@ -114,19 +147,20 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
 
   const selectLocale = useCallback((locale: SystemLocale) => {
     setSettings((current) => ({ ...current, locale }));
-    window.localStorage.setItem('tjxy-system-locale', locale);
+    window.localStorage.setItem(DEVICE_LOCALE_KEY, locale);
+    window.localStorage.setItem(SYSTEM_LOCALE_KEY, locale);
   }, []);
   const value = useMemo(() => ({
     locale: settings.locale,
     isLoading,
     siteTitle: settings.siteTitle,
     siteSubtitle: settings.siteSubtitle,
-    logoUrl: settings.logoUrl,
-    iconUrl: settings.iconUrl,
+    logoUrl,
+    iconUrl,
     theme: settings.theme,
     settingsLoadFailed,
     setLocale: selectLocale,
-  }), [isLoading, selectLocale, settings, settingsLoadFailed]);
+  }), [iconUrl, isLoading, logoUrl, selectLocale, settings, settingsLoadFailed]);
   return <SystemLocaleContext.Provider value={value}>{children}</SystemLocaleContext.Provider>;
 }
 

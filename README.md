@@ -37,7 +37,8 @@ The current foundation includes:
 
 The server is not yet a complete Jellyfin implementation. A HeroUI v3 administrator
 application is available for sign-in, local-user, library, durable-task, and access
-management, plus the Google Drive/OneDrive Personal OAuth and root-selection flows;
+management, QR login/authorization, personal session management, plus the Google
+Drive/OneDrive Personal OAuth and root-selection flows;
 the compatibility matrix in
 [`docs/api-parity.md`](docs/api-parity.md) remains the authoritative record of
 implemented behavior.
@@ -75,8 +76,9 @@ rename/revocation, API key lifecycle management, plus the Google Drive and OneDr
 Personal authorization, paginated folder-selection, and binding flows. Bootstrap setup remains
 environment-driven, and storage status/reauthorization, task-log/cache-state, metadata,
 migration, and conflict pages are not yet implemented. The browser session is
-stored in `sessionStorage`; logout clears that browser session but does not revoke
-the server-side token.
+stored in `sessionStorage`; normal logout and personal session revocation also
+invalidate the server-side session. If another device revokes a session, the
+client exits on the next request or periodic account check.
 
 The `/app/` client has an independent `tjxy.web.*` browser session and HeroUI shell
 for user sign-in, expanded home/library browsing, popular search suggestions, item details,

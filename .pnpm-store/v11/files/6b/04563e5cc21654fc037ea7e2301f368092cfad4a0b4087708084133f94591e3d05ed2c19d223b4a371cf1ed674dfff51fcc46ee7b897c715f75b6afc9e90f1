@@ -1,0 +1,33 @@
+import type { ComponentProps } from "react";
+import { ModalBackdrop, ModalBody, ModalCloseTrigger, ModalContainer, ModalDialog, ModalFooter, ModalHeader, ModalHeading, ModalIcon, ModalRoot, ModalTrigger } from "./modal";
+export declare const Modal: (({ children, state, ...props }: import("./modal").ModalRootProps) => import("react/jsx-runtime").JSX.Element) & {
+    Root: ({ children, state, ...props }: import("./modal").ModalRootProps) => import("react/jsx-runtime").JSX.Element;
+    Trigger: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, ...props }: import("./modal").ModalTriggerProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./modal").ModalTriggerProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    Backdrop: ({ children, className, isDismissable, onClick, variant, ...props }: import("./modal").ModalBackdropProps) => import("react/jsx-runtime").JSX.Element;
+    Container: ({ children, className, placement, scroll, size, ...props }: import("./modal").ModalContainerProps) => import("react/jsx-runtime").JSX.Element;
+    Dialog: ({ children, className, ...props }: import("./modal").ModalDialogProps) => import("react/jsx-runtime").JSX.Element;
+    Header: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, ...props }: import("./modal").ModalHeaderProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./modal").ModalHeaderProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    Icon: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, ...props }: import("./modal").ModalIconProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./modal").ModalIconProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    Heading: ({ children, className, ...props }: import("./modal").ModalHeadingProps) => import("react/jsx-runtime").JSX.Element;
+    Body: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, ...props }: import("./modal").ModalBodyProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./modal").ModalBodyProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    Footer: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, ...props }: import("./modal").ModalFooterProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./modal").ModalFooterProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    CloseTrigger: ({ className, ...rest }: import("./modal").ModalCloseTriggerProps) => import("react/jsx-runtime").JSX.Element;
+};
+export type Modal = {
+    Props: ComponentProps<typeof ModalRoot>;
+    RootProps: ComponentProps<typeof ModalRoot>;
+    TriggerProps: ComponentProps<typeof ModalTrigger>;
+    BackdropProps: ComponentProps<typeof ModalBackdrop>;
+    ContainerProps: ComponentProps<typeof ModalContainer>;
+    DialogProps: ComponentProps<typeof ModalDialog>;
+    HeaderProps: ComponentProps<typeof ModalHeader>;
+    IconProps: ComponentProps<typeof ModalIcon>;
+    HeadingProps: ComponentProps<typeof ModalHeading>;
+    BodyProps: ComponentProps<typeof ModalBody>;
+    FooterProps: ComponentProps<typeof ModalFooter>;
+    CloseTriggerProps: ComponentProps<typeof ModalCloseTrigger>;
+};
+export { ModalRoot, ModalTrigger, ModalBackdrop, ModalContainer, ModalDialog, ModalHeader, ModalIcon, ModalHeading, ModalBody, ModalFooter, ModalCloseTrigger, };
+export type { ModalRootProps, ModalRootProps as ModalProps, ModalTriggerProps, ModalBackdropProps, ModalContainerProps, ModalDialogProps, ModalHeaderProps, ModalIconProps, ModalHeadingProps, ModalBodyProps, ModalFooterProps, ModalCloseTriggerProps, } from "./modal";
+export { modalVariants } from "@heroui/styles";
+export type { ModalVariants } from "@heroui/styles";

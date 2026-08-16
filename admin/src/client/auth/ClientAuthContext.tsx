@@ -1,10 +1,11 @@
 /* eslint-disable react-hooks/set-state-in-effect, react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ClientApiError, clientRequest } from '../api/clientApi';
+import { CLIENT_AUTH_INVALIDATED_EVENT, ClientApiError, clientRequest } from '../api/clientApi';
 import { clearClientToken, getClientToken, setClientToken } from './clientSession';
+import type { QrAuthentication } from './qrLoginApi';
 
 export interface ClientUser { Id: string; Name: string; Policy?: { IsDisabled?: boolean; IsAdministrator?: boolean }; }
-interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string) => Promise<void>; signOut: () => Promise<void>; }
+interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string) => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
 const ClientAuthContext = createContext<ClientAuthValue | null>(null);
 
 export function ClientAuthProvider({ children }: { children: ReactNode }) {
@@ -14,6 +15,33 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
     if (!getClientToken()) { setIsLoading(false); return; }
     void clientRequest<ClientUser>('/Users/Me').then(setUser).catch(() => { clearClientToken(); setUser(null); }).finally(() => { setIsLoading(false); });
   }, []);
+  useEffect(() => {
+    if (user === null) return undefined;
+    let disposed = false;
+    const validate = () => {
+      if (disposed || document.visibilityState === 'hidden') return;
+      void clientRequest<ClientUser>('/Users/Me').then((current) => {
+        if (!disposed) setUser(current);
+      }).catch((error: unknown) => {
+        if (!disposed && error instanceof ClientApiError && error.kind === 'authentication') {
+          clearClientToken();
+          setUser(null);
+        }
+      });
+    };
+    const interval = window.setInterval(validate, 60_000);
+    window.addEventListener('focus', validate);
+    document.addEventListener('visibilitychange', validate);
+    const invalidated = () => { if (!disposed) { clearClientToken(); setUser(null); } };
+    window.addEventListener(CLIENT_AUTH_INVALIDATED_EVENT, invalidated);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', validate);
+      document.removeEventListener('visibilitychange', validate);
+      window.removeEventListener(CLIENT_AUTH_INVALIDATED_EVENT, invalidated);
+    };
+  }, [user]);
   const value = useMemo<ClientAuthValue>(() => ({
     user,
     isLoading,
@@ -26,6 +54,17 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
         if (current.Policy?.IsDisabled) throw new ClientApiError(403, 'authorization');
         setUser(current);
       } catch (error) { clearClientToken(); setUser(null); throw error; }
+    },
+    adoptAuthentication(authentication) {
+      if (!authentication.AccessToken) throw new ClientApiError(200, 'invalid-response');
+      setClientToken(authentication.AccessToken);
+      if (authentication.User.Policy?.IsDisabled) {
+        clearClientToken();
+        setUser(null);
+        throw new ClientApiError(403, 'authorization');
+      }
+      setUser(authentication.User);
+      return Promise.resolve();
     },
     async signOut() {
       try { await clientRequest('/Sessions/Logout', { method: 'POST' }); } finally { clearClientToken(); setUser(null); }

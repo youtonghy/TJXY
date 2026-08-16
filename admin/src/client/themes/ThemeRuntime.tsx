@@ -1,11 +1,12 @@
 /* eslint-disable react-refresh/only-export-components */
-import { Alert, Button, Spinner } from '@heroui/react';
+import { Alert, Button, CloseButton, Spinner } from '@heroui/react';
 import {
   Component,
   Suspense,
   createContext,
   useContext,
   useLayoutEffect,
+  useState,
   type ReactNode,
 } from 'react';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
@@ -28,6 +29,8 @@ export function ClientThemeRuntime({ children }: { children: ReactNode }) {
   const tr = useTranslate();
   const resolved = resolveClientTheme(theme);
   const { colorMode, toggleColorMode } = useClientColorMode();
+  const warningKey = settingsLoadFailed ? 'settings' : resolved.didFallback ? theme.id : '';
+  const [dismissedWarning, setDismissedWarning] = useState('');
   useClientThemeAttribute(resolved.definition.id, resolved.options, colorMode);
 
   if (isLoading) {
@@ -37,13 +40,18 @@ export function ClientThemeRuntime({ children }: { children: ReactNode }) {
     <ThemeLoadBoundary key={resolved.definition.id}>
       <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-background"><Spinner aria-label={tr('Loading theme', '正在加载主题')} /></div>}>
         <ActiveThemeContext.Provider value={{ definition: resolved.definition, options: resolved.options, colorMode, toggleColorMode }}>
-          {(settingsLoadFailed || resolved.didFallback) && (
-            <div className="fixed inset-x-0 top-0 z-[80] flex justify-center p-2">
+          {warningKey && dismissedWarning !== warningKey && (
+            <div className="fixed bottom-4 right-4 z-[80] w-[min(28rem,calc(100vw-2rem))]">
               <Alert className="max-w-xl" status="warning">
                 <Alert.Content>
                   <Alert.Title>{tr('Appearance fallback active', '已启用备用外观')}</Alert.Title>
-                  <Alert.Description>{tr('The configured theme is unavailable. TJXY is using the classic theme.', '配置的主题不可用，TJXY 正在使用经典主题。')}</Alert.Description>
+                  <Alert.Description>
+                    {settingsLoadFailed
+                      ? tr('Server appearance settings could not be loaded. TJXY is using the local fallback.', '无法加载服务器外观设置，TJXY 正在使用本地备用设置。')
+                      : tr('The configured theme is unavailable. TJXY is using the classic theme.', '配置的主题不可用，TJXY 正在使用经典主题。')}
+                  </Alert.Description>
                 </Alert.Content>
+                <CloseButton aria-label={tr('Dismiss warning', '关闭提示')} onPress={() => { setDismissedWarning(warningKey); }} />
               </Alert>
             </div>
           )}

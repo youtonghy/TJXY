@@ -9,9 +9,12 @@ export const authProvider: AuthProvider = {
     await requireAdministrator();
   },
 
-  logout() {
-    clearSession();
-    return Promise.resolve();
+  async logout() {
+    try {
+      if (getAccessToken() !== null) await apiRequest('/Sessions/Logout', { method: 'POST' });
+    } finally {
+      clearSession();
+    }
   },
 
   async checkAuth() {

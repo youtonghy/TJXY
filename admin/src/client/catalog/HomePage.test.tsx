@@ -100,3 +100,13 @@ it('keeps successful library rows visible when another library fails', async () 
   expect(screen.queryByRole('heading', { name: 'TV shows' })).not.toBeInTheDocument();
   expect(screen.getByRole('alert')).toHaveTextContent('Some library sections are unavailable');
 });
+
+it('shows an explicit empty state when all library requests succeed without content', async () => {
+  api.getResumeItems.mockResolvedValueOnce([]);
+  api.getLibraries.mockResolvedValueOnce([]);
+
+  render(<MemoryRouter><HomePage /></MemoryRouter>);
+
+  expect(await screen.findByText('No media available yet')).toBeVisible();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});

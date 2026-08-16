@@ -533,6 +533,81 @@ async fn daily_quota_counts_requests_per_user_and_utc_day() {
 }
 
 #[tokio::test]
+async fn daily_token_usage_sums_integer_tokens_by_user_and_utc_day() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let auth = AuthRepository::new(&database);
+    let alice = auth
+        .create_user(
+            &tjxy_common::Username::parse("alice-daily-tokens").unwrap(),
+            "test-only",
+            false,
+            false,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let bob = auth
+        .create_user(
+            &tjxy_common::Username::parse("bob-daily-tokens").unwrap(),
+            "test-only",
+            false,
+            false,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let repository = AiUsageRepository::new(&database);
+    let usage_day = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+    let next_day = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+    let now = Utc::now();
+    let model_id = Uuid::new_v4();
+
+    for (user_id, day, prompt_tokens, completion_tokens) in [
+        (alice.id(), usage_day, 70, 30),
+        (bob.id(), usage_day, 10, 15),
+        (alice.id(), next_day, 5, 5),
+    ] {
+        repository
+            .record(
+                &AiExecutionInput::new(
+                    user_id,
+                    model_id,
+                    "Cinema Guide",
+                    "model-visible",
+                    &day.to_string(),
+                    now,
+                    now,
+                    10,
+                    AiExecutionOutcome::Success,
+                )
+                .with_usage(prompt_tokens, completion_tokens),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        repository
+            .daily_token_usage(alice.id(), usage_day)
+            .await
+            .unwrap(),
+        100
+    );
+    assert_eq!(
+        repository.daily_total_token_usage(usage_day).await.unwrap(),
+        125
+    );
+    assert_eq!(
+        repository
+            .daily_token_usage(bob.id(), next_day)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn daily_quota_consumption_is_atomic_across_five_connections() {
     let fixture = reconnectable_test_database().await.unwrap();
     let database = fixture.connection();

@@ -1,0 +1,33 @@
+import type { ComponentProps } from "react";
+import { AlertDialogBackdrop, AlertDialogBody, AlertDialogCloseTrigger, AlertDialogContainer, AlertDialogDialog, AlertDialogFooter, AlertDialogHeader, AlertDialogHeading, AlertDialogIcon, AlertDialogRoot, AlertDialogTrigger } from "./alert-dialog";
+export declare const AlertDialog: (({ children, ...props }: import("./alert-dialog").AlertDialogRootProps) => import("react/jsx-runtime").JSX.Element) & {
+    Root: ({ children, ...props }: import("./alert-dialog").AlertDialogRootProps) => import("react/jsx-runtime").JSX.Element;
+    Trigger: ({ children, className, ...props }: import("./alert-dialog").AlertDialogTriggerProps) => import("react/jsx-runtime").JSX.Element;
+    Backdrop: ({ children, className, isDismissable, isKeyboardDismissDisabled, onClick, variant, ...props }: import("./alert-dialog").AlertDialogBackdropProps) => import("react/jsx-runtime").JSX.Element;
+    Container: ({ children, className, placement, size, ...props }: import("./alert-dialog").AlertDialogContainerProps) => import("react/jsx-runtime").JSX.Element;
+    Dialog: ({ children, className, ...props }: import("./alert-dialog").AlertDialogDialogProps) => import("react/jsx-runtime").JSX.Element;
+    Header: ({ children, className, ...props }: import("./alert-dialog").AlertDialogHeaderProps) => import("react/jsx-runtime").JSX.Element;
+    Heading: ({ children, className, ...props }: import("./alert-dialog").AlertDialogHeadingProps) => import("react/jsx-runtime").JSX.Element;
+    Body: ({ children, className, ...props }: import("./alert-dialog").AlertDialogBodyProps) => import("react/jsx-runtime").JSX.Element;
+    Footer: ({ children, className, ...props }: import("./alert-dialog").AlertDialogFooterProps) => import("react/jsx-runtime").JSX.Element;
+    Icon: <E extends keyof React.JSX.IntrinsicElements = "div">({ children, className, status, ...props }: import("./alert-dialog").AlertDialogIconProps<E> & Omit<React.JSX.IntrinsicElements[E], keyof import("./alert-dialog").AlertDialogIconProps<E>>) => import("react/jsx-runtime").JSX.Element;
+    CloseTrigger: ({ className, ...rest }: import("./alert-dialog").AlertDialogCloseTriggerProps) => import("react/jsx-runtime").JSX.Element;
+};
+export type AlertDialog = {
+    Props: ComponentProps<typeof AlertDialogRoot>;
+    RootProps: ComponentProps<typeof AlertDialogRoot>;
+    TriggerProps: ComponentProps<typeof AlertDialogTrigger>;
+    BackdropProps: ComponentProps<typeof AlertDialogBackdrop>;
+    ContainerProps: ComponentProps<typeof AlertDialogContainer>;
+    DialogProps: ComponentProps<typeof AlertDialogDialog>;
+    HeaderProps: ComponentProps<typeof AlertDialogHeader>;
+    HeadingProps: ComponentProps<typeof AlertDialogHeading>;
+    BodyProps: ComponentProps<typeof AlertDialogBody>;
+    FooterProps: ComponentProps<typeof AlertDialogFooter>;
+    IconProps: ComponentProps<typeof AlertDialogIcon>;
+    CloseTriggerProps: ComponentProps<typeof AlertDialogCloseTrigger>;
+};
+export { AlertDialogRoot, AlertDialogTrigger, AlertDialogBackdrop, AlertDialogContainer, AlertDialogDialog, AlertDialogHeader, AlertDialogHeading, AlertDialogBody, AlertDialogFooter, AlertDialogIcon, AlertDialogCloseTrigger, };
+export type { AlertDialogRootProps, AlertDialogRootProps as AlertDialogProps, AlertDialogTriggerProps, AlertDialogBackdropProps, AlertDialogContainerProps, AlertDialogDialogProps, AlertDialogHeaderProps, AlertDialogHeadingProps, AlertDialogBodyProps, AlertDialogFooterProps, AlertDialogIconProps, AlertDialogCloseTriggerProps, } from "./alert-dialog";
+export { alertDialogVariants } from "@heroui/styles";
+export type { AlertDialogVariants } from "@heroui/styles";

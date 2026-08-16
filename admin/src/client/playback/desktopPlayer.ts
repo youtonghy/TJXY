@@ -1,9 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export async function playExternalStream(url: string, title: string): Promise<void> {
-  await invoke('play_stream', { url, title });
+export async function startDesktopStream(
+  url: string,
+  serverOrigin: string,
+  startPositionSeconds: number,
+): Promise<string> {
+  return invoke('start_stream_proxy', { url, serverOrigin, startPositionSeconds });
 }
 
-export async function stopExternalPlayer(): Promise<void> {
-  await invoke('stop_player');
+export async function stopDesktopStream(): Promise<void> {
+  await invoke('stop_stream_proxy');
 }

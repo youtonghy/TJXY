@@ -602,6 +602,45 @@ where
         })
     }
 
+    /// Issues a new session for a user whose existing authenticated session
+    /// has explicitly approved an out-of-band login.
+    pub async fn issue_approved_session(
+        &self,
+        user: &AuthUser,
+        client: ClientIdentity,
+    ) -> Result<IssuedAuthentication, AuthError> {
+        let now = self.clock.now();
+        let expires_at = match self.session_lifetime {
+            Some(lifetime) => Some(
+                now.checked_add_signed(lifetime)
+                    .ok_or(AuthError::TimestampOverflow)?,
+            ),
+            None => None,
+        };
+        let access_token = generate_session_token();
+        let draft = SessionDraft {
+            id: Uuid::new_v4(),
+            token_digest: digest_token(access_token.expose_secret()),
+            device_id: client.device_id.clone(),
+            device_name: client.device_name.clone(),
+            client_name: client.client_name.clone(),
+            client_version: client.client_version.clone(),
+            created_at: now,
+            expires_at,
+        };
+        let session_id = draft.id;
+        AuthRepository::new(&self.database)
+            .issue_session_for_user(user.id(), user.auth_revision(), draft)
+            .await?;
+        Ok(IssuedAuthentication {
+            user: user.clone(),
+            session_id,
+            client,
+            access_token,
+            expires_at,
+        })
+    }
+
     /// Verifies local credentials without creating a durable session.
     ///
     /// # Errors
@@ -789,6 +828,27 @@ where
             )
             .await?;
         Ok(())
+    }
+
+    /// Revokes one active session owned by the authenticated user.
+    ///
+    /// API-key principals are deliberately rejected because they do not
+    /// represent a durable login session.
+    pub async fn revoke_user_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        session_id: Uuid,
+    ) -> Result<bool, AuthError> {
+        let current_user_id = principal.user().id();
+        require_session_id(principal)?;
+        Ok(AuthRepository::new(&self.database)
+            .revoke_session(
+                current_user_id,
+                session_id,
+                self.clock.now(),
+                "user_revoked",
+            )
+            .await?)
     }
 
     /// Lists the active devices visible to an administrator.

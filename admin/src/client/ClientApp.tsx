@@ -3,6 +3,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { ClientAuthProvider, useClientAuth } from './auth/ClientAuthContext';
 import { ClientLoginPage } from './auth/ClientLoginPage';
+import { QrApprovalPage } from './auth/QrApprovalPage';
 import { safeClientDestination } from './auth/clientDestination';
 import { HomePage } from './catalog/HomePage';
 import { ClientShell } from './layout/ClientShell';
@@ -19,7 +20,7 @@ const RankingsPage = lazy(async () => ({ default: (await import('./rankings/Rank
 const SearchPage = lazy(async () => ({ default: (await import('./catalog/SearchPage')).SearchPage }));
 
 export function ClientApp() {
-  return <ClientThemeRuntime><ClientAuthProvider><Suspense fallback={<ClientRouteLoading />}><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<RankingsPage />} path="rankings" /><Route element={<AiChatPage />} path="ai" /><Route element={<ProfilePage />} path="profile" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></Suspense></ClientAuthProvider></ClientThemeRuntime>;
+  return <ClientThemeRuntime><ClientAuthProvider><Suspense fallback={<ClientRouteLoading />}><Routes><Route element={<ClientLoginPage />} path="login" /><Route element={<ClientRouteGuard />}><Route element={<ClientShellLayout />}><Route index element={<HomePage />} /><Route element={<HomePage />} path="home" /><Route element={<LibrariesPage />} path="libraries" /><Route element={<LibraryPage />} path="libraries/:id" /><Route element={<SearchPage />} path="search" /><Route element={<RankingsPage />} path="rankings" /><Route element={<AiChatPage />} path="ai" /><Route element={<ProfilePage />} path="profile" /><Route element={<QrApprovalPage />} path="profile/authorize" /><Route element={<ItemPage />} path="items/:id" /><Route element={<PlayerPage />} path="play/:id" /></Route></Route><Route element={<Navigate replace to="/app/" />} path="*" /></Routes></Suspense></ClientAuthProvider></ClientThemeRuntime>;
 }
 
 function ClientRouteLoading() { const tr = useTranslate(); return <div className="flex min-h-72 items-center justify-center" role="status"><Spinner aria-label={tr('Loading page', '正在加载页面')} color="accent" /></div>; }

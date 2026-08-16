@@ -1,9 +1,10 @@
 use axum::{
     Json,
-    extract::{RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use serde::Serialize;
 use tjxy_api::SessionInfoDto;
 use tjxy_application::{AuthError, SessionListFilter};
 use tjxy_common::UserId;
@@ -78,6 +79,81 @@ pub(crate) async fn logout(
     };
     match service.logout(&principal).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(AuthError::SessionRequired) => StatusCode::FORBIDDEN.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct PersonalSessionDto {
+    id: Uuid,
+    device_id: String,
+    device_name: String,
+    client_name: String,
+    application_version: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_activity_date: chrono::DateTime<chrono::Utc>,
+    is_current: bool,
+}
+
+pub(crate) async fn list_personal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let principal =
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
+    if principal.session_id().is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(service) = state.auth.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match service
+        .sessions(&principal, SessionListFilter::default())
+        .await
+    {
+        Ok(sessions) => Json(
+            sessions
+                .into_iter()
+                .map(|session| PersonalSessionDto {
+                    is_current: principal.session_id() == Some(session.id()),
+                    id: session.id(),
+                    device_id: session.device_id().to_owned(),
+                    device_name: session.device_name().to_owned(),
+                    client_name: session.client_name().to_owned(),
+                    application_version: session.client_version().to_owned(),
+                    created_at: session.created_at(),
+                    last_activity_date: session.last_activity_at(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(crate) async fn revoke_personal(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let principal =
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
+    let Some(service) = state.auth.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match service.revoke_user_session(&principal, session_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(AuthError::SessionRequired) => StatusCode::FORBIDDEN.into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }

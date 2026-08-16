@@ -29,11 +29,14 @@ import {
 import {
   getProfile,
   getUserInsights,
+  listPersonalSessions,
+  revokePersonalSession,
   updateProfile,
   type InsightRange,
   type InsightTimelineEvent,
   type UserInsights,
   type UserProfile,
+  type PersonalSession,
 } from '../api/portalApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
@@ -53,6 +56,9 @@ export function ProfilePage() {
   const { signOut } = useClientAuth();
   const [profile, setProfile] = useState<UserProfile>();
   const [insights, setInsights] = useState<UserInsights>();
+  const [sessions, setSessions] = useState<PersonalSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessionBusy, setSessionBusy] = useState<string | null>(null);
   const [range, setRange] = useState<InsightRange>('today');
   const [editing, setEditing] = useState(false);
   const [server, setServer] = useState(getStoredApiBaseUrl() ?? 'http://127.0.0.1:8096');
@@ -63,6 +69,13 @@ export function ProfilePage() {
   const { locale } = useSystemLocale();
 
   useEffect(() => { void getProfile().then(setProfile); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void listPersonalSessions(controller.signal).then(setSessions).catch(() => undefined).finally(() => {
+      if (!controller.signal.aborted) setSessionsLoading(false);
+    });
+    return () => { controller.abort(); };
+  }, []);
   useEffect(() => { void getUserInsights(range).then(setInsights); }, [range]);
 
   if (!profile) return <div aria-label={tr('Loading profile', '正在加载个人资料')} className="h-52 animate-pulse rounded-2xl bg-default" role="status" />;
@@ -76,7 +89,7 @@ export function ProfilePage() {
             <h1 className="mt-1 text-3xl font-semibold">{profile.Username}</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{profile.Bio || tr('Add a short introduction about yourself.', '添加一段简短的自我介绍。')}</p>
           </div>
-          <Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button>
+          <div className="flex flex-wrap gap-2"><Button onPress={() => { void navigate('/app/profile/authorize'); }} variant="secondary">{tr('Authorize device', '授权设备')}</Button><Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button></div>
         </Card.Content>
       </Card>
 
@@ -114,6 +127,27 @@ export function ProfilePage() {
         </Card>
       )}
 
+      <SessionManagement
+        loading={sessionsLoading}
+        sessions={sessions}
+        busy={sessionBusy}
+        onRevoke={async (session) => {
+          if (sessionBusy !== null) return;
+          setSessionBusy(session.Id);
+          try {
+            await revokePersonalSession(session.Id);
+            if (session.IsCurrent) {
+              await signOut();
+              void navigate('/app/login', { replace: true });
+              return;
+            }
+            setSessions((current) => current.filter((item) => item.Id !== session.Id));
+          } finally {
+            setSessionBusy(null);
+          }
+        }}
+      />
+
       <section className="space-y-5" aria-labelledby="statistics-heading">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
           <div><h2 className="text-2xl font-semibold" id="statistics-heading">{tr('Viewing statistics', '观看统计')}</h2><p className="mt-1 text-sm text-muted">{tr('Your activity across the selected period.', '所选时间范围内的观看活动。')}</p></div>
@@ -147,6 +181,56 @@ export function ProfilePage() {
       {editing ? <ProfileDialog profile={profile} onClose={() => { setEditing(false); }} onSaved={setProfile} onSessionInvalidated={async () => { await signOut(); void navigate('/app/login?redirect=%2Fapp%2Fprofile', { replace: true }); }} /> : null}
     </div>
   );
+}
+
+function SessionManagement({
+  loading,
+  sessions,
+  busy,
+  onRevoke,
+}: {
+  loading: boolean;
+  sessions: PersonalSession[];
+  busy: string | null;
+  onRevoke: (session: PersonalSession) => Promise<void>;
+}) {
+  const tr = useTranslate();
+  return (
+    <Card>
+      <Card.Header>
+        <Card.Title>{tr('Signed-in devices', '已登录设备')}</Card.Title>
+        <Card.Description>{tr('Review active sessions and sign out older logins.', '查看当前会话并注销较早的登录。')}</Card.Description>
+      </Card.Header>
+      <Card.Content>
+        {loading ? <div aria-label={tr('Loading signed-in devices', '正在加载已登录设备')} className="h-24 animate-pulse rounded-xl bg-default" role="status" /> : sessions.length === 0 ? (
+          <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
+        ) : (
+          <ul aria-label={tr('Signed-in devices', '已登录设备')} className="divide-y divide-border">
+            {sessions.map((session) => (
+              <li className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between" key={session.Id}>
+                <div className="min-w-0">
+                  <p className="font-medium text-foreground">{session.DeviceName} {session.IsCurrent ? <span className="text-xs text-accent">({tr('This device', '此设备')})</span> : null}</p>
+                  <p className="text-sm text-muted">{session.ClientName} · {session.ApplicationVersion}</p>
+                  <p className="text-xs text-muted">{tr('Last active', '最近活动')}：{formatTimelineDate(session.LastActivityDate, localeForDate())}</p>
+                </div>
+                <Button
+                  isDisabled={busy !== null}
+                  isPending={busy === session.Id}
+                  onPress={() => { void onRevoke(session); }}
+                  size="sm"
+                  variant={session.IsCurrent ? 'tertiary' : 'danger-soft'}
+                >{session.IsCurrent ? tr('Sign out', '退出登录') : tr('Revoke', '注销')}</Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card.Content>
+    </Card>
+  );
+}
+
+function localeForDate(): string {
+  return document.documentElement.lang || 'en-US';
 }
 
 function InsightKpi({ icon: Icon, label, value }: { icon: typeof Clock3; label: string; value: string }) {

@@ -4,11 +4,12 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 import { LibraryPage } from './LibraryPage';
 
-const api = vi.hoisted(() => ({ getItems: vi.fn(), getLibraryFilterFacets: vi.fn() }));
+const api = vi.hoisted(() => ({ getItems: vi.fn(), getLibraries: vi.fn(), getLibraryFilterFacets: vi.fn() }));
 vi.mock('../api/catalogApi', () => api);
 vi.mock('../ui/MediaTile', () => ({ MediaTile: ({ item }: { item: { Name: string } }) => <div>{item.Name}</div> }));
 
 beforeEach(() => {
+  api.getLibraries.mockResolvedValue([{ Id: 'library-1', Name: 'Cinema' }]);
   api.getLibraryFilterFacets.mockResolvedValue({ Genres: ['Drama', 'Science Fiction'], ProductionYears: [2021, 2016] });
   api.getItems.mockResolvedValue({
     Items: [{ Genres: ['Drama'], Id: 'movie-1', Name: 'Arrival', ProductionYear: 2016, Type: 'Movie' }],
@@ -26,6 +27,9 @@ it('keeps CellSelect filters collapsed by default and sends expanded selections 
   );
 
   expect(await screen.findByText('Arrival')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Cinema' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
   expect(screen.queryByRole('button', { name: /Media type/ })).not.toBeInTheDocument();
   const filterRegion = screen.getByRole('region', { name: 'Library filters' });
   const filters = filterRegion.querySelector('[data-slot="disclosure-group"]');

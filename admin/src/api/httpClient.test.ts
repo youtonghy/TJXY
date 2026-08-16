@@ -24,12 +24,14 @@ it('sends canonical identity headers for login without query credentials', async
     body: JSON.stringify({ Username: 'Admin', Pw: 'secret' }),
   });
 
-  const request = fetchMock.mock.calls[0]?.[0] as Request;
-  expect(request.url).not.toContain('secret');
-  expect(request.headers.get('Authorization')).toBe(
+  const [url, init] = fetchMock.mock.calls[0] ?? [];
+  const headers = new Headers(init?.headers);
+  const requestUrl = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
+  expect(requestUrl).not.toContain('secret');
+  expect(headers.get('Authorization')).toBe(
     'MediaBrowser Client="TJXY Admin", Device="Browser", DeviceId="018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11", Version="0.1.0"',
   );
-  expect(request.headers.get('Content-Type')).toBe('application/json');
+  expect(headers.get('Content-Type')).toBe('application/json');
 });
 
 it('sends the session token in a canonical header', async () => {
@@ -41,10 +43,12 @@ it('sends the session token in a canonical header', async () => {
 
   await apiRequest('/Users/Me');
 
-  const request = fetchMock.mock.calls[0]?.[0] as Request;
-  expect(request.url).not.toContain('secret-token');
-  expect(request.headers.get('Authorization')).toBe('MediaBrowser Token="secret-token"');
-  expect(request.headers.has('Content-Type')).toBe(false);
+  const [url, init] = fetchMock.mock.calls[0] ?? [];
+  const headers = new Headers(init?.headers);
+  const requestUrl = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
+  expect(requestUrl).not.toContain('secret-token');
+  expect(headers.get('Authorization')).toBe('MediaBrowser Token="secret-token"');
+  expect(headers.has('Content-Type')).toBe(false);
 });
 
 it.each([204, 205])('returns undefined for an empty %s response', async (status) => {

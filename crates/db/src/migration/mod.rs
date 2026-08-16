@@ -62,6 +62,7 @@ mod m20260812_000061_asset_storage_roots;
 mod m20260813_000062_logging_settings;
 mod m20260813_000063_direct_local_metadata;
 mod m20260815_000064_ai_token_limits;
+mod m20260816_000065_qr_login_challenges;
 
 use std::collections::HashSet;
 
@@ -185,6 +186,7 @@ async fn validate_current_schema(
         "asset_storage_roots",
         "logging_settings",
         "direct_metadata_refs",
+        "qr_login_challenges",
     ] {
         if !manager.has_table(table).await? {
             missing.push(format!("table {table}"));
@@ -298,6 +300,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260813_000062_logging_settings::Migration),
             Box::new(m20260813_000063_direct_local_metadata::Migration),
             Box::new(m20260815_000064_ai_token_limits::Migration),
+            Box::new(m20260816_000065_qr_login_challenges::Migration),
         ]
     }
 }

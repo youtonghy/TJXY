@@ -22,7 +22,11 @@ export function selectBrowserSource(sources: PlaybackSource[]): PlaybackSource |
 }
 
 export function selectNativeSource(sources: PlaybackSource[]): PlaybackSource | null {
-  return nativeSources(sources)[0] ?? null;
+  return selectBrowserSource(sources) ?? nativeSources(sources)[0] ?? null;
+}
+
+export function isBrowserPlayableSource(source: PlaybackSource): boolean {
+  return browserSources([source]).length > 0;
 }
 
 export function sourceLabel(source: PlaybackSource): string {

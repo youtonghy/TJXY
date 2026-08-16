@@ -6786,6 +6786,23 @@ async fn administrator_dashboard_reports_real_catalog_playback_and_session_activ
 }
 
 #[tokio::test]
+async fn popular_fallback_includes_primary_image_tags() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let poster_tag = seed_asset(&app, item, b"poster").await;
+    let (_, _, token) = login(&app.router).await;
+
+    let response = get(&app.router, "/Discover/Popular?limit=12", Some(&token)).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let page: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page["Items"][0]["Id"], item.to_string());
+    assert_eq!(page["Items"][0]["PrimaryImageTag"], poster_tag);
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keeps personal insights and both ranking endpoints on one fixture.
 async fn client_portal_reports_personal_insights_and_discover_rankings() {
     let app = test_app().await;

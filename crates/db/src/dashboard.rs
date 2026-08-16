@@ -506,8 +506,20 @@ impl<'a> DashboardRepository<'a> {
                 })
             })
             .collect::<Result<Vec<_>, DbErr>>()?;
-        attach_primary_image_tags(self.database, &mut top_items).await?;
+        self.attach_primary_image_tags(&mut top_items).await?;
         Ok(top_items)
+    }
+
+    /// Populates primary image tags for dashboard item summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbErr`] when the asset query or row decoding fails.
+    pub async fn attach_primary_image_tags(
+        &self,
+        items: &mut [DashboardTopItem],
+    ) -> Result<(), DbErr> {
+        attach_primary_image_tags(self.database, items).await
     }
 }
 

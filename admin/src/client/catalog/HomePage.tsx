@@ -1,4 +1,6 @@
 import { Alert, Skeleton } from '@heroui/react';
+import { EmptyState } from '@heroui-pro/react';
+import { Library as LibraryIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import {
@@ -85,6 +87,15 @@ export function HomePage() {
                 <Alert.Description>{tr('Refresh the page to try loading them again.', '请刷新页面后重试。')}</Alert.Description>
               </Alert.Content>
             </Alert>
+          )}
+          {!hasUnavailableLibraries && resume.length === 0 && libraryRows.length === 0 && (
+            <EmptyState className="min-h-64 border border-dashed border-separator">
+              <EmptyState.Media variant="icon"><LibraryIcon /></EmptyState.Media>
+              <EmptyState.Title>{tr('No media available yet', '暂无可用媒体')}</EmptyState.Title>
+              <EmptyState.Description>
+                {tr('Your libraries will appear here when content is available.', '媒体库有可用内容后会显示在这里。')}
+              </EmptyState.Description>
+            </EmptyState>
           )}
           <MediaRow itemTo={playbackDestination} items={resume} title={tr('Continue watching', '继续观看')} />
           {libraryRows.map(({ library, items }) => (

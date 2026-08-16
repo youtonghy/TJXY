@@ -166,6 +166,11 @@ impl AuthSessionRecord {
     }
 
     #[must_use]
+    pub const fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    #[must_use]
     pub const fn user_id(&self) -> UserId {
         self.user_id
     }
@@ -608,6 +613,75 @@ impl<'connection> AuthRepository<'connection> {
         let transaction = self.database.begin().await?;
         let result = issue_session_in_transaction(&transaction, credential, &session).await;
         finish(transaction, result).await
+    }
+
+    /// Issues a session for an already authenticated user after an explicit
+    /// out-of-band approval (for example a QR login challenge).
+    pub async fn issue_session_for_user(
+        &self,
+        user_id: UserId,
+        auth_revision: i64,
+        session: SessionDraft,
+    ) -> Result<IssuedSession, AuthRepositoryError> {
+        validate_session(&session)?;
+        let transaction = self.database.begin().await?;
+        let update = Query::update()
+            .table(Alias::new("users"))
+            .value(Alias::new("last_login_at"), session.created_at)
+            .value(Alias::new("last_activity_at"), session.created_at)
+            .value(Alias::new("updated_at"), session.created_at)
+            .and_where(Expr::col(Alias::new("id")).eq(user_id.as_uuid()))
+            .and_where(Expr::col(Alias::new("auth_revision")).eq(auth_revision))
+            .and_where(Expr::col(Alias::new("disabled_at")).is_null())
+            .to_owned();
+        let backend = transaction.get_database_backend();
+        if transaction
+            .execute(backend.build(&update))
+            .await?
+            .rows_affected()
+            != 1
+        {
+            return Err(AuthRepositoryError::CredentialChanged);
+        }
+        let insert = Query::insert()
+            .into_table(Alias::new("auth_sessions"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("user_id"),
+                Alias::new("token_digest"),
+                Alias::new("auth_revision"),
+                Alias::new("device_id"),
+                Alias::new("device_key"),
+                Alias::new("device_name"),
+                Alias::new("client_name"),
+                Alias::new("client_version"),
+                Alias::new("created_at"),
+                Alias::new("expires_at"),
+            ])
+            .values_panic([
+                session.id.into(),
+                user_id.as_uuid().into(),
+                session.token_digest.to_vec().into(),
+                auth_revision.into(),
+                session.device_id.clone().into(),
+                crate::natural_key::hash(&["device", &session.device_id]).into(),
+                session.device_name.clone().into(),
+                session.client_name.clone().into(),
+                session.client_version.clone().into(),
+                session.created_at.into(),
+                session.expires_at.into(),
+            ])
+            .to_owned();
+        transaction.execute(backend.build(&insert)).await?;
+        finish(
+            transaction,
+            Ok(IssuedSession {
+                id: session.id,
+                user_id,
+                expires_at: session.expires_at,
+            }),
+        )
+        .await
     }
 
     /// Resolves a non-revoked, unexpired session whose auth revision still

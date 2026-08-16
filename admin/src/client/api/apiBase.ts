@@ -1,4 +1,5 @@
 export const API_BASE_STORAGE_KEY = 'tjxy.api.baseUrl';
+export const API_BASE_CHANGED_EVENT = 'tjxy-api-base-changed';
 
 export function isDesktopShell(): boolean {
   return import.meta.env.VITE_TJXY_SHELL === 'desktop';
@@ -19,27 +20,38 @@ export function getStoredApiBaseUrl(): string | null {
 }
 
 export function getApiBaseUrl(): string {
-  const stored = getStoredApiBaseUrl();
-  if (stored) return stored;
-  if (isDesktopShell()) return '';
-  if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
-  return '';
+  if (!isDesktopShell()) {
+    return typeof window !== 'undefined' ? window.location.origin : '';
+  }
+  return getStoredApiBaseUrl() ?? '';
 }
 
 export function setApiBaseUrl(origin: string): string {
   const normalized = normalizeOrigin(origin);
+  const previous = window.localStorage.getItem(API_BASE_STORAGE_KEY);
   window.localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
+  if (previous !== normalized) {
+    window.dispatchEvent(new CustomEvent(API_BASE_CHANGED_EVENT, { detail: normalized }));
+  }
   return normalized;
 }
 
 export function clearApiBaseUrl(): void {
+  const hadStoredOrigin = window.localStorage.getItem(API_BASE_STORAGE_KEY) !== null;
   window.localStorage.removeItem(API_BASE_STORAGE_KEY);
+  if (hadStoredOrigin) window.dispatchEvent(new CustomEvent(API_BASE_CHANGED_EVENT));
 }
 
 export function resolveApiUrl(path: string, baseUrl = getApiBaseUrl()): string {
   if (!path.startsWith('/') || path.startsWith('//')) throw new Error('invalid path');
   if (!baseUrl) throw new Error('missing api base url');
   return new URL(path, `${baseUrl}/`).toString();
+}
+
+export function resolvePublicAssetUrl(value: string): string {
+  if (!isDesktopShell() || !value.startsWith('/') || value.startsWith('//')) return value;
+  const baseUrl = getStoredApiBaseUrl();
+  return baseUrl ? new URL(value, `${baseUrl}/`).toString() : value;
 }
 
 export async function probeServer(origin: string, signal?: AbortSignal): Promise<string> {

@@ -31,9 +31,23 @@ vi.mock('./ClientAuthContext', () => ({
 }));
 
 beforeEach(() => {
+  vi.unstubAllEnvs();
   languageApi.getSystemLanguage.mockReset();
   languageApi.getSystemLanguage.mockResolvedValue({ locale: 'en-US', revision: 1, supportedLocales: ['zh-CN', 'en-US'] });
   window.localStorage.setItem('tjxy-system-locale', 'en-US');
+});
+
+it('does not show server address settings in the web application', async () => {
+  window.localStorage.setItem('tjxy.api.baseUrl', 'http://old-server.example:8096');
+  render(
+    <SystemLocaleProvider><ClientThemeRuntime><MemoryRouter initialEntries={['/app/login']}>
+      <ClientLoginPage />
+    </MemoryRouter></ClientThemeRuntime></SystemLocaleProvider>,
+  );
+
+  expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: /Server address/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Save server' })).not.toBeInTheDocument();
 });
 
 it('uses the shared system mark in the client sign-in brand', async () => {
