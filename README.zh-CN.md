@@ -47,17 +47,40 @@ PostgreSQL 或已有外部数据库。
 
 ## 使用 Docker 快速安装
 
-这是推荐的源码部署方式。启动脚本会构建前端和服务端镜像、创建持久化目录、
-启动 Compose 服务，并等待所有服务通过健康检查。
+推荐的最终用户部署方式是从 GHCR 拉取已经构建好的镜像。启动脚本会创建持久化
+目录、启动 Compose 服务，并等待所有服务通过健康检查。维护者仍可以从源码构建。
 
 ### 环境要求
 
 - Docker Engine 和较新的 Compose v2 插件
-- Node.js 22.12 或更高版本及 npm
-- 已准备好的 `admin/node_modules` 前端依赖
+- 从源码构建时还需要 Node.js 22.12 或更高版本、npm，以及已经准备好的
+  `admin/node_modules` 前端依赖。
 
-HeroUI Pro 是受许可保护的构建依赖。首次准备源码的维护者应在 `admin/` 包中
-完成安装，且不要把密钥提交到仓库：
+### 使用已发布镜像
+
+Release CI 会将多架构镜像发布到 `ghcr.io/youtonghy/tjxy:latest`，同时发布
+类似 `ghcr.io/youtonghy/tjxy:0.1.0` 的版本标签。通过启动脚本拉取镜像，不再
+执行本地前端构建：
+
+```bash
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+  --runtime docker \
+  --database postgres \
+  --media /path/to/media
+```
+
+也可以使用等价参数：`--image ghcr.io/youtonghy/tjxy:latest`。如果 GHCR
+镜像包是私有的，请先执行 `docker login ghcr.io`。使用已发布镜像时不需要
+Node.js、npm 或 `HEROUI_KEY`。
+
+生产环境可以把 `latest` 替换成固定版本标签。更新时重新执行同一命令即可拉取
+新镜像并重建应用容器。
+
+### 从源码构建
+
+HeroUI Pro 是受许可保护的构建依赖。维护者在发布版本标签前，必须将
+`HEROUI_KEY` 保存为 GitHub Actions repository secret。本地准备源码时也可以
+在 `admin/` 包中安装，但不要把密钥提交到仓库：
 
 ```bash
 cd admin
@@ -65,6 +88,11 @@ HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
 npm run build
 cd ..
 ```
+
+`Release` workflow 只在生成 `admin/dist` 和发布镜像时使用该 secret。部署主机
+永远不需要这个密钥。第一次发布后，如果需要匿名拉取并且 HeroUI Pro 许可证
+允许这种分发方式，请把 GHCR package 的可见性设置为 public。若要从当前源码
+构建而不是拉取镜像，请在下面的启动命令中去掉 `TJXY_IMAGE` 和 `--image`。
 
 ### 自动管理 PostgreSQL
 
@@ -77,7 +105,7 @@ cd ..
 选择 **Docker 启动** 和 **自动安装并管理 PostgreSQL**，也可以直接传入参数：
 
 ```bash
-./tjxy-setup \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
   --runtime docker \
   --database postgres \
   --media /path/to/media \
@@ -97,7 +125,7 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 选择 external 模式即可使用已有的 SQLite、PostgreSQL 或 MySQL：
 
 ```bash
-./tjxy-setup \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
   --runtime docker \
   --database external \
   --media /path/to/media
@@ -116,13 +144,16 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 | `--media PATH` | `./media` | `/media`，可在媒体库文件浏览器中选择 |
 | `--media-mode ro` | `rw` | 以只读方式挂载媒体目录 |
 | `--port PORT` | `8096` | 发布 TJXY HTTP 服务端口 |
+| `--image IMAGE` | 从源码构建 | 拉取已发布镜像并跳过前端构建 |
 
 默认只监听宿主机的 `127.0.0.1`。使用同一台机器上的反向代理或 SSH 隧道时，
 建议保持该设置。若需要直接从局域网访问，可以显式监听所有网卡，并通过防火墙
 限制端口：
 
 ```bash
-TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
+TJXY_PUBLISH_HOST=0.0.0.0 \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest \
+./tjxy-setup \
   --runtime docker \
   --database postgres \
   --port 8096
@@ -139,8 +170,10 @@ TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
 ```
 
 `stop` 会删除容器和 Compose 网络，但不会删除宿主机挂载文件或 PostgreSQL
-volume。升级源码部署前，应备份数据库和宿主机目录、停止 TJXY、更新仓库；若
-前端锁文件发生变化，还需要重新准备前端依赖，最后使用原启动命令重新启动。
+volume。升级发布镜像部署前，应先备份数据库和宿主机目录，再把原命令中的镜像
+版本改为新版本并重新执行；脚本会先拉取镜像，然后重建 TJXY。升级源码部署时，
+需要停止 TJXY、更新仓库；若前端锁文件发生变化，还需要重新准备前端依赖，
+最后重新执行源码构建命令。
 
 除非确定要永久删除自动管理的 PostgreSQL 数据，否则不要运行
 `docker compose down --volumes`。

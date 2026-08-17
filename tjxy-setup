@@ -12,6 +12,7 @@ DATA_DIR=
 PORT=8096
 POSTGRES_PORT=5433
 MEDIA_MODE=rw
+IMAGE=${TJXY_IMAGE:-}
 PROJECT_NAME=tjxy-setup
 
 usage() {
@@ -29,6 +30,7 @@ Options:
   --data-dir PATH              Host directory for assets and logs
   --port PORT                  Published TJXY port (default: 8096)
   --postgres-port PORT         Local managed PostgreSQL port (default: 5433)
+  --image IMAGE                Pull a published image instead of building locally
   -h, --help                   Show this help
 EOF
 }
@@ -74,6 +76,8 @@ while [ "$#" -gt 0 ]; do
             require_value "$@"; PORT=$2; shift 2 ;;
         --postgres-port)
             require_value "$@"; POSTGRES_PORT=$2; shift 2 ;;
+        --image)
+            require_value "$@"; IMAGE=$2; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -99,6 +103,7 @@ load_state() {
     PORT=$(state_value port)
     POSTGRES_PORT=$(state_value postgres-port)
     MEDIA_MODE=$(state_value media-mode)
+    IMAGE=$(state_value image)
     [ -n "$RUNTIME" ] && [ -n "$DATABASE_MODE" ] || fail "setup state is incomplete"
 }
 
@@ -138,6 +143,7 @@ write_state() {
     printf '%s\n' "$PORT" > "$STATE_DIR/port"
     printf '%s\n' "$POSTGRES_PORT" > "$STATE_DIR/postgres-port"
     printf '%s\n' "$MEDIA_MODE" > "$STATE_DIR/media-mode"
+    printf '%s\n' "$IMAGE" > "$STATE_DIR/image"
 }
 
 require_command() {
@@ -171,15 +177,25 @@ export_runtime_environment() {
     TJXY_GID=$(id -g)
     export TJXY_CONFIG_DIR TJXY_DATA_DIR TJXY_MEDIA_DIR TJXY_MEDIA_MODE TJXY_PORT
     export TJXY_POSTGRES_PORT TJXY_UID TJXY_GID
+    TJXY_IMAGE=$IMAGE
+    export TJXY_IMAGE
 }
 
 compose() {
     case "$RUNTIME:$DATABASE_MODE" in
         docker:postgres)
-            docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            if [ -n "$IMAGE" ]; then
+                docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.published.yaml" "$@"
+            else
+                docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            fi
             ;;
         docker:external)
-            docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.external.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            if [ -n "$IMAGE" ]; then
+                docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.external.yaml" -f "$ROOT_DIR/compose.published.yaml" "$@"
+            else
+                docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.external.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            fi
             ;;
         local:postgres)
             docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.local-postgres.yaml" "$@"
@@ -249,13 +265,22 @@ start_local() {
 
 start_docker() {
     require_command docker
-    require_command npm
-    printf '%s\n' 'Building the host frontend for the Docker image...'
-    npm --prefix "$ROOT_DIR/admin" run build
     if [ "$DATABASE_MODE" = postgres ]; then
         ensure_postgres_password
     fi
-    compose up -d --build --wait --wait-timeout 600
+    if [ -n "$IMAGE" ]; then
+        printf 'Pulling published TJXY image %s...\n' "$IMAGE"
+        compose pull
+    else
+        require_command npm
+        printf '%s\n' 'Building the host frontend for the Docker image...'
+        npm --prefix "$ROOT_DIR/admin" run build
+    fi
+    if [ -n "$IMAGE" ]; then
+        compose up -d --wait --wait-timeout 600
+    else
+        compose up -d --build --wait --wait-timeout 600
+    fi
 }
 
 stop_local() {
@@ -323,6 +348,7 @@ fi
 case "$RUNTIME" in local|docker) ;; *) fail "--runtime must be local or docker" ;; esac
 case "$DATABASE_MODE" in external|postgres) ;; *) fail "--database must be external or postgres" ;; esac
 case "$MEDIA_MODE" in rw|ro) ;; *) fail "--media-mode must be rw or ro" ;; esac
+[ "$RUNTIME" = docker ] || [ -z "$IMAGE" ] || fail "--image is only valid with --runtime docker"
 valid_port "$PORT" || fail "--port must be an integer from 1 through 65535"
 valid_port "$POSTGRES_PORT" || fail "--postgres-port must be an integer from 1 through 65535"
 

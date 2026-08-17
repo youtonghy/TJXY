@@ -1,0 +1,4 @@
+services:
+  tjxy:
+    build: !reset null
+    image: ${TJXY_IMAGE:-ghcr.io/youtonghy/tjxy:latest}

@@ -54,18 +54,43 @@ existing database.
 
 ## Quick Start with Docker
 
-This is the recommended source deployment. The launcher builds the frontend and
-server image, creates persistent storage, starts the Compose services, and waits
-until they are healthy.
+The recommended end-user deployment pulls a published image from GHCR. The
+launcher creates persistent storage, starts the Compose services, and waits until
+they are healthy. Source builds are available for maintainers who need to build
+from a checkout.
 
 ### Requirements
 
 - Docker Engine with a recent Compose v2 plugin
-- Node.js 22.12 or newer and npm
-- Prepared frontend dependencies in `admin/node_modules`
+- Source builds additionally need Node.js 22.12 or newer, npm, and prepared
+  frontend dependencies in `admin/node_modules`.
 
-HeroUI Pro is a licensed build dependency. Maintainers preparing a fresh source
-checkout should install it from the `admin/` package without committing the key:
+### Published Image
+
+Release CI publishes multi-platform images to
+`ghcr.io/youtonghy/tjxy:latest` and a version tag such as
+`ghcr.io/youtonghy/tjxy:0.1.0`. Pull the image through the launcher without
+running a frontend build:
+
+```bash
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+  --runtime docker \
+  --database postgres \
+  --media /path/to/media
+```
+
+The equivalent flag is `--image ghcr.io/youtonghy/tjxy:latest`. If the GHCR
+package is private, authenticate first with `docker login ghcr.io`. Published
+image users do not need Node.js, npm, or `HEROUI_KEY`.
+
+For a pinned release, replace `latest` with an immutable version tag. Rerun the
+same command to pull a newer image and recreate the application container.
+
+### Source Build
+
+HeroUI Pro is a licensed build dependency. Maintainers must store `HEROUI_KEY`
+as a GitHub Actions repository secret before publishing a tagged release. For a
+local source build, install it without committing the key:
 
 ```bash
 cd admin
@@ -73,6 +98,13 @@ HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
 npm run build
 cd ..
 ```
+
+The `Release` workflow uses that secret only while producing `admin/dist`; it
+then publishes the completed image. The secret is never needed on a deployment
+host. After the first release, set the GHCR package visibility to public if
+anonymous pulls are required and the HeroUI Pro license permits that
+distribution. To build from the checkout instead of pulling an image, omit
+`TJXY_IMAGE` and `--image` from the launcher commands below.
 
 ### Managed PostgreSQL
 
@@ -85,7 +117,7 @@ Run the interactive launcher:
 Choose **Docker** and **managed PostgreSQL**, or provide the choices directly:
 
 ```bash
-./tjxy-setup \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
   --runtime docker \
   --database postgres \
   --media /path/to/media \
@@ -107,7 +139,7 @@ The database is available only on the Compose network. Its data remains in the
 Use an existing SQLite, PostgreSQL, or MySQL database by selecting external mode:
 
 ```bash
-./tjxy-setup \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
   --runtime docker \
   --database external \
   --media /path/to/media
@@ -127,13 +159,16 @@ Docker Desktop.
 | `--media PATH` | `./media` | `/media`, visible to the library browser |
 | `--media-mode ro` | `rw` | Mount media read-only |
 | `--port PORT` | `8096` | Publish the TJXY HTTP service |
+| `--image IMAGE` | source build | Pull a published image and skip frontend build |
 
 TJXY publishes only on `127.0.0.1` by default. Keep this setting when using an
 SSH tunnel or reverse proxy on the same host. For direct LAN access, explicitly
 publish on every interface and protect the port with a firewall:
 
 ```bash
-TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
+TJXY_PUBLISH_HOST=0.0.0.0 \
+TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest \
+./tjxy-setup \
   --runtime docker \
   --database postgres \
   --port 8096
@@ -150,10 +185,11 @@ Use a TLS reverse proxy before exposing TJXY outside a trusted network.
 ```
 
 `stop` removes containers and the Compose network but preserves bind-mounted
-files and the managed PostgreSQL volume. To update a source deployment, back up
-the database and host directories, stop TJXY, update the checkout, refresh
-frontend dependencies when the lockfile changes, and rerun the same start
-command.
+files and the managed PostgreSQL volume. To update a published-image deployment,
+back up the database and host directories, then rerun the same command with the
+new version tag. The launcher pulls the image before recreating TJXY. For source
+deployments, stop TJXY, update the checkout, refresh frontend dependencies when
+the lockfile changes, and rerun the source-build command.
 
 Do not run `docker compose down --volumes` unless the managed PostgreSQL database
 is intentionally being deleted.
