@@ -1,0 +1,352 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+STATE_DIR="$ROOT_DIR/.tjxy"
+COMMAND=start
+RUNTIME=
+DATABASE_MODE=
+MEDIA_DIR=
+CONFIG_DIR=
+DATA_DIR=
+PORT=8096
+POSTGRES_PORT=5433
+MEDIA_MODE=rw
+PROJECT_NAME=tjxy-setup
+
+usage() {
+    cat <<'EOF'
+Usage: ./tjxy-setup [start] [options]
+       ./tjxy-setup stop|status|logs
+
+Options:
+  --runtime local|docker       Run TJXY on the host or in Docker
+  --database external|postgres
+                               Use an existing database or managed PostgreSQL
+  --media PATH                 Host media directory mounted as /media
+  --media-mode rw|ro           Media mount access (default: rw)
+  --config-dir PATH            Host directory for tjxy.toml
+  --data-dir PATH              Host directory for assets and logs
+  --port PORT                  Published TJXY port (default: 8096)
+  --postgres-port PORT         Local managed PostgreSQL port (default: 5433)
+  -h, --help                   Show this help
+EOF
+}
+
+fail() {
+    printf 'tjxy-setup: %s\n' "$*" >&2
+    exit 1
+}
+
+valid_port() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+require_value() {
+    [ "$#" -ge 2 ] || fail "$1 requires a value"
+}
+
+case "${1:-}" in
+    start|stop|status|logs)
+        COMMAND=$1
+        shift
+        ;;
+esac
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --runtime)
+            require_value "$@"; RUNTIME=$2; shift 2 ;;
+        --database)
+            require_value "$@"; DATABASE_MODE=$2; shift 2 ;;
+        --media)
+            require_value "$@"; MEDIA_DIR=$2; shift 2 ;;
+        --media-mode)
+            require_value "$@"; MEDIA_MODE=$2; shift 2 ;;
+        --config-dir)
+            require_value "$@"; CONFIG_DIR=$2; shift 2 ;;
+        --data-dir)
+            require_value "$@"; DATA_DIR=$2; shift 2 ;;
+        --port)
+            require_value "$@"; PORT=$2; shift 2 ;;
+        --postgres-port)
+            require_value "$@"; POSTGRES_PORT=$2; shift 2 ;;
+        -h|--help)
+            usage; exit 0 ;;
+        *)
+            fail "unknown argument: $1"
+            ;;
+    esac
+done
+
+state_value() {
+    if [ -f "$STATE_DIR/$1" ]; then
+        sed -n '1p' "$STATE_DIR/$1"
+    fi
+    return 0
+}
+
+load_state() {
+    [ -d "$STATE_DIR" ] || fail "no setup state found; run ./tjxy-setup first"
+    RUNTIME=$(state_value runtime)
+    DATABASE_MODE=$(state_value database-mode)
+    MEDIA_DIR=$(state_value media-path)
+    CONFIG_DIR=$(state_value config-path)
+    DATA_DIR=$(state_value data-path)
+    PORT=$(state_value port)
+    POSTGRES_PORT=$(state_value postgres-port)
+    MEDIA_MODE=$(state_value media-mode)
+    [ -n "$RUNTIME" ] && [ -n "$DATABASE_MODE" ] || fail "setup state is incomplete"
+}
+
+prompt_runtime() {
+    printf '%s\n' 'TJXY 启动方式：' '  1) 本地启动（在宿主机编译并运行）' '  2) Docker 启动'
+    printf '请选择 [1-2]: '
+    read -r answer
+    case "$answer" in
+        1) RUNTIME=local ;;
+        2) RUNTIME=docker ;;
+        *) fail "无效的启动方式" ;;
+    esac
+}
+
+prompt_database() {
+    printf '%s\n' '数据库方式：' '  1) 使用自备数据库（在网页安装向导中配置）' '  2) 自动安装并管理 PostgreSQL'
+    printf '请选择 [1-2]: '
+    read -r answer
+    case "$answer" in
+        1) DATABASE_MODE=external ;;
+        2) DATABASE_MODE=postgres ;;
+        *) fail "无效的数据库方式" ;;
+    esac
+}
+
+canonical_directory() {
+    mkdir -p "$1"
+    (CDPATH= cd -P "$1" && pwd -P)
+}
+
+write_state() {
+    printf '%s\n' "$RUNTIME" > "$STATE_DIR/runtime"
+    printf '%s\n' "$DATABASE_MODE" > "$STATE_DIR/database-mode"
+    printf '%s\n' "$MEDIA_DIR" > "$STATE_DIR/media-path"
+    printf '%s\n' "$CONFIG_DIR" > "$STATE_DIR/config-path"
+    printf '%s\n' "$DATA_DIR" > "$STATE_DIR/data-path"
+    printf '%s\n' "$PORT" > "$STATE_DIR/port"
+    printf '%s\n' "$POSTGRES_PORT" > "$STATE_DIR/postgres-port"
+    printf '%s\n' "$MEDIA_MODE" > "$STATE_DIR/media-mode"
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+ensure_postgres_password() {
+    password_file="$STATE_DIR/postgres-password"
+    if [ ! -s "$password_file" ]; then
+        if command -v openssl >/dev/null 2>&1; then
+            openssl rand -hex 24 > "$password_file"
+        else
+            od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "$password_file"
+            printf '\n' >> "$password_file"
+        fi
+        chmod 600 "$password_file"
+    fi
+    TJXY_POSTGRES_PASSWORD=$(sed -n '1p' "$password_file")
+    [ -n "$TJXY_POSTGRES_PASSWORD" ] || fail "managed PostgreSQL password is empty"
+    export TJXY_POSTGRES_PASSWORD
+}
+
+export_runtime_environment() {
+    TJXY_CONFIG_DIR=$CONFIG_DIR
+    TJXY_DATA_DIR=$DATA_DIR
+    TJXY_MEDIA_DIR=$MEDIA_DIR
+    TJXY_MEDIA_MODE=$MEDIA_MODE
+    TJXY_PORT=$PORT
+    TJXY_POSTGRES_PORT=$POSTGRES_PORT
+    TJXY_UID=$(id -u)
+    TJXY_GID=$(id -g)
+    export TJXY_CONFIG_DIR TJXY_DATA_DIR TJXY_MEDIA_DIR TJXY_MEDIA_MODE TJXY_PORT
+    export TJXY_POSTGRES_PORT TJXY_UID TJXY_GID
+}
+
+compose() {
+    case "$RUNTIME:$DATABASE_MODE" in
+        docker:postgres)
+            docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            ;;
+        docker:external)
+            docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.external.yaml" -f "$ROOT_DIR/compose.prebuilt.yaml" "$@"
+            ;;
+        local:postgres)
+            docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/compose.local-postgres.yaml" "$@"
+            ;;
+        *)
+            fail "there is no Compose stack for $RUNTIME/$DATABASE_MODE"
+            ;;
+    esac
+}
+
+wait_for_http() {
+    attempts=0
+    while [ "$attempts" -lt 90 ]; do
+        if curl --fail --silent "http://127.0.0.1:$PORT/health/ready" >/dev/null 2>&1; then
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    return 1
+}
+
+start_local() {
+    require_command npm
+    require_command cargo
+    printf '%s\n' 'Building the frontend and local TJXY server...'
+    npm --prefix "$ROOT_DIR/admin" run build
+    cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release --locked -p tjxy-server --bin tjxy-server
+
+    if [ "$DATABASE_MODE" = postgres ]; then
+        require_command docker
+        ensure_postgres_password
+        compose up -d --wait --wait-timeout 120
+        TJXY_SETUP_POSTGRES_HOST=127.0.0.1
+        TJXY_SETUP_POSTGRES_PORT=$POSTGRES_PORT
+        TJXY_SETUP_POSTGRES_DATABASE=tjxy
+        TJXY_SETUP_POSTGRES_USERNAME=tjxy
+        export TJXY_SETUP_POSTGRES_HOST TJXY_SETUP_POSTGRES_PORT
+        export TJXY_SETUP_POSTGRES_DATABASE TJXY_SETUP_POSTGRES_USERNAME
+    else
+        unset TJXY_SETUP_POSTGRES_HOST TJXY_SETUP_POSTGRES_PORT || true
+        unset TJXY_SETUP_POSTGRES_DATABASE TJXY_SETUP_POSTGRES_USERNAME || true
+        unset TJXY_SETUP_POSTGRES_PASSWORD || true
+    fi
+
+    unset TJXY_DATABASE_URL TJXY_SERVER_ID TJXY_CREDENTIAL_KEYRING TJXY_BIND TJXY_PUBLIC_ADDRESS || true
+    TJXY_CONFIG_FILE="$CONFIG_DIR/tjxy.toml"
+    TJXY_SETUP_DATA_DIR=$DATA_DIR
+    TJXY_SETUP_BIND="127.0.0.1:$PORT"
+    TJXY_ASSETS_DIR="$DATA_DIR/assets"
+    TJXY_ADMIN_DIST_DIR="$ROOT_DIR/admin/dist"
+    TJXY_LOG_DIR="$DATA_DIR/logs"
+    TJXY_MEDIA_BROWSER_ROOTS=$MEDIA_DIR
+    export TJXY_CONFIG_FILE TJXY_SETUP_DATA_DIR TJXY_SETUP_BIND TJXY_ASSETS_DIR
+    export TJXY_ADMIN_DIST_DIR TJXY_LOG_DIR TJXY_MEDIA_BROWSER_ROOTS
+
+    mkdir -p "$DATA_DIR/logs"
+    console_log="$DATA_DIR/logs/launcher.log"
+    nohup "$ROOT_DIR/target/release/tjxy-server" >> "$console_log" 2>&1 &
+    server_pid=$!
+    printf '%s\n' "$server_pid" > "$STATE_DIR/server.pid"
+    if ! wait_for_http; then
+        kill "$server_pid" 2>/dev/null || true
+        fail "local server did not become ready; inspect $console_log"
+    fi
+}
+
+start_docker() {
+    require_command docker
+    require_command npm
+    printf '%s\n' 'Building the host frontend for the Docker image...'
+    npm --prefix "$ROOT_DIR/admin" run build
+    if [ "$DATABASE_MODE" = postgres ]; then
+        ensure_postgres_password
+    fi
+    compose up -d --build --wait --wait-timeout 600
+}
+
+stop_local() {
+    pid=$(state_value server.pid)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+        case "$command_line" in
+            *tjxy-server*) kill "$pid" ;;
+            *) fail "PID $pid does not belong to tjxy-server" ;;
+        esac
+    fi
+    rm -f "$STATE_DIR/server.pid"
+    if [ "$DATABASE_MODE" = postgres ]; then
+        ensure_postgres_password
+        compose down
+    fi
+}
+
+show_status() {
+    if curl --fail --silent "http://127.0.0.1:$PORT/health/ready" >/dev/null 2>&1; then
+        printf 'TJXY is reachable at http://127.0.0.1:%s/\n' "$PORT"
+    else
+        printf 'TJXY is not reachable at http://127.0.0.1:%s/\n' "$PORT"
+    fi
+    if [ "$RUNTIME" = docker ] || [ "$DATABASE_MODE" = postgres ]; then
+        [ "$DATABASE_MODE" != postgres ] || ensure_postgres_password
+        compose ps
+    fi
+}
+
+if [ "$COMMAND" != start ]; then
+    [ "$#" -eq 0 ] || fail "$COMMAND does not accept setup options"
+    load_state
+    export_runtime_environment
+    case "$COMMAND" in
+        stop)
+            if [ "$RUNTIME" = local ]; then stop_local; else [ "$DATABASE_MODE" != postgres ] || ensure_postgres_password; compose down; fi
+            ;;
+        status) show_status ;;
+        logs)
+            if [ "$RUNTIME" = local ]; then
+                tail -f "$DATA_DIR/logs/launcher.log"
+            else
+                [ "$DATABASE_MODE" != postgres ] || ensure_postgres_password
+                compose logs -f
+            fi
+            ;;
+    esac
+    exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+LOCK_DIR="$STATE_DIR/setup.lock"
+mkdir "$LOCK_DIR" 2>/dev/null || fail "another tjxy-setup process is running"
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT HUP INT TERM
+
+if [ -z "$RUNTIME" ]; then
+    [ -t 0 ] || fail "--runtime is required without an interactive terminal"
+    prompt_runtime
+fi
+if [ -z "$DATABASE_MODE" ]; then
+    [ -t 0 ] || fail "--database is required without an interactive terminal"
+    prompt_database
+fi
+case "$RUNTIME" in local|docker) ;; *) fail "--runtime must be local or docker" ;; esac
+case "$DATABASE_MODE" in external|postgres) ;; *) fail "--database must be external or postgres" ;; esac
+case "$MEDIA_MODE" in rw|ro) ;; *) fail "--media-mode must be rw or ro" ;; esac
+valid_port "$PORT" || fail "--port must be an integer from 1 through 65535"
+valid_port "$POSTGRES_PORT" || fail "--postgres-port must be an integer from 1 through 65535"
+
+MEDIA_DIR=${MEDIA_DIR:-"$ROOT_DIR/media"}
+CONFIG_DIR=${CONFIG_DIR:-"$STATE_DIR/config"}
+DATA_DIR=${DATA_DIR:-"$STATE_DIR/data"}
+MEDIA_DIR=$(canonical_directory "$MEDIA_DIR")
+CONFIG_DIR=$(canonical_directory "$CONFIG_DIR")
+DATA_DIR=$(canonical_directory "$DATA_DIR")
+chmod 700 "$STATE_DIR" "$CONFIG_DIR" "$DATA_DIR"
+
+old_runtime=$(state_value runtime)
+old_database=$(state_value database-mode)
+old_config=$(state_value config-path)
+if [ -n "$old_config" ] && [ -f "$old_config/tjxy.toml" ]; then
+    if [ "$old_runtime" != "$RUNTIME" ] || [ "$old_database" != "$DATABASE_MODE" ]; then
+        fail "the existing installation uses $old_runtime/$old_database; choose a new --config-dir before changing modes"
+    fi
+fi
+
+write_state
+export_runtime_environment
+if [ "$RUNTIME" = local ]; then start_local; else start_docker; fi
+
+printf '\nTJXY setup is ready: http://127.0.0.1:%s/setup/\n' "$PORT"
+printf 'Runtime: %s, database: %s\n' "$RUNTIME" "$DATABASE_MODE"
+printf 'Config: %s\nData: %s\nMedia: %s -> /media (%s)\n' "$CONFIG_DIR" "$DATA_DIR" "$MEDIA_DIR" "$MEDIA_MODE"

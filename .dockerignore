@@ -3,6 +3,7 @@
 .DS_Store
 target
 data
+.tjxy
 admin/node_modules
 admin/dist
 admin/output

@@ -6,12 +6,12 @@ use tjxy_metadata::{
     MusicBrainzProvider, ReloadableMetadataProvider, TheAudioDbProvider, TmdbProvider,
 };
 use tjxy_server::{
-    AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin,
-    GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
+    AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin, DatabaseDraft,
+    DatabaseTlsMode, GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
     InstallationConfigStore, InstallationState, LoggingRuntime,
-    MicrosoftOneDriveOAuthConfiguration, ServerIdentity, SetupCoordinator, SetupError,
-    SetupValidator, StartupOptions, build_router_with_admin_dist,
-    build_setup_router_with_admin_dist_and_assets, initialize, parse_credential_keyring,
+    MicrosoftOneDriveOAuthConfiguration, SecretString, ServerIdentity, SetupCoordinator,
+    SetupError, SetupValidator, StartupOptions, build_router_with_admin_dist,
+    build_setup_router_with_admin_dist_assets_and_database, initialize, parse_credential_keyring,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -28,6 +28,12 @@ enum StartupError {
     InvalidBindAddress(#[source] std::net::AddrParseError),
     #[error("TJXY_SETUP_BIND is not a valid socket address: {0}")]
     InvalidSetupBindAddress(#[source] std::net::AddrParseError),
+    #[error("TJXY_SETUP_POSTGRES_PORT must be an integer from 1 through 65535")]
+    InvalidSetupPostgresPort,
+    #[error(
+        "TJXY_SETUP_POSTGRES_HOST, TJXY_SETUP_POSTGRES_PORT, TJXY_SETUP_POSTGRES_DATABASE, TJXY_SETUP_POSTGRES_USERNAME, and TJXY_SETUP_POSTGRES_PASSWORD must be set together"
+    )]
+    IncompleteSetupPostgres,
     #[error("installation configuration is unavailable: {0}")]
     InstallationConfig(#[from] InstallationConfigError),
     #[error("setup validation failed: {0}")]
@@ -322,11 +328,12 @@ async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), Startu
     let branding_asset_dir = env::var("TJXY_ASSETS_DIR")
         .map_or_else(|_| data_dir.join("assets"), PathBuf::from)
         .join("branding");
-    let router = build_setup_router_with_admin_dist_and_assets(
+    let router = build_setup_router_with_admin_dist_assets_and_database(
         coordinator,
         validator,
         admin_dist,
         branding_asset_dir,
+        managed_setup_database()?,
     )?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     axum::serve(
@@ -336,6 +343,42 @@ async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), Startu
     .with_graceful_shutdown(async move { shutdown.wait_until_completed().await })
     .await?;
     Ok(())
+}
+
+fn managed_setup_database() -> Result<Option<DatabaseDraft>, StartupError> {
+    let values = [
+        env::var("TJXY_SETUP_POSTGRES_HOST").ok(),
+        env::var("TJXY_SETUP_POSTGRES_PORT").ok(),
+        env::var("TJXY_SETUP_POSTGRES_DATABASE").ok(),
+        env::var("TJXY_SETUP_POSTGRES_USERNAME").ok(),
+        env::var("TJXY_SETUP_POSTGRES_PASSWORD").ok(),
+    ];
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [
+        Some(host),
+        Some(port),
+        Some(database),
+        Some(username),
+        Some(password),
+    ] = values
+    else {
+        return Err(StartupError::IncompleteSetupPostgres);
+    };
+    let port = port
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .ok_or(StartupError::InvalidSetupPostgresPort)?;
+    Ok(Some(DatabaseDraft::PostgreSql {
+        host,
+        port,
+        database,
+        username,
+        password: SecretString::new(password),
+        tls: DatabaseTlsMode::Disable,
+    }))
 }
 
 fn google_oauth_configuration() -> Result<Option<GoogleDriveOAuthConfiguration>, StartupError> {

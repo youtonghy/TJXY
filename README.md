@@ -794,12 +794,39 @@ cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
 
-For Docker, the included Compose file starts an isolated PostgreSQL 18 instance
-alongside TJXY. PostgreSQL data is persisted in `tjxy-postgres` and is published
-only on `127.0.0.1:5433` for local tools; from the TJXY container use host
-`postgres` and port `5432`. The browser setup remains deliberately interactive:
-the manifest is persisted under `/config` and branding/application data under
-`/data`.
+The repository-level `./tjxy-setup` launcher is the supported local setup entry
+point. With no arguments it interactively selects whether TJXY itself runs as a
+native host process or in Docker, followed by whether setup uses an existing
+database or a managed PostgreSQL 18 container. The same choices can be supplied
+without prompts:
+
+```bash
+./tjxy-setup --runtime local --database external --media /path/to/media
+./tjxy-setup --runtime local --database postgres --media /path/to/media
+./tjxy-setup --runtime docker --database external --media /path/to/media
+./tjxy-setup --runtime docker --database postgres --media /path/to/media
+```
+
+Managed PostgreSQL credentials are generated once under `.tjxy`, retained with
+owner-only permissions, and tested entirely by the server. Its database page is
+therefore omitted from the browser setup without returning the password to the
+browser. Native TJXY publishes managed PostgreSQL on `127.0.0.1:5433`; a Docker
+TJXY reaches it by the Compose service name `postgres`, and PostgreSQL is not
+published to the host in that mode. External database mode preserves the normal
+SQLite, PostgreSQL, and MySQL setup page. From Docker, use
+`host.docker.internal` to reach a database on the host rather than `localhost`;
+the Compose definition supplies the Linux `host-gateway` mapping as well as
+working with Docker Desktop.
+
+By default, host configuration, application data, and media are mapped as
+`.tjxy/config:/config`, `.tjxy/data:/data`, and `./media:/media`. Override them
+with `--config-dir`, `--data-dir`, and `--media`; use `--media-mode ro` when TJXY
+must not write to the media tree. The stable container path `/media` is exposed
+to the administrator file browser. `./tjxy-setup stop`, `status`, and `logs`
+reuse the saved runtime selection. Stop never removes the PostgreSQL volume.
+Because a completed `tjxy.toml` stores its database endpoint, changing runtime
+or database mode requires a new configuration directory rather than silently
+rewriting an installation.
 
 The default Dockerfile builds the frontend from its lockfile. Maintainers with
 HeroUI Pro access can instead build the licensed frontend on the host and pass
@@ -812,7 +839,7 @@ cd admin
 HEROUI_KEY="$HeroPro" npx -y hpsetup@latest --auto
 npm run build
 cd ..
-docker compose -f compose.yaml -f compose.prebuilt.yaml up --build
+docker compose -f compose.external.yaml -f compose.prebuilt.yaml up --build
 ```
 
 `compose.prebuilt.yaml` uses `admin/dist` as a named BuildKit context and fails
@@ -821,20 +848,26 @@ the image build when `index.html` is missing or empty. It never copies host
 not need HeroUI Pro credentials; only the maintainer producing `admin/dist`
 does.
 
-To build the frontend inside Docker instead, use the original source-build
-path. That environment must independently have access to all licensed HeroUI
-Pro artifacts:
+The supported launcher builds `admin/dist` on the host and then builds the TJXY
+image from that output, so the Docker build itself does not need HeroUI Pro
+credentials:
+
+```bash
+./tjxy-setup --runtime docker --database postgres
+```
+
+To build the frontend inside Docker directly instead, use the source-build
+Compose path. That environment must independently have access to all licensed
+HeroUI Pro artifacts:
 
 ```bash
 docker compose up --build
 ```
 
-The default local database values are database `tjxy`, user `tjxy`, and password
-`tjxy-local-dev`. Override them before starting with `TJXY_POSTGRES_DB`,
-`TJXY_POSTGRES_USER`, and `TJXY_POSTGRES_PASSWORD` (for example in an untracked
-`.env` file). In the setup wizard choose **PostgreSQL**, enter `postgres` as the
-host, `5432` as the port, and test the connection before completing installation.
-To connect from the host after startup, use `postgresql://tjxy:tjxy-local-dev@127.0.0.1:5433/tjxy`.
+The managed database name and user both default to `tjxy`. Its generated password
+is intentionally not printed. Use external mode when an operator needs to supply
+different PostgreSQL or MySQL ownership, TLS, or network settings through the
+browser setup.
 
 SQLite accepts a file under the configured data root. PostgreSQL and MySQL accept
 separate host, port, database, username, password, and TLS fields; connection URLs

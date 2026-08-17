@@ -42,6 +42,7 @@ struct SetupHttpState {
     validator: SetupValidator,
     sessions: Arc<Mutex<VecDeque<SetupSession>>>,
     branding_asset_dir: Arc<PathBuf>,
+    managed_database: Option<DatabaseDraft>,
 }
 
 #[derive(Clone)]
@@ -62,6 +63,15 @@ pub fn build_setup_router_with_asset_dir(
     coordinator: SetupCoordinator,
     validator: SetupValidator,
     branding_asset_dir: impl Into<PathBuf>,
+) -> Router {
+    build_setup_router_with_options(coordinator, validator, branding_asset_dir, None)
+}
+
+pub fn build_setup_router_with_options(
+    coordinator: SetupCoordinator,
+    validator: SetupValidator,
+    branding_asset_dir: impl Into<PathBuf>,
+    managed_database: Option<DatabaseDraft>,
 ) -> Router {
     Router::new()
         .route("/health/live", get(|| async { "live" }))
@@ -85,6 +95,7 @@ pub fn build_setup_router_with_asset_dir(
             validator,
             sessions: Arc::new(Mutex::new(VecDeque::new())),
             branding_asset_dir: Arc::new(branding_asset_dir.into()),
+            managed_database,
         })
 }
 
@@ -258,12 +269,16 @@ async fn complete(
         Ok(session) => session,
         Err(status) => return status.into_response(),
     };
-    if session.tested_database.as_ref() != Some(&request.database) {
-        return setup_error(SetupErrorCode::DatabaseConfigurationInvalid);
-    }
     if request.validate_profile().is_err() {
         return setup_error(SetupErrorCode::SystemSettingsInvalid);
     }
+    let database = match (state.managed_database.as_ref(), request.database) {
+        (Some(managed), None) if session.tested_database.as_ref() == Some(managed) => {
+            managed.clone()
+        }
+        (None, Some(database)) if session.tested_database.as_ref() == Some(&database) => database,
+        _ => return setup_error(SetupErrorCode::DatabaseConfigurationInvalid),
+    };
     let network = match request.network.validate() {
         Ok(network) => network,
         Err(code) => return setup_error(code),
@@ -277,7 +292,7 @@ async fn complete(
                 request.locale,
                 request.logo_url,
                 request.icon_url,
-                request.database,
+                database,
                 network,
                 request.administrator_username,
                 request.administrator_password,
@@ -311,13 +326,21 @@ async fn status(
         Ok(status) => status,
         Err(error) => return setup_error(error.code()),
     };
+    let tested_database = if let Some(database) = state.managed_database.as_ref() {
+        if let Err(error) = state.validator.test_database(database).await {
+            return setup_error(error.code());
+        }
+        Some(database.clone())
+    } else {
+        None
+    };
     let session = SetupSession {
         id: Uuid::new_v4().to_string(),
         csrf: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         installation_id: setup_status.installation_id(),
         created_at: Instant::now(),
         mutation_attempts: VecDeque::new(),
-        tested_database: None,
+        tested_database,
     };
     let Ok(mut sessions) = state.sessions.lock() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -344,6 +367,7 @@ async fn status(
         configuration_writable: state.coordinator.configuration_writable(),
         source_eligible: true,
         blocking_overrides: blocking_environment_overrides(),
+        managed_database_backend: state.managed_database.as_ref().map(database_backend_name),
     })
     .into_response();
     no_store(response.headers_mut());
@@ -355,6 +379,14 @@ async fn status(
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
+}
+
+fn database_backend_name(database: &DatabaseDraft) -> &'static str {
+    match database {
+        DatabaseDraft::Sqlite { .. } => "sqlite",
+        DatabaseDraft::PostgreSql { .. } => "postgresql",
+        DatabaseDraft::Mysql { .. } => "mysql",
+    }
 }
 
 fn blocking_environment_overrides() -> Vec<&'static str> {
@@ -528,6 +560,7 @@ struct SetupStatusResponse<'a> {
     configuration_writable: bool,
     source_eligible: bool,
     blocking_overrides: Vec<&'static str>,
+    managed_database_backend: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -567,7 +600,7 @@ struct CompleteSetupRequest {
     locale: String,
     logo_url: String,
     icon_url: String,
-    database: DatabaseDraft,
+    database: Option<DatabaseDraft>,
     network: NetworkRequest,
     administrator_username: String,
     administrator_password: String,

@@ -23,6 +23,7 @@ export interface SetupStatus {
   configurationWritable: boolean;
   sourceEligible: boolean;
   blockingOverrides: string[];
+  managedDatabaseBackend: DatabaseBackend | null;
 }
 
 export interface DatabaseTestResult {
@@ -61,7 +62,7 @@ export interface CompleteSetupDraft {
   locale: 'zh-CN' | 'en-US';
   logoUrl: string;
   iconUrl: string;
-  database: DatabaseDraft;
+  database: DatabaseDraft | null;
   network: NetworkDraft;
   administratorUsername: string;
   administratorPassword: string;

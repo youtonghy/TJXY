@@ -22,6 +22,7 @@ it('strictly parses setup status and rejects response drift', async () => {
     ConfigurationWritable: true,
     SourceEligible: true,
     BlockingOverrides: [],
+    ManagedDatabaseBackend: null,
   });
   await expect(getSetupStatus()).resolves.toEqual({
     state: 'unconfigured',
@@ -33,6 +34,7 @@ it('strictly parses setup status and rejects response drift', async () => {
     configurationWritable: true,
     sourceEligible: true,
     blockingOverrides: [],
+    managedDatabaseBackend: null,
   });
 
   requestMock.mockResolvedValueOnce({
@@ -45,6 +47,7 @@ it('strictly parses setup status and rejects response drift', async () => {
     ConfigurationWritable: true,
     SourceEligible: true,
     BlockingOverrides: [],
+    ManagedDatabaseBackend: null,
     Secret: 'leaked',
   });
   await expect(getSetupStatus()).rejects.toMatchObject({ category: 'invalid-response' });
@@ -83,6 +86,18 @@ it('submits secrets only in the final request body', async () => {
     auth: 'none', method: 'POST', headers: { 'X-TJXY-Setup-CSRF': csrf },
   }));
   expect(requestMock.mock.calls[0]?.[0]).not.toContain('correct horse');
+});
+
+it('submits a null database when the server manages PostgreSQL', async () => {
+  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin' });
+  await completeSetup(csrf, {
+    siteTitle: 'Cinema', siteSubtitle: '', locale: 'en-US',
+    logoUrl: '/brand/tjxy-mark.webp', iconUrl: '/brand/favicon.svg', database: null,
+    network: { listenHost: '0.0.0.0', port: 8096, publicUrl: null },
+    administratorUsername: 'admin', administratorPassword: 'correct horse',
+  });
+  expect(requestMock.mock.calls[0]?.[0]).toBe('/Setup/Complete');
+  expect(requestMock.mock.calls[0]?.[1]?.body).toContain('"Database":null');
 });
 
 it('submits recovery credentials only to the csrf-protected recovery endpoint', async () => {

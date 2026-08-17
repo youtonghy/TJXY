@@ -27,6 +27,17 @@ it('navigates eight screens while retaining four data steps', () => {
   expect(state.databaseDrafts.mysql.Password).toBe('');
 });
 
+it('skips database entry when tjxy-setup manages PostgreSQL', () => {
+  let state = setupReducer(initialSetupState(), { type: 'set-managed-database', backend: 'postgresql' });
+  state = setupReducer(state, { type: 'advance' });
+  state = setupReducer(state, { type: 'advance' });
+  state = setupReducer(state, { type: 'advance' });
+  expect(state.screen).toBe('network');
+  expect(state.selectedDatabase).toBe('postgresql');
+  state = setupReducer(state, { type: 'back' });
+  expect(state.screen).toBe('branding');
+});
+
 it('retains backend drafts and invalidates only the changed test result', () => {
   let state = initialSetupState();
   state = setupReducer(state, { type: 'database-tested', backend: 'sqlite', fingerprint: 'sqlite-a' });

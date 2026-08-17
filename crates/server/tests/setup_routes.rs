@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tjxy_server::{
     InstallationConfigStore, SetupCoordinator, SetupValidator, build_setup_router,
-    build_setup_router_with_asset_dir,
+    build_setup_router_with_asset_dir, build_setup_router_with_options,
 };
 use tower::ServiceExt;
 
@@ -24,6 +24,74 @@ fn private_request(method: &str, path: &str, body: Body) -> Request<Body> {
         "192.168.10.20:41000".parse::<SocketAddr>().unwrap(),
     ));
     request
+}
+
+#[tokio::test]
+async fn managed_database_is_tested_server_side_and_completed_without_browser_credentials() {
+    let directory = tempdir().unwrap();
+    let validator = SetupValidator::new(vec![directory.path().to_path_buf()]).unwrap();
+    let database_path = directory.path().join("managed.db");
+    let router = build_setup_router_with_options(
+        SetupCoordinator::new(
+            InstallationConfigStore::at(directory.path().join("config/tjxy.toml")),
+            validator.clone(),
+        ),
+        validator,
+        directory.path().join("assets/branding"),
+        Some(tjxy_server::DatabaseDraft::Sqlite {
+            path: database_path.clone(),
+        }),
+    );
+    let status = router
+        .clone()
+        .oneshot(private_request("GET", "/Setup/Status", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let cookie = status.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let status_bytes = status.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(body["ManagedDatabaseBackend"], "sqlite");
+    assert!(!String::from_utf8_lossy(&status_bytes).contains(&database_path.display().to_string()));
+
+    let mut request = private_request(
+        "POST",
+        "/Setup/Complete",
+        Body::from(
+            json!({
+                "SiteTitle": "TJXY",
+                "SiteSubtitle": "Managed database",
+                "Locale": "en-US",
+                "LogoUrl": "/brand/tjxy-mark.webp",
+                "IconUrl": "/brand/favicon.svg",
+                "Database": null,
+                "Network": { "ListenHost": "127.0.0.1", "Port": 8096, "PublicUrl": null },
+                "AdministratorUsername": "admin",
+                "AdministratorPassword": "correct horse battery staple"
+            })
+            .to_string(),
+        ),
+    );
+    request
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    request
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse().unwrap());
+    request.headers_mut().insert(
+        "x-tjxy-setup-csrf",
+        body["CsrfToken"].as_str().unwrap().parse().unwrap(),
+    );
+    assert_eq!(
+        router.oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

@@ -86,6 +86,7 @@ pub use setup::{
     CompleteSetupInput, DatabaseBackend, DatabaseDraft, DatabaseTestResult, SetupCompletion,
     SetupCoordinator, SetupError, SetupErrorCode, SetupProgress, SetupProgressStage, SetupState,
     SetupStatus, SetupValidator, build_setup_router, build_setup_router_with_asset_dir,
+    build_setup_router_with_options,
 };
 pub use startup::{
     ApiKeyValidationError, BootstrapAdmin, InitializationError, MetadataSettingsValidationError,
@@ -886,6 +887,27 @@ pub fn build_setup_router_with_admin_dist_and_assets(
         build_setup_router_with_asset_dir(coordinator, validator, branding_asset_dir)
             .merge(admin_assets::setup_router(dist_dir.as_ref())?),
     )
+}
+
+/// Builds the first-run router with explicit assets and an optional operator-managed database.
+///
+/// # Errors
+///
+/// Returns [`AdminAssetsError`] when the distribution entry document is unavailable.
+pub fn build_setup_router_with_admin_dist_assets_and_database(
+    coordinator: SetupCoordinator,
+    validator: SetupValidator,
+    dist_dir: impl AsRef<std::path::Path>,
+    branding_asset_dir: impl Into<std::path::PathBuf>,
+    managed_database: Option<DatabaseDraft>,
+) -> Result<Router, AdminAssetsError> {
+    Ok(setup::build_setup_router_with_options(
+        coordinator,
+        validator,
+        branding_asset_dir,
+        managed_database,
+    )
+    .merge(admin_assets::setup_router(dist_dir.as_ref())?))
 }
 
 fn library_routes() -> Router<AppState> {

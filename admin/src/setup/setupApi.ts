@@ -35,7 +35,7 @@ export async function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus>
   });
   if (
     !isRecord(value)
-    || !exactKeys(value, ['State', 'InstallationId', 'CsrfToken', 'DatabaseBackends', 'DeploymentMode', 'Version', 'ConfigurationWritable', 'SourceEligible', 'BlockingOverrides'])
+    || !exactKeys(value, ['State', 'InstallationId', 'CsrfToken', 'DatabaseBackends', 'DeploymentMode', 'Version', 'ConfigurationWritable', 'SourceEligible', 'BlockingOverrides', 'ManagedDatabaseBackend'])
     || (value.State !== 'unconfigured' && value.State !== 'pending')
     || !validUuid(value.InstallationId)
     || !validToken(value.CsrfToken)
@@ -48,6 +48,7 @@ export async function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus>
     || typeof value.ConfigurationWritable !== 'boolean'
     || typeof value.SourceEligible !== 'boolean'
     || !validBlockingOverrides(value.BlockingOverrides)
+    || (value.ManagedDatabaseBackend !== null && !isBackend(value.ManagedDatabaseBackend))
   ) throw invalidResponse('setup status');
   return {
     state: value.State,
@@ -59,6 +60,7 @@ export async function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus>
     configurationWritable: value.ConfigurationWritable,
     sourceEligible: value.SourceEligible,
     blockingOverrides: value.BlockingOverrides,
+    managedDatabaseBackend: value.ManagedDatabaseBackend,
   };
 }
 

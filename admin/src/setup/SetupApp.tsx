@@ -81,6 +81,9 @@ export function SetupApp({ createCinematicScene }: { createCinematicScene?: Cine
       setCsrf(value.csrfToken);
       setInstallationId(value.installationId);
       setSetupVersion(value.version);
+      if (value.managedDatabaseBackend !== null) {
+        dispatch({ type: 'set-managed-database', backend: value.managedDatabaseBackend });
+      }
       if (value.deploymentMode === 'container') setListenHost('0.0.0.0');
       const blockers = [
         ...(!value.configurationWritable ? ['configuration'] : []),
@@ -109,7 +112,7 @@ export function SetupApp({ createCinematicScene }: { createCinematicScene?: Cine
     submitted.current = true;
     const draft: CompleteSetupDraft = {
       siteTitle, siteSubtitle, locale, logoUrl, iconUrl,
-      database: selectedDraft(state),
+      database: state.managedDatabaseBackend === null ? selectedDraft(state) : null,
       network: { listenHost, port, publicUrl: publicUrl.trim() || null },
       administratorUsername: username,
       administratorPassword: password,
@@ -186,7 +189,7 @@ export function SetupApp({ createCinematicScene }: { createCinematicScene?: Cine
 
   if (state.screen === 'administrator') { const invalid = username.trim().length === 0 || password.length < 8 || password !== passwordConfirmation; return <SetupLayout {...setupLayoutProps} description={tr('Create the first enabled administrator.', '创建第一个启用的管理员账户。')} footer={footer(invalid)} step={4} theme={theme} title={tr('Administrator account', '管理员账户')} toggleTheme={toggleTheme}><div className="space-y-5"><TextField fullWidth isRequired><Label>{tr('Username', '用户名')}</Label><Input autoComplete="username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} /></TextField><TextField fullWidth isRequired><Label>{tr('Password', '密码')}</Label><Input autoComplete="new-password" type="password" value={password} onChange={(event) => { setPassword(event.currentTarget.value); }} /><Description>{tr('Use at least 8 characters.', '至少使用 8 个字符。')}</Description></TextField><TextField fullWidth isRequired isInvalid={passwordConfirmation.length > 0 && password !== passwordConfirmation}><Label>{tr('Confirm password', '确认密码')}</Label><Input autoComplete="new-password" type="password" value={passwordConfirmation} onChange={(event) => { setPasswordConfirmation(event.currentTarget.value); }} /></TextField></div></SetupLayout>; }
 
-  if (state.screen === 'review') return <SetupLayout {...setupLayoutProps} description={tr('Review the non-secret configuration before installation.', '安装前确认不含敏感信息的配置摘要。')} footer={<><Button onPress={() => { dispatch({ type: 'back' }); }} variant="tertiary">{tr('Back', '上一步')}</Button><Button onPress={() => { dispatch({ type: 'install' }); }}><ShieldCheck className="size-4" />{tr('Install TJXY', '安装 TJXY')}</Button></>} step={4} theme={theme} title={tr('Review and install', '确认并安装')} toggleTheme={toggleTheme}><dl className="divide-y divide-border border-y border-border text-sm"><Summary label={tr('System', '系统')} value={siteTitle} /><Summary label={tr('Database', '数据库')} value={labelForBackend(state.selectedDatabase)} /><Summary label={tr('Listen address', '监听地址')} value={`${listenHost}:${String(port)}`} /><Summary label={tr('Administrator', '管理员')} value={username} /></dl></SetupLayout>;
+  if (state.screen === 'review') return <SetupLayout {...setupLayoutProps} description={tr('Review the non-secret configuration before installation.', '安装前确认不含敏感信息的配置摘要。')} footer={<><Button onPress={() => { dispatch({ type: 'back' }); }} variant="tertiary">{tr('Back', '上一步')}</Button><Button onPress={() => { dispatch({ type: 'install' }); }}><ShieldCheck className="size-4" />{tr('Install TJXY', '安装 TJXY')}</Button></>} step={4} theme={theme} title={tr('Review and install', '确认并安装')} toggleTheme={toggleTheme}><dl className="divide-y divide-border border-y border-border text-sm"><Summary label={tr('System', '系统')} value={siteTitle} /><Summary label={tr('Database', '数据库')} value={state.managedDatabaseBackend === null ? labelForBackend(state.selectedDatabase) : `${labelForBackend(state.managedDatabaseBackend)} (${tr('managed by tjxy-setup', '由 tjxy-setup 管理')})`} /><Summary label={tr('Listen address', '监听地址')} value={`${listenHost}:${String(port)}`} /><Summary label={tr('Administrator', '管理员')} value={username} /></dl></SetupLayout>;
 
   if (state.screen === 'progress') return <SetupLayout {...setupLayoutProps} description={tr('Keep this page open while TJXY prepares the database and account.', 'TJXY 正在准备数据库和管理员账户，请保持页面打开。')} step={0} theme={theme} title={tr('Installing TJXY', '正在安装 TJXY')} toggleTheme={toggleTheme}>{operationError ? <Alert role="alert" status="danger"><Alert.Indicator><CircleAlert className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>{tr('Installation stopped', '安装已停止')}</Alert.Title><Alert.Description>{tr('The completed state was not activated. Retry this installation.', '系统未进入已安装状态，请重试。')}</Alert.Description></Alert.Content><Button onPress={() => { setOperationError(false); submitted.current = false; setSubmissionAttempt((attempt) => attempt + 1); }} variant="secondary">{tr('Retry', '重试')}</Button></Alert> : <SetupProgressPanel progressStages={progressStages} progressUnavailable={progressUnavailable} tr={tr} />}</SetupLayout>;
 

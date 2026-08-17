@@ -23,6 +23,7 @@ export interface SetupMachineState {
   };
   databaseTests: Record<DatabaseBackend, string | null>;
   destinationUrl: string | null;
+  managedDatabaseBackend: DatabaseBackend | null;
 }
 
 export type SetupAction =
@@ -35,7 +36,8 @@ export type SetupAction =
   | { type: 'database-tested'; backend: DatabaseBackend; fingerprint: string }
   | { type: 'update-sqlite-path'; path: string }
   | { type: 'update-postgresql-host'; host: string }
-  | { type: 'update-database-draft'; backend: DatabaseBackend; draft: SetupMachineState['databaseDrafts'][DatabaseBackend] };
+  | { type: 'update-database-draft'; backend: DatabaseBackend; draft: SetupMachineState['databaseDrafts'][DatabaseBackend] }
+  | { type: 'set-managed-database'; backend: DatabaseBackend };
 
 const screens: SetupScreen[] = [
   'intro', 'welcome', 'branding', 'database', 'network', 'administrator', 'review',
@@ -53,6 +55,7 @@ export function initialSetupState(): SetupMachineState {
     },
     databaseTests: { sqlite: null, postgresql: null, mysql: null },
     destinationUrl: null,
+    managedDatabaseBackend: null,
   };
 }
 
@@ -61,13 +64,19 @@ export function setupReducer(state: SetupMachineState, action: SetupAction): Set
     case 'advance': {
       const index = screens.indexOf(state.screen);
       if (index < 0 || index === screens.length - 1) return state;
-      const screen = screens[index + 1] ?? state.screen;
+      const nextIndex = state.screen === 'branding' && state.managedDatabaseBackend !== null
+        ? index + 2
+        : index + 1;
+      const screen = screens[nextIndex] ?? state.screen;
       return { ...state, screen, step: stepFor(screen) };
     }
     case 'back': {
       const index = screens.indexOf(state.screen);
       if (index <= 0) return state;
-      const screen = screens[index - 1] ?? state.screen;
+      const previousIndex = state.screen === 'network' && state.managedDatabaseBackend !== null
+        ? index - 2
+        : index - 1;
+      const screen = screens[previousIndex] ?? state.screen;
       return { ...state, screen, step: stepFor(screen) };
     }
     case 'install':
@@ -109,6 +118,8 @@ export function setupReducer(state: SetupMachineState, action: SetupAction): Set
         databaseDrafts: { ...state.databaseDrafts, [action.backend]: action.draft },
         databaseTests: { ...state.databaseTests, [action.backend]: null },
       };
+    case 'set-managed-database':
+      return { ...state, selectedDatabase: action.backend, managedDatabaseBackend: action.backend };
   }
 }
 

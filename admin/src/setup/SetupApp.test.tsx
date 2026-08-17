@@ -37,6 +37,7 @@ beforeEach(() => {
     configurationWritable: true,
     sourceEligible: true,
     blockingOverrides: [],
+    managedDatabaseBackend: null,
   });
   databaseMock.mockReset().mockResolvedValue({ backend: 'sqlite', version: '3.49.1', elapsedMilliseconds: 8 });
   networkMock.mockReset().mockResolvedValue({
@@ -62,6 +63,7 @@ it('shows recovery instead of a new wizard for a pending installation', async ()
     configurationWritable: true,
     sourceEligible: true,
     blockingOverrides: [],
+    managedDatabaseBackend: null,
   });
   renderSetup();
 
@@ -90,6 +92,7 @@ it('blocks setup when an environment override would replace the chosen configura
     configurationWritable: true,
     sourceEligible: true,
     blockingOverrides: ['TJXY_DATABASE_URL'],
+    managedDatabaseBackend: null,
   });
   renderSetup();
 
@@ -192,4 +195,29 @@ it('uses the HeroUI setup flow and gates database continuation on a successful t
   await user.click(screen.getByRole('button', { name: 'Test connection' }));
   expect(await screen.findByText('SQLite 3.49.1 · 8 ms')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+});
+
+it('skips database credentials when tjxy-setup manages PostgreSQL', async () => {
+  const user = userEvent.setup();
+  statusMock.mockResolvedValueOnce({
+    state: 'unconfigured',
+    installationId: '11111111-1111-4111-8111-111111111111',
+    csrfToken: 'csrf-token-0123456789abcdef',
+    databaseBackends: ['sqlite', 'postgresql', 'mysql'],
+    deploymentMode: 'container',
+    version: '0.1.0',
+    configurationWritable: true,
+    sourceEligible: true,
+    blockingOverrides: [],
+    managedDatabaseBackend: 'postgresql',
+  });
+  renderSetup();
+
+  await user.click(await screen.findByRole('button', { name: 'Skip intro' }));
+  await user.click(screen.getByRole('button', { name: 'Continue' }));
+  await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+  expect(screen.getByRole('heading', { name: 'Network' })).toBeVisible();
+  expect(screen.queryByRole('heading', { name: 'Connect database' })).not.toBeInTheDocument();
+  expect(databaseMock).not.toHaveBeenCalled();
 });

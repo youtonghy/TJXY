@@ -5,9 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${TJXY_POSTGRES_DB:-tjxy}
       POSTGRES_USER: ${TJXY_POSTGRES_USER:-tjxy}
-      POSTGRES_PASSWORD: ${TJXY_POSTGRES_PASSWORD:-tjxy-local-dev}
-    ports:
-      - "127.0.0.1:5433:5432"
+      POSTGRES_PASSWORD: ${TJXY_POSTGRES_PASSWORD:?run ./tjxy-setup to initialize PostgreSQL}
     volumes:
       - tjxy-postgres:/var/lib/postgresql
     healthcheck:
@@ -25,7 +23,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8096:8096"
+      - "${TJXY_PUBLISH_HOST:-127.0.0.1}:${TJXY_PORT:-8096}:8096"
     environment:
       TJXY_CONTAINER: "true"
       TJXY_CONFIG_FILE: /config/tjxy.toml
@@ -34,10 +32,17 @@ services:
       TJXY_ASSETS_DIR: /data/assets
       TJXY_ADMIN_DIST_DIR: /app/admin/dist
       TJXY_LOG_DIR: /data/logs
-      TJXY_LOG_FILE: /data/server.log
+      TJXY_MEDIA_BROWSER_ROOTS: /media
+      TJXY_SETUP_POSTGRES_HOST: postgres
+      TJXY_SETUP_POSTGRES_PORT: "5432"
+      TJXY_SETUP_POSTGRES_DATABASE: ${TJXY_POSTGRES_DB:-tjxy}
+      TJXY_SETUP_POSTGRES_USERNAME: ${TJXY_POSTGRES_USER:-tjxy}
+      TJXY_SETUP_POSTGRES_PASSWORD: ${TJXY_POSTGRES_PASSWORD:?run ./tjxy-setup to initialize PostgreSQL}
     volumes:
-      - tjxy-config:/config
-      - tjxy-data:/data
+      - "${TJXY_CONFIG_DIR:-./.tjxy/config}:/config"
+      - "${TJXY_DATA_DIR:-./.tjxy/data}:/data"
+      - "${TJXY_MEDIA_DIR:-./media}:/media:${TJXY_MEDIA_MODE:-rw}"
+    user: "${TJXY_UID:-10001}:${TJXY_GID:-10001}"
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -45,6 +50,4 @@ services:
       - no-new-privileges:true
 
 volumes:
-  tjxy-config:
-  tjxy-data:
   tjxy-postgres:

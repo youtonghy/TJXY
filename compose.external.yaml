@@ -1,0 +1,29 @@
+services:
+  tjxy:
+    build:
+      context: .
+    image: tjxy:local
+    restart: unless-stopped
+    ports:
+      - "${TJXY_PUBLISH_HOST:-127.0.0.1}:${TJXY_PORT:-8096}:8096"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TJXY_CONTAINER: "true"
+      TJXY_CONFIG_FILE: /config/tjxy.toml
+      TJXY_SETUP_DATA_DIR: /data
+      TJXY_SETUP_BIND: 0.0.0.0:8096
+      TJXY_ASSETS_DIR: /data/assets
+      TJXY_ADMIN_DIST_DIR: /app/admin/dist
+      TJXY_LOG_DIR: /data/logs
+      TJXY_MEDIA_BROWSER_ROOTS: /media
+    volumes:
+      - "${TJXY_CONFIG_DIR:-./.tjxy/config}:/config"
+      - "${TJXY_DATA_DIR:-./.tjxy/data}:/data"
+      - "${TJXY_MEDIA_DIR:-./media}:/media:${TJXY_MEDIA_MODE:-rw}"
+    user: "${TJXY_UID:-10001}:${TJXY_GID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
