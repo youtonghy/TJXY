@@ -78,7 +78,7 @@ Node.js、npm 或 `HEROUI_KEY`。
 
 ### 从源码构建
 
-HeroUI Pro 是受许可保护的构建依赖。维护者在发布版本标签前，必须将
+HeroUI Pro 是受许可保护的构建依赖。维护者在发布版本前，必须将
 `HEROUI_KEY` 保存为 GitHub Actions repository secret。本地准备源码时也可以
 在 `admin/` 包中安装，但不要把密钥提交到仓库：
 
@@ -93,6 +93,11 @@ cd ..
 永远不需要这个密钥。第一次发布后，如果需要匿名拉取并且 HeroUI Pro 许可证
 允许这种分发方式，请把 GHCR package 的可见性设置为 public。若要从当前源码
 构建而不是拉取镜像，请在下面的启动命令中去掉 `TJXY_IMAGE` 和 `--image`。
+
+手动发布时，进入 **Actions > Release > Run workflow**，输入例如 `0.2.0`。
+CI 会直接构建当前 `main`，并创建 `v0.2.0` tag、GitHub Release、便携发行包和
+容器镜像，不需要提前创建 tag。继续支持直接推送 `vX.Y.Z` tag；这种方式仍会
+严格检查 Cargo workspace 版本。
 
 ### 自动管理 PostgreSQL
 

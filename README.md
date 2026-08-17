@@ -89,8 +89,8 @@ same command to pull a newer image and recreate the application container.
 ### Source Build
 
 HeroUI Pro is a licensed build dependency. Maintainers must store `HEROUI_KEY`
-as a GitHub Actions repository secret before publishing a tagged release. For a
-local source build, install it without committing the key:
+as a GitHub Actions repository secret before publishing a release. For a local
+source build, install it without committing the key:
 
 ```bash
 cd admin
@@ -105,6 +105,12 @@ host. After the first release, set the GHCR package visibility to public if
 anonymous pulls are required and the HeroUI Pro license permits that
 distribution. To build from the checkout instead of pulling an image, omit
 `TJXY_IMAGE` and `--image` from the launcher commands below.
+
+For a manual release, open **Actions > Release > Run workflow** and enter a
+version such as `0.2.0`. CI builds the current `main` branch and creates the
+`v0.2.0` tag, GitHub Release, portable archives, and container image. An existing
+tag is not required. Pushing a matching `vX.Y.Z` tag remains supported and keeps
+the stricter Cargo workspace version check.
 
 ### Managed PostgreSQL
 

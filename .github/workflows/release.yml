@@ -6,8 +6,8 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing version tag to publish, for example v0.1.0
+      version:
+        description: Version to publish from main, for example 0.2.0
         required: true
         type: string
 
@@ -15,27 +15,36 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 env:
   RUST_VERSION: 1.88.0
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref_name }}
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
       - name: Confirm version tag
         run: |
-          case "$RELEASE_TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "RELEASE_TAG must be a semantic version tag like v0.1.0" >&2; exit 1 ;;
-          esac
+          version="${RELEASE_VERSION#v}"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo 'Version must be semantic, for example 0.2.0.' >&2
+            exit 1
+          fi
+          test "$RELEASE_TAG" = "v$version"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            exit 0
+          fi
           version="$(awk '
             /^\[workspace.package\]$/ { in_package = 1; next }
             in_package && /^\[/ { exit }
@@ -48,6 +57,9 @@ jobs:
           test -n "$version"
           test "$RELEASE_TAG" = "v${version}"
           git rev-parse --verify "refs/tags/$RELEASE_TAG"
+      - name: Pin release source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   frontend:
     needs: validate
@@ -55,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: actions/setup-node@v6
         with:
           node-version: 22.22.3
@@ -93,7 +105,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate.outputs.source_sha }}
       - name: Install Rust toolchain
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt --no-self-update
@@ -105,7 +117,7 @@ jobs:
           cargo fmt --all -- --check
 
   package:
-    needs: [frontend, rust]
+    needs: [validate, frontend, rust]
     strategy:
       fail-fast: false
       matrix:
@@ -118,7 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate.outputs.source_sha }}
       - name: Install Rust toolchain
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
@@ -154,7 +166,7 @@ jobs:
           retention-days: 1
 
   docker-image:
-    needs: [frontend, rust]
+    needs: [validate, frontend, rust]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -162,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate.outputs.source_sha }}
       - name: Download frontend distribution
         uses: actions/download-artifact@v5
         with:
@@ -189,9 +201,7 @@ jobs:
             echo "name=$image"
             echo 'tags<<EOF'
             echo "$image:$version"
-            if [ "$GITHUB_EVENT_NAME" = push ]; then
-              echo "$image:latest"
-            fi
+            echo "$image:latest"
             echo EOF
           } >> "$GITHUB_OUTPUT"
       - name: Build and push multi-platform image
@@ -213,14 +223,14 @@ jobs:
           sbom: true
 
   publish:
-    needs: [package, docker-image]
+    needs: [validate, package, docker-image]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate.outputs.source_sha }}
       - name: Download release archives
         uses: actions/download-artifact@v5
         with:
@@ -238,5 +248,7 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --clobber
           else
-            gh release create "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --generate-notes
+            gh release create "$RELEASE_TAG" ./*.tar.gz SHA256SUMS \
+              --target "$(git -C ../.. rev-parse HEAD)" \
+              --generate-notes
           fi
