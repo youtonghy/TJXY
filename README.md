@@ -107,10 +107,10 @@ distribution. To build from the checkout instead of pulling an image, omit
 `TJXY_IMAGE` and `--image` from the launcher commands below.
 
 For a manual release, open **Actions > Release > Run workflow** and enter a
-version such as `0.2.0`. CI builds the current `main` branch and creates the
-`v0.2.0` tag, GitHub Release, portable archives, and container image. An existing
-tag is not required. Pushing a matching `vX.Y.Z` tag remains supported and keeps
-the stricter Cargo workspace version check.
+version such as `0.2.0` or `v0.2.0`. CI builds the current `main` branch and
+creates the `v0.2.0` tag, GitHub Release, portable archives, and container image.
+An existing tag is not required. Pushing a matching `vX.Y.Z` tag remains
+supported and keeps the stricter Cargo workspace version check.
 
 ### Managed PostgreSQL
 

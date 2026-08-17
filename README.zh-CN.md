@@ -94,10 +94,10 @@ cd ..
 允许这种分发方式，请把 GHCR package 的可见性设置为 public。若要从当前源码
 构建而不是拉取镜像，请在下面的启动命令中去掉 `TJXY_IMAGE` 和 `--image`。
 
-手动发布时，进入 **Actions > Release > Run workflow**，输入例如 `0.2.0`。
-CI 会直接构建当前 `main`，并创建 `v0.2.0` tag、GitHub Release、便携发行包和
-容器镜像，不需要提前创建 tag。继续支持直接推送 `vX.Y.Z` tag；这种方式仍会
-严格检查 Cargo workspace 版本。
+手动发布时，进入 **Actions > Release > Run workflow**，输入例如 `0.2.0` 或
+`v0.2.0`。CI 会直接构建当前 `main`，并创建 `v0.2.0` tag、GitHub Release、
+便携发行包和容器镜像，不需要提前创建 tag。继续支持直接推送 `vX.Y.Z` tag；
+这种方式仍会严格检查 Cargo workspace 版本。
 
 ### 自动管理 PostgreSQL
 

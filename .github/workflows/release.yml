@@ -20,43 +20,46 @@ concurrency:
 
 env:
   RUST_VERSION: 1.88.0
-  RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+  RELEASE_INPUT: ${{ inputs.version || github.ref_name }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref_name }}
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
     outputs:
+      release_version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.tag }}
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
-      - name: Confirm version tag
+      - name: Resolve release version
+        id: release
         run: |
-          version="${RELEASE_VERSION#v}"
+          version="${RELEASE_INPUT#v}"
           if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
-            echo 'Version must be semantic, for example 0.2.0.' >&2
+            echo 'Version must be semantic, for example 0.2.0 or v0.2.0.' >&2
             exit 1
           fi
-          test "$RELEASE_TAG" = "v$version"
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            exit 0
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            workspace_version="$(awk '
+              /^\[workspace.package\]$/ { in_package = 1; next }
+              in_package && /^\[/ { exit }
+              in_package && /^version = / {
+                gsub(/^[^\"]*\"|\".*$/, "")
+                print
+                exit
+              }
+            ' Cargo.toml)"
+            test -n "$workspace_version"
+            test "$version" = "$workspace_version"
+            git rev-parse --verify "refs/tags/$tag"
           fi
-          version="$(awk '
-            /^\[workspace.package\]$/ { in_package = 1; next }
-            in_package && /^\[/ { exit }
-            in_package && /^version = / {
-              gsub(/^[^\"]*\"|\".*$/, "")
-              print
-              exit
-            }
-          ' Cargo.toml)"
-          test -n "$version"
-          test "$RELEASE_TAG" = "v${version}"
-          git rev-parse --verify "refs/tags/$RELEASE_TAG"
       - name: Pin release source
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -118,6 +121,8 @@ jobs:
 
   package:
     needs: [validate, frontend, rust]
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -168,6 +173,9 @@ jobs:
   docker-image:
     needs: [validate, frontend, rust]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
     permissions:
       contents: read
       packages: write
@@ -192,15 +200,12 @@ jobs:
           password: ${{ github.token }}
       - name: Prepare image tags
         id: image
-        env:
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version="${RELEASE_TAG#v}"
           {
             echo "name=$image"
             echo 'tags<<EOF'
-            echo "$image:$version"
+            echo "$image:$RELEASE_VERSION"
             echo "$image:latest"
             echo EOF
           } >> "$GITHUB_OUTPUT"
@@ -225,6 +230,8 @@ jobs:
   publish:
     needs: [validate, package, docker-image]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
     permissions:
       contents: write
     steps:
