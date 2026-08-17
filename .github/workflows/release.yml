@@ -105,6 +105,12 @@ jobs:
   rust:
     needs: validate
     runs-on: ubuntu-24.04
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: ${{ runner.temp }}/tjxy-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -113,11 +119,18 @@ jobs:
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt --no-self-update
           rustup default "$RUST_VERSION"
+      - name: Report initial disk space
+        run: df -h
       - name: Verify Rust workspace
         run: |
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo fmt --all -- --check
+      - name: Report Rust artifact disk usage
+        if: ${{ always() }}
+        run: |
+          df -h
+          du -sh "$CARGO_TARGET_DIR" 2>/dev/null || true
 
   package:
     needs: [validate, frontend, rust]
