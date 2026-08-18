@@ -179,7 +179,7 @@ async fn qr_login_requires_an_authenticated_approval_and_is_consumed_once() {
     )
     .await;
     assert_eq!(preview.status(), StatusCode::OK);
-    let approved = token_request(
+    let approved_response = token_request(
         app.clone(),
         Method::POST,
         "/Auth/Qr/Approve",
@@ -187,7 +187,7 @@ async fn qr_login_requires_an_authenticated_approval_and_is_consumed_once() {
         Some(json!({"Token": approval_token})),
     )
     .await;
-    assert_eq!(approved.status(), StatusCode::NO_CONTENT);
+    assert_eq!(approved_response.status(), StatusCode::NO_CONTENT);
 
     let issued = token_request(
         app.clone(),
