@@ -1733,7 +1733,7 @@ async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
     let database = database().await;
     let library = seed_library_with_policy(
         &database,
-        "Lazy",
+        "Full",
         "library_roots",
         "basic",
         "on_browse",
