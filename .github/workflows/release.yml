@@ -124,7 +124,7 @@ jobs:
         run: df -h
       - name: Verify Rust workspace
         run: |
-          cargo test --workspace --locked
+          cargo test --workspace --locked -- --test-threads=2
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo fmt --all -- --check
       - name: Report Rust artifact disk usage
