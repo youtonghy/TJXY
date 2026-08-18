@@ -103,7 +103,7 @@ pub(crate) async fn create(
     } else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    let qr_payload = format!("tjxy-login:v1:{}:{}", challenge_id, approval_token);
+    let qr_payload = format!("tjxy-login:v1:{challenge_id}:{approval_token}");
     no_store(Json(CreateResponse {
         challenge_id,
         poll_token,

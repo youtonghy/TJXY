@@ -490,6 +490,7 @@ fn admin_error_response(error: &AuthError) -> Response {
     }
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are returned directly by all handler callers.
 pub(crate) fn client_identity_response(
     headers: &HeaderMap,
     legacy_enabled: bool,

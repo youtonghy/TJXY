@@ -482,9 +482,10 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         let settings = tjxy_db::LoggingSettingsRepository::new(&database)
             .get()
             .await?;
-        let mode = settings
-            .as_ref()
-            .map_or(tjxy_db::LogMode::Error, |value| value.mode());
+        let mode = settings.as_ref().map_or(
+            tjxy_db::LogMode::Error,
+            tjxy_db::LoggingSettingsRecord::mode,
+        );
         let retention_days = settings
             .as_ref()
             .map_or(tjxy_db::DEFAULT_LOG_RETENTION_DAYS, |value| {

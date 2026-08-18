@@ -171,7 +171,7 @@ impl LocalMetadataAdminService {
             match tokio::fs::remove_file(root.join(&row.relative_path)).await {
                 Ok(()) => deleted.add(row.byte_size),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    deleted.add(row.byte_size)
+                    deleted.add(row.byte_size);
                 }
                 Err(_) => failed_count += 1,
             }

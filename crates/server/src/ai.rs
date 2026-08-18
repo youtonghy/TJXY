@@ -99,6 +99,7 @@ impl AiService {
             .await?)
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the persisted AI settings fields at this boundary.
     pub(crate) async fn save_settings(
         &self,
         enabled: bool,
@@ -392,6 +393,7 @@ pub(crate) async fn delete_conversation(
     )
 }
 
+#[allow(clippy::too_many_lines)] // Keeps admission, quota checks, and stream creation in request order.
 pub(crate) async fn chat(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -547,7 +549,7 @@ fn agent_stream_response(request: ChatStreamRequest) -> Response {
     let stream = async_stream::stream! {
         // The permit intentionally lives with the SSE body so completion, provider errors, and
         // client cancellation all release both concurrency slots through normal drop semantics.
-        let _permit = permit;
+        let permit_guard = permit;
         let started_at = Utc::now();
         let started = Instant::now();
         let day_key = Local::now().date_naive().to_string();
@@ -644,6 +646,7 @@ fn agent_stream_response(request: ChatStreamRequest) -> Response {
                 })));
             }
         }
+        drop(permit_guard);
     };
     let mut response = Sse::new(stream)
         .keep_alive(

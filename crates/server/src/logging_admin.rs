@@ -84,9 +84,8 @@ pub(crate) async fn put_settings(
     let Some(system) = state.system_settings.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let mode = match request.mode.parse::<LogMode>() {
-        Ok(mode) => mode,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(mode) = request.mode.parse::<LogMode>() else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let repository = LoggingSettingsRepository::new(system.database());
     match repository
@@ -148,9 +147,8 @@ pub(crate) async fn read_file(
     let Some(path) = file_path(runtime.directory(), &date) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let mut query = match auth::request_query(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(mut query) = auth::request_query(raw_query.as_deref()) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     query.remove("ApiKey");
     query.remove("api_key");
