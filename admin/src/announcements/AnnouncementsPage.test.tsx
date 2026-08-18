@@ -56,7 +56,7 @@ it('creates a Markdown draft and publishes an existing announcement', async () =
   const user = userEvent.setup();
 
   const table = await screen.findByRole('grid', { name: 'Announcements' });
-  expect(within(table).getByText('Library maintenance')).toBeVisible();
+  expect(await within(table).findByText('Library maintenance')).toBeVisible();
   expect(screen.getByText('Draft')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'New announcement' }));
   await user.type(screen.getByLabelText('Title'), 'New release');
