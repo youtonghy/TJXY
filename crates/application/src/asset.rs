@@ -53,6 +53,11 @@ impl AssetWriteService {
         Self::new_with_override(database, root, false).await
     }
 
+    /// Creates and pins an asset root selected by an environment override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssetWriteError`] when the root cannot be initialized or persisted.
     pub async fn new_environment_override(
         database: DatabaseConnection,
         root: impl AsRef<Path>,

@@ -604,6 +604,10 @@ where
 
     /// Issues a new session for a user whose existing authenticated session
     /// has explicitly approved an out-of-band login.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when token creation, expiry calculation, or persistence fails.
     pub async fn issue_approved_session(
         &self,
         user: &AuthUser,
@@ -834,6 +838,10 @@ where
     ///
     /// API-key principals are deliberately rejected because they do not
     /// represent a durable login session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the principal is not a session or persistence fails.
     pub async fn revoke_user_session(
         &self,
         principal: &AuthenticatedPrincipal,
