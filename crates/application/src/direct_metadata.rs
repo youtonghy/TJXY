@@ -18,6 +18,7 @@ pub struct DirectMetadataReadService {
 }
 
 impl DirectMetadataReadService {
+    #[must_use]
     pub fn new(database: DatabaseConnection) -> Self {
         Self {
             database,
@@ -25,11 +26,17 @@ impl DirectMetadataReadService {
         }
     }
 
+    #[must_use]
     pub fn with_backend_registry(mut self, backends: StorageBackendRegistry) -> Self {
         self.backends = backends;
         self
     }
 
+    /// Reads and parses the direct NFO sidecar for a catalog item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reference is invalid, unavailable, or cannot be parsed.
     pub async fn nfo(
         &self,
         item_id: CatalogItemId,
@@ -49,6 +56,11 @@ impl DirectMetadataReadService {
         )?))
     }
 
+    /// Opens a direct metadata image from its authorized storage object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image reference, backend, range, or format is invalid.
     pub async fn image(
         &self,
         item_id: CatalogItemId,
@@ -139,15 +151,19 @@ pub struct OpenedDirectImage {
 }
 
 impl OpenedDirectImage {
+    #[must_use]
     pub fn into_stream(self) -> tjxy_storage::ByteStream {
         self.stream
     }
+    #[must_use]
     pub const fn size(&self) -> u64 {
         self.size
     }
+    #[must_use]
     pub const fn mime_type(&self) -> &'static str {
         self.mime_type
     }
+    #[must_use]
     pub fn etag(&self) -> &str {
         &self.etag
     }
@@ -182,6 +198,7 @@ fn direct_etag(object: &DirectMetadataObjectRecord) -> String {
     format!("direct-{digest:x}")
 }
 
+#[allow(clippy::needless_pass_by_value)] // Error conversion consumes no large owned payload and keeps map_err ergonomic.
 fn map_storage_read(error: StorageReadError) -> DirectMetadataReadError {
     DirectMetadataReadError::Storage(error.to_string())
 }

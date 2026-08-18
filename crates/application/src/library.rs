@@ -73,6 +73,7 @@ impl LibraryService {
     /// # Errors
     ///
     /// Returns [`LibraryServiceError`] for invalid policy/input or persistence failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_virtual_folder_with_filesystem_root(
         &self,
         name: &str,
@@ -180,6 +181,7 @@ impl LibraryService {
     ///
     /// Returns [`LibraryServiceError`] for an invalid profile, stale version, missing library,
     /// or persistence failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_profile(
         &self,
         library_id: LibraryId,
