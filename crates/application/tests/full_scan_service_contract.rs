@@ -7,13 +7,12 @@ use sea_orm_migration::MigratorTrait;
 use tjxy_application::{FullScanError, FullScanService, MetadataResolveService, TaskService};
 use tjxy_common::{
     CatalogItemId, LibraryId, LibraryRootBindingId, MediaSourceId, SortKey, StorageObjectRecordId,
-    StorageRootId, UserId, Username,
+    StorageRootId, UserId,
 };
 use tjxy_db::{
-    AuthRepository, CatalogQueryError, CatalogQueryRepository, DiscoverTitlesRepository,
-    FullScanChildSubmission, FullScanRepository, FullScanRepositoryError,
-    HybridCandidateRepository, MetadataRequirement, UserDataPatch, UserDataRepository,
-    WorkJobRepository, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
+    CatalogQueryError, CatalogQueryRepository, DiscoverTitlesRepository, FullScanChildSubmission,
+    FullScanRepository, MetadataRequirement, WorkJobRepository, WorkJobResult, WorkJobSpec,
+    WorkJobState, WorkScope, WorkTaskKind,
 };
 use tjxy_domain::MetadataSourceMode;
 use tjxy_test_support::test_database;
@@ -760,57 +759,6 @@ async fn seed_structure_child(
     item
 }
 
-async fn seed_current_structure_publication(
-    database: &DatabaseConnection,
-    item: CatalogItemId,
-    job_id: Uuid,
-) {
-    let publication = Uuid::new_v4();
-    let backend = database.get_database_backend();
-    database
-        .execute(
-            backend.build(
-                Query::insert()
-                    .into_table(Alias::new("catalog_publications"))
-                    .columns([
-                        Alias::new("id"),
-                        Alias::new("job_id"),
-                        Alias::new("owner_catalog_item_id"),
-                        Alias::new("publication_kind"),
-                        Alias::new("expected_revision"),
-                        Alias::new("state"),
-                        Alias::new("manifest_sha256"),
-                        Alias::new("expected_row_count"),
-                        Alias::new("activated_generation"),
-                    ])
-                    .values_panic([
-                        publication.into(),
-                        job_id.into(),
-                        item.as_uuid().into(),
-                        "Structure".into(),
-                        1_i64.into(),
-                        "Active".into(),
-                        "0".repeat(64).into(),
-                        0_i64.into(),
-                        1_i64.into(),
-                    ]),
-            ),
-        )
-        .await
-        .unwrap();
-    database
-        .execute(
-            backend.build(
-                Query::update()
-                    .table(Alias::new("catalog_items"))
-                    .value(Alias::new("active_structure_publication_id"), publication)
-                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
-            ),
-        )
-        .await
-        .unwrap();
-}
-
 async fn seed_stale_active_structure_publication(
     database: &DatabaseConnection,
     owner: CatalogItemId,
@@ -935,395 +883,6 @@ async fn claimed_full_scan(
     .await
     .unwrap()
     .unwrap()
-}
-
-#[tokio::test]
-async fn hybrid_background_candidates_prioritize_user_signals_and_stay_bounded() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let other_library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let now = Utc::now();
-    let watching =
-        seed_background_candidate(&database, library, "Watching", now - Duration::days(4)).await;
-    let favorite =
-        seed_background_candidate(&database, library, "Favorite", now - Duration::days(3)).await;
-    let recent =
-        seed_background_candidate(&database, library, "Recent", now - Duration::days(1)).await;
-    let older =
-        seed_background_candidate(&database, library, "Older", now - Duration::days(2)).await;
-    let already_expanded =
-        seed_background_candidate(&database, library, "Expanded", now + Duration::days(1)).await;
-    let outside = seed_background_candidate(&database, other_library, "Outside", now).await;
-    let watching_episode = seed_structure_child(&database, watching).await;
-    let user = AuthRepository::new(&database)
-        .create_user(
-            &Username::parse("hybrid-viewer").unwrap(),
-            "$argon2id$test",
-            false,
-            true,
-            now,
-        )
-        .await
-        .unwrap()
-        .id();
-    let user_data = UserDataRepository::new(&database);
-    user_data
-        .commit(
-            user,
-            watching_episode,
-            UserDataPatch::default().with_playback_position_ticks(42_000),
-        )
-        .await
-        .unwrap();
-    user_data
-        .commit(user, favorite, UserDataPatch::favorite(true))
-        .await
-        .unwrap();
-    let pins = HybridCandidateRepository::new(&database);
-    assert!(
-        pins.pin(LibraryId::from_uuid(library), older)
-            .await
-            .unwrap()
-            .changed()
-    );
-    let claimed = claimed_full_scan(&database, library).await;
-    seed_current_structure_publication(&database, already_expanded, claimed.id().as_uuid()).await;
-    let repository = FullScanRepository::new(&database);
-
-    assert_eq!(
-        repository.background_candidates(&claimed, 3).await.unwrap(),
-        vec![older, watching, favorite]
-    );
-    assert!(
-        pins.unpin(LibraryId::from_uuid(library), older)
-            .await
-            .unwrap()
-            .changed()
-    );
-    assert_eq!(
-        repository.background_candidates(&claimed, 4).await.unwrap(),
-        vec![watching, favorite, recent, older]
-    );
-
-    assert!(
-        !repository
-            .background_candidates(&claimed, 4)
-            .await
-            .unwrap()
-            .contains(&outside)
-    );
-    assert!(matches!(
-        repository.background_candidates(&claimed, 0).await,
-        Err(FullScanRepositoryError::InvalidCandidateLimit)
-    ));
-    assert!(matches!(
-        repository.background_candidates(&claimed, 65).await,
-        Err(FullScanRepositoryError::InvalidCandidateLimit)
-    ));
-}
-
-#[tokio::test]
-async fn hybrid_next_up_homepage_signal_ranks_ahead_of_favorite_and_recent_items() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let now = Utc::now();
-    let homepage =
-        seed_background_candidate(&database, library, "Next Up", now - Duration::days(2)).await;
-    let favorite =
-        seed_background_candidate(&database, library, "Favorite", now - Duration::days(3)).await;
-    let recent =
-        seed_background_candidate(&database, library, "Recent", now - Duration::days(1)).await;
-    let played_episode = seed_structure_child(&database, homepage).await;
-    let unplayed_episode = seed_structure_child(&database, homepage).await;
-    let user = AuthRepository::new(&database)
-        .create_user(
-            &Username::parse("next-up-viewer").unwrap(),
-            "$argon2id$test",
-            false,
-            true,
-            now,
-        )
-        .await
-        .unwrap()
-        .id();
-    let user_data = UserDataRepository::new(&database);
-    user_data
-        .commit(
-            user,
-            played_episode,
-            UserDataPatch::default().with_played(true),
-        )
-        .await
-        .unwrap();
-    user_data
-        .commit(user, favorite, UserDataPatch::favorite(true))
-        .await
-        .unwrap();
-    let claimed = claimed_full_scan(&database, library).await;
-    seed_stale_active_structure_publication(
-        &database,
-        homepage,
-        &[played_episode, unplayed_episode],
-        claimed.id().as_uuid(),
-        None,
-    )
-    .await;
-
-    assert_eq!(
-        FullScanRepository::new(&database)
-            .background_candidates(&claimed, 3)
-            .await
-            .unwrap(),
-        vec![homepage, favorite, recent]
-    );
-}
-
-#[tokio::test]
-async fn hybrid_next_up_ignores_played_episodes_outside_the_active_publication() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let now = Utc::now();
-    let candidate =
-        seed_background_candidate(&database, library, "Candidate", now - Duration::days(2)).await;
-    let recent =
-        seed_background_candidate(&database, library, "Recent", now - Duration::days(1)).await;
-    let active_episode = seed_structure_child(&database, candidate).await;
-    let orphan_episode = seed_structure_child(&database, candidate).await;
-    let user = AuthRepository::new(&database)
-        .create_user(
-            &Username::parse("orphan-viewer").unwrap(),
-            "$argon2id$test",
-            false,
-            true,
-            now,
-        )
-        .await
-        .unwrap()
-        .id();
-    UserDataRepository::new(&database)
-        .commit(
-            user,
-            orphan_episode,
-            UserDataPatch::default().with_played(true),
-        )
-        .await
-        .unwrap();
-    let claimed = claimed_full_scan(&database, library).await;
-    seed_stale_active_structure_publication(
-        &database,
-        candidate,
-        &[active_episode],
-        claimed.id().as_uuid(),
-        None,
-    )
-    .await;
-
-    assert_eq!(
-        FullScanRepository::new(&database)
-            .background_candidates(&claimed, 2)
-            .await
-            .unwrap(),
-        vec![recent, candidate]
-    );
-}
-
-#[tokio::test]
-async fn hybrid_next_up_does_not_combine_progress_from_different_users() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let now = Utc::now();
-    let candidate =
-        seed_background_candidate(&database, library, "Candidate", now - Duration::days(2)).await;
-    let recent =
-        seed_background_candidate(&database, library, "Recent", now - Duration::days(1)).await;
-    let first_episode = seed_structure_child(&database, candidate).await;
-    let second_episode = seed_structure_child(&database, candidate).await;
-    let users = AuthRepository::new(&database);
-    let completed_user = users
-        .create_user(
-            &Username::parse("completed-viewer").unwrap(),
-            "$argon2id$test",
-            false,
-            true,
-            now,
-        )
-        .await
-        .unwrap()
-        .id();
-    let new_user = users
-        .create_user(
-            &Username::parse("new-viewer").unwrap(),
-            "$argon2id$test",
-            false,
-            true,
-            now,
-        )
-        .await
-        .unwrap()
-        .id();
-    let user_data = UserDataRepository::new(&database);
-    for episode in [first_episode, second_episode] {
-        user_data
-            .commit(
-                completed_user,
-                episode,
-                UserDataPatch::default().with_played(true),
-            )
-            .await
-            .unwrap();
-    }
-    user_data
-        .commit(
-            new_user,
-            second_episode,
-            UserDataPatch::default().with_playback_position_ticks(0),
-        )
-        .await
-        .unwrap();
-    let claimed = claimed_full_scan(&database, library).await;
-    seed_stale_active_structure_publication(
-        &database,
-        candidate,
-        &[first_episode, second_episode],
-        claimed.id().as_uuid(),
-        None,
-    )
-    .await;
-
-    assert_eq!(
-        FullScanRepository::new(&database)
-            .background_candidates(&claimed, 2)
-            .await
-            .unwrap(),
-        vec![recent, candidate]
-    );
-}
-
-#[tokio::test]
-async fn hybrid_candidate_batch_stays_fixed_for_the_full_scan_lifecycle() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    for offset in 0..21 {
-        seed_background_candidate(
-            &database,
-            library,
-            &format!("Initial {offset:02}"),
-            Utc::now() + Duration::minutes(offset),
-        )
-        .await;
-    }
-    let claimed = claimed_full_scan(&database, library).await;
-    let repository = FullScanRepository::new(&database);
-    let fixed_batch = repository
-        .background_candidate_batch(&claimed, 20)
-        .await
-        .unwrap();
-    assert_eq!(fixed_batch.len(), 20);
-
-    let later_pin = seed_background_candidate(
-        &database,
-        library,
-        "Pinned after selection",
-        Utc::now() + Duration::hours(1),
-    )
-    .await;
-    HybridCandidateRepository::new(&database)
-        .pin(LibraryId::from_uuid(library), later_pin)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        repository
-            .background_candidate_batch(&claimed, 20)
-            .await
-            .unwrap(),
-        fixed_batch
-    );
-}
-
-#[tokio::test]
-async fn hybrid_empty_candidate_batch_stays_empty_for_the_full_scan_lifecycle() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let claimed = claimed_full_scan(&database, library).await;
-    let repository = FullScanRepository::new(&database);
-    assert!(
-        repository
-            .background_candidate_batch(&claimed, 20)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let later = seed_background_candidate(&database, library, "Later", Utc::now()).await;
-    HybridCandidateRepository::new(&database)
-        .pin(LibraryId::from_uuid(library), later)
-        .await
-        .unwrap();
-
-    assert!(
-        repository
-            .background_candidate_batch(&claimed, 20)
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[tokio::test]
@@ -1640,10 +1199,10 @@ async fn manual_root_full_scan_targets_only_items_matched_under_the_selected_roo
 async fn full_scan_targets_follow_the_persisted_object_selection_scope() {
     for (profile, object_selection, metadata, expansion, probe, includes_projected) in [
         (
-            "Hybrid",
+            "Lazy",
             "title_layer",
             "basic",
-            "background",
+            "on_browse",
             "on_playback",
             false,
         ),
@@ -1946,7 +1505,7 @@ async fn cancelling_scheduled_full_preserves_a_child_shared_with_manual_root_ful
 
 #[tokio::test]
 async fn non_eager_expansion_policies_do_not_index_existing_movies() {
-    for expansion in ["on_browse", "background", "manual"] {
+    for expansion in ["on_browse", "manual"] {
         let database = database().await;
         let library = seed_library_with_policy(
             &database,
@@ -2051,103 +1610,6 @@ async fn eager_expansion_resolves_music_metadata_before_indexing_tracks() {
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn hybrid_refresh_schedules_a_recent_series_as_low_priority_background_work() {
-    let database = database().await;
-    let library = seed_library_with_policy(
-        &database,
-        "Hybrid",
-        "title_layer",
-        "basic",
-        "background",
-        "on_playback",
-    )
-    .await;
-    let (root, root_object) = seed_root(&database, library).await;
-    database
-        .execute(
-            database.get_database_backend().build(
-                Query::update()
-                    .table(Alias::new("library_storage_roots"))
-                    .value(Alias::new("discovered_sync_revision"), 1_i64)
-                    .and_where(Expr::col(Alias::new("library_id")).eq(library)),
-            ),
-        )
-        .await
-        .unwrap();
-    let series = seed_unexpanded_series(&database, library, root_object).await;
-    let claimed = claimed_full_scan(&database, library).await;
-    let jobs = WorkJobRepository::new(&database);
-
-    assert!(matches!(
-        FullScanService::new(database.clone())
-            .execute(&claimed)
-            .await,
-        Err(FullScanError::ChildrenPending { scheduled: 1 })
-    ));
-    let inventory = jobs
-        .claim_next(
-            &[WorkTaskKind::ScopedStorageSync],
-            "hybrid-root-inventory",
-            Duration::minutes(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let transaction = database.begin().await.unwrap();
-    jobs.complete_in_transaction(
-        &transaction,
-        &inventory,
-        WorkJobResult::success(serde_json::json!({"objects": 0}), Vec::new())
-            .with_sync_revision(1)
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    transaction.commit().await.unwrap();
-    advance_root_inventory_watermarks(&database, root, root_object, 2).await;
-    advance_library_discovery_watermark(&database, library, 2).await;
-    jobs.retry(&claimed, Duration::zero(), "waiting for root inventory")
-        .await
-        .unwrap();
-    let resumed = jobs
-        .claim_next(
-            &[WorkTaskKind::FullMediaScan],
-            "hybrid-background-parent",
-            Duration::minutes(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        FullScanService::new(database.clone())
-            .execute(&resumed)
-            .await,
-        Err(FullScanError::ChildrenPending { scheduled: 1 })
-    ));
-    assert!(
-        jobs.claim_next(
-            &[WorkTaskKind::ScopedStorageSync],
-            "unexpected-second-hybrid-root-inventory",
-            Duration::minutes(5),
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
-    let expansion = jobs
-        .claim_next(
-            &[WorkTaskKind::ExpandItem],
-            "hybrid-background",
-            Duration::minutes(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(expansion.job().scope(), WorkScope::CatalogItem(series));
-    assert_eq!(expansion.job().priority(), 5);
 }
 
 #[tokio::test]
@@ -2271,7 +1733,7 @@ async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
     let database = database().await;
     let library = seed_library_with_policy(
         &database,
-        "Hybrid",
+        "Lazy",
         "library_roots",
         "basic",
         "on_browse",
