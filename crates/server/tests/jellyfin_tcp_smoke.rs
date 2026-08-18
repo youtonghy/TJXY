@@ -13,6 +13,10 @@ use reqwest::{Client, Response, StatusCode, Url, header::CACHE_CONTROL};
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tjxy_server::{
+    DatabaseConfiguration, InstallationConfigStore, InstallationProfile, NetworkConfiguration,
+    PendingInstallation, SecretString,
+};
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
@@ -103,9 +107,40 @@ impl TestServer {
     fn spawn_with_database(
         root: &Path,
         database_url: &str,
-        credential_keyring: Option<&str>,
+        keyring_override: Option<&str>,
     ) -> Self {
         let port = available_port();
+        let database_path = database_url
+            .strip_prefix("sqlite://")
+            .and_then(|value| value.strip_suffix("?mode=rwc"))
+            .map(PathBuf::from)
+            .expect("TCP smoke database URL uses the SQLite read-write-create format");
+        let keyring =
+            keyring_override.map_or_else(|| credential_keyring(1, &[(1, 0)]), str::to_owned);
+        let config_store = InstallationConfigStore::at(root.join("tjxy.toml"));
+        let pending = PendingInstallation::new(
+            Uuid::new_v4(),
+            Uuid::parse_str(SERVER_ID).expect("TCP smoke server ID is valid"),
+            SecretString::new(keyring),
+            DatabaseConfiguration::Sqlite {
+                path: database_path,
+            },
+            NetworkConfiguration::new("127.0.0.1", port, None),
+            InstallationProfile::new(
+                "TJXY TCP Smoke",
+                "Integration test server",
+                "en-US",
+                "/brand/tjxy-mark.webp",
+                "/brand/favicon.svg",
+                USERNAME,
+            ),
+        );
+        config_store
+            .write_pending(&pending)
+            .expect("write pending TCP smoke installation config");
+        config_store
+            .complete(&pending.complete())
+            .expect("complete TCP smoke installation config");
         let admin_dist = root.join("admin");
         fs::create_dir_all(&admin_dist).expect("create temporary admin directory");
         fs::write(
@@ -117,10 +152,8 @@ impl TestServer {
         let stderr_log = root.join(format!("server-{port}.stderr.log"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_tjxy-server"));
         command
-            .env("TJXY_SERVER_ID", SERVER_ID)
             .env("TJXY_SERVER_NAME", "TJXY TCP Smoke")
-            .env("TJXY_BIND", format!("127.0.0.1:{port}"))
-            .env("TJXY_DATABASE_URL", database_url)
+            .env("TJXY_CONFIG_FILE", config_store.path())
             .env("TJXY_ASSETS_DIR", root.join("assets"))
             .env("TJXY_REDIS_MODE", "disabled")
             .env("TJXY_ENABLE_REMOTE_PROVIDERS", "false")
@@ -136,11 +169,6 @@ impl TestServer {
             .stderr(Stdio::from(
                 File::create(&stderr_log).expect("create stderr log"),
             ));
-        if let Some(keyring) = credential_keyring {
-            command.env("TJXY_CREDENTIAL_KEYRING", keyring);
-        } else {
-            command.env_remove("TJXY_CREDENTIAL_KEYRING");
-        }
         let child = command.spawn().expect("start tjxy-server process");
         Self {
             child,
