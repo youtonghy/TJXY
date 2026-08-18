@@ -272,7 +272,7 @@ it('renders six compact recommendation skeletons while the request is pending', 
 it('distinguishes an empty recommendation result from an unavailable request', async () => {
   renderItem('series-1');
   const emptyRecommendations = await screen.findByRole('region', { name: 'Recommended for you' });
-  expect(within(emptyRecommendations).getByText('No recommendations yet')).toBeVisible();
+  expect(await within(emptyRecommendations).findByText('No recommendations yet')).toBeVisible();
 
   api.getSimilarItems.mockReset();
   api.getSimilarItems.mockRejectedValueOnce(new Error('offline'));
