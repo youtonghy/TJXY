@@ -608,6 +608,7 @@ async fn local_only_metadata_uses_nfo_without_invoking_configured_remote_provide
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // The contract verifies one end-to-end direct metadata transaction.
 async fn direct_local_metadata_indexes_refs_without_importing_catalog_or_asset_bytes() {
     let fixture = fixture().await;
     let backend = fixture.database.get_database_backend();
