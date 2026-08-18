@@ -473,12 +473,12 @@ impl CatalogItemRecord {
         overview: Option<&str>,
     ) {
         if let Some(name) = name {
-            self.name = name.to_owned();
+            name.clone_into(&mut self.name);
         }
         self.original_title = original_title.map(str::to_owned);
         self.production_year = production_year.or(self.production_year);
         self.overview = overview.map(str::to_owned);
-        self.metadata_state = "Complete".to_owned();
+        "Complete".clone_into(&mut self.metadata_state);
     }
 }
 
@@ -667,7 +667,7 @@ impl CatalogItemDetailRecord {
                 sort_order: person
                     .order()
                     .and_then(|value| i32::try_from(value).ok())
-                    .unwrap_or(index as i32),
+                    .unwrap_or_else(|| i32::try_from(index).unwrap_or(i32::MAX)),
             })
             .collect();
     }
@@ -3731,6 +3731,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
     })
 }
 
+#[allow(clippy::too_many_lines)] // One batched projection assigns all primary and backdrop tags consistently.
 async fn attach_image_tags(
     database: &DatabaseConnection,
     items: &mut [CatalogItemRecord],

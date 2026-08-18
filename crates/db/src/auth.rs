@@ -617,6 +617,11 @@ impl<'connection> AuthRepository<'connection> {
 
     /// Issues a session for an already authenticated user after an explicit
     /// out-of-band approval (for example a QR login challenge).
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, credential revision, or database error when the
+    /// session cannot be issued.
     pub async fn issue_session_for_user(
         &self,
         user_id: UserId,

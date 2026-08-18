@@ -21,36 +21,47 @@ pub struct DirectMetadataObjectRecord {
 }
 
 impl DirectMetadataObjectRecord {
+    #[must_use]
     pub const fn storage_object_id(&self) -> StorageObjectRecordId {
         self.storage_object_id
     }
+    #[must_use]
     pub const fn storage_account_id(&self) -> Uuid {
         self.storage_account_id
     }
+    #[must_use]
     pub fn provider(&self) -> &str {
         &self.provider
     }
+    #[must_use]
     pub fn provider_drive_id(&self) -> &str {
         &self.provider_drive_id
     }
+    #[must_use]
     pub fn provider_object_id(&self) -> &str {
         &self.provider_object_id
     }
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
+    #[must_use]
     pub const fn size(&self) -> u64 {
         self.size
     }
+    #[must_use]
     pub fn remote_revision(&self) -> Option<&str> {
         self.remote_revision.as_deref()
     }
+    #[must_use]
     pub fn resource_kind(&self) -> &str {
         &self.resource_kind
     }
+    #[must_use]
     pub const fn priority(&self) -> i32 {
         self.priority
     }
+    #[must_use]
     pub const fn input_revision(&self) -> i64 {
         self.input_revision
     }
@@ -61,10 +72,17 @@ pub struct DirectMetadataRepository<'connection> {
 }
 
 impl<'connection> DirectMetadataRepository<'connection> {
+    #[must_use]
     pub const fn new(database: &'connection DatabaseConnection) -> Self {
         Self { database }
     }
 
+    /// Loads the authorized storage object backing one direct metadata resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the authorization snapshot cannot be read.
+    #[allow(clippy::too_many_lines)] // Keeps object identity, root authorization, and current facts in one snapshot.
     pub async fn object(
         &self,
         item_id: CatalogItemId,

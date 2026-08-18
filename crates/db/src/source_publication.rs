@@ -1725,6 +1725,7 @@ async fn load_series_source_groups(
     Ok(groups.into_values().collect())
 }
 
+#[allow(clippy::too_many_lines)] // Keeps source activation, generation, and follow-up metadata enqueueing atomic.
 async fn publish_sources(
     transaction: &DatabaseTransaction,
     jobs: &WorkJobRepository<'_>,

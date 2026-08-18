@@ -38,6 +38,11 @@ impl<'a> AssetStorageRepository<'a> {
         Self { database }
     }
 
+    /// Activates a storage root and moves the previous root into history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when the root transition cannot be persisted.
     pub async fn activate(
         &self,
         canonical_path: &str,
@@ -107,6 +112,11 @@ impl<'a> AssetStorageRepository<'a> {
         })
     }
 
+    /// Registers a historical storage root without changing the active root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when the root cannot be read or persisted.
     pub async fn register_history(
         &self,
         canonical_path: &str,
@@ -159,6 +169,11 @@ impl<'a> AssetStorageRepository<'a> {
         })
     }
 
+    /// Lists all known asset storage roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when the roots cannot be read.
     pub async fn roots(&self) -> Result<Vec<AssetStorageRoot>, AssetStorageError> {
         let backend = self.database.get_database_backend();
         let query = Query::select()
@@ -182,6 +197,11 @@ impl<'a> AssetStorageRepository<'a> {
             .collect()
     }
 
+    /// Records the storage root that should become active after migration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when the pending root cannot be persisted.
     pub async fn set_pending(&self, canonical_path: &str) -> Result<(), AssetStorageError> {
         let transaction = self.database.begin().await?;
         let backend = transaction.get_database_backend();

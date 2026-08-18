@@ -414,6 +414,11 @@ impl<'connection> MetadataWorkRepository<'connection> {
     }
 
     /// Publishes only source-object references for Direct mode without importing metadata bytes.
+    /// Commits direct metadata references for a claimed metadata job.
+    ///
+    /// # Errors
+    ///
+    /// Returns a work error when the claim, snapshot, or referenced objects are stale or invalid.
     pub async fn commit_direct(
         &self,
         claimed: &ClaimedWorkJob,
@@ -566,17 +571,14 @@ async fn replace_direct_refs(
         let mut primary_priority = 0_i32;
         let mut backdrop_priority = 0_i32;
         let image_resources = snapshot.images.iter().map(|image| {
-            let (kind, priority) = match image.image_type() {
-                ImageType::Primary => {
-                    let value = primary_priority;
-                    primary_priority = primary_priority.saturating_add(1);
-                    ("Primary", value)
-                }
-                _ => {
-                    let value = backdrop_priority;
-                    backdrop_priority = backdrop_priority.saturating_add(1);
-                    ("Backdrop", value)
-                }
+            let (kind, priority) = if image.image_type() == ImageType::Primary {
+                let value = primary_priority;
+                primary_priority = primary_priority.saturating_add(1);
+                ("Primary", value)
+            } else {
+                let value = backdrop_priority;
+                backdrop_priority = backdrop_priority.saturating_add(1);
+                ("Backdrop", value)
             };
             (image.file(), kind, priority)
         });

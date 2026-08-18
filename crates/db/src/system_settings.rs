@@ -163,7 +163,7 @@ impl<'connection> SystemSettingsRepository<'connection> {
                 }
                 (Some(record), Some(_)) => SystemSettingsInput::from(&record),
             };
-            input.locale = locale.to_owned();
+            locale.clone_into(&mut input.locale);
             let input = validate(&input)?;
             put_on(&transaction, &input, expected_revision).await
         }

@@ -226,6 +226,10 @@ impl WorkJobSpec {
     }
 
     /// Sets whether local metadata is imported or referenced in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkJobRepositoryError::InvalidMetadataWork`] for non-metadata tasks.
     pub fn with_local_metadata_access_mode(
         mut self,
         mode: LocalMetadataAccessMode,

@@ -256,6 +256,7 @@ impl<'a> AiSettingsRepository<'a> {
     ///
     /// # Errors
     /// Returns validation, revision, credential identity, or database errors.
+    #[allow(clippy::too_many_arguments)]
     pub async fn put(
         &self,
         sealed: &SealedCredential,
@@ -675,7 +676,7 @@ fn validate_settings(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)] // Keeps the revision-fenced settings and model replacement atomic.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keeps the complete settings replacement atomic.
 async fn put_settings(
     transaction: &DatabaseTransaction,
     sealed: &SealedCredential,

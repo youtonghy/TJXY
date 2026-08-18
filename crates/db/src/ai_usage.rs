@@ -293,6 +293,10 @@ impl<'a> AiUsageRepository<'a> {
     }
 
     /// Returns the recorded token usage for a user on one UTC day.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the usage total cannot be read.
     pub async fn daily_token_usage(
         &self,
         user_id: UserId,
@@ -302,6 +306,10 @@ impl<'a> AiUsageRepository<'a> {
     }
 
     /// Returns the recorded token usage across all users on one UTC day.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the usage total cannot be read.
     pub async fn daily_total_token_usage(
         &self,
         usage_day: NaiveDate,
