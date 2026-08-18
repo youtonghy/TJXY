@@ -257,7 +257,7 @@ async fn main() -> Result<(), ImportError> {
                             match result {
                                 Ok(movie) => batch_movies.push(movie),
                                 Err(_) => {
-                                    tracing::error!("    Warning: failed to fetch movie {id}")
+                                    tracing::error!("    Warning: failed to fetch movie {id}");
                                 }
                             }
                         }
@@ -279,7 +279,7 @@ async fn main() -> Result<(), ImportError> {
                             match result {
                                 Ok(series) => batch_series.push(series),
                                 Err(_) => {
-                                    tracing::error!("    Warning: failed to fetch series {id}")
+                                    tracing::error!("    Warning: failed to fetch series {id}");
                                 }
                             }
                         }
