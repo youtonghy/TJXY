@@ -216,7 +216,7 @@ pub(crate) async fn poll(
         }
         (challenge.client.clone(), approved, challenge.expires_at)
     };
-    let Some(approver) = approved else {
+    let Some(principal) = approved else {
         return no_store(Json(PollResponse {
             state: "Pending",
             expires_at,
@@ -228,11 +228,11 @@ pub(crate) async fn poll(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let issued = match service
-        .issue_approved_session(approver.user(), client)
+        .issue_approved_session(principal.user(), client)
         .await
     {
         Ok(value) => value,
-        Err(AuthError::Repository(_)) | Err(AuthError::InvalidToken) => {
+        Err(AuthError::Repository(_) | AuthError::InvalidToken) => {
             return StatusCode::GONE.into_response();
         }
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),

@@ -84,8 +84,9 @@ async fn original(
             {
                 Ok(Some(image)) => direct_image_response(image, headers, head_only),
                 Ok(None) => error(StatusCode::NOT_FOUND, "image was not found"),
-                Err(DirectMetadataReadError::Query(_))
-                | Err(DirectMetadataReadError::BackendUnavailable) => error(
+                Err(
+                    DirectMetadataReadError::Query(_) | DirectMetadataReadError::BackendUnavailable,
+                ) => error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "image service is unavailable",
                 ),

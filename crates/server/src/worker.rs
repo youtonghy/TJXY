@@ -371,7 +371,7 @@ enum ImportWorkerError {
 
 pub(crate) fn spawn_probe_worker(database: DatabaseConnection, service: Arc<ProbeService>) {
     tokio::spawn(async move {
-        run_probe_worker(database, service).await;
+        Box::pin(run_probe_worker(database, service)).await;
     });
 }
 
@@ -380,7 +380,7 @@ pub(crate) fn spawn_metadata_worker(
     service: Arc<MetadataResolveService>,
 ) {
     tokio::spawn(async move {
-        run_metadata_worker(database, service).await;
+        Box::pin(run_metadata_worker(database, service)).await;
     });
 }
 
@@ -534,21 +534,21 @@ fn storage_change_retry_delay(error: &StorageChangeFeedError) -> StdDuration {
 pub(crate) fn spawn_source_index_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
         let service = SourceIndexService::new(database.clone());
-        run_source_index_worker(database, service).await;
+        Box::pin(run_source_index_worker(database, service)).await;
     });
 }
 
 pub(crate) fn spawn_series_expand_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
         let service = SeriesExpandService::new(database.clone());
-        run_series_expand_worker(database, service).await;
+        Box::pin(run_series_expand_worker(database, service)).await;
     });
 }
 
 pub(crate) fn spawn_full_scan_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
         let service = FullScanService::new(database.clone());
-        run_full_scan_worker(database, service).await;
+        Box::pin(run_full_scan_worker(database, service)).await;
     });
 }
 
@@ -1231,13 +1231,13 @@ async fn handle_outcome(
     outcome: Result<i64, ProbeServiceError>,
 ) {
     match outcome {
-        Ok(_) => {}
+        Ok(_)
+        | Err(ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(
+            WorkJobRepositoryError::LostLease,
+        ))) => {}
         Err(ProbeServiceError::InspectionFailed(error)) => {
             tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "media probe inspection failed");
         }
-        Err(ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(
-            WorkJobRepositoryError::LostLease,
-        ))) => {}
         Err(error) => {
             let message = error.to_string();
             let message = truncate_error(&message);
