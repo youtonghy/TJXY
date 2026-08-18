@@ -117,7 +117,7 @@ impl TestServer {
             .expect("TCP smoke database URL uses the SQLite read-write-create format");
         let keyring =
             keyring_override.map_or_else(|| credential_keyring(1, &[(1, 0)]), str::to_owned);
-        let config_store = InstallationConfigStore::at(root.join("tjxy.toml"));
+        let config_store = InstallationConfigStore::at(root.join(format!("tjxy-{port}.toml")));
         let pending = PendingInstallation::new(
             Uuid::new_v4(),
             Uuid::parse_str(SERVER_ID).expect("TCP smoke server ID is valid"),
