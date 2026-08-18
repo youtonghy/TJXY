@@ -575,7 +575,7 @@ async fn daily_token_usage_sums_integer_tokens_by_user_and_utc_day() {
                     model_id,
                     "Cinema Guide",
                     "model-visible",
-                    &day.to_string(),
+                    day.to_string(),
                     now,
                     now,
                     10,
