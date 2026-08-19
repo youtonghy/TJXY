@@ -247,10 +247,12 @@ TJXY_JELLYFIN_WEB_DIST_DIR=/usr/share/jellyfin/web \
 ```
 
 The configured directory must contain `index.html`. Jellyfin Web is GPL-2.0
-licensed and is not bundled into TJXY's MIT-licensed release archives. Without
-`TJXY_JELLYFIN_WEB_DIST_DIR`, the server root continues to open `/app/`. The
-current compatibility baseline is Jellyfin Web 10.11.11; newer client releases
-need to be validated before changing the mounted distribution.
+licensed and is not bundled into TJXY's MIT-licensed release archives. For local
+development, TJXY automatically mounts `data/jellyfin-web` when that directory
+contains `index.html`; `TJXY_JELLYFIN_WEB_DIST_DIR` overrides this location.
+When neither source is available, the server root continues to open `/app/`.
+The current compatibility baseline is Jellyfin Web 10.11.11; newer client
+releases need to be validated before changing the mounted distribution.
 
 ## Linux Release Archive
 

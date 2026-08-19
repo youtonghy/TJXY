@@ -297,16 +297,14 @@ async fn serve_application(
     let restart = state.restart_controller();
     let shutdown = restart.clone();
     let admin_dist = admin_dist_dir(|| env::var("TJXY_ADMIN_DIST_DIR"));
-    let router = match env::var("TJXY_JELLYFIN_WEB_DIST_DIR") {
-        Ok(jellyfin_web_dist) => build_router_with_admin_and_jellyfin_web_dist(
-            state,
-            admin_dist,
-            PathBuf::from(jellyfin_web_dist),
-        )?,
-        Err(env::VarError::NotPresent) => build_router_with_admin_dist(state, admin_dist)?,
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err(StartupError::InvalidJellyfinWebDistPath);
+    let router = match jellyfin_web_dist_dir(
+        || env::var("TJXY_JELLYFIN_WEB_DIST_DIR"),
+        PathBuf::from("data/jellyfin-web"),
+    )? {
+        Some(jellyfin_web_dist) => {
+            build_router_with_admin_and_jellyfin_web_dist(state, admin_dist, jellyfin_web_dist)?
         }
+        None => build_router_with_admin_dist(state, admin_dist)?,
     };
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     axum::serve(
@@ -323,6 +321,23 @@ async fn serve_application(
             .map_err(StartupError::Restart)?;
     }
     Ok(())
+}
+
+fn jellyfin_web_dist_dir<F>(
+    get_environment: F,
+    default_path: PathBuf,
+) -> Result<Option<PathBuf>, StartupError>
+where
+    F: FnOnce() -> Result<String, env::VarError>,
+{
+    match get_environment() {
+        Ok(path) => Ok(Some(PathBuf::from(path))),
+        Err(env::VarError::NotPresent) if default_path.join("index.html").is_file() => {
+            Ok(Some(default_path))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(StartupError::InvalidJellyfinWebDistPath),
+    }
 }
 
 async fn serve_setup(config_store: InstallationConfigStore) -> Result<(), StartupError> {
@@ -516,7 +531,8 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::{
-        admin_dist_dir, ai_admission_config, media_refresh_interval, parse_credential_keyring,
+        admin_dist_dir, ai_admission_config, jellyfin_web_dist_dir, media_refresh_interval,
+        parse_credential_keyring,
     };
 
     #[test]
@@ -579,6 +595,32 @@ mod tests {
         assert_eq!(
             admin_dist_dir(|| Ok("/srv/tjxy/admin".to_owned())),
             PathBuf::from("/srv/tjxy/admin")
+        );
+    }
+
+    #[test]
+    fn jellyfin_web_distribution_prefers_an_override_and_discovers_a_local_build() {
+        let local = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("index.html"), "<!doctype html>").unwrap();
+        assert_eq!(
+            jellyfin_web_dist_dir(
+                || Ok("/srv/jellyfin/web".to_owned()),
+                local.path().to_path_buf(),
+            )
+            .unwrap(),
+            Some(PathBuf::from("/srv/jellyfin/web"))
+        );
+        assert_eq!(
+            jellyfin_web_dist_dir(|| Err(VarError::NotPresent), local.path().to_path_buf(),)
+                .unwrap(),
+            Some(local.path().to_path_buf())
+        );
+
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            jellyfin_web_dist_dir(|| Err(VarError::NotPresent), missing.path().to_path_buf(),)
+                .unwrap(),
+            None
         );
     }
 
