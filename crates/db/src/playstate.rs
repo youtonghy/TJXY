@@ -14,6 +14,11 @@ use crate::{
     user_data::{UserDataCommit, UserDataPatch, UserDataRepositoryError, commit_in_transaction},
 };
 
+const TICKS_PER_SECOND: i64 = 10_000_000;
+const MIN_RESUME_DURATION_TICKS: i64 = 5 * 60 * TICKS_PER_SECOND;
+const MIN_RESUME_PERCENT: i64 = 5;
+const PLAYED_PERCENT: i64 = 90;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlaybackSessionCommit {
     user_data: Option<UserDataCommit>,
@@ -295,8 +300,8 @@ async fn start_in_transaction(
             replayed: true,
         }));
     }
-    let patch = UserDataPatch::default()
-        .with_playback_position_ticks(position_ticks)
+    let runtime_ticks = catalog_runtime_ticks(transaction, item_id).await?;
+    let patch = playback_user_data_patch(position_ticks, runtime_ticks)
         .with_play_count_delta(1)
         .with_last_played_at(now);
     let user_data = commit_in_transaction(transaction, user_id, item_id, &patch, now).await?;
@@ -357,7 +362,8 @@ async fn advance_in_transaction(
     let backend = transaction.get_database_backend();
     transaction.execute(backend.build(&update)).await?;
     let user_data = if changed {
-        let patch = UserDataPatch::default().with_playback_position_ticks(position_ticks);
+        let runtime_ticks = catalog_runtime_ticks(transaction, item_id).await?;
+        let patch = playback_user_data_patch(position_ticks, runtime_ticks);
         Some(commit_in_transaction(transaction, user_id, item_id, &patch, now).await?)
     } else {
         None
@@ -366,6 +372,43 @@ async fn advance_in_transaction(
         user_data,
         replayed: !changed && stop,
     }))
+}
+
+async fn catalog_runtime_ticks(
+    transaction: &DatabaseTransaction,
+    item_id: CatalogItemId,
+) -> Result<Option<i64>, PlaystateRepositoryError> {
+    let query = Query::select()
+        .column(Alias::new("runtime_ticks"))
+        .from(Alias::new("catalog_items"))
+        .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    let runtime_ticks = transaction
+        .query_one(backend.build(&query))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("catalog item disappeared while locked".into()))?
+        .try_get::<Option<i64>>("", "runtime_ticks")?;
+    Ok(runtime_ticks.filter(|value| *value > 0))
+}
+
+fn playback_user_data_patch(position_ticks: i64, runtime_ticks: Option<i64>) -> UserDataPatch {
+    let Some(runtime_ticks) = runtime_ticks else {
+        return UserDataPatch::default().with_playback_position_ticks(position_ticks);
+    };
+    let progress = i128::from(position_ticks) * 100;
+    let runtime = i128::from(runtime_ticks);
+    if progress >= runtime * i128::from(PLAYED_PERCENT) {
+        return UserDataPatch::default()
+            .with_playback_position_ticks(0)
+            .with_played(true);
+    }
+    if runtime_ticks < MIN_RESUME_DURATION_TICKS
+        || progress < runtime * i128::from(MIN_RESUME_PERCENT)
+    {
+        return UserDataPatch::default().with_playback_position_ticks(0);
+    }
+    UserDataPatch::default().with_playback_position_ticks(position_ticks)
 }
 
 async fn lock_session(
@@ -510,9 +553,36 @@ async fn finish<T>(
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
-    use super::watched_delta_ticks;
+    use super::{TICKS_PER_SECOND, UserDataPatch, playback_user_data_patch, watched_delta_ticks};
 
     const SECOND: i64 = 10_000_000;
+    const TEN_MINUTES: i64 = 10 * 60 * TICKS_PER_SECOND;
+
+    #[test]
+    fn playback_thresholds_clear_early_and_completed_resume_positions() {
+        assert_eq!(
+            playback_user_data_patch(20 * TICKS_PER_SECOND, Some(TEN_MINUTES)),
+            UserDataPatch::default().with_playback_position_ticks(0)
+        );
+        assert_eq!(
+            playback_user_data_patch(5 * 60 * TICKS_PER_SECOND, Some(TEN_MINUTES)),
+            UserDataPatch::default().with_playback_position_ticks(5 * 60 * TICKS_PER_SECOND)
+        );
+        assert_eq!(
+            playback_user_data_patch(9 * 60 * TICKS_PER_SECOND, Some(TEN_MINUTES)),
+            UserDataPatch::default()
+                .with_playback_position_ticks(0)
+                .with_played(true)
+        );
+    }
+
+    #[test]
+    fn playback_thresholds_keep_legacy_progress_without_runtime() {
+        assert_eq!(
+            playback_user_data_patch(42, None),
+            UserDataPatch::default().with_playback_position_ticks(42)
+        );
+    }
 
     #[test]
     fn watched_delta_tracks_forward_progress_but_not_seeks_or_rewinds() {

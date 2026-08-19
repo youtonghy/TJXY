@@ -95,6 +95,8 @@ pub use startup::{
 pub use storage_admin::{GoogleDriveOAuthConfiguration, MicrosoftOneDriveOAuthConfiguration};
 pub use system_settings::RestartController;
 
+const JELLYFIN_API_COMPAT_VERSION: &str = "10.11.11";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerIdentity {
     id: Uuid,
@@ -136,8 +138,9 @@ impl ServerIdentity {
         PublicSystemInfo {
             local_address: self.local_address.clone(),
             server_name: self.server_name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: JELLYFIN_API_COMPAT_VERSION.to_owned(),
             product_name: "TJXY".to_owned(),
+            product_version: env!("CARGO_PKG_VERSION").to_owned(),
             operating_system: self.operating_system.clone(),
             id: self.id,
             startup_wizard_completed: self.startup_wizard_completed,
@@ -511,6 +514,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/System/Info/Public", get(public_system_info))
+        .route("/System/Info", get(system_info))
         .route("/System/Endpoint", get(endpoint_info))
         .route("/System/Ping", get(system_ping))
         .route(
@@ -527,6 +531,16 @@ pub fn build_router(state: AppState) -> Router {
             "/Users/AuthenticateByName",
             post(auth::authenticate_by_name),
         )
+        .route(
+            "/Users/authenticatebyname",
+            post(auth::authenticate_by_name),
+        )
+        .route(
+            "/Users/AuthenticateWithQuickConnect",
+            post(qr::authenticate),
+        )
+        .route("/Users/Public", get(auth::public_users))
+        .route("/users/public", get(auth::public_users))
         .route("/Users/Me", get(auth::current_user))
         .route("/Ai/Models", get(ai_settings::models))
         .route("/Ai/Conversations", get(ai::list_conversations))
@@ -581,11 +595,28 @@ pub fn build_router(state: AppState) -> Router {
             get(display_preferences::get).post(display_preferences::post),
         )
         .route("/socket", get(socket::connect))
+        .route("/Playback/BitrateTest", get(stream::bitrate_test))
         .merge(media_collection_routes())
         .route("/Items/Filters", get(browse::item_filters))
         .route("/Items/Latest", get(browse::latest_items))
         .route("/UserItems/Resume", get(browse::resume_items))
+        .route(
+            "/Users/{user_id}/Items/Resume",
+            get(browse::user_resume_items),
+        )
+        .route(
+            "/Users/{user_id}/Items/Latest",
+            get(browse::user_latest_items),
+        )
+        .route("/Users/{user_id}/Items", get(browse::user_items))
+        .route(
+            "/Users/{user_id}/Items/{item_id}",
+            get(browse::user_item_detail),
+        )
         .route("/Shows/NextUp", get(browse::next_up_items))
+        .route("/Shows/{series_id}/Seasons", get(browse::show_seasons))
+        .route("/Shows/{series_id}/Episodes", get(browse::show_episodes))
+        .route("/LiveTv/Programs", get(browse::live_tv_programs))
         .route("/Items", get(browse::items))
         .route("/Items/{item_id}/Similar", get(browse::similar_items))
         .route("/Items/{item_id}", get(browse::item_detail))
@@ -618,8 +649,16 @@ pub fn build_router(state: AppState) -> Router {
             get(stream::get).head(stream::head),
         )
         .route(
+            "/Videos/{item_id}/stream.{container}",
+            get(stream::get_with_container).head(stream::head_with_container),
+        )
+        .route(
             "/Audio/{item_id}/stream",
             get(stream::get).head(stream::head),
+        )
+        .route(
+            "/Audio/{item_id}/stream.{container}",
+            get(stream::get_with_container).head(stream::head_with_container),
         )
         .route(
             "/Videos/{item_id}/{media_source_id}/Subtitles/{index}/{stream}",
@@ -647,6 +686,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/Auth/Qr/Challenges/{challenge_id}/Poll", post(qr::poll))
         .route("/Auth/Qr/Preview", post(qr::preview))
         .route("/Auth/Qr/Approve", post(qr::approve))
+        .route("/QuickConnect/Enabled", get(qr::enabled))
+        .route(
+            "/QuickConnect/Initiate",
+            get(qr::quick_connect_initiate).post(qr::quick_connect_initiate),
+        )
+        .route("/QuickConnect/Connect", get(qr::connect))
+        .route("/QuickConnect/Authorize", post(qr::authorize))
         .route("/Admin/Dashboard/Summary", get(dashboard_admin::summary))
         .route(
             "/Admin/Dashboard/NowPlaying",
@@ -858,6 +904,24 @@ pub fn build_router_with_admin_dist(
     Ok(build_router(state).merge(admin_assets::router(dist_dir.as_ref())?))
 }
 
+/// Builds the API router with the TJXY applications and an operator-supplied Jellyfin Web build.
+///
+/// # Errors
+///
+/// Returns [`AdminAssetsError`] when either static distribution is incomplete or unreadable.
+pub fn build_router_with_admin_and_jellyfin_web_dist(
+    state: AppState,
+    admin_dist_dir: impl AsRef<std::path::Path>,
+    jellyfin_web_dist_dir: impl AsRef<std::path::Path>,
+) -> Result<Router, AdminAssetsError> {
+    Ok(
+        build_router(state).merge(admin_assets::router_with_jellyfin_web(
+            admin_dist_dir.as_ref(),
+            Some(jellyfin_web_dist_dir.as_ref()),
+        )?),
+    )
+}
+
 /// Builds the database-independent first-run router and setup-only static application.
 ///
 /// # Errors
@@ -1038,6 +1102,19 @@ async fn public_system_info(State(state): State<AppState>) -> Json<PublicSystemI
         }
     }
     Json(info)
+}
+
+async fn system_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    public_system_info(State(state)).await.into_response()
 }
 
 async fn endpoint_info(

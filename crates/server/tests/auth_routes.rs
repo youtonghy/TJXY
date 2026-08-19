@@ -137,6 +137,56 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
 }
 
 #[tokio::test]
+async fn ordinary_users_can_read_only_their_own_jellyfin_user_resource() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let service = Arc::new(
+        AuthService::new(database, SystemClock, Some(Duration::days(30)), 2)
+            .await
+            .unwrap(),
+    );
+    service
+        .create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    service
+        .create_user("Alice", "correct horse", true)
+        .await
+        .unwrap();
+    let identity = ServerIdentity::new(Uuid::parse_str(SERVER_ID).unwrap(), "TJXY", "Linux")
+        .with_startup_wizard_completed(true);
+    let app = build_router(AppState::new(identity).with_auth(service).with_ready(true));
+    let alice = json_response(login(app.clone(), "correct horse").await).await;
+    let alice_id = alice["User"]["Id"].as_str().unwrap();
+    let bob = json_response(login_as(app.clone(), "bob", "ordinary password").await).await;
+    let bob_id = bob["User"]["Id"].as_str().unwrap();
+    let bob_token = bob["AccessToken"].as_str().unwrap();
+
+    let own = token_request(
+        app.clone(),
+        Method::GET,
+        format!("/Users/{bob_id}"),
+        bob_token,
+        None,
+    )
+    .await;
+    assert_eq!(own.status(), StatusCode::OK);
+    assert_eq!(json_response(own).await["Name"], "Bob");
+    assert_eq!(
+        token_request(
+            app,
+            Method::GET,
+            format!("/Users/{alice_id}"),
+            bob_token,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn qr_login_requires_an_authenticated_approval_and_is_consumed_once() {
     let app = app().await;
     let approver = json_response(login(app.clone(), "correct horse").await).await;
@@ -217,6 +267,216 @@ async fn qr_login_requires_an_authenticated_approval_and_is_consumed_once() {
     )
     .await;
     assert_eq!(consumed.status(), StatusCode::GONE);
+}
+
+#[allow(clippy::too_many_lines)] // Covers the Jellyfin QuickConnect issue, authorize, connect, and consume lifecycle.
+#[tokio::test]
+async fn jellyfin_quick_connect_issues_one_session_after_authenticated_approval() {
+    let app = app().await;
+    let enabled = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/QuickConnect/Enabled")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    assert_eq!(json_response(enabled).await, json!(true));
+    assert_eq!(
+        json_response(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/Users/Public")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        )
+        .await,
+        json!([])
+    );
+
+    let initiated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/QuickConnect/Initiate")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initiated.status(), StatusCode::OK);
+    assert_eq!(initiated.headers()[header::CACHE_CONTROL], "no-store");
+    let challenge = json_response(initiated).await;
+    let secret = challenge["Secret"].as_str().unwrap();
+    let code = challenge["Code"].as_str().unwrap();
+    assert_eq!(code.len(), 6);
+    assert_eq!(challenge["Authenticated"], false);
+
+    let pending = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/QuickConnect/Connect?secret={secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    assert_eq!(json_response(pending).await["Authenticated"], false);
+
+    let approver = json_response(login(app.clone(), "correct horse").await).await;
+    let approver_token = approver["AccessToken"].as_str().unwrap();
+    let approved_response = token_request(
+        app.clone(),
+        Method::POST,
+        "/QuickConnect/Authorize",
+        approver_token,
+        Some(json!({"Code": code})),
+    )
+    .await;
+    assert_eq!(approved_response.status(), StatusCode::OK);
+    assert_eq!(json_response(approved_response).await, json!(true));
+
+    let connected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/QuickConnect/Connect?Secret={secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(connected.status(), StatusCode::OK);
+    assert_eq!(json_response(connected).await["Authenticated"], true);
+
+    let issued = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/Users/AuthenticateWithQuickConnect")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"Secret": secret}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued = json_response(issued).await;
+    assert_eq!(issued["User"]["Name"], "Alice");
+    assert_eq!(issued["AccessToken"].as_str().unwrap().len(), 64);
+
+    let consumed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/Users/AuthenticateWithQuickConnect")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"Secret": secret}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(consumed.status(), StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn jellyfin_web_lowercase_auth_route_aliases_are_supported() {
+    let app = app().await;
+    let public = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/users/public")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
+    let body = public.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!([]));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/authenticatebyname")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": "alice", "Pw": "correct horse"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn jellyfin_media_player_accepts_a_unicode_device_name_for_login_and_token_auth() {
+    let app = app().await;
+    let identity = axum::http::HeaderValue::from_bytes(
+        r#"MediaBrowser Client="Jellyfin Media Player", Device="有童的洋算盘 (2)", DeviceId="jmp-macos", Version="1.12.0""#
+            .as_bytes(),
+    )
+    .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/authenticatebyname")
+                .header(header::AUTHORIZATION, identity.clone())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": "alice", "Pw": "correct horse"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let authentication = json_response(response).await;
+    assert_eq!(
+        authentication["SessionInfo"]["DeviceName"],
+        "有童的洋算盘 (2)"
+    );
+    let token = authentication["AccessToken"].as_str().unwrap();
+    let authenticated_identity = axum::http::HeaderValue::from_bytes(
+        format!(
+            r#"MediaBrowser Client="Jellyfin Media Player", Device="有童的洋算盘 (2)", DeviceId="jmp-macos", Version="1.12.0", Token="{token}""#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+
+    let current_user = app
+        .oneshot(
+            Request::builder()
+                .uri("/Users/Me")
+                .header(header::AUTHORIZATION, authenticated_identity)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_user.status(), StatusCode::OK);
+    assert_eq!(json_response(current_user).await["Name"], "Alice");
 }
 
 #[tokio::test]

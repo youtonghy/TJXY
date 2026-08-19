@@ -48,9 +48,9 @@
           "Height": null,
           "Index": 0,
           "IsExternal": true,
-          "IsExternalUrl": false,
+          "IsExternalUrl": true,
           "IsTextSubtitleStream": true,
-          "Language": null,
+          "Language": "und",
           "Level": null,
           "Profile": null,
           "SupportsExternalStream": true,
@@ -59,10 +59,11 @@
         }
       ],
       "Path": null,
-      "Protocol": "Http",
+      "Protocol": "File",
+      "RequiredHttpHeaders": {},
       "RunTimeTicks": 10000000,
-      "SupportsDirectPlay": true,
-      "SupportsDirectStream": false,
+      "SupportsDirectPlay": false,
+      "SupportsDirectStream": true,
       "SupportsTranscoding": false,
       "TranscodingUrl": null
     }

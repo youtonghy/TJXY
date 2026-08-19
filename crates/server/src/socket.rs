@@ -61,7 +61,7 @@ pub(crate) async fn connect(
             Ok(principal) => principal,
             Err(response) => return response,
         };
-    if !auth_only_query(raw_query.as_deref()) {
+    if !socket_query_matches(&principal, raw_query.as_deref()) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let receiver = state.realtime_events().subscribe();
@@ -144,11 +144,19 @@ fn event_json<Data: Serialize>(message_type: &'static str, data: Data) -> Option
     serde_json::to_string(&SocketEvent { message_type, data }).ok()
 }
 
-fn auth_only_query(raw_query: Option<&str>) -> bool {
+fn socket_query_matches(
+    principal: &tjxy_application::AuthenticatedPrincipal,
+    raw_query: Option<&str>,
+) -> bool {
     let Ok(mut query) = auth::request_query(raw_query) else {
         return false;
     };
     query.remove("ApiKey");
     query.remove("api_key");
+    if let Some(device_id) = query.remove("deviceId")
+        && principal.device_id() != Some(device_id.as_str())
+    {
+        return false;
+    }
     query.is_empty()
 }

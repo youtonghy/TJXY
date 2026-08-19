@@ -84,6 +84,10 @@ pub struct BaseItemDto {
     id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    season_id: Option<Uuid>,
     #[serde(rename = "Type")]
     item_type: BaseItemKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,7 +142,6 @@ pub struct BaseItemDto {
     provider_ids: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     has_media_sources: Option<bool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     backdrop_image_tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     primary_image_aspect_ratio: Option<f64>,
@@ -163,6 +166,8 @@ impl BaseItemDto {
             server_id,
             id,
             parent_id: None,
+            series_id: None,
+            season_id: None,
             item_type: BaseItemKind::CollectionFolder,
             media_type: None,
             collection_type: Some(collection_type),
@@ -216,6 +221,12 @@ impl BaseItemDto {
             server_id,
             id,
             parent_id,
+            series_id: (item_type == BaseItemKind::Season)
+                .then_some(parent_id)
+                .flatten(),
+            season_id: (item_type == BaseItemKind::Episode)
+                .then_some(parent_id)
+                .flatten(),
             item_type,
             media_type: item_type.media_type(),
             collection_type: None,

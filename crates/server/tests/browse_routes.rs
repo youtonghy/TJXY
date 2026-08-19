@@ -2351,6 +2351,36 @@ async fn socket_upgrade_requires_a_valid_session() {
 }
 
 #[tokio::test]
+async fn jellyfin_media_player_socket_accepts_only_its_authenticated_device_id() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.router).await.unwrap();
+    });
+
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/socket?api_key={token}&deviceId=phone-1"
+    ))
+    .await
+    .unwrap();
+    drop(socket);
+    let error = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/socket?api_key={token}&deviceId=another-device"
+    ))
+    .await
+    .unwrap_err();
+    server.abort();
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        error => panic!("expected an HTTP device mismatch, got {error}"),
+    }
+}
+
+#[tokio::test]
 async fn system_endpoint_requires_auth_and_does_not_guess_missing_connection_info() {
     let app = test_app().await;
     assert_eq!(
@@ -2364,6 +2394,191 @@ async fn system_endpoint_requires_auth_and_does_not_guess_missing_connection_inf
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({"IsLocal": false, "IsInNetwork": false})
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the real JMP bootstrap request dialect in one regression contract.
+async fn jellyfin_media_player_bootstrap_routes_match_its_request_dialect() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "JMP TV", true).await;
+    let item = seed_item(&app.database, library, "Smoke Show", "Series").await;
+    let season = seed_item(&app.database, library, "Season 01", "Season").await;
+    let episode = seed_item(&app.database, library, "S01E01", "Episode").await;
+    let backend = app.database.get_database_backend();
+    for (child, parent) in [(season, item), (episode, season)] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("parent_id"), parent.as_uuid())
+                        .and_where(Expr::col(Alias::new("id")).eq(child.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (user_id, _, token) = login(&app.router).await;
+
+    let library_detail = get(
+        &app.router,
+        &format!("/Users/{user_id}/Items/{library}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(library_detail.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &library_detail
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+        )
+        .unwrap()["Name"],
+        "JMP TV"
+    );
+
+    let items = get(
+        &app.router,
+        &format!(
+            "/Users/{user_id}/Items?ParentId={library}&IncludeItemTypes=Series&Recursive=true&Fields=PrimaryImageAspectRatio&ImageTypeLimit=1&EnableImageTypes=Primary%2CBackdrop&EnableUserData=true"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(items.status(), StatusCode::OK);
+    let items: Value =
+        serde_json::from_slice(&items.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(items["Items"][0]["Id"], item.to_string());
+
+    assert_eq!(
+        get(
+            &app.router,
+            &format!(
+                "/Users/{user_id}/Items/Latest?Limit=16&Fields=PrimaryImageAspectRatio%2CPath&ImageTypeLimit=1&EnableImageTypes=Primary%2CBackdrop%2CThumb&ParentId={library}"
+            ),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    for media_type in ["Audio", "Book"] {
+        let resume = get(
+            &app.router,
+            &format!(
+                "/Users/{user_id}/Items/Resume?MediaTypes={media_type}&Limit=12&Recursive=true&Fields=PrimaryImageAspectRatio&ImageTypeLimit=1&EnableImageTypes=Primary%2CBackdrop&EnableTotalRecordCount=false"
+            ),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(resume.status(), StatusCode::OK, "{media_type}");
+        let resume: Value =
+            serde_json::from_slice(&resume.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            resume,
+            json!({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+        );
+    }
+
+    assert_eq!(
+        get(
+            &app.router,
+            &format!(
+                "/Shows/NextUp?UserId={user_id}&NextUpDateCutoff=2026-08-19T00%3A00%3A00Z&DisableFirstEpisode=false&EnableRewatching=false"
+            ),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let seasons = get(
+        &app.router,
+        &format!(
+            "/Shows/{item}/Seasons?UserId={user_id}&Fields=ItemCounts%2CPrimaryImageAspectRatio%2CCanDelete%2CMediaSourceCount"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(seasons.status(), StatusCode::OK);
+    let seasons: Value =
+        serde_json::from_slice(&seasons.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(seasons["Items"][0]["Id"], season.to_string());
+    assert_eq!(seasons["Items"][0]["SeriesId"], item.to_string());
+
+    let episodes = get(
+        &app.router,
+        &format!(
+            "/Shows/{item}/Episodes?UserId={user_id}&SeasonId={season}&Fields=PrimaryImageAspectRatio%2CMediaSourceCount&EnableUserData=true"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(episodes.status(), StatusCode::OK);
+    let episodes: Value =
+        serde_json::from_slice(&episodes.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(episodes["Items"][0]["Id"], episode.to_string());
+    assert_eq!(episodes["Items"][0]["SeasonId"], season.to_string());
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/Shows/{item}/Episodes?UserId={user_id}&Season=1"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let live_tv = get(
+        &app.router,
+        &format!("/LiveTv/Programs?UserId={user_id}&ImageTypeLimit=1&HasAired=false&Limit=50"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(live_tv.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&live_tv.into_body().collect().await.unwrap().to_bytes())
+            .unwrap(),
+        json!({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+    );
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("/LiveTv/Programs?UserId={}", Uuid::new_v4()),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let bitrate = get(
+        &app.router,
+        "/Playback/BitrateTest?Size=500000",
+        Some(&token),
+    )
+    .await;
+    assert_eq!(bitrate.status(), StatusCode::OK);
+    assert_eq!(
+        bitrate.headers()[header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert_eq!(
+        bitrate
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .len(),
+        524_288
     );
 }
 
@@ -3388,6 +3603,7 @@ async fn item_detail_omits_unprobed_sources_without_scheduling_probe_work() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers GET, HEAD, revalidation, and JMP image query hints together.
 async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Library", true).await;
@@ -3421,6 +3637,21 @@ async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
     );
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
+        b"jpeg"[..]
+    );
+
+    let jmp_image = get(
+        &app.router,
+        &format!(
+            "{path}?MaxWidth=480&MaxHeight=720&Quality=90&Tag={sha256}&Format=jpg&ImageIndex=0"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(jmp_image.status(), StatusCode::OK);
+    assert_eq!(jmp_image.headers()[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(
+        jmp_image.into_body().collect().await.unwrap().to_bytes(),
         b"jpeg"[..]
     );
 
@@ -3511,7 +3742,9 @@ async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
     );
     for path in [
         format!("/Items/{unknown}/Images/primary"),
-        format!("/Items/{unknown}/Images/Primary?width=100"),
+        format!("/Items/{unknown}/Images/Primary?width=invalid"),
+        format!("/Items/{unknown}/Images/Primary?format=tiff"),
+        format!("/Items/{unknown}/Images/Primary?unexpected=1"),
         format!("/Items/{unknown}/Images/Primary?tag=a&tag=b"),
     ] {
         assert_eq!(
@@ -3907,7 +4140,15 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
         &token,
         json!({
             "DeviceProfile": {
-                "DirectPlayProfiles": [{"Type": "Video", "Container": "mkv"}]
+                "DirectPlayProfiles": [{"Type": "Video"}],
+                "CodecProfiles": [{
+                    "Type": "Video",
+                    "Conditions": [{
+                        "Condition": "NotEquals",
+                        "Property": "VideoRangeType",
+                        "Value": "DOVI"
+                    }]
+                }]
             }
         })
         .to_string(),
@@ -3918,7 +4159,7 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
     assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-    assert_eq!(payload["MediaSources"][0]["Protocol"], "Http");
+    assert_eq!(payload["MediaSources"][0]["Protocol"], "File");
     assert_eq!(payload["MediaSources"][0]["Name"], "Director's Cut");
     assert_eq!(payload["MediaSources"][0]["Bitrate"], 8_000_000);
     assert_eq!(
@@ -3926,6 +4167,8 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
         72_000_000_000_i64
     );
     assert_eq!(payload["MediaSources"][0]["IsDefault"], true);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
     assert_eq!(
         payload["MediaSources"][0]["DirectStreamUrl"],
         format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}")
@@ -3936,6 +4179,10 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
     );
     assert_eq!(
         payload["MediaSources"][0]["MediaStreams"][0]["IsDefault"],
+        true
+    );
+    assert_eq!(
+        payload["MediaSources"][0]["MediaStreams"][0]["IsExternalUrl"],
         true
     );
     let encoded = String::from_utf8(body.to_vec()).unwrap();
@@ -4112,7 +4359,8 @@ async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions
                 .unwrap();
         assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
         assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], expected);
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], expected);
     }
 }
 
@@ -4182,6 +4430,7 @@ async fn playback_info_query_overrides_body_identity_source_and_direct_play_flag
     assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
 }
 
+#[allow(clippy::too_many_lines)] // Covers GET, HEAD, range slicing, If-Range, and 416 range error semantics.
 #[tokio::test]
 async fn media_stream_supports_get_head_range_if_range_and_416() {
     let app = test_app().await;
@@ -4210,6 +4459,49 @@ async fn media_stream_supports_get_head_range_if_range_and_416() {
     let etag = full.headers()[header::ETAG].to_str().unwrap().to_owned();
     let body = full.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"0123456789");
+
+    let jmp_uri = format!(
+        "/Videos/{item}/stream?Static=true&MediaSourceId={presentation}&DeviceId=jmp-device&PlaySessionId={}&MaxStreamingBitrate=120000000&AudioStreamIndex=1&SubtitleStreamIndex=3&StartTimeTicks=10000000&Tag=fixture",
+        Uuid::new_v4()
+    );
+    assert_eq!(
+        stream_request(&app.router, "GET", &jmp_uri, Some(&token), None, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let jmp_container_uri = format!(
+        "/Videos/{item}/stream.mkv?Static=true&MediaSourceId={presentation}&DeviceId=jmp-device"
+    );
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &jmp_container_uri,
+            Some(&token),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let duplicate_source = format!(
+        "/Videos/{item}/stream?static=true&mediaSourceId={presentation}&MediaSourceId={presentation}"
+    );
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &duplicate_source,
+            Some(&token),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
 
     let partial = stream_request(
         &app.router,
@@ -6321,6 +6613,15 @@ async fn external_subtitles_require_auth_and_stream_only_the_indexed_format() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"1\n00:00:01,000 --> 00:00:02,000\nArrival\n");
 
+    let jmp_path = format!(
+        "{path}?DeviceId=jmp-device&PlaySessionId={}&Tag=fixture",
+        Uuid::new_v4()
+    );
+    assert_eq!(
+        get(&app.router, &jmp_path, Some(&token)).await.status(),
+        StatusCode::OK
+    );
+
     let with_zero_offset = format!("/Videos/{item}/{presentation}/Subtitles/3/0/Stream.srt");
     assert_eq!(
         get(&app.router, &with_zero_offset, Some(&token))
@@ -6482,12 +6783,35 @@ async fn user_data_get_and_post_are_authorized_patch_based_and_revisioned() {
         assert_eq!(data["IsFavorite"], expected_favorite);
         assert_eq!(data["Played"], expected_played);
     }
+    let played_with_jmp_date = stream_request(
+        &app.router,
+        "POST",
+        &format!("/Users/{user_id}/PlayedItems/{item}?DatePlayed=2026-08-19T04%3A19%3A13.286Z"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(played_with_jmp_date.status(), StatusCode::OK);
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "POST",
+            &format!("/Users/{user_id}/PlayedItems/{item}?DatePlayed=invalid"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         repository
             .revision(tjxy_common::UserId::from_uuid(user_id))
             .await
             .unwrap(),
-        Some(5)
+        Some(6)
     );
 }
 
@@ -6503,7 +6827,7 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
             backend.build(
                 Query::update()
                     .table(Alias::new("catalog_items"))
-                    .value(Alias::new("runtime_ticks"), 1_000_i64)
+                    .value(Alias::new("runtime_ticks"), 6_000_000_000_i64)
                     .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
             ),
         )
@@ -6581,7 +6905,7 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
 
     for _ in 0..2 {
         assert_eq!(
-            post(&app.router, "/Sessions/Playing", &token, event(10))
+            post(&app.router, "/Sessions/Playing", &token, event(600_000_000),)
                 .await
                 .status(),
             StatusCode::NO_CONTENT
@@ -6589,7 +6913,7 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
     }
     let data = repository.get(user, item).await.unwrap().unwrap();
     assert_eq!(data.play_count, 1);
-    assert_eq!(data.playback_position_ticks, 10);
+    assert_eq!(data.playback_position_ticks, 600_000_000);
     assert_eq!(repository.revision(user).await.unwrap(), Some(1));
     assert_eq!(
         tjxy_db::PlaystateRepository::new(&app.database)
@@ -6610,9 +6934,14 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
 
     for _ in 0..2 {
         assert_eq!(
-            post(&app.router, "/Sessions/Playing/Progress", &token, event(20),)
-                .await
-                .status(),
+            post(
+                &app.router,
+                "/Sessions/Playing/Progress",
+                &token,
+                event(1_200_000_000),
+            )
+            .await
+            .status(),
             StatusCode::NO_CONTENT
         );
     }
@@ -6632,21 +6961,31 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
 
     for _ in 0..2 {
         assert_eq!(
-            post(&app.router, "/Sessions/Playing/Stopped", &token, event(30),)
-                .await
-                .status(),
+            post(
+                &app.router,
+                "/Sessions/Playing/Stopped",
+                &token,
+                event(1_800_000_000),
+            )
+            .await
+            .status(),
             StatusCode::NO_CONTENT
         );
     }
     let data = repository.get(user, item).await.unwrap().unwrap();
     assert_eq!(data.play_count, 1);
-    assert_eq!(data.playback_position_ticks, 30);
+    assert_eq!(data.playback_position_ticks, 1_800_000_000);
     assert_eq!(repository.revision(user).await.unwrap(), Some(3));
 
     assert_eq!(
-        post(&app.router, "/Sessions/Playing/Progress", &token, event(40),)
-            .await
-            .status(),
+        post(
+            &app.router,
+            "/Sessions/Playing/Progress",
+            &token,
+            event(2_400_000_000),
+        )
+        .await
+        .status(),
         StatusCode::CONFLICT
     );
     assert_eq!(repository.revision(user).await.unwrap(), Some(3));
@@ -6673,21 +7012,33 @@ async fn playstate_events_are_durable_idempotent_and_revisioned_by_real_changes(
     let result: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(result["TotalRecordCount"], 1);
     assert_eq!(result["Items"][0]["Id"], item.to_string());
-    assert_eq!(result["Items"][0]["RunTimeTicks"], 1_000);
-    assert_eq!(result["Items"][0]["UserData"]["PlaybackPositionTicks"], 30);
+    assert_eq!(result["Items"][0]["RunTimeTicks"], 6_000_000_000_i64);
     assert_eq!(
-        stream_request(
+        result["Items"][0]["UserData"]["PlaybackPositionTicks"],
+        1_800_000_000_i64
+    );
+    let completed_session = Uuid::new_v4();
+    assert_eq!(
+        post(
             &app.router,
-            "POST",
-            &format!("/Users/{user_id}/PlayedItems/{item}"),
-            Some(&token),
-            None,
-            None,
+            "/Sessions/Playing",
+            &token,
+            json!({
+                "ItemId": item,
+                "MediaSourceId": presentation,
+                "PlaySessionId": completed_session,
+                "PositionTicks": 5_400_000_000_i64,
+                "UserId": user_id
+            })
+            .to_string(),
         )
         .await
         .status(),
-        StatusCode::OK
+        StatusCode::NO_CONTENT
     );
+    let data = repository.get(user, item).await.unwrap().unwrap();
+    assert!(data.is_played);
+    assert_eq!(data.playback_position_ticks, 0);
     let response = get(&app.router, &resume_path, Some(&token)).await;
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let result: Value = serde_json::from_slice(&body).unwrap();
@@ -7442,6 +7793,7 @@ async fn concurrent_setup_system_settings_language_updates_map_cas_conflict_to_4
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps missing and real JMP empty identity variants in one lifecycle.
 async fn playstate_accepts_optional_jellyfin_identity_fields_and_derives_missing_session_state() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
@@ -7501,4 +7853,53 @@ async fn playstate_accepts_optional_jellyfin_identity_fields_and_derives_missing
     assert_eq!(data.play_count, 1);
     assert_eq!(data.playback_position_ticks, 30);
     assert_eq!(repository.revision(user).await.unwrap(), Some(3));
+
+    let second_item = seed_item(&app.database, library, "Contact", "Movie").await;
+    let second_source = seed_playable_source(
+        &app.database,
+        second_item,
+        Uuid::new_v4(),
+        &format!("jmp-{}", Uuid::new_v4()),
+        10,
+        &format!("subtitle-{}", Uuid::new_v4()),
+    )
+    .await;
+    let real_jmp_body = |position| {
+        json!({
+            "VolumeLevel": 100,
+            "IsMuted": false,
+            "IsPaused": false,
+            "RepeatMode": "RepeatNone",
+            "ShuffleMode": "Sorted",
+            "MaxStreamingBitrate": 2_147_483_647_i64,
+            "PositionTicks": position,
+            "PlaybackRate": 1,
+            "SecondarySubtitleStreamIndex": -1,
+            "BufferedRanges": [],
+            "PlayMethod": "DirectStream",
+            "PlaySessionId": "",
+            "PlaylistItemId": "playlistItem0",
+            "MediaSourceId": second_source,
+            "CanSeek": true,
+            "ItemId": second_item,
+            "NowPlayingQueue": [{"Id": second_item, "PlaylistItemId": "playlistItem0"}]
+        })
+        .to_string()
+    };
+    for (path, position) in [
+        ("/Sessions/Playing", 100_i64),
+        ("/Sessions/Playing/Progress", 200_i64),
+        ("/Sessions/Playing/Stopped", 300_i64),
+    ] {
+        assert_eq!(
+            post(&app.router, path, &token, real_jmp_body(position))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT,
+            "{path} accepts JMP's empty optional PlaySessionId"
+        );
+    }
+    let data = repository.get(user, second_item).await.unwrap().unwrap();
+    assert_eq!(data.play_count, 1);
+    assert_eq!(data.playback_position_ticks, 300);
 }

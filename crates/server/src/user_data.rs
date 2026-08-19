@@ -103,6 +103,7 @@ pub(crate) async fn favorite(
         headers,
         raw_query,
         UserDataPatch::favorite(true),
+        false,
     )
     .await
 }
@@ -120,6 +121,7 @@ pub(crate) async fn unfavorite(
         headers,
         raw_query,
         UserDataPatch::favorite(false),
+        false,
     )
     .await
 }
@@ -137,6 +139,7 @@ pub(crate) async fn played(
         headers,
         raw_query,
         UserDataPatch::default().with_played(true),
+        true,
     )
     .await
 }
@@ -154,6 +157,7 @@ pub(crate) async fn unplayed(
         headers,
         raw_query,
         UserDataPatch::default().with_played(false),
+        false,
     )
     .await
 }
@@ -165,13 +169,14 @@ async fn command(
     headers: HeaderMap,
     raw_query: Option<String>,
     patch: UserDataPatch,
+    allow_date_played: bool,
 ) -> Response {
     let principal =
         match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
             Ok(principal) => principal,
             Err(response) => return response,
         };
-    if !valid_auth_only_query(raw_query.as_deref()) {
+    if !valid_command_query(raw_query.as_deref(), allow_date_played) {
         return error(StatusCode::BAD_REQUEST, "invalid user data query");
     }
     let Some(service) = state.user_data.as_ref() else {
@@ -216,12 +221,25 @@ fn requested_user(raw_query: Option<&str>) -> Result<Option<UserId>, ()> {
         .transpose()
 }
 
-fn valid_auth_only_query(raw_query: Option<&str>) -> bool {
+fn valid_command_query(raw_query: Option<&str>, allow_date_played: bool) -> bool {
     let Ok(mut query) = auth::request_query(raw_query) else {
         return false;
     };
     query.remove("ApiKey");
     query.remove("api_key");
+    if allow_date_played {
+        let lower = query.remove("datePlayed");
+        let upper = query.remove("DatePlayed");
+        if lower.is_some() && upper.is_some() {
+            return false;
+        }
+        if lower
+            .or(upper)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(&value).is_err())
+        {
+            return false;
+        }
+    }
     query.is_empty()
 }
 

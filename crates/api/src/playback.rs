@@ -22,14 +22,14 @@ pub struct PlaybackTicketResponse {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum MediaProtocol {
-    Http,
+    File,
 }
 
 impl MediaProtocol {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Http => "Http",
+            Self::File => "File",
         }
     }
 }
@@ -96,6 +96,7 @@ pub struct MediaSourceInfo {
     media_streams: Vec<MediaStream>,
     transcoding_url: Option<String>,
     direct_stream_url: String,
+    required_http_headers: std::collections::BTreeMap<String, String>,
 }
 
 impl MediaSourceInfo {
@@ -104,7 +105,7 @@ impl MediaSourceInfo {
         &self.media_streams
     }
 
-    /// Builds a byte-for-byte direct-play source using only TJXY routes.
+    /// Builds a byte-for-byte direct-stream source using only TJXY routes.
     ///
     /// # Errors
     ///
@@ -130,7 +131,7 @@ impl MediaSourceInfo {
         }
 
         Ok(Self {
-            protocol: MediaProtocol::Http,
+            protocol: MediaProtocol::File,
             id,
             path: None,
             container: container.into(),
@@ -140,11 +141,12 @@ impl MediaSourceInfo {
             is_default: false,
             is_remote: false,
             supports_transcoding: false,
-            supports_direct_stream: false,
-            supports_direct_play,
+            supports_direct_stream: supports_direct_play,
+            supports_direct_play: false,
             media_streams,
             transcoding_url: None,
             direct_stream_url,
+            required_http_headers: std::collections::BTreeMap::new(),
         })
     }
 

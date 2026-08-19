@@ -11,6 +11,50 @@ use uuid::Uuid;
 
 use crate::{AppState, auth};
 
+const MAX_BITRATE_TEST_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) async fn bitrate_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let Ok(mut query) = auth::request_query(raw_query.as_deref()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    query.remove("ApiKey");
+    query.remove("api_key");
+    let lower = query.remove("size");
+    let upper = query.remove("Size");
+    if !query.is_empty() || lower.is_some() && upper.is_some() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let requested = lower
+        .or(upper)
+        .map_or(Ok(102_400_usize), |value| value.parse::<usize>());
+    let Ok(requested) = requested else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if requested == 0 || requested > MAX_BITRATE_TEST_BYTES {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let size = requested.next_power_of_two();
+    let mut response = Body::from(vec![0_u8; size]).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store"),
+    );
+    response
+}
+
 pub(crate) async fn get(
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
@@ -23,6 +67,24 @@ pub(crate) async fn get(
 pub(crate) async fn head(
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    serve(state, item_id, headers, raw_query, true).await
+}
+
+pub(crate) async fn get_with_container(
+    State(state): State<AppState>,
+    Path((item_id, _container)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    serve(state, item_id, headers, raw_query, false).await
+}
+
+pub(crate) async fn head_with_container(
+    State(state): State<AppState>,
+    Path((item_id, _container)): Path<(Uuid, String)>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
@@ -170,12 +232,30 @@ fn stream_query(raw_query: Option<&str>) -> Result<StreamQuery, (StatusCode, &'s
         .map_err(|()| (StatusCode::BAD_REQUEST, "invalid stream query"))?;
     let api_key_present = query.remove("ApiKey").is_some() || query.remove("api_key").is_some();
     let playback_ticket = query.remove("PlaybackTicket");
-    if query.remove("static").as_deref() != Some("true") {
+    let static_value = take_alias(&mut query, "static", "Static")?;
+    if !static_value.is_some_and(|value| value.eq_ignore_ascii_case("true")) {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
-    let presentation = query
-        .remove("mediaSourceId")
+    let presentation = take_alias(&mut query, "mediaSourceId", "MediaSourceId")?
         .ok_or((StatusCode::BAD_REQUEST, "invalid stream query"))?;
+    for hint in [
+        "deviceId",
+        "DeviceId",
+        "playSessionId",
+        "PlaySessionId",
+        "tag",
+        "Tag",
+        "maxStreamingBitrate",
+        "MaxStreamingBitrate",
+        "audioStreamIndex",
+        "AudioStreamIndex",
+        "subtitleStreamIndex",
+        "SubtitleStreamIndex",
+        "startTimeTicks",
+        "StartTimeTicks",
+    ] {
+        query.remove(hint);
+    }
     if !query.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
@@ -187,6 +267,19 @@ fn stream_query(raw_query: Option<&str>) -> Result<StreamQuery, (StatusCode, &'s
         playback_ticket,
         api_key_present,
     })
+}
+
+fn take_alias(
+    query: &mut std::collections::HashMap<String, String>,
+    canonical: &str,
+    alias: &str,
+) -> Result<Option<String>, (StatusCode, &'static str)> {
+    let canonical = query.remove(canonical);
+    let alias = query.remove(alias);
+    if canonical.is_some() && alias.is_some() {
+        return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
+    }
+    Ok(canonical.or(alias))
 }
 
 fn requested_range(headers: &HeaderMap, size: u64) -> Result<Option<(u64, u64)>, ()> {

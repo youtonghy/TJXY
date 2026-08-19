@@ -55,7 +55,7 @@ fn direct_play_response_matches_the_pinned_pascal_case_golden() {
     assert_eq!(actual, expected);
     assert_eq!(
         actual["MediaSources"][0]["Protocol"],
-        MediaProtocol::Http.as_str()
+        MediaProtocol::File.as_str()
     );
 }
 

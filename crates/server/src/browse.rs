@@ -276,6 +276,20 @@ pub(crate) async fn items(
     }
 }
 
+pub(crate) async fn user_items(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    items(
+        State(state),
+        headers,
+        RawQuery(Some(query_for_user(raw_query.as_deref(), user_id))),
+    )
+    .await
+}
+
 pub(crate) async fn item_filters(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -369,6 +383,14 @@ pub(crate) async fn resume_items(
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
+    if !query.includes_video {
+        return Json(BaseItemDtoQueryResult::new(
+            Vec::new(),
+            query.page.start_index(),
+            0,
+        ))
+        .into_response();
+    }
     match catalog
         .resume_items(principal.user().id(), query.user_id, query.page)
         .await
@@ -379,6 +401,20 @@ pub(crate) async fn resume_items(
         },
         Err(error) => service_error(&error),
     }
+}
+
+pub(crate) async fn user_resume_items(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    resume_items(
+        State(state),
+        headers,
+        RawQuery(Some(query_for_user(raw_query.as_deref(), user_id))),
+    )
+    .await
 }
 
 pub(crate) async fn latest_items(
@@ -414,6 +450,20 @@ pub(crate) async fn latest_items(
         },
         Err(error) => service_error(&error),
     }
+}
+
+pub(crate) async fn user_latest_items(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    latest_items(
+        State(state),
+        headers,
+        RawQuery(Some(query_for_user(raw_query.as_deref(), user_id))),
+    )
+    .await
 }
 
 pub(crate) async fn next_up_items(
@@ -469,6 +519,20 @@ pub(crate) async fn item_detail(
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
+    match catalog
+        .user_views(principal.user().id(), requested_user)
+        .await
+    {
+        Ok(views) => {
+            if let Some(view) = views.iter().find(|view| view.id() == item_id) {
+                return match library_dto(state.identity.id, view) {
+                    Ok(item) => Json(item).into_response(),
+                    Err(()) => error(StatusCode::INTERNAL_SERVER_ERROR, "catalog data is invalid"),
+                };
+            }
+        }
+        Err(error) => return service_error(&error),
+    }
     let item_id = CatalogItemId::from_uuid(item_id);
     match catalog
         .item_detail(principal.user().id(), requested_user, item_id)
@@ -500,6 +564,132 @@ pub(crate) async fn item_detail(
         Ok(None) => error(StatusCode::NOT_FOUND, "catalog item was not found"),
         Err(error) => service_error(&error),
     }
+}
+
+pub(crate) async fn user_item_detail(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    item_detail(
+        State(state),
+        Path(item_id),
+        headers,
+        RawQuery(Some(query_for_user(raw_query.as_deref(), user_id))),
+    )
+    .await
+}
+
+pub(crate) async fn show_seasons(
+    State(state): State<AppState>,
+    Path(series_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let constraints = format!("parentId={series_id}&includeItemTypes=Season");
+    let query = raw_query.map_or(constraints.clone(), |query| {
+        format!("{query}&{constraints}")
+    });
+    items(State(state), headers, RawQuery(Some(query))).await
+}
+
+pub(crate) async fn show_episodes(
+    State(state): State<AppState>,
+    Path(series_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    if let Err(response) =
+        auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await
+    {
+        return response;
+    }
+    let query = match episodes_query(raw_query.as_deref(), series_id) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
+    items(State(state), headers, RawQuery(Some(query))).await
+}
+
+fn episodes_query(raw_query: Option<&str>, series_id: Uuid) -> Result<String, HttpBrowseError> {
+    let mut parameters = endpoint_parameters(raw_query)?;
+    let season_id = take_uuid(&mut parameters, "seasonId")?;
+    if let Some(season) = parameters.remove("season") {
+        if season.parse::<i32>().is_err() {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid season number",
+            ));
+        }
+        if season_id.is_none() {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "season number filtering is not supported",
+            ));
+        }
+    }
+    match take_bool(&mut parameters, "isMissing") {
+        Ok(Some(true)) => {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "missing episode filtering is not supported",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
+    for unsupported in ["adjacentTo", "startItemId"] {
+        if parameters.remove(unsupported).is_some() {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "episode adjacency is not supported",
+            ));
+        }
+    }
+
+    let pairs = auth::request_query_pairs(raw_query)
+        .map_err(|()| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid query parameters"))?;
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        let normalized = lower_camel_query_name(name.clone());
+        if !matches!(
+            normalized.as_str(),
+            "seasonId" | "season" | "isMissing" | "adjacentTo" | "startItemId"
+        ) {
+            serializer.append_pair(&name, &value);
+        }
+    }
+    serializer.append_pair("parentId", &season_id.unwrap_or(series_id).to_string());
+    serializer.append_pair("includeItemTypes", "Episode");
+    if season_id.is_none() {
+        serializer.append_pair("recursive", "true");
+    }
+    Ok(serializer.finish())
+}
+
+pub(crate) async fn live_tv_programs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let principal =
+        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
+    let mut parameters = match endpoint_parameters(raw_query.as_deref()) {
+        Ok(parameters) => parameters,
+        Err(error) => return error.into_response(),
+    };
+    let requested_user = match take_user_id(&mut parameters) {
+        Ok(user_id) => user_id,
+        Err(error) => return error.into_response(),
+    };
+    if requested_user.is_some_and(|user_id| user_id != principal.user().id()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    Json(BaseItemDtoQueryResult::new(Vec::new(), 0, 0)).into_response()
 }
 
 pub(crate) async fn similar_items(
@@ -747,7 +937,7 @@ fn media_source_info(
         .collect::<Vec<_>>();
     streams.extend(source.subtitles().iter().map(|subtitle| MediaStream {
         codec: Some(subtitle.format().to_owned()),
-        language: subtitle.language().map(str::to_owned),
+        language: Some(subtitle.language().unwrap_or("und").to_owned()),
         width: None,
         height: None,
         channels: None,
@@ -762,7 +952,7 @@ fn media_source_info(
             subtitle.delivery_index(),
             subtitle.format()
         )),
-        is_external_url: false,
+        is_external_url: true,
         is_text_subtitle_stream: true,
         supports_external_stream: true,
         is_default: subtitle.is_default(),
@@ -899,6 +1089,7 @@ struct SearchQuery {
 struct ResumeQuery {
     user_id: Option<UserId>,
     page: CatalogPageRequest,
+    includes_video: bool,
 }
 
 struct LatestQuery {
@@ -1095,16 +1286,15 @@ fn parse_resume_query(raw_query: Option<&str>) -> Result<ResumeQuery, HttpBrowse
     let user_id = take_user_id(&mut parameters)?;
     let start_index = take_u64(&mut parameters, "startIndex")?.unwrap_or(0);
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(100);
-    if parameters
+    let includes_video = parameters
         .remove("mediaTypes")
-        .is_some_and(|value| value != "Video")
-    {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported resume media type",
-        ));
-    }
-    for boolean in ["enableUserData", "enableImages", "enableTotalRecordCount"] {
+        .is_none_or(|value| value.split(',').any(|media_type| media_type == "Video"));
+    for boolean in [
+        "recursive",
+        "enableUserData",
+        "enableImages",
+        "enableTotalRecordCount",
+    ] {
         take_bool(&mut parameters, boolean)?;
     }
     if parameters.contains_key("imageTypeLimit") {
@@ -1115,7 +1305,11 @@ fn parse_resume_query(raw_query: Option<&str>) -> Result<ResumeQuery, HttpBrowse
     reject_remaining(&parameters)?;
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?;
-    Ok(ResumeQuery { user_id, page })
+    Ok(ResumeQuery {
+        user_id,
+        page,
+        includes_video,
+    })
 }
 
 fn parse_latest_query(raw_query: Option<&str>) -> Result<LatestQuery, HttpBrowseError> {
@@ -1173,13 +1367,19 @@ fn parse_next_up_query(raw_query: Option<&str>) -> Result<NextUpQuery, HttpBrows
             ));
         }
     }
-    for unsupported in ["parentId", "nextUpDateCutoff"] {
-        if parameters.remove(unsupported).is_some() {
-            return Err(HttpBrowseError::new(
-                StatusCode::BAD_REQUEST,
-                "unsupported next-up scope",
-            ));
-        }
+    if parameters.remove("parentId").is_some() {
+        return Err(HttpBrowseError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported next-up scope",
+        ));
+    }
+    if parameters.remove("nextUpDateCutoff").is_some_and(|value| {
+        value.is_empty() || value.len() > 64 || value.chars().any(char::is_control)
+    }) {
+        return Err(HttpBrowseError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid next-up date cutoff",
+        ));
     }
     if parameters.contains_key("imageTypeLimit") {
         take_u64(&mut parameters, "imageTypeLimit")?;
@@ -1223,11 +1423,39 @@ fn parse_similar_items_query(
 fn endpoint_parameters(
     raw_query: Option<&str>,
 ) -> Result<HashMap<String, String>, HttpBrowseError> {
-    let mut parameters = auth::request_query(raw_query)
+    let parameters = auth::request_query(raw_query)
         .map_err(|()| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid query parameters"))?;
+    let mut normalized = HashMap::with_capacity(parameters.len());
+    for (name, value) in parameters {
+        let name = match name.as_str() {
+            "ApiKey" | "PlaybackTicket" => name,
+            _ => lower_camel_query_name(name),
+        };
+        if normalized.insert(name, value).is_some() {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "duplicate query parameter",
+            ));
+        }
+    }
+    let mut parameters = normalized;
     parameters.remove("ApiKey");
     parameters.remove("api_key");
     Ok(parameters)
+}
+
+fn lower_camel_query_name(mut name: String) -> String {
+    if let Some(first) = name.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    name
+}
+
+fn query_for_user(raw_query: Option<&str>, user_id: Uuid) -> String {
+    raw_query.map_or_else(
+        || format!("userId={user_id}"),
+        |query| format!("{query}&userId={user_id}"),
+    )
 }
 
 fn take_user_id(

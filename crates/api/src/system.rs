@@ -8,6 +8,7 @@ pub struct PublicSystemInfo {
     pub server_name: String,
     pub version: String,
     pub product_name: String,
+    pub product_version: String,
     pub operating_system: String,
     pub id: Uuid,
     pub startup_wizard_completed: bool,

@@ -150,6 +150,16 @@ fn valid_query(raw_query: Option<&str>) -> bool {
     };
     query.remove("ApiKey");
     query.remove("api_key");
+    for hint in [
+        "deviceId",
+        "DeviceId",
+        "playSessionId",
+        "PlaySessionId",
+        "tag",
+        "Tag",
+    ] {
+        query.remove(hint);
+    }
     query.is_empty()
 }
 

@@ -77,6 +77,11 @@ pub(crate) async fn current_user(
     }
 }
 
+pub(crate) async fn public_users() -> Json<Vec<UserDto>> {
+    // TJXY does not expose account names on an unauthenticated endpoint.
+    Json(Vec::new())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 struct UpdateSelfProfileRequest {
@@ -240,9 +245,12 @@ pub(crate) async fn user(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
-    {
-        return response;
+    let principal = match authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    if !principal.user().is_admin() && principal.user().id().as_uuid() != user_id {
+        return StatusCode::FORBIDDEN.into_response();
     }
     let Some(service) = state.auth.as_ref() else {
         return HttpAuthError::Unavailable.into_response();
@@ -512,7 +520,7 @@ fn client_identity(
         return Err(HttpAuthError::BadRequest);
     };
     let parameters = parse_authorization(
-        value.to_str().map_err(|_| HttpAuthError::BadRequest)?,
+        std::str::from_utf8(value.as_bytes()).map_err(|_| HttpAuthError::BadRequest)?,
         legacy_enabled,
     )?;
     ClientIdentity::new(
@@ -531,7 +539,7 @@ fn access_token(
 ) -> Result<String, HttpAuthError> {
     if let Some(value) = headers.get(header::AUTHORIZATION) {
         let parameters = parse_authorization(
-            value.to_str().map_err(|_| HttpAuthError::Unauthorized)?,
+            std::str::from_utf8(value.as_bytes()).map_err(|_| HttpAuthError::Unauthorized)?,
             legacy_enabled,
         )
         .map_err(|_| HttpAuthError::Unauthorized)?;

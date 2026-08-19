@@ -1,15 +1,16 @@
 {
   "MediaSources": [
     {
-      "Protocol": "Http",
+      "Protocol": "File",
+      "RequiredHttpHeaders": {},
       "Id": "{{default_source_id}}",
       "Path": null,
       "Container": "mkv",
       "IsDefault": true,
       "IsRemote": false,
       "SupportsTranscoding": false,
-      "SupportsDirectStream": false,
-      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "SupportsDirectPlay": false,
       "MediaStreams": [
         {
           "Codec": "h264",
@@ -41,7 +42,7 @@
           "IsExternal": true,
           "DeliveryMethod": "External",
           "DeliveryUrl": "/Videos/{{item_id}}/{{default_source_id}}/Subtitles/1/Stream.srt",
-          "IsExternalUrl": false,
+          "IsExternalUrl": true,
           "IsTextSubtitleStream": true,
           "SupportsExternalStream": true
         }
@@ -50,14 +51,15 @@
       "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{default_source_id}}"
     },
     {
-      "Protocol": "Http",
+      "Protocol": "File",
+      "RequiredHttpHeaders": {},
       "Id": "{{alternate_source_id}}",
       "Path": null,
       "Container": "mkv",
       "IsRemote": false,
       "SupportsTranscoding": false,
-      "SupportsDirectStream": false,
-      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "SupportsDirectPlay": false,
       "MediaStreams": [
         {
           "Codec": "h264",

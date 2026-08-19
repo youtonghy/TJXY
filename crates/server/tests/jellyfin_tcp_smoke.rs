@@ -896,12 +896,12 @@ async fn assert_playback_delivery_contract(
     let expected: Value = serde_json::from_str(FILESYSTEM_PLAYBACK_RESPONSE)
         .expect("filesystem PlaybackInfo golden is valid JSON");
     assert_eq!(normalized, expected);
-    assert_eq!(source["Protocol"], "Http");
+    assert_eq!(source["Protocol"], "File");
     assert_eq!(source["Path"], Value::Null);
     assert_eq!(source["IsRemote"], false);
     assert_eq!(source["SupportsTranscoding"], false);
-    assert_eq!(source["SupportsDirectStream"], false);
-    assert_eq!(source["SupportsDirectPlay"], true);
+    assert_eq!(source["SupportsDirectStream"], true);
+    assert_eq!(source["SupportsDirectPlay"], false);
     assert_eq!(source["TranscodingUrl"], Value::Null);
     let direct_stream_url = source["DirectStreamUrl"]
         .as_str()
@@ -919,7 +919,7 @@ async fn assert_playback_delivery_contract(
         .map(|stream| {
             assert_eq!(stream["Type"], "Subtitle");
             assert_eq!(stream["DeliveryMethod"], "External");
-            assert_eq!(stream["IsExternalUrl"], false);
+            assert_eq!(stream["IsExternalUrl"], true);
             (
                 stream["Index"].as_i64().expect("subtitle delivery index"),
                 stream["DeliveryUrl"]

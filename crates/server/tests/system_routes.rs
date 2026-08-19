@@ -17,7 +17,7 @@ fn state() -> AppState {
 }
 
 #[tokio::test]
-async fn public_system_info_is_honest_and_pascal_case() {
+async fn public_system_info_distinguishes_api_compatibility_from_product_version() {
     let response = build_router(state())
         .oneshot(
             Request::builder()
@@ -34,11 +34,42 @@ async fn public_system_info_is_honest_and_pascal_case() {
     let info: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(info["ProductName"], "TJXY");
     assert_eq!(info["LocalAddress"], Value::Null);
-    assert_eq!(info["Version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["Version"], "10.11.11");
+    assert_eq!(info["ProductVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(info["ServerName"], "Living Room");
     assert_eq!(info["OperatingSystem"], "Linux");
     assert_eq!(info["Id"], "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11");
     assert_eq!(info["StartupWizardCompleted"], false);
+}
+
+#[tokio::test]
+async fn authenticated_system_info_reuses_the_honest_public_identity() {
+    let response = build_router(state())
+        .oneshot(
+            Request::builder()
+                .uri("/System/Info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn quick_connect_is_disabled_without_an_authentication_service() {
+    let response = build_router(state())
+        .oneshot(
+            Request::builder()
+                .uri("/QuickConnect/Enabled")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(!serde_json::from_slice::<bool>(&body).unwrap());
 }
 
 #[tokio::test]

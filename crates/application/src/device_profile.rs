@@ -76,7 +76,7 @@ impl DeviceProfile {
 impl DirectPlayProfile {
     fn matches_codecs(&self, source: &PlaybackSource) -> bool {
         self.profile_type.eq_ignore_ascii_case("Video")
-            && matches_list(&self.container, source.container())
+            && (self.container.is_empty() || matches_list(&self.container, source.container()))
             && matches_stream_codecs(&self.video_codec, source.streams(), "Video")
             && matches_stream_codecs(&self.audio_codec, source.streams(), "Audio")
     }

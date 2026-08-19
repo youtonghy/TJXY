@@ -83,6 +83,7 @@ fn rich_item_details_are_pascal_case_and_list_only_fields_remain_compact() {
             "CommunityRating": 8.7,
             "IsFolder": true,
             "ImageTags": {},
+            "BackdropImageTags": [],
             "Tagline": "Every lie we tell incurs a debt.",
             "VoteCount": 7000,
             "RunTimeTicks": 36_000_000_000_i64,
@@ -141,7 +142,8 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
                     "Type": "CollectionFolder",
                     "CollectionType": "movies",
                     "IsFolder": true,
-                    "ImageTags": {}
+                    "ImageTags": {},
+                    "BackdropImageTags": []
                 },
                 {
                     "Name": "Arrival",
@@ -155,6 +157,7 @@ fn library_and_item_query_results_use_stable_pascal_case_fields() {
                     "RunTimeTicks": 69_600_000_000_i64,
                     "IsFolder": false,
                     "ImageTags": {},
+                    "BackdropImageTags": [],
                     "UserData": {
                         "Key": item_id,
                         "ItemId": item_id,

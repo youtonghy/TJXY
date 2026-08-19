@@ -138,12 +138,70 @@ fn direct_image_response(
 }
 
 fn valid_query(raw_query: Option<&str>) -> bool {
-    let Ok(mut parameters) = auth::request_query(raw_query) else {
+    let Ok(parameters) = auth::request_query(raw_query) else {
         return false;
     };
+    let mut normalized = std::collections::HashMap::with_capacity(parameters.len());
+    for (mut name, value) in parameters {
+        if !matches!(name.as_str(), "ApiKey")
+            && let Some(first) = name.get_mut(0..1)
+        {
+            first.make_ascii_lowercase();
+        }
+        if normalized.insert(name, value).is_some() {
+            return false;
+        }
+    }
+    let mut parameters = normalized;
     parameters.remove("ApiKey");
     parameters.remove("api_key");
     parameters.remove("tag");
+    for name in [
+        "maxWidth",
+        "maxHeight",
+        "width",
+        "height",
+        "fillWidth",
+        "fillHeight",
+        "unplayedCount",
+        "blur",
+        "imageIndex",
+    ] {
+        if parameters
+            .remove(name)
+            .is_some_and(|value| value.parse::<u32>().map_or(true, |value| value > 1_000_000))
+        {
+            return false;
+        }
+    }
+    if parameters
+        .remove("quality")
+        .is_some_and(|value| value.parse::<u8>().map_or(true, |value| value > 100))
+    {
+        return false;
+    }
+    if parameters.remove("percentPlayed").is_some_and(|value| {
+        value.parse::<f64>().map_or(true, |value| {
+            !value.is_finite() || !(0.0..=100.0).contains(&value)
+        })
+    }) {
+        return false;
+    }
+    if parameters.remove("format").is_some_and(|value| {
+        !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "original" | "gif" | "jpg" | "jpeg" | "png" | "webp"
+        )
+    }) {
+        return false;
+    }
+    for name in ["backgroundColor", "foregroundLayer"] {
+        if parameters.remove(name).is_some_and(|value| {
+            value.is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+        }) {
+            return false;
+        }
+    }
     parameters.is_empty()
 }
 

@@ -234,6 +234,24 @@ Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.
 
+### Jellyfin Media Player
+
+Jellyfin Media Player 1.11 and newer loads a server-hosted Jellyfin Web client.
+TJXY can mount an operator-supplied Jellyfin Web distribution at `/web/` while
+keeping the TJXY application at `/app/` and the administrator UI at `/admin/`:
+
+```bash
+TJXY_ADMIN_DIST_DIR=admin/dist \
+TJXY_JELLYFIN_WEB_DIST_DIR=/usr/share/jellyfin/web \
+./target/release/tjxy-server
+```
+
+The configured directory must contain `index.html`. Jellyfin Web is GPL-2.0
+licensed and is not bundled into TJXY's MIT-licensed release archives. Without
+`TJXY_JELLYFIN_WEB_DIST_DIR`, the server root continues to open `/app/`. The
+current compatibility baseline is Jellyfin Web 10.11.11; newer client releases
+need to be validated before changing the mounted distribution.
+
 ## Linux Release Archive
 
 [GitHub Releases](https://github.com/youtonghy/TJXY/releases) provide

@@ -12,6 +12,23 @@ fn playback_state_identity_fields_follow_the_optional_jellyfin_contract() {
     assert_eq!(telemetry_only.play_session_id, None);
     assert_eq!(telemetry_only.position_ticks, 0);
 
+    let empty_identity: PlaybackStateRequest = serde_json::from_value(json!({
+        "ItemId": null,
+        "MediaSourceId": "",
+        "PlaySessionId": "",
+        "UserId": ""
+    }))
+    .expect("JMP empty optional identity fields");
+    assert_eq!(empty_identity.item_id, None);
+    assert_eq!(empty_identity.media_source_id, None);
+    assert_eq!(empty_identity.play_session_id, None);
+    assert_eq!(empty_identity.user_id, None);
+
+    assert!(
+        serde_json::from_value::<PlaybackStateRequest>(json!({"PlaySessionId": "not-a-uuid"}))
+            .is_err()
+    );
+
     let item_id = Uuid::new_v4();
     let media_source_id = Uuid::new_v4();
     let play_session_id = Uuid::new_v4();

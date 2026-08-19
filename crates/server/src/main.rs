@@ -10,8 +10,9 @@ use tjxy_server::{
     DatabaseTlsMode, GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
     InstallationConfigStore, InstallationState, LoggingRuntime,
     MicrosoftOneDriveOAuthConfiguration, SecretString, ServerIdentity, SetupCoordinator,
-    SetupError, SetupValidator, StartupOptions, build_router_with_admin_dist,
-    build_setup_router_with_admin_dist_assets_and_database, initialize, parse_credential_keyring,
+    SetupError, SetupValidator, StartupOptions, build_router_with_admin_and_jellyfin_web_dist,
+    build_router_with_admin_dist, build_setup_router_with_admin_dist_assets_and_database,
+    initialize, parse_credential_keyring,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -90,6 +91,8 @@ enum StartupError {
     Initialization(#[from] InitializationError),
     #[error("TJXY admin assets are invalid: {0}")]
     AdminAssets(#[from] AdminAssetsError),
+    #[error("TJXY_JELLYFIN_WEB_DIST_DIR is not valid Unicode")]
+    InvalidJellyfinWebDistPath,
     #[error("failed to bind or serve HTTP: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -294,7 +297,17 @@ async fn serve_application(
     let restart = state.restart_controller();
     let shutdown = restart.clone();
     let admin_dist = admin_dist_dir(|| env::var("TJXY_ADMIN_DIST_DIR"));
-    let router = build_router_with_admin_dist(state, admin_dist)?;
+    let router = match env::var("TJXY_JELLYFIN_WEB_DIST_DIR") {
+        Ok(jellyfin_web_dist) => build_router_with_admin_and_jellyfin_web_dist(
+            state,
+            admin_dist,
+            PathBuf::from(jellyfin_web_dist),
+        )?,
+        Err(env::VarError::NotPresent) => build_router_with_admin_dist(state, admin_dist)?,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(StartupError::InvalidJellyfinWebDistPath);
+        }
+    };
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     axum::serve(
         listener,

@@ -1,7 +1,7 @@
 {
   "MediaSources": [
     {
-      "Protocol": "Http",
+      "Protocol": "File",
       "Id": "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11",
       "Path": null,
       "Container": "mkv",
@@ -11,8 +11,9 @@
       "IsDefault": true,
       "IsRemote": false,
       "SupportsTranscoding": false,
-      "SupportsDirectStream": false,
-      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "RequiredHttpHeaders": {},
+      "SupportsDirectPlay": false,
       "MediaStreams": [
         {
           "Codec": "srt",

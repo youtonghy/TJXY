@@ -9,7 +9,8 @@ use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tjxy_server::{
     AdminAssetsError, AppState, InstallationConfigStore, ServerIdentity, SetupCoordinator,
-    SetupValidator, build_router_with_admin_dist, build_setup_router_with_admin_dist,
+    SetupValidator, build_router_with_admin_and_jellyfin_web_dist, build_router_with_admin_dist,
+    build_setup_router_with_admin_dist,
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -39,6 +40,21 @@ fn distribution() -> TempDir {
     std::fs::write(
         directory.path().join("brand/tjxy-mark.webp"),
         b"RIFF-brand-fixture-WEBP",
+    )
+    .unwrap();
+    directory
+}
+
+fn jellyfin_web_distribution() -> TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("index.html"),
+        "<!doctype html><title>Jellyfin Web</title><script src=\"main.js\"></script>",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("main.js"),
+        "console.log('jellyfin-web');",
     )
     .unwrap();
     directory
@@ -108,6 +124,31 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
     assert_eq!(body_text(response).await, "RIFF-brand-fixture-WEBP");
+}
+
+#[tokio::test]
+async fn operator_supplied_jellyfin_web_owns_only_root_and_web_routes() {
+    let admin = distribution();
+    let jellyfin_web = jellyfin_web_distribution();
+    let app =
+        build_router_with_admin_and_jellyfin_web_dist(state(), admin.path(), jellyfin_web.path())
+            .unwrap();
+
+    let root = request(&app, Method::GET, "/").await;
+    assert_eq!(root.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(root.headers()[header::LOCATION], "/web/");
+    let web = request(&app, Method::GET, "/web/").await;
+    assert_eq!(web.status(), StatusCode::OK);
+    assert!(body_text(web).await.contains("Jellyfin Web"));
+    let script = request(&app, Method::GET, "/web/main.js").await;
+    assert_eq!(script.status(), StatusCode::OK);
+    assert!(body_text(script).await.contains("jellyfin-web"));
+
+    for path in ["/app/", "/admin/"] {
+        let response = request(&app, Method::GET, path).await;
+        assert_eq!(response.status(), StatusCode::OK, "path {path}");
+        assert!(body_text(response).await.contains("TJXY Admin"));
+    }
 }
 
 #[tokio::test]
@@ -234,4 +275,14 @@ fn rejects_missing_or_invalid_distributions_without_path_disclosure() {
     let error = build_router_with_admin_dist(state(), index_directory.path()).unwrap_err();
     assert!(matches!(error, AdminAssetsError::MissingIndex));
     assert!(!format!("{error:?}").contains(&index_directory.path().display().to_string()));
+
+    let admin = distribution();
+    let missing_web = Path::new("/private/deployment/secret/jellyfin-web");
+    let error = build_router_with_admin_and_jellyfin_web_dist(state(), admin.path(), missing_web)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AdminAssetsError::MissingJellyfinWebDistribution
+    ));
+    assert!(!format!("{error:?}").contains("private/deployment"));
 }

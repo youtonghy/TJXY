@@ -18,15 +18,30 @@ pub enum AdminAssetsError {
     MissingIndex,
     #[error("admin distribution index.html could not be read")]
     UnreadableIndex,
+    #[error("Jellyfin Web distribution directory is missing or is not a directory")]
+    MissingJellyfinWebDistribution,
+    #[error("Jellyfin Web distribution index.html is missing or is not a file")]
+    MissingJellyfinWebIndex,
+    #[error("Jellyfin Web distribution index.html could not be read")]
+    UnreadableJellyfinWebIndex,
 }
 
 pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
+    router_with_jellyfin_web(dist_dir, None)
+}
+
+pub(super) fn router_with_jellyfin_web(
+    dist_dir: &Path,
+    jellyfin_web_dist_dir: Option<&Path>,
+) -> Result<Router, AdminAssetsError> {
     let index_path = distribution(dist_dir)?;
     let fallback_index_path = index_path.clone();
     let app_fallback_index_path = index_path.clone();
+    let jellyfin_web_dist_dir = jellyfin_web_dist_dir
+        .map(jellyfin_web_distribution)
+        .transpose()?;
 
-    Ok(Router::new()
-        .route("/", get(|| async { Redirect::permanent("/app/") }))
+    let router = Router::new()
         .route("/admin", get(|| async { Redirect::permanent("/admin/") }))
         .route("/setup", get(|| async { Redirect::temporary("/app/") }))
         .route("/setup/", get(|| async { Redirect::temporary("/app/") }))
@@ -52,7 +67,18 @@ pub(super) fn router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
                 let index_path = fallback_index_path.clone();
                 async move { spa_fallback(&headers, &index_path).await }
             }),
-        ))
+        );
+    let router = if let Some(web_dist_dir) = jellyfin_web_dist_dir {
+        router
+            .route("/", get(|| async { Redirect::permanent("/web/") }))
+            .nest_service(
+                "/web",
+                ServeDir::new(web_dist_dir).append_index_html_on_directories(true),
+            )
+    } else {
+        router.route("/", get(|| async { Redirect::permanent("/app/") }))
+    };
+    Ok(router)
 }
 
 pub(super) fn setup_router(dist_dir: &Path) -> Result<Router, AdminAssetsError> {
@@ -95,6 +121,18 @@ fn distribution(dist_dir: &Path) -> Result<std::path::PathBuf, AdminAssetsError>
     }
     fs::read(&index_path).map_err(|_| AdminAssetsError::UnreadableIndex)?;
     Ok(index_path)
+}
+
+fn jellyfin_web_distribution(dist_dir: &Path) -> Result<std::path::PathBuf, AdminAssetsError> {
+    if !dist_dir.is_dir() {
+        return Err(AdminAssetsError::MissingJellyfinWebDistribution);
+    }
+    let index_path = dist_dir.join("index.html");
+    if !index_path.is_file() {
+        return Err(AdminAssetsError::MissingJellyfinWebIndex);
+    }
+    fs::read(&index_path).map_err(|_| AdminAssetsError::UnreadableJellyfinWebIndex)?;
+    Ok(dist_dir.to_owned())
 }
 
 async fn spa_fallback(headers: &HeaderMap, index_path: &Path) -> Response {
