@@ -34,6 +34,8 @@
           "IsDefault": true
         }
       ],
+      "DefaultAudioStreamIndex": null,
+      "DefaultSubtitleStreamIndex": 3,
       "TranscodingUrl": null,
       "DirectStreamUrl": "/Videos/41/stream?static=true&mediaSourceId=018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11"
     }

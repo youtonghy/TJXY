@@ -534,6 +534,8 @@ pub struct PublishedMediaStream {
     codec: Option<String>,
     language: Option<String>,
     delivery_index: i32,
+    is_default: bool,
+    is_forced: bool,
     width: Option<i32>,
     height: Option<i32>,
     channels: Option<i32>,
@@ -560,6 +562,16 @@ impl PublishedMediaStream {
     #[must_use]
     pub const fn delivery_index(&self) -> i32 {
         self.delivery_index
+    }
+
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.is_default
+    }
+
+    #[must_use]
+    pub const fn is_forced(&self) -> bool {
+        self.is_forced
     }
 
     #[must_use]
@@ -3584,6 +3596,14 @@ async fn attach_streams(
             Alias::new("delivery_index"),
         )
         .expr_as(
+            Expr::col((stream.clone(), Alias::new("is_default"))),
+            Alias::new("is_default"),
+        )
+        .expr_as(
+            Expr::col((stream.clone(), Alias::new("is_forced"))),
+            Alias::new("is_forced"),
+        )
+        .expr_as(
             Expr::col((stream.clone(), Alias::new("width"))),
             Alias::new("width"),
         )
@@ -3623,6 +3643,12 @@ async fn attach_streams(
             codec: row.try_get("", "codec")?,
             language: row.try_get("", "language")?,
             delivery_index: row.try_get("", "delivery_index")?,
+            is_default: row
+                .try_get::<Option<bool>>("", "is_default")?
+                .unwrap_or(false),
+            is_forced: row
+                .try_get::<Option<bool>>("", "is_forced")?
+                .unwrap_or(false),
             width: row.try_get("", "width")?,
             height: row.try_get("", "height")?,
             channels: row.try_get("", "channels")?,

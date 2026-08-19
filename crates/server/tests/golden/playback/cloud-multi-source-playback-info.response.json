@@ -22,6 +22,7 @@
           "Level": null,
           "Type": "Video",
           "Index": 0,
+          "IsDefault": true,
           "IsExternal": false,
           "DeliveryMethod": "Embed",
           "DeliveryUrl": null,
@@ -47,6 +48,8 @@
           "SupportsExternalStream": true
         }
       ],
+      "DefaultAudioStreamIndex": null,
+      "DefaultSubtitleStreamIndex": null,
       "TranscodingUrl": null,
       "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{default_source_id}}"
     },
@@ -71,6 +74,7 @@
           "Level": null,
           "Type": "Video",
           "Index": 0,
+          "IsDefault": true,
           "IsExternal": false,
           "DeliveryMethod": "Embed",
           "DeliveryUrl": null,
@@ -79,6 +83,8 @@
           "SupportsExternalStream": false
         }
       ],
+      "DefaultAudioStreamIndex": null,
+      "DefaultSubtitleStreamIndex": null,
       "TranscodingUrl": null,
       "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{alternate_source_id}}"
     }

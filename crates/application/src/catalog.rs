@@ -125,6 +125,8 @@ pub struct PlaybackStream {
     codec: Option<String>,
     language: Option<String>,
     delivery_index: i32,
+    is_default: bool,
+    is_forced: bool,
     width: Option<i32>,
     height: Option<i32>,
     channels: Option<i32>,
@@ -151,6 +153,16 @@ impl PlaybackStream {
     #[must_use]
     pub const fn delivery_index(&self) -> i32 {
         self.delivery_index
+    }
+
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.is_default
+    }
+
+    #[must_use]
+    pub const fn is_forced(&self) -> bool {
+        self.is_forced
     }
 
     #[must_use]
@@ -1321,6 +1333,8 @@ fn playable_sources(
                     codec: stream.codec().map(str::to_owned),
                     language: stream.language().map(str::to_owned),
                     delivery_index: stream.delivery_index(),
+                    is_default: stream.is_default(),
+                    is_forced: stream.is_forced(),
                     width: stream.width(),
                     height: stream.height(),
                     channels: stream.channels(),

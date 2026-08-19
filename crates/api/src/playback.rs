@@ -94,6 +94,8 @@ pub struct MediaSourceInfo {
     supports_direct_stream: bool,
     supports_direct_play: bool,
     media_streams: Vec<MediaStream>,
+    default_audio_stream_index: Option<i32>,
+    default_subtitle_stream_index: Option<i32>,
     transcoding_url: Option<String>,
     direct_stream_url: String,
     required_http_headers: std::collections::BTreeMap<String, String>,
@@ -129,6 +131,19 @@ impl MediaSourceInfo {
         {
             return Err(PlaybackInfoError::UnsafeSubtitleRoute);
         }
+        let default_audio_stream_index = media_streams
+            .iter()
+            .find(|stream| stream.stream_type == MediaStreamType::Audio && stream.is_default)
+            .or_else(|| {
+                media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type == MediaStreamType::Audio)
+            })
+            .map(|stream| stream.index);
+        let default_subtitle_stream_index = media_streams
+            .iter()
+            .find(|stream| stream.stream_type == MediaStreamType::Subtitle && stream.is_default)
+            .map(|stream| stream.index);
 
         Ok(Self {
             protocol: MediaProtocol::File,
@@ -144,6 +159,8 @@ impl MediaSourceInfo {
             supports_direct_stream: supports_direct_play,
             supports_direct_play: false,
             media_streams,
+            default_audio_stream_index,
+            default_subtitle_stream_index,
             transcoding_url: None,
             direct_stream_url,
             required_http_headers: std::collections::BTreeMap::new(),

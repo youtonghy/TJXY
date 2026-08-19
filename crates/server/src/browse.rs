@@ -930,8 +930,8 @@ fn media_source_info(
                 is_external_url: false,
                 is_text_subtitle_stream: false,
                 supports_external_stream: false,
-                is_default: false,
-                is_forced: false,
+                is_default: stream.is_default(),
+                is_forced: stream.is_forced(),
             })
         })
         .collect::<Vec<_>>();

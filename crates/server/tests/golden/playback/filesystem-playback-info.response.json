@@ -58,6 +58,8 @@
           "Width": null
         }
       ],
+      "DefaultAudioStreamIndex": 2,
+      "DefaultSubtitleStreamIndex": null,
       "Path": null,
       "Protocol": "File",
       "RequiredHttpHeaders": {},
