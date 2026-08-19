@@ -83,6 +83,7 @@ pub struct MediaSourcePublicationRow {
     presentation_key: PresentationKey,
     edition: Option<String>,
     container: Option<String>,
+    locator_kind: String,
     naming_hints: Option<Value>,
     row_sha256: String,
 }
@@ -109,6 +110,7 @@ impl MediaSourcePublicationRow {
             presentation_key,
             edition,
             container,
+            locator_kind: "storage".to_owned(),
             naming_hints: None,
             row_sha256: String::new(),
         };
@@ -124,6 +126,24 @@ impl MediaSourcePublicationRow {
     #[must_use]
     pub const fn presentation_key(&self) -> PresentationKey {
         self.presentation_key
+    }
+
+    /// Marks the source as a validated storage object or a `.strm` descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError::InvalidSourceRow`] for unknown locator kinds.
+    pub fn with_locator_kind(
+        mut self,
+        locator_kind: impl Into<String>,
+    ) -> Result<Self, CatalogPublicationError> {
+        let locator_kind = locator_kind.into();
+        if !matches!(locator_kind.as_str(), "storage" | "strm") {
+            return Err(CatalogPublicationError::InvalidSourceRow);
+        }
+        self.locator_kind = locator_kind;
+        self.row_sha256 = source_hash(&self);
+        Ok(self)
     }
 
     /// Adds bounded parser evidence without treating it as probe output.
@@ -516,6 +536,7 @@ pub struct PublishedMediaSource {
     presentation_key: PresentationKey,
     edition: Option<String>,
     container: Option<String>,
+    locator_kind: String,
     probe_state: String,
     probe_revision: i64,
     bitrate: Option<i64>,
@@ -609,6 +630,7 @@ pub struct PlaybackLocation {
     size: u64,
     remote_revision: Option<String>,
     container: Option<String>,
+    locator_kind: String,
     is_audio: bool,
 }
 
@@ -664,6 +686,11 @@ impl PlaybackLocation {
     #[must_use]
     pub fn container(&self) -> Option<&str> {
         self.container.as_deref()
+    }
+
+    #[must_use]
+    pub fn locator_kind(&self) -> &str {
+        &self.locator_kind
     }
 
     #[must_use]
@@ -726,6 +753,11 @@ impl PublishedMediaSource {
     #[must_use]
     pub fn container(&self) -> Option<&str> {
         self.container.as_deref()
+    }
+
+    #[must_use]
+    pub fn locator_kind(&self) -> &str {
+        &self.locator_kind
     }
 
     #[must_use]
@@ -925,6 +957,18 @@ impl CatalogPublicationRepository<'_> {
         playback_location(self.database, owner, presentation_key).await
     }
 
+    /// Lists storage accounts attached to an enabled library containing this item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError`] for database failures.
+    pub async fn playback_storage_accounts(
+        &self,
+        owner: CatalogItemId,
+    ) -> Result<Vec<Uuid>, CatalogPublicationError> {
+        playback_storage_accounts(self.database, owner).await
+    }
+
     /// Resolves one active external subtitle by stable presentation and delivery index.
     ///
     /// # Errors
@@ -941,6 +985,86 @@ impl CatalogPublicationRepository<'_> {
         }
         subtitle_location(self.database, owner, presentation_key, delivery_index).await
     }
+}
+
+async fn playback_storage_accounts(
+    database: &sea_orm::DatabaseConnection,
+    owner: CatalogItemId,
+) -> Result<Vec<Uuid>, CatalogPublicationError> {
+    let item = Alias::new("strm_item");
+    let structure_owner = Alias::new("strm_structure_owner");
+    let membership = Alias::new("strm_membership");
+    let library = Alias::new("strm_library");
+    let library_root = Alias::new("strm_library_root");
+    let root = Alias::new("strm_root");
+    let account = Alias::new("strm_account");
+    let query = Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((account.clone(), Alias::new("id"))),
+            Alias::new("storage_account_id"),
+        )
+        .from_as(Alias::new("catalog_items"), item.clone())
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("catalog_items"),
+            structure_owner.clone(),
+            Expr::col((structure_owner.clone(), Alias::new("id")))
+                .equals((item.clone(), Alias::new("structure_owner_item_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_catalog_items"),
+            membership.clone(),
+            Cond::any()
+                .add(
+                    Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                        .equals((item.clone(), Alias::new("id"))),
+                )
+                .add(
+                    Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                        .equals((structure_owner.clone(), Alias::new("id"))),
+                ),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership.clone(), Alias::new("library_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            library_root.clone(),
+            Expr::col((library_root.clone(), Alias::new("library_id")))
+                .equals((library.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_roots"),
+            root.clone(),
+            Expr::col((root.clone(), Alias::new("id")))
+                .equals((library_root.clone(), Alias::new("storage_root_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_accounts"),
+            account.clone(),
+            Expr::col((account.clone(), Alias::new("id")))
+                .equals((root.clone(), Alias::new("storage_account_id"))),
+        )
+        .and_where(Expr::col((item, Alias::new("id"))).eq(owner.as_uuid()))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .and_where(Expr::col((account, Alias::new("status"))).is_in(["Active", "Ready"]))
+        .to_owned();
+    let backend = database.get_database_backend();
+    database
+        .query_all(backend.build(&query))
+        .await?
+        .iter()
+        .map(|row| row.try_get("", "storage_account_id").map_err(Into::into))
+        .collect()
 }
 
 async fn set_source_playback_policy(
@@ -1160,6 +1284,7 @@ async fn stage_source_rows(
                 Alias::new("presentation_key"),
                 Alias::new("edition"),
                 Alias::new("container"),
+                Alias::new("locator_kind"),
                 Alias::new("naming_hints"),
                 Alias::new("row_sha256"),
             ])
@@ -1171,6 +1296,7 @@ async fn stage_source_rows(
                 row.presentation_key.as_uuid().into(),
                 row.edition.clone().into(),
                 row.container.clone().into(),
+                row.locator_kind.clone().into(),
                 row.naming_hints.clone().into(),
                 row.row_sha256.clone().into(),
             ])
@@ -1180,6 +1306,7 @@ async fn stage_source_rows(
                         Alias::new("presentation_key"),
                         Alias::new("edition"),
                         Alias::new("container"),
+                        Alias::new("locator_kind"),
                         Alias::new("naming_hints"),
                         Alias::new("row_sha256"),
                     ])
@@ -1658,6 +1785,7 @@ async fn load_series_source_groups(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("locator_kind"),
             Alias::new("naming_hints"),
             Alias::new("row_sha256"),
         ])
@@ -1674,6 +1802,7 @@ async fn load_series_source_groups(
             presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
             edition: row.try_get("", "edition")?,
             container: row.try_get("", "container")?,
+            locator_kind: row.try_get("", "locator_kind")?,
             naming_hints: row.try_get("", "naming_hints")?,
             row_sha256: row.try_get("", "row_sha256")?,
         };
@@ -2223,6 +2352,7 @@ async fn materialize_sources(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("locator_kind"),
             Alias::new("naming_hints"),
             Alias::new("probe_state"),
             Alias::new("probe_revision"),
@@ -2234,6 +2364,7 @@ async fn materialize_sources(
                 row.presentation_key.as_uuid().into(),
                 row.edition.clone().into(),
                 row.container.clone().into(),
+                row.locator_kind.clone().into(),
                 row.naming_hints.clone().into(),
                 "NotProbed".into(),
                 0_i64.into(),
@@ -2241,7 +2372,11 @@ async fn materialize_sources(
         }
         insert.on_conflict(
             OnConflict::column(Alias::new("id"))
-                .update_columns([Alias::new("edition"), Alias::new("naming_hints")])
+                .update_columns([
+                    Alias::new("edition"),
+                    Alias::new("locator_kind"),
+                    Alias::new("naming_hints"),
+                ])
                 .to_owned(),
         );
         transaction.execute(backend.build(&insert)).await?;
@@ -2454,6 +2589,7 @@ async fn storage_availability_map(
     Ok(availability)
 }
 
+#[allow(clippy::too_many_lines)] // The source projection query and its attached associations are one read model.
 async fn active_sources(
     database: &sea_orm::DatabaseConnection,
     owner: CatalogItemId,
@@ -2481,6 +2617,10 @@ async fn active_sources(
         .expr_as(
             Expr::col((canonical.clone(), Alias::new("container"))),
             Alias::new("container"),
+        )
+        .expr_as(
+            Expr::col((canonical.clone(), Alias::new("locator_kind"))),
+            Alias::new("locator_kind"),
         )
         .expr_as(
             Expr::col((canonical.clone(), Alias::new("probe_state"))),
@@ -2890,6 +3030,10 @@ async fn playback_location(
             Alias::new("container"),
         )
         .expr_as(
+            Expr::col((canonical_source.clone(), Alias::new("locator_kind"))),
+            Alias::new("locator_kind"),
+        )
+        .expr_as(
             Expr::col((item.clone(), Alias::new("item_type"))),
             Alias::new("item_type"),
         )
@@ -3076,6 +3220,7 @@ fn playback_location_from_row(
         size: u64::try_from(size).map_err(|_| CatalogPublicationError::InvalidSourceGraph)?,
         remote_revision: row.try_get("", "remote_revision")?,
         container: row.try_get("", "container")?,
+        locator_kind: row.try_get("", "locator_kind")?,
         is_audio: row.try_get::<String>("", "item_type")? == "Audio",
     })
 }
@@ -3137,6 +3282,7 @@ async fn subtitle_location(
             Expr::col((canonical_source.clone(), Alias::new("container"))),
             Alias::new("container"),
         )
+        .expr_as(Expr::val("storage"), Alias::new("locator_kind"))
         .expr_as(
             Expr::col((item.clone(), Alias::new("item_type"))),
             Alias::new("item_type"),
@@ -3667,6 +3813,7 @@ fn published_source_from_row(
         presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
         edition: row.try_get("", "edition")?,
         container: row.try_get("", "container")?,
+        locator_kind: row.try_get("", "locator_kind")?,
         probe_state: row.try_get("", "probe_state")?,
         probe_revision: row.try_get("", "probe_revision")?,
         bitrate: row.try_get("", "bitrate")?,
@@ -3690,6 +3837,7 @@ async fn load_source_rows(
             Alias::new("presentation_key"),
             Alias::new("edition"),
             Alias::new("container"),
+            Alias::new("locator_kind"),
             Alias::new("naming_hints"),
             Alias::new("row_sha256"),
         ])
@@ -3707,6 +3855,7 @@ async fn load_source_rows(
                 presentation_key: PresentationKey::from_uuid(row.try_get("", "presentation_key")?),
                 edition: row.try_get("", "edition")?,
                 container: row.try_get("", "container")?,
+                locator_kind: row.try_get("", "locator_kind")?,
                 naming_hints: row.try_get("", "naming_hints")?,
                 row_sha256: row.try_get("", "row_sha256")?,
             })
@@ -3880,6 +4029,7 @@ fn source_hash(row: &MediaSourcePublicationRow) -> String {
     hasher.update(row.presentation_key.as_uuid().as_bytes());
     hash_optional_text(&mut hasher, row.edition.as_deref());
     hash_optional_text(&mut hasher, row.container.as_deref());
+    hasher.update(row.locator_kind.as_bytes());
     let naming_hints = row.naming_hints.as_ref().map(Value::to_string);
     hash_optional_text(&mut hasher, naming_hints.as_deref());
     format!("{:x}", hasher.finalize())

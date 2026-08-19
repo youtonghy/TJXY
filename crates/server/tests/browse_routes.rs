@@ -3329,6 +3329,7 @@ async fn latest_and_next_up_return_user_scoped_home_rows() {
     let older = seed_item(&app.database, library, "Older", "Movie").await;
     let newer = seed_item(&app.database, library, "Newer", "Movie").await;
     let series = seed_item(&app.database, library, "Series", "Series").await;
+    let series_image_tag = seed_asset(&app, series, b"series-poster").await;
     let first = seed_item(&app.database, library, "S01E01", "Episode").await;
     let second = seed_item(&app.database, library, "S01E02", "Episode").await;
     let backend = app.database.get_database_backend();
@@ -3408,6 +3409,19 @@ async fn latest_and_next_up_return_user_scoped_home_rows() {
         serde_json::from_slice(&next_up.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(next_up["TotalRecordCount"], 1);
     assert_eq!(next_up["Items"][0]["Id"], second.to_string());
+    assert_eq!(next_up["Items"][0]["SeriesId"], series.to_string());
+    assert_eq!(
+        next_up["Items"][0]["SeriesPrimaryImageTag"],
+        series_image_tag
+    );
+    assert_eq!(
+        next_up["Items"][0]["ParentPrimaryImageItemId"],
+        series.to_string()
+    );
+    assert_eq!(
+        next_up["Items"][0]["ParentPrimaryImageTag"],
+        series_image_tag
+    );
 }
 
 #[tokio::test]
@@ -3452,7 +3466,7 @@ async fn item_detail_requires_auth_and_returns_only_visible_catalog_items() {
     assert!(item["DateCreated"].is_string());
     assert_eq!(item["LocationType"], "FileSystem");
     assert_eq!(item["PrimaryImageAspectRatio"], 2.0);
-    assert_eq!(item["MediaSources"][0]["Id"], presentation.to_string());
+    assert_eq!(item["MediaSources"][0]["Id"], visible.to_string());
     assert!(!item["MediaStreams"].as_array().unwrap().is_empty());
     assert_eq!(
         item["MediaSources"][0]["DirectStreamUrl"],
@@ -3612,6 +3626,14 @@ async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
     let (_, _, token) = login(&app.router).await;
     let path = format!("/Items/{item}/Images/Primary");
 
+    let anonymous = get(&app.router, &path, None).await;
+    assert_eq!(anonymous.status(), StatusCode::OK);
+    assert_eq!(anonymous.headers()[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(
+        anonymous.into_body().collect().await.unwrap().to_bytes(),
+        b"jpeg"[..]
+    );
+
     let response = app
         .router
         .clone()
@@ -3728,7 +3750,7 @@ async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
         )
         .await
         .status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::NOT_FOUND
     );
     assert_eq!(
         get(
@@ -4167,7 +4189,7 @@ async fn playback_info_exposes_only_stable_ids_and_local_routes() {
         72_000_000_000_i64
     );
     assert_eq!(payload["MediaSources"][0]["IsDefault"], true);
-    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
     assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
     assert_eq!(
         payload["MediaSources"][0]["DirectStreamUrl"],

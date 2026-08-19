@@ -69,5 +69,16 @@ pub trait StorageBackend: Send + Sync {
         range: ByteRange,
     ) -> Result<ByteStream, BackendError>;
 
+    /// Resolves a local path reference without allowing the target to escape this backend's root.
+    async fn resolve_local_reference(
+        &self,
+        _descriptor: &StorageObjectId,
+        _reference: &str,
+    ) -> Result<StorageObject, BackendError> {
+        Err(BackendError::unsupported_capability(
+            "local path references",
+        ))
+    }
+
     fn capabilities(&self) -> StorageCapabilities;
 }

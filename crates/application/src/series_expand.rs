@@ -338,7 +338,14 @@ fn episode_source(
         PresentationKey::from_uuid(derived_uuid(episode.as_uuid(), "presentation", video.id()));
     let naming_hints =
         serde_json::to_value(parsed).map_err(|_| SeriesExpandError::InvalidNamingHints)?;
-    let source_row = MediaSourcePublicationRow::new(source, presentation, None, Some(container))?
+    let locator_kind = if container == "strm" {
+        "strm"
+    } else {
+        "storage"
+    };
+    let stored_container = (container != "strm").then_some(container);
+    let source_row = MediaSourcePublicationRow::new(source, presentation, None, stored_container)?
+        .with_locator_kind(locator_kind)?
         .with_naming_hints(naming_hints)?;
     let (identity, kind) = video.checksum().map_or((None, None), |checksum| {
         (
@@ -411,7 +418,7 @@ fn video_parts(name: &str) -> Option<(String, String)> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts"
+        "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts" | "strm"
     ) {
         return None;
     }
@@ -447,4 +454,17 @@ pub enum SeriesExpandError {
     Work(#[from] WorkJobRepositoryError),
     #[error("Series publication failed: {0}")]
     Publication(#[from] CatalogPublicationError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::video_parts;
+
+    #[test]
+    fn strm_participates_in_episode_aggregation() {
+        assert_eq!(
+            video_parts("Dark.S01E01.strm"),
+            Some(("Dark.S01E01".to_owned(), "strm".to_owned()))
+        );
+    }
 }

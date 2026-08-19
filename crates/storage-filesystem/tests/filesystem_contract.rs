@@ -210,6 +210,92 @@ async fn streams_only_the_requested_half_open_range() {
     assert_eq!(bytes, b"cdefg");
 }
 
+#[tokio::test]
+async fn resolves_relative_and_absolute_local_references_inside_the_root() {
+    let root = tempdir().unwrap();
+    fs::create_dir(root.path().join("show")).unwrap();
+    fs::write(root.path().join("show/episode.strm"), b"episode.mkv").unwrap();
+    fs::write(root.path().join("show/episode.mkv"), b"abcdefgh").unwrap();
+    let backend = FilesystemBackend::new(root.path()).await.unwrap();
+    let folders = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+    let show = folders.objects.first().unwrap();
+    let files = backend.list_children(show.id(), None).await.unwrap();
+    let descriptor = files
+        .objects
+        .iter()
+        .find(|object| object.name() == "episode.strm")
+        .unwrap();
+
+    let relative = backend
+        .resolve_local_reference(descriptor.id(), "episode.mkv")
+        .await
+        .unwrap();
+    let absolute = backend
+        .resolve_local_reference(
+            descriptor.id(),
+            fs::canonicalize(root.path())
+                .unwrap()
+                .join("show/episode.mkv")
+                .to_str()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = backend
+        .open_range(relative.id(), ByteRange::new(2, 6).unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .concat();
+
+    assert_eq!(relative.id(), absolute.id());
+    assert_eq!(bytes, b"cdef");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_references_reject_dot_components_and_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    fs::write(root.path().join("episode.strm"), b"escape.mkv").unwrap();
+    fs::write(outside.path().join("secret.mkv"), b"secret").unwrap();
+    symlink(
+        outside.path().join("secret.mkv"),
+        root.path().join("escape.mkv"),
+    )
+    .unwrap();
+    let backend = FilesystemBackend::new(root.path()).await.unwrap();
+    let files = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+    let descriptor = files
+        .objects
+        .iter()
+        .find(|object| object.name() == "episode.strm")
+        .unwrap();
+
+    assert!(matches!(
+        backend
+            .resolve_local_reference(descriptor.id(), "../secret.mkv")
+            .await,
+        Err(tjxy_storage::BackendError::InvalidValue { .. })
+    ));
+    assert!(
+        backend
+            .resolve_local_reference(descriptor.id(), "escape.mkv")
+            .await
+            .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn directory_listing_does_not_follow_symlinks_outside_the_root() {

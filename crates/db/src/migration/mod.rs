@@ -63,6 +63,7 @@ mod m20260813_000062_logging_settings;
 mod m20260813_000063_direct_local_metadata;
 mod m20260815_000064_ai_token_limits;
 mod m20260816_000065_qr_login_challenges;
+mod m20260818_000066_strm_locator;
 
 use std::collections::HashSet;
 
@@ -301,6 +302,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260813_000063_direct_local_metadata::Migration),
             Box::new(m20260815_000064_ai_token_limits::Migration),
             Box::new(m20260816_000065_qr_login_challenges::Migration),
+            Box::new(m20260818_000066_strm_locator::Migration),
         ]
     }
 }

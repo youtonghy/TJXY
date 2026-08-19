@@ -88,6 +88,12 @@ pub struct BaseItemDto {
     series_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     season_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_primary_image_item_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_primary_image_tag: Option<String>,
     #[serde(rename = "Type")]
     item_type: BaseItemKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +174,9 @@ impl BaseItemDto {
             parent_id: None,
             series_id: None,
             season_id: None,
+            series_primary_image_tag: None,
+            parent_primary_image_item_id: None,
+            parent_primary_image_tag: None,
             item_type: BaseItemKind::CollectionFolder,
             media_type: None,
             collection_type: Some(collection_type),
@@ -227,6 +236,9 @@ impl BaseItemDto {
             season_id: (item_type == BaseItemKind::Episode)
                 .then_some(parent_id)
                 .flatten(),
+            series_primary_image_tag: None,
+            parent_primary_image_item_id: None,
+            parent_primary_image_tag: None,
             item_type,
             media_type: item_type.media_type(),
             collection_type: None,
@@ -266,6 +278,19 @@ impl BaseItemDto {
     #[must_use]
     pub fn with_image_tags(mut self, image_tags: BTreeMap<String, String>) -> Self {
         self.image_tags = image_tags;
+        self
+    }
+
+    #[must_use]
+    pub fn with_series_image(mut self, series_id: Option<Uuid>, tag: Option<String>) -> Self {
+        if series_id.is_some() {
+            self.series_id = series_id;
+        }
+        self.series_primary_image_tag.clone_from(&tag);
+        if tag.is_some() {
+            self.parent_primary_image_item_id = self.series_id;
+            self.parent_primary_image_tag = tag;
+        }
         self
     }
 

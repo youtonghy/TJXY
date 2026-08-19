@@ -187,10 +187,19 @@ pub struct NfoDocument {
     original_title: Option<String>,
     production_year: Option<i32>,
     overview: Option<String>,
+    outline: Option<String>,
     provider_ids: BTreeMap<String, String>,
     genres: Vec<String>,
     studios: Vec<String>,
     people: Vec<MetadataPerson>,
+    community_rating: Option<f64>,
+    vote_count: Option<i64>,
+    runtime_ticks: Option<i64>,
+    premiere_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    release_status: Option<String>,
+    official_rating: Option<String>,
+    original_language: Option<String>,
     source: MetadataSource,
 }
 
@@ -234,6 +243,46 @@ impl NfoDocument {
     #[must_use]
     pub fn overview(&self) -> Option<&str> {
         self.overview.as_deref()
+    }
+
+    #[must_use]
+    pub const fn community_rating(&self) -> Option<f64> {
+        self.community_rating
+    }
+
+    #[must_use]
+    pub const fn vote_count(&self) -> Option<i64> {
+        self.vote_count
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
+    }
+
+    #[must_use]
+    pub const fn premiere_date(&self) -> Option<NaiveDate> {
+        self.premiere_date
+    }
+
+    #[must_use]
+    pub const fn end_date(&self) -> Option<NaiveDate> {
+        self.end_date
+    }
+
+    #[must_use]
+    pub fn release_status(&self) -> Option<&str> {
+        self.release_status.as_deref()
+    }
+
+    #[must_use]
+    pub fn official_rating(&self) -> Option<&str> {
+        self.official_rating.as_deref()
+    }
+
+    #[must_use]
+    pub fn original_language(&self) -> Option<&str> {
+        self.original_language.as_deref()
     }
 
     #[must_use]
@@ -288,14 +337,14 @@ impl NfoDocument {
             genres: Some(self.genres),
             studios: Some(self.studios),
             people: Some(self.people),
-            community_rating: None,
-            vote_count: None,
-            runtime_ticks: None,
-            premiere_date: None,
-            end_date: None,
-            release_status: None,
-            official_rating: None,
-            original_language: None,
+            community_rating: self.community_rating,
+            vote_count: self.vote_count,
+            runtime_ticks: self.runtime_ticks,
+            premiere_date: self.premiere_date,
+            end_date: self.end_date,
+            release_status: self.release_status,
+            official_rating: self.official_rating,
+            original_language: self.original_language,
             countries: None,
             languages: None,
             details_loaded: false,
@@ -387,9 +436,12 @@ impl NfoParser {
         if !self.stack.is_empty() {
             return Err(MetadataError::MalformedXml);
         }
-        let document = self.document.ok_or(MetadataError::UnsupportedDocument)?;
+        let mut document = self.document.ok_or(MetadataError::UnsupportedDocument)?;
         if document.title.is_none() {
             return Err(MetadataError::MissingTitle);
+        }
+        if document.overview.is_none() {
+            document.overview = document.outline.take();
         }
         Ok(document)
     }
@@ -408,16 +460,28 @@ impl NfoParser {
             original_title: None,
             production_year: None,
             overview: None,
+            outline: None,
             provider_ids: BTreeMap::new(),
             genres: Vec::new(),
             studios: Vec::new(),
             people: Vec::new(),
+            community_rating: None,
+            vote_count: None,
+            runtime_ticks: None,
+            premiere_date: None,
+            end_date: None,
+            release_status: None,
+            official_rating: None,
+            original_language: None,
             source: self.source.clone(),
         });
         Ok(())
     }
 
     fn append_text(&mut self, value: &str) -> Result<(), MetadataError> {
+        if value.chars().any(is_disallowed_xml_text_character) {
+            return Err(MetadataError::InvalidText);
+        }
         if self
             .text
             .chars()
@@ -449,14 +513,59 @@ impl NfoParser {
                 }
                 document.production_year = Some(year);
             }
-            [_, "plot"] => set_once(&mut document.overview, value, MAX_TEXT_CHARS)?,
+            [_, "plot"] => set_once_multiline(&mut document.overview, value, MAX_TEXT_CHARS)?,
+            [_, "outline"] => set_once_multiline(&mut document.outline, value, MAX_TEXT_CHARS)?,
+            [_, "rating"] if !value.is_empty() => {
+                let rating = value
+                    .parse::<f64>()
+                    .map_err(|_| MetadataError::InvalidAssociation)?;
+                if !rating.is_finite() || !(0.0..=10.0).contains(&rating) {
+                    return Err(MetadataError::InvalidAssociation);
+                }
+                document.community_rating = Some(rating);
+            }
+            [_, "votes"] if !value.is_empty() => {
+                let votes = value
+                    .replace(',', "")
+                    .parse::<i64>()
+                    .map_err(|_| MetadataError::InvalidAssociation)?;
+                if votes < 0 {
+                    return Err(MetadataError::InvalidAssociation);
+                }
+                document.vote_count = Some(votes);
+            }
+            [_, "runtime"] if !value.is_empty() => {
+                let minutes = value
+                    .parse::<i64>()
+                    .map_err(|_| MetadataError::InvalidAssociation)?;
+                document.runtime_ticks = Some(
+                    minutes
+                        .checked_mul(60 * 10_000_000)
+                        .filter(|ticks| *ticks >= 0)
+                        .ok_or(MetadataError::InvalidAssociation)?,
+                );
+            }
+            [_, "premiered" | "releasedate"] if !value.is_empty() => {
+                let date = parse_nfo_date(value)?;
+                document.premiere_date.get_or_insert(date);
+            }
+            [_, "enddate"] if !value.is_empty() => {
+                document.end_date = Some(parse_nfo_date(value)?);
+            }
+            [_, "status"] => set_once(&mut document.release_status, value, 64)?,
+            [_, "mpaa"] => set_once(&mut document.official_rating, value, 32)?,
+            [_, "language" | "original_language"] => {
+                set_once(&mut document.original_language, value, 16)?;
+            }
             [_, "uniqueid"] => {
                 if let Some(provider) = self.unique_id_provider.take() {
                     insert_provider_id(&mut document.provider_ids, &provider, value)?;
                 }
             }
             [_, "tmdbid"] => insert_provider_id(&mut document.provider_ids, "tmdb", value)?,
-            [_, "imdbid"] => insert_provider_id(&mut document.provider_ids, "imdb", value)?,
+            [_, "imdbid" | "imdb_id"] => {
+                insert_provider_id(&mut document.provider_ids, "imdb", value)?;
+            }
             [_, "tvdbid"] => insert_provider_id(&mut document.provider_ids, "tvdb", value)?,
             [_, "genre"] => push_unique(&mut document.genres, value)?,
             [_, "studio"] => push_unique(&mut document.studios, value)?,
@@ -799,7 +908,7 @@ impl MetadataCandidate {
             && self
                 .overview
                 .as_deref()
-                .is_none_or(|value| valid_text(value, MAX_TEXT_CHARS))
+                .is_none_or(|value| valid_multiline_text(value, MAX_TEXT_CHARS))
             && self.provider_ids.len() <= MAX_ASSOCIATIONS
             && self.provider_ids.iter().all(|(provider, provider_id)| {
                 valid_text(provider, 128) && valid_text(provider_id, 2048)
@@ -1868,6 +1977,8 @@ pub enum MetadataError {
     NestingTooDeep,
     #[error("metadata field exceeds its limit")]
     FieldTooLarge,
+    #[error("metadata text contains a disallowed control character")]
+    InvalidText,
     #[error("metadata document type is unsupported")]
     UnsupportedDocument,
     #[error("metadata document has no title")]
@@ -1961,6 +2072,25 @@ fn set_once(
     Ok(())
 }
 
+fn set_once_multiline(
+    target: &mut Option<String>,
+    value: &str,
+    max_chars: usize,
+) -> Result<(), MetadataError> {
+    if value.is_empty() || target.is_some() {
+        return Ok(());
+    }
+    if !valid_multiline_text(value, max_chars) {
+        return Err(MetadataError::FieldTooLarge);
+    }
+    *target = Some(value.to_owned());
+    Ok(())
+}
+
+fn parse_nfo_date(value: &str) -> Result<NaiveDate, MetadataError> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| MetadataError::InvalidAssociation)
+}
+
 fn insert_provider_id(
     target: &mut BTreeMap<String, String>,
     provider: &str,
@@ -2037,6 +2167,16 @@ fn valid_text(value: &str, max_chars: usize) -> bool {
     !value.trim().is_empty()
         && value.chars().count() <= max_chars
         && !value.chars().any(char::is_control)
+}
+
+fn valid_multiline_text(value: &str, max_chars: usize) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= max_chars
+        && !value.chars().any(is_disallowed_xml_text_character)
+}
+
+fn is_disallowed_xml_text_character(character: char) -> bool {
+    character.is_control() && !matches!(character, '\t' | '\n' | '\r')
 }
 
 fn valid_named_values(values: Option<&[MetadataNamedValue]>) -> bool {

@@ -107,7 +107,7 @@ impl MediaSourceInfo {
         &self.media_streams
     }
 
-    /// Builds a byte-for-byte direct-stream source using only TJXY routes.
+    /// Builds a byte-for-byte direct-play source using only TJXY routes.
     ///
     /// # Errors
     ///
@@ -156,8 +156,11 @@ impl MediaSourceInfo {
             is_default: false,
             is_remote: false,
             supports_transcoding: false,
+            // Jellyfin reports a compatible original-file response as both
+            // direct-play and direct-stream capable. Clients such as Jellyfin
+            // Media Player require SupportsDirectPlay to select this source.
             supports_direct_stream: supports_direct_play,
-            supports_direct_play: false,
+            supports_direct_play,
             media_streams,
             default_audio_stream_index,
             default_subtitle_stream_index,

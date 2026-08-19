@@ -350,6 +350,7 @@ impl LibraryViewRecord {
 pub struct CatalogItemRecord {
     id: CatalogItemId,
     parent_id: Option<CatalogItemId>,
+    series_id: Option<CatalogItemId>,
     item_type: String,
     name: String,
     original_title: Option<String>,
@@ -367,6 +368,7 @@ pub struct CatalogItemRecord {
     image_tags: BTreeMap<String, String>,
     backdrop_image_tags: Vec<String>,
     primary_image_aspect_ratio: Option<f64>,
+    series_primary_image_tag: Option<String>,
 }
 
 impl CatalogItemRecord {
@@ -378,6 +380,11 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn parent_id(&self) -> Option<CatalogItemId> {
         self.parent_id
+    }
+
+    #[must_use]
+    pub const fn series_id(&self) -> Option<CatalogItemId> {
+        self.series_id
     }
 
     #[must_use]
@@ -463,6 +470,11 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn primary_image_aspect_ratio(&self) -> Option<f64> {
         self.primary_image_aspect_ratio
+    }
+
+    #[must_use]
+    pub fn series_primary_image_tag(&self) -> Option<&str> {
+        self.series_primary_image_tag.as_deref()
     }
 
     pub fn apply_direct_metadata(
@@ -649,6 +661,31 @@ impl CatalogItemDetailRecord {
             document.production_year(),
             document.overview(),
         );
+        self.item.community_rating = document.community_rating().or(self.item.community_rating);
+        self.vote_count = document.vote_count().or(self.vote_count);
+        self.runtime_ticks = document.runtime_ticks().or(self.runtime_ticks);
+        self.premiere_date = document
+            .premiere_date()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|value| DateTime::from_naive_utc_and_offset(value, Utc))
+            .or(self.premiere_date);
+        self.end_date = document
+            .end_date()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|value| DateTime::from_naive_utc_and_offset(value, Utc))
+            .or(self.end_date);
+        self.release_status = document
+            .release_status()
+            .map(str::to_owned)
+            .or_else(|| self.release_status.take());
+        self.official_rating = document
+            .official_rating()
+            .map(str::to_owned)
+            .or_else(|| self.official_rating.take());
+        self.original_language = document
+            .original_language()
+            .map(str::to_owned)
+            .or_else(|| self.original_language.take());
         self.genres = document.genres().to_vec();
         self.studios = document.studios().to_vec();
         self.provider_ids = document.provider_ids().clone();
@@ -3646,6 +3683,10 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                     Alias::new(column),
                 );
             }
+            query.expr_as(
+                Expr::col((ci, Alias::new("structure_owner_item_id"))),
+                Alias::new("series_id"),
+            );
         }
         ItemQuerySource::Publication(_) => {
             let pci = Alias::new("pci");
@@ -3676,6 +3717,10 @@ fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {
                     Alias::new(column),
                 );
             }
+            query.expr_as(
+                Expr::col((catalog_item, Alias::new("structure_owner_item_id"))),
+                Alias::new("series_id"),
+            );
         }
     }
     for column in [
@@ -3705,6 +3750,9 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         parent_id: row
             .try_get::<Option<Uuid>>("", "parent_id")?
             .map(CatalogItemId::from_uuid),
+        series_id: row
+            .try_get::<Option<Uuid>>("", "series_id")?
+            .map(CatalogItemId::from_uuid),
         item_type: row.try_get("", "item_type")?,
         name: row.try_get("", "name")?,
         original_title: row.try_get("", "original_title")?,
@@ -3728,6 +3776,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         image_tags: BTreeMap::new(),
         backdrop_image_tags: Vec::new(),
         primary_image_aspect_ratio: None,
+        series_primary_image_tag: None,
     })
 }
 
@@ -3739,6 +3788,12 @@ async fn attach_image_tags(
     if items.is_empty() {
         return Ok(());
     }
+    let image_item_ids = items
+        .iter()
+        .flat_map(|item| [Some(item.id), item.series_id])
+        .flatten()
+        .map(CatalogItemId::as_uuid)
+        .collect::<BTreeSet<_>>();
     let asset = Alias::new("asset");
     let blob = Alias::new("blob");
     let mut query = Query::select();
@@ -3775,10 +3830,7 @@ async fn attach_image_tags(
             Expr::col((Alias::new("blob"), Alias::new("height"))),
             Alias::new("height"),
         )
-        .and_where(
-            Expr::col((asset, Alias::new("item_id")))
-                .is_in(items.iter().map(|item| item.id.as_uuid())),
-        )
+        .and_where(Expr::col((asset, Alias::new("item_id"))).is_in(image_item_ids.iter().copied()))
         .order_by((Alias::new("asset"), Alias::new("item_id")), Order::Asc)
         .order_by((Alias::new("asset"), Alias::new("image_type")), Order::Asc)
         .order_by((Alias::new("asset"), Alias::new("priority")), Order::Asc)
@@ -3828,7 +3880,7 @@ async fn attach_image_tags(
                     .from_as(Alias::new("direct_metadata_refs"), direct.clone())
                     .and_where(
                         Expr::col((direct.clone(), Alias::new("catalog_item_id")))
-                            .is_in(items.iter().map(|item| item.id.as_uuid())),
+                            .is_in(image_item_ids.iter().copied()),
                     )
                     .and_where(
                         Expr::col((direct.clone(), Alias::new("resource_kind")))
@@ -3862,9 +3914,18 @@ async fn attach_image_tags(
         }
     }
     for item in items {
-        item.image_tags = by_item.remove(&item.id.as_uuid()).unwrap_or_default();
-        item.backdrop_image_tags = backdrops.remove(&item.id.as_uuid()).unwrap_or_default();
-        item.primary_image_aspect_ratio = primary_aspect_ratios.remove(&item.id.as_uuid());
+        item.series_primary_image_tag = item.series_id.and_then(|series_id| {
+            by_item
+                .get(&series_id.as_uuid())
+                .and_then(|tags| tags.get("Primary"))
+                .cloned()
+        });
+        item.image_tags = by_item.get(&item.id.as_uuid()).cloned().unwrap_or_default();
+        item.backdrop_image_tags = backdrops
+            .get(&item.id.as_uuid())
+            .cloned()
+            .unwrap_or_default();
+        item.primary_image_aspect_ratio = primary_aspect_ratios.get(&item.id.as_uuid()).copied();
     }
     Ok(())
 }

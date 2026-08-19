@@ -41,6 +41,7 @@ pub struct ProbeCandidate {
     size: u64,
     location_revision: String,
     remote_revision: Option<String>,
+    locator_kind: String,
 }
 
 impl ProbeCandidate {
@@ -92,6 +93,11 @@ impl ProbeCandidate {
     #[must_use]
     pub fn remote_revision(&self) -> Option<&str> {
         self.remote_revision.as_deref()
+    }
+
+    #[must_use]
+    pub fn locator_kind(&self) -> &str {
+        &self.locator_kind
     }
 }
 
@@ -279,10 +285,45 @@ impl<'connection> ProbeRepository<'connection> {
         snapshot: &ProbeCandidate,
         result: &ProbeResult,
     ) -> Result<i64, ProbeRepositoryError> {
+        self.commit_success_with_location_revision(
+            claimed,
+            snapshot,
+            result,
+            snapshot.location_revision(),
+        )
+        .await
+    }
+
+    /// Commits Probe output while recording the revision of an indirectly resolved media target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProbeRepositoryError`] for invalid revisions, stale snapshots, or persistence
+    /// failures.
+    pub async fn commit_success_with_location_revision(
+        &self,
+        claimed: &ClaimedWorkJob,
+        snapshot: &ProbeCandidate,
+        result: &ProbeResult,
+        probe_location_revision: &str,
+    ) -> Result<i64, ProbeRepositoryError> {
         validate_claim(claimed)?;
         validate_result(result)?;
+        if probe_location_revision.trim().is_empty()
+            || probe_location_revision.chars().count() > MAX_IDENTITY_CHARS
+        {
+            return Err(ProbeRepositoryError::InvalidResult);
+        }
         let transaction = self.database.begin().await?;
-        let outcome = commit_success(&transaction, self.database, claimed, snapshot, result).await;
+        let outcome = commit_success(
+            &transaction,
+            self.database,
+            claimed,
+            snapshot,
+            result,
+            probe_location_revision,
+        )
+        .await;
         finish(transaction, outcome).await
     }
 
@@ -462,6 +503,10 @@ fn select_candidate_columns(query: &mut SelectStatement, tables: &ProbeTables) {
         .expr_as(
             Expr::col((tables.object.clone(), Alias::new("observed_sync_revision"))),
             Alias::new("observed_sync_revision"),
+        )
+        .expr_as(
+            Expr::col((tables.canonical.clone(), Alias::new("locator_kind"))),
+            Alias::new("locator_kind"),
         )
         .expr_as(
             Expr::col((tables.root_relation.clone(), Alias::new("storage_root_id"))),
@@ -696,6 +741,7 @@ async fn candidate_from_row(
         size,
         location_revision,
         remote_revision,
+        locator_kind: row.try_get("", "locator_kind")?,
     }))
 }
 
@@ -725,6 +771,7 @@ async fn commit_success(
     claimed: &ClaimedWorkJob,
     snapshot: &ProbeCandidate,
     result: &ProbeResult,
+    probe_location_revision: &str,
 ) -> Result<i64, ProbeRepositoryError> {
     fence_live_claim(transaction, claimed, Utc::now()).await?;
     let current = load_candidate(transaction, claimed)
@@ -743,7 +790,14 @@ async fn commit_success(
     )
     .await?;
     assign_external_subtitles(transaction, snapshot.source_id, assignments).await?;
-    update_source(transaction, claimed, snapshot, result).await?;
+    update_source(
+        transaction,
+        claimed,
+        snapshot,
+        result,
+        probe_location_revision,
+    )
+    .await?;
     let generation = advance_generation(transaction).await?;
     insert_change_event(
         transaction,
@@ -1088,6 +1142,7 @@ async fn update_source(
     claimed: &ClaimedWorkJob,
     snapshot: &ProbeCandidate,
     result: &ProbeResult,
+    probe_location_revision: &str,
 ) -> Result<(), ProbeRepositoryError> {
     let next_revision = claimed
         .job()
@@ -1109,7 +1164,7 @@ async fn update_source(
         )
         .value(
             Alias::new("probe_location_revision"),
-            snapshot.location_revision.as_str(),
+            probe_location_revision,
         )
         .value(Alias::new("last_probe_error"), Option::<String>::None)
         .and_where(Expr::col(Alias::new("id")).eq(snapshot.source_id.as_uuid()))

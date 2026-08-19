@@ -13,7 +13,7 @@
       "SupportsTranscoding": false,
       "SupportsDirectStream": true,
       "RequiredHttpHeaders": {},
-      "SupportsDirectPlay": false,
+      "SupportsDirectPlay": true,
       "MediaStreams": [
         {
           "Codec": "srt",

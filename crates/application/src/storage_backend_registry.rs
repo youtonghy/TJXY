@@ -4,7 +4,7 @@ use std::{
 };
 
 use thiserror::Error;
-use tjxy_storage::StorageBackend;
+use tjxy_storage::{BackendError, StorageBackend, StorageObject, StorageObjectId};
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
@@ -134,6 +134,40 @@ impl StorageBackendRegistry {
             .map(|entry| Arc::clone(&entry.backend))
     }
 
+    pub(crate) async fn resolve_local_reference(
+        &self,
+        preferred_account: Uuid,
+        allowed_accounts: &[Uuid],
+        descriptor: &StorageObjectId,
+        reference: &str,
+    ) -> Result<ResolvedLocalReference, BackendError> {
+        let mut account_ids = Vec::with_capacity(allowed_accounts.len() + 1);
+        account_ids.push(preferred_account);
+        account_ids.extend(
+            allowed_accounts
+                .iter()
+                .copied()
+                .filter(|account_id| *account_id != preferred_account),
+        );
+        for account_id in account_ids {
+            let Some(backend) = self.backend(account_id) else {
+                continue;
+            };
+            match backend.resolve_local_reference(descriptor, reference).await {
+                Ok(object) => {
+                    return Ok(ResolvedLocalReference {
+                        account_id,
+                        backend,
+                        object,
+                    });
+                }
+                Err(BackendError::NotFound | BackendError::UnsupportedCapability { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(BackendError::NotFound)
+    }
+
     /// Removes an account only when its active provider drive matches the requested drive.
     #[must_use]
     pub fn deactivate(&self, account_id: Uuid, provider_drive_id: &str) -> bool {
@@ -149,6 +183,12 @@ impl StorageBackendRegistry {
         });
         matches && entries.remove(&account_id).is_some()
     }
+}
+
+pub(crate) struct ResolvedLocalReference {
+    pub(crate) account_id: Uuid,
+    pub(crate) backend: Arc<dyn StorageBackend>,
+    pub(crate) object: StorageObject,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]

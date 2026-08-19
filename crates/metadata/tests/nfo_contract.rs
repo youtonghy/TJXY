@@ -50,3 +50,64 @@ fn nfo_rejects_doctype_unknown_entities_and_oversized_input() {
     let oversized = vec![b'x'; NfoDocument::MAX_BYTES + 1];
     assert!(NfoDocument::parse(&oversized, "large.nfo").is_err());
 }
+
+#[test]
+fn emby_series_nfo_accepts_bom_multiline_cdata_and_rich_fields() {
+    let xml = [
+        b"\xEF\xBB\xBF".as_slice(),
+        br#"<?xml version="1.0" encoding="utf-8"?>
+            <tvshow>
+              <plot><![CDATA[First line.
+Second line.]]></plot>
+              <outline>Fallback outline.</outline>
+              <title>Star Detective Precure!</title>
+              <originaltitle>Detective Precure!</originaltitle>
+              <rating>8.2</rating>
+              <votes>1,234</votes>
+              <year>2026</year>
+              <mpaa>BR-10</mpaa>
+              <imdb_id>tt39047437</imdb_id>
+              <premiered>2026-01-31</premiered>
+              <releasedate>2026-02-01</releasedate>
+              <enddate>2026-12-31</enddate>
+              <runtime>24</runtime>
+              <status>Continuing</status>
+              <language>ja</language>
+              <uniqueid type="tmdb">306721</uniqueid>
+            </tvshow>"#,
+    ]
+    .concat();
+
+    let document = NfoDocument::parse(&xml, "tvshow.nfo").unwrap();
+
+    assert_eq!(document.kind(), MetadataItemKind::Series);
+    assert_eq!(document.overview(), Some("First line.\nSecond line."));
+    assert_eq!(document.community_rating(), Some(8.2));
+    assert_eq!(document.vote_count(), Some(1_234));
+    assert_eq!(document.runtime_ticks(), Some(14_400_000_000));
+    assert_eq!(
+        document.premiere_date().map(|date| date.to_string()),
+        Some("2026-01-31".to_owned())
+    );
+    assert_eq!(
+        document.end_date().map(|date| date.to_string()),
+        Some("2026-12-31".to_owned())
+    );
+    assert_eq!(document.release_status(), Some("Continuing"));
+    assert_eq!(document.official_rating(), Some("BR-10"));
+    assert_eq!(document.original_language(), Some("ja"));
+    assert_eq!(document.provider_id("imdb"), Some("tt39047437"));
+    assert_eq!(document.provider_id("tmdb"), Some("306721"));
+    assert_eq!(document.state(), MetadataState::Ready);
+}
+
+#[test]
+fn nfo_rejects_non_xml_control_characters_without_calling_them_oversized() {
+    let error = NfoDocument::parse(
+        b"<movie><title>Unsafe\x01Title</title></movie>",
+        "unsafe-control.nfo",
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, tjxy_metadata::MetadataError::InvalidText));
+}

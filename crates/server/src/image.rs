@@ -54,9 +54,6 @@ async fn original(
     raw_query: Option<&str>,
     head_only: bool,
 ) -> Response {
-    if let Err(response) = auth::authenticated_principal(&state, headers, raw_query).await {
-        return response;
-    }
     let Ok(image_type) = image_type.parse::<ImageType>() else {
         return error(StatusCode::BAD_REQUEST, "unsupported image type");
     };

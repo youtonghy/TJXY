@@ -10,7 +10,7 @@
       "IsRemote": false,
       "SupportsTranscoding": false,
       "SupportsDirectStream": true,
-      "SupportsDirectPlay": false,
+      "SupportsDirectPlay": true,
       "MediaStreams": [
         {
           "Codec": "h264",
@@ -62,7 +62,7 @@
       "IsRemote": false,
       "SupportsTranscoding": false,
       "SupportsDirectStream": true,
-      "SupportsDirectPlay": false,
+      "SupportsDirectPlay": true,
       "MediaStreams": [
         {
           "Codec": "h264",

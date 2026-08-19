@@ -26,6 +26,7 @@ mod storage_change_feed;
 mod storage_read;
 mod storage_sync;
 mod storage_validate;
+mod strm;
 mod task;
 mod user_data;
 

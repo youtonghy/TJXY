@@ -34,6 +34,22 @@ async fn fixture(
     nested_episode: bool,
     additional_flat_episode: bool,
 ) -> Fixture {
+    fixture_with_video_name(
+        season_indexed,
+        nested_episode,
+        additional_flat_episode,
+        "Dark.S01E01.mkv",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)] // Mirrors one complete reconciled Series storage tree.
+async fn fixture_with_video_name(
+    season_indexed: bool,
+    nested_episode: bool,
+    additional_flat_episode: bool,
+    video_name: &str,
+) -> Fixture {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let sql = database.get_database_backend();
@@ -230,7 +246,7 @@ async fn fixture(
         season
     };
     objects.extend([
-        (video, Some(media_parent), "Dark.S01E01.mkv", "File", false),
+        (video, Some(media_parent), video_name, "File", false),
         (
             subtitle,
             Some(media_parent),
@@ -370,6 +386,31 @@ async fn fixture(
         video,
         subtitle,
     }
+}
+
+#[tokio::test]
+async fn expand_accepts_strm_as_an_episode_source_locator() {
+    let fixture = fixture_with_video_name(true, false, false, "Dark.S01E01.strm").await;
+
+    expand_series(&fixture).await;
+
+    let row = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .columns([Alias::new("locator_kind"), Alias::new("container")])
+                    .from(Alias::new("media_sources")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "locator_kind").unwrap(), "strm");
+    assert_eq!(
+        row.try_get::<Option<String>>("", "container").unwrap(),
+        None
+    );
 }
 
 async fn expand_series(fixture: &Fixture) {

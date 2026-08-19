@@ -6,10 +6,11 @@ use std::{
 
 use futures_util::StreamExt;
 use matroska::{Settings, Tracktype};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_db::{
-    ClaimedWorkJob, ProbeCandidate, ProbeRepository, ProbeRepositoryError, ProbeResult,
-    ProbedStream, StorageSyncRepositoryError,
+    CatalogPublicationError, CatalogPublicationRepository, ClaimedWorkJob, ProbeCandidate,
+    ProbeRepository, ProbeRepositoryError, ProbeResult, ProbedStream, StorageSyncRepositoryError,
 };
 use tjxy_storage::{BackendError, ByteRange, StorageBackend, StorageObject, StorageObjectId};
 use uuid::Uuid;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 use crate::{
     StorageBackendRegistry, StorageChangeProjectorError,
     storage_read::{self, StorageReadError},
+    strm::{MAX_STRM_BYTES, parse_strm},
 };
 
 const RANGE_BUDGET: u64 = 1024 * 1024;
@@ -650,6 +652,7 @@ impl ProbeService {
     ///
     /// Returns [`ProbeServiceError`] without completing the job when the backend,
     /// inspection, snapshot, or fenced commit fails.
+    #[allow(clippy::too_many_lines)] // Keeps descriptor and target snapshot fencing in one Probe transaction flow.
     pub async fn execute(&self, claimed: &ClaimedWorkJob) -> Result<i64, ProbeServiceError> {
         let repository = ProbeRepository::new(&self.database);
         let candidate = repository
@@ -674,12 +677,90 @@ impl ProbeService {
         .await
         .map_err(probe_storage_read_error)?;
         validate_object_snapshot(&candidate, &before)?;
+        let mut probe_object_id = object_id.clone();
+        let mut probe_size = candidate.size();
+        let mut probe_record_id = Some(candidate.storage_object_id());
+        let mut probe_backend = Arc::clone(&backend);
+        let mut target_before = None;
+        let mut probe_location_revision = candidate.location_revision().to_owned();
+        if candidate.locator_kind() == "strm" {
+            let descriptor_size = usize::try_from(candidate.size()).unwrap_or(usize::MAX);
+            if descriptor_size > MAX_STRM_BYTES {
+                let message = "STRM descriptor exceeds 8 KiB".to_owned();
+                repository
+                    .commit_failure(claimed, &candidate, &message)
+                    .await?;
+                return Err(ProbeServiceError::InspectionFailed(message));
+            }
+            let descriptor = read_exact_range(
+                &self.database,
+                backend.as_ref(),
+                Some(candidate.storage_object_id()),
+                &object_id,
+                0,
+                candidate.size(),
+                &repository,
+                claimed,
+                &candidate,
+            )
+            .await?;
+            let target = match parse_strm(&descriptor) {
+                Ok(target) => target,
+                Err(error) => {
+                    let message = error.to_string();
+                    repository
+                        .commit_failure(claimed, &candidate, &message)
+                        .await?;
+                    return Err(ProbeServiceError::InspectionFailed(message));
+                }
+            };
+            let allowed_accounts = CatalogPublicationRepository::new(&self.database)
+                .playback_storage_accounts(candidate.item_id())
+                .await?;
+            let resolved = match self
+                .backends
+                .resolve_local_reference(
+                    candidate.storage_account_id(),
+                    &allowed_accounts,
+                    &object_id,
+                    target,
+                )
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    let message = format!("STRM target is unavailable: {error}");
+                    repository
+                        .commit_failure(claimed, &candidate, &message)
+                        .await?;
+                    return Err(ProbeServiceError::InspectionFailed(message));
+                }
+            };
+            let Some(target_size) = resolved.object.size() else {
+                let message = "STRM target is not a regular file".to_owned();
+                repository
+                    .commit_failure(claimed, &candidate, &message)
+                    .await?;
+                return Err(ProbeServiceError::InspectionFailed(message));
+            };
+            probe_size = target_size;
+            probe_location_revision = strm_probe_revision(
+                &candidate,
+                resolved.account_id,
+                &resolved.object,
+                target_size,
+            );
+            probe_object_id = resolved.object.id().clone();
+            probe_record_id = None;
+            probe_backend = resolved.backend;
+            target_before = Some(resolved.object);
+        }
         let input = read_probe_input(
             &self.database,
-            backend.as_ref(),
-            candidate.storage_object_id(),
-            &object_id,
-            candidate.size(),
+            probe_backend.as_ref(),
+            probe_record_id,
+            &probe_object_id,
+            probe_size,
             &repository,
             claimed,
             &candidate,
@@ -708,11 +789,40 @@ impl ProbeService {
         if object_revision(&before) != object_revision(&after) || before.size() != after.size() {
             return Err(ProbeServiceError::ObjectChanged);
         }
+        if let Some(target_before) = target_before {
+            let target_after = probe_backend.get_object(&probe_object_id).await?;
+            if object_revision(&target_before) != object_revision(&target_after)
+                || target_before.size() != target_after.size()
+            {
+                return Err(ProbeServiceError::ObjectChanged);
+            }
+        }
         repository
-            .commit_success(claimed, &candidate, &result)
+            .commit_success_with_location_revision(
+                claimed,
+                &candidate,
+                &result,
+                &probe_location_revision,
+            )
             .await
             .map_err(Into::into)
     }
+}
+
+fn strm_probe_revision(
+    candidate: &ProbeCandidate,
+    target_account_id: Uuid,
+    target: &StorageObject,
+    target_size: u64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(candidate.location_revision().as_bytes());
+    digest.update(target_account_id.as_bytes());
+    digest.update(target.id().provider().as_bytes());
+    digest.update(target.id().provider_object_id().as_bytes());
+    digest.update(target.remote_revision().unwrap_or_default().as_bytes());
+    digest.update(target_size.to_be_bytes());
+    format!("strm:{:x}", digest.finalize())
 }
 
 #[derive(Debug, Error)]
@@ -735,13 +845,15 @@ pub enum ProbeServiceError {
     AvailabilityProjection(#[from] StorageChangeProjectorError),
     #[error("Probe persistence failed: {0}")]
     Repository(#[from] ProbeRepositoryError),
+    #[error("Probe catalog publication lookup failed: {0}")]
+    Publication(#[from] CatalogPublicationError),
 }
 
 #[allow(clippy::too_many_arguments)] // Each backend read is fenced by the durable claim and exact SQL candidate.
 async fn read_probe_input(
     database: &sea_orm::DatabaseConnection,
     backend: &dyn StorageBackend,
-    record_id: tjxy_common::StorageObjectRecordId,
+    record_id: Option<tjxy_common::StorageObjectRecordId>,
     object_id: &StorageObjectId,
     size: u64,
     repository: &ProbeRepository<'_>,
@@ -797,7 +909,7 @@ async fn read_probe_input(
 async fn read_exact_range(
     database: &sea_orm::DatabaseConnection,
     backend: &dyn StorageBackend,
-    record_id: tjxy_common::StorageObjectRecordId,
+    record_id: Option<tjxy_common::StorageObjectRecordId>,
     object_id: &StorageObjectId,
     start: u64,
     end: u64,
@@ -810,9 +922,13 @@ async fn read_exact_range(
     }
     ensure_probe_candidate(repository, claimed, candidate).await?;
     let range = ByteRange::new(start, end)?;
-    let mut stream = storage_read::open_range(database, backend, record_id, object_id, range)
-        .await
-        .map_err(probe_storage_read_error)?;
+    let mut stream = if let Some(record_id) = record_id {
+        storage_read::open_range(database, backend, record_id, object_id, range)
+            .await
+            .map_err(probe_storage_read_error)?
+    } else {
+        backend.open_range(object_id, range).await?
+    };
     let expected = usize::try_from(end - start)
         .map_err(|_| ProbeServiceError::Inspection("Probe range is too large".into()))?;
     let mut bytes = Vec::with_capacity(expected);

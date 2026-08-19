@@ -103,8 +103,15 @@ fn build_graph(
             )
         });
         if source_ids.insert(source) {
+            let locator_kind = if extension == "strm" {
+                "strm"
+            } else {
+                "storage"
+            };
+            let container = (extension != "strm").then_some(extension);
             let mut source_row =
-                MediaSourcePublicationRow::new(source, presentation, None, Some(extension))?;
+                MediaSourcePublicationRow::new(source, presentation, None, container)?
+                    .with_locator_kind(locator_kind)?;
             if !is_audio {
                 let parsed = parse_media_name(object.name())?;
                 let hints = serde_json::to_value(parsed)
@@ -202,7 +209,7 @@ fn supported_media_extension(extension: &str, is_audio: bool) -> bool {
     } else {
         matches!(
             extension,
-            "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts"
+            "mkv" | "mp4" | "m4v" | "webm" | "avi" | "mov" | "ts" | "m2ts" | "strm"
         )
     }
 }
@@ -227,4 +234,19 @@ pub enum SourceIndexError {
     Repository(#[from] SourceIndexRepositoryError),
     #[error("source-index publication failed: {0}")]
     Publication(#[from] CatalogPublicationError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_parts, supported_media_extension};
+
+    #[test]
+    fn strm_is_a_video_source_but_not_an_audio_source() {
+        assert!(supported_media_extension("strm", false));
+        assert!(!supported_media_extension("strm", true));
+        assert_eq!(
+            file_parts("Show.S01E01.strm"),
+            Some(("Show.S01E01".to_owned(), "strm".to_owned()))
+        );
+    }
 }

@@ -64,7 +64,7 @@
       "Protocol": "File",
       "RequiredHttpHeaders": {},
       "RunTimeTicks": 10000000,
-      "SupportsDirectPlay": false,
+      "SupportsDirectPlay": true,
       "SupportsDirectStream": true,
       "SupportsTranscoding": false,
       "TranscodingUrl": null

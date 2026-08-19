@@ -549,7 +549,15 @@ pub(crate) async fn item_detail(
             };
             let media_sources = sources
                 .iter()
-                .map(|source| media_source_info(item_id.as_uuid(), source, true))
+                .enumerate()
+                .map(|(index, source)| {
+                    media_source_info(
+                        item_id.as_uuid(),
+                        source,
+                        true,
+                        jellyfin_media_source_id(item_id.as_uuid(), source, index),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>();
             match media_sources {
                 Ok(media_sources) => {
@@ -841,12 +849,16 @@ async fn playback_info(
         .await
     {
         Ok(Some(sources)) => {
+            // Jellyfin uses the catalog item id as the id of its primary media
+            // source. Treat that id as an explicit request for the default
+            // source while keeping presentation keys for alternate versions.
+            let requested_source = request
+                .media_source_id
+                .filter(|requested| requested.as_uuid() != item_id);
             let mut sources = sources
                 .into_iter()
                 .filter(|source| {
-                    request
-                        .media_source_id
-                        .is_none_or(|requested| source.presentation_key() == requested)
+                    requested_source.is_none_or(|requested| source.presentation_key() == requested)
                 })
                 .map(|source| {
                     let compatible = request.enable_direct_play.unwrap_or(true)
@@ -862,7 +874,9 @@ async fn playback_info(
             sort_playback_sources(&mut sources);
             let media_sources = sources
                 .into_iter()
-                .map(|(compatible, _, source)| media_source_info(item_id, &source, compatible))
+                .map(|(compatible, _, source)| {
+                    media_source_info(item_id, &source, compatible, source.presentation_key())
+                })
                 .collect::<Result<Vec<_>, _>>();
             match media_sources {
                 Ok(media_sources) => Json(PlaybackInfoResponse {
@@ -903,6 +917,7 @@ fn media_source_info(
     item_id: Uuid,
     source: &PlaybackSource,
     supports_direct_play: bool,
+    jellyfin_source_id: PresentationKey,
 ) -> Result<MediaSourceInfo, tjxy_api::PlaybackInfoError> {
     let presentation = source.presentation_key();
     let mut streams = source
@@ -960,7 +975,7 @@ fn media_source_info(
     }));
     let route = if source.is_audio() { "Audio" } else { "Videos" };
     MediaSourceInfo::direct_play(
-        presentation,
+        jellyfin_source_id,
         source.container(),
         format!("/{route}/{item_id}/stream?static=true&mediaSourceId={presentation}"),
         streams,
@@ -974,6 +989,18 @@ fn media_source_info(
             source.is_default(),
         )
     })
+}
+
+fn jellyfin_media_source_id(
+    item_id: Uuid,
+    source: &PlaybackSource,
+    source_index: usize,
+) -> PresentationKey {
+    if source_index == 0 {
+        PresentationKey::from_uuid(item_id)
+    } else {
+        source.presentation_key()
+    }
 }
 
 #[derive(Default)]
@@ -1786,6 +1813,12 @@ fn item_dto(
         },
         item.backdrop_image_tags().to_vec(),
         item.primary_image_aspect_ratio(),
+    )
+    .with_series_image(
+        matches!(item_type, BaseItemKind::Season | BaseItemKind::Episode)
+            .then(|| item.series_id().map(CatalogItemId::as_uuid))
+            .flatten(),
+        item.series_primary_image_tag().map(str::to_owned),
     )
     .with_image_tags(item.image_tags().clone()))
 }

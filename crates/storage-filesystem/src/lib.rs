@@ -447,6 +447,48 @@ impl StorageBackend for FilesystemBackend {
         Ok(Box::pin(stream))
     }
 
+    async fn resolve_local_reference(
+        &self,
+        descriptor: &StorageObjectId,
+        reference: &str,
+    ) -> Result<StorageObject, BackendError> {
+        let reference = Path::new(reference);
+        if reference.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        }) {
+            return Err(BackendError::InvalidValue {
+                message: "local reference must not contain dot path components".to_owned(),
+            });
+        }
+        let path = if reference.is_absolute() {
+            reference
+                .strip_prefix(&self.root)
+                .map(|relative| self.root.join(relative))
+                .map_err(|_| BackendError::NotFound)?
+        } else {
+            let descriptor_path = self.path_for(descriptor).await?;
+            descriptor_path
+                .parent()
+                .ok_or_else(|| BackendError::InvalidValue {
+                    message: "descriptor has no parent directory".to_owned(),
+                })?
+                .join(reference)
+        };
+        let file = self.open_media_file(&path).await?;
+        let metadata = file.metadata().await.map_err(map_io_error)?;
+        if !metadata.is_file() {
+            return Err(BackendError::InvalidValue {
+                message: "local reference target is not a regular file".to_owned(),
+            });
+        }
+        let object = self.object_from_metadata(&path, &metadata)?;
+        self.paths.write().await.insert(object.id().clone(), path);
+        Ok(object)
+    }
+
     fn capabilities(&self) -> StorageCapabilities {
         StorageCapabilities::new()
             .with_file_events(true)

@@ -901,7 +901,7 @@ async fn assert_playback_delivery_contract(
     assert_eq!(source["IsRemote"], false);
     assert_eq!(source["SupportsTranscoding"], false);
     assert_eq!(source["SupportsDirectStream"], true);
-    assert_eq!(source["SupportsDirectPlay"], false);
+    assert_eq!(source["SupportsDirectPlay"], true);
     assert_eq!(source["TranscodingUrl"], Value::Null);
     let direct_stream_url = source["DirectStreamUrl"]
         .as_str()
