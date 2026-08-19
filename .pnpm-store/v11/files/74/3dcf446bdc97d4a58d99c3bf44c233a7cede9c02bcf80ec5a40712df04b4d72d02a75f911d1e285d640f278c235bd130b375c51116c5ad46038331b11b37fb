@@ -1,5 +1,0 @@
-{
-  "main": "../dist/exports/TokenField.cjs",
-  "module": "../dist/exports/TokenField.js",
-  "types": "../dist/types/exports/TokenField.d.ts"
-}
