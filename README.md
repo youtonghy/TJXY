@@ -17,9 +17,9 @@ it. One movie, episode, or track can therefore keep a stable catalog identity
 while its playable sources live on local disks, Google Drive, or OneDrive.
 
 The project includes a browser media client, an administrator console, a Rust
-HTTP server, and a terminal diagnostic console. It can run natively or as a
-Docker Compose deployment with either a managed PostgreSQL instance or an
-existing database.
+HTTP server, and a terminal diagnostic console. The recommended installation
+pulls a published Docker image. Native builds, source builds, and Linux
+archives remain available for maintainers.
 
 > [!IMPORTANT]
 > TJXY is under active development and does not yet implement the complete
@@ -52,80 +52,54 @@ existing database.
 - **Operational tooling:** health checks, structured rotating logs, a diagnostic
   TUI, Docker health checks, and persistent installation configuration.
 
-## Quick Start with Docker
+## Quick Start
 
-The recommended end-user deployment pulls a published image from GHCR. The
-launcher creates persistent storage, starts the Compose services, and waits until
-they are healthy. Source builds are available for maintainers who need to build
-from a checkout.
+The recommended end-user installation pulls the published Docker image. The
+launcher creates persistent storage, starts Compose, and waits until the
+services are healthy. You do not need Node.js, Rust, or `HEROUI_KEY` on the
+deployment host.
 
 ### Requirements
 
 - Docker Engine with a recent Compose v2 plugin
-- Source builds additionally need Node.js 22.12 or newer, npm, and prepared
-  frontend dependencies in `admin/node_modules`.
 
-### Published Image
+### Published Docker Image
 
-Release CI publishes multi-platform images to
-`ghcr.io/youtonghy/tjxy:latest` and a version tag such as
-`ghcr.io/youtonghy/tjxy:0.1.0`. Pull the image through the launcher without
-running a frontend build:
+Current release: `ghcr.io/youtonghy/tjxy:0.0.1` (`linux/amd64` and
+`linux/arm64`). The `latest` tag points at the same image. Pin the version tag
+in production.
+
+The repository and GHCR package are currently private, so authenticate before
+the first pull:
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+docker login ghcr.io
+./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media
 ```
 
-The equivalent flag is `--image ghcr.io/youtonghy/tjxy:latest`. If the GHCR
-package is private, authenticate first with `docker login ghcr.io`. Published
-image users do not need Node.js, npm, or `HEROUI_KEY`.
-
-For a pinned release, replace `latest` with an immutable version tag. Rerun the
-same command to pull a newer image and recreate the application container.
-
-### Source Build
-
-HeroUI Pro is a licensed build dependency. Maintainers must store `HEROUI_KEY`
-as a GitHub Actions repository secret before publishing a release. For a local
-source build, install it without committing the key:
-
-```bash
-cd admin
-HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
-npm run build
-cd ..
-```
-
-The `Release` workflow uses that secret only while producing `admin/dist`; it
-then publishes the completed image. The secret is never needed on a deployment
-host. After the first release, set the GHCR package visibility to public if
-anonymous pulls are required and the HeroUI Pro license permits that
-distribution. To build from the checkout instead of pulling an image, omit
-`TJXY_IMAGE` and `--image` from the launcher commands below.
-
-For a manual release, open **Actions > Release > Run workflow** and enter a
-version such as `0.2.0` or `v0.2.0`. CI builds the current `main` branch and
-creates the `v0.2.0` tag, GitHub Release, portable archives, and container image.
-An existing tag is not required. Pushing a matching `vX.Y.Z` tag remains
-supported and keeps the stricter Cargo workspace version check.
+`TJXY_IMAGE=ghcr.io/youtonghy/tjxy:0.0.1` is equivalent to `--image`. Rerun the
+same command to pull a newer tag and recreate the application container.
 
 ### Managed PostgreSQL
 
-Run the interactive launcher:
+The command above provisions PostgreSQL automatically. You can also run the
+interactive launcher and pass the published image:
 
 ```bash
-./tjxy-setup
+./tjxy-setup --image ghcr.io/youtonghy/tjxy:0.0.1
 ```
 
 Choose **Docker** and **managed PostgreSQL**, or provide the choices directly:
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media \
   --port 8096
 ```
@@ -145,9 +119,10 @@ The database is available only on the Compose network. Its data remains in the
 Use an existing SQLite, PostgreSQL, or MySQL database by selecting external mode:
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+./tjxy-setup \
   --runtime docker \
   --database external \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media
 ```
 
@@ -165,18 +140,17 @@ Docker Desktop.
 | `--media PATH` | `./media` | `/media`, visible to the library browser |
 | `--media-mode ro` | `rw` | Mount media read-only |
 | `--port PORT` | `8096` | Publish the TJXY HTTP service |
-| `--image IMAGE` | source build | Pull a published image and skip frontend build |
+| `--image IMAGE` | unset (source build) | Recommended: `ghcr.io/youtonghy/tjxy:0.0.1`. Omit only when building from a checkout |
 
 TJXY publishes only on `127.0.0.1` by default. Keep this setting when using an
 SSH tunnel or reverse proxy on the same host. For direct LAN access, explicitly
 publish on every interface and protect the port with a firewall:
 
 ```bash
-TJXY_PUBLISH_HOST=0.0.0.0 \
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest \
-./tjxy-setup \
+TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --port 8096
 ```
 
@@ -193,9 +167,7 @@ Use a TLS reverse proxy before exposing TJXY outside a trusted network.
 `stop` removes containers and the Compose network but preserves bind-mounted
 files and the managed PostgreSQL volume. To update a published-image deployment,
 back up the database and host directories, then rerun the same command with the
-new version tag. The launcher pulls the image before recreating TJXY. For source
-deployments, stop TJXY, update the checkout, refresh frontend dependencies when
-the lockfile changes, and rerun the source-build command.
+new version tag. The launcher pulls the image before recreating TJXY.
 
 Do not run `docker compose down --volumes` unless the managed PostgreSQL database
 is intentionally being deleted.
@@ -263,8 +235,8 @@ require a Rust or Node.js toolchain.
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf tjxy-v0.1.0-linux-x86_64-gnu.tar.gz
-cd tjxy-v0.1.0-linux-x86_64-gnu
+tar -xzf tjxy-v0.0.1-linux-x86_64-gnu.tar.gz
+cd tjxy-v0.0.1-linux-x86_64-gnu
 ./tjxy
 ```
 
@@ -287,6 +259,36 @@ endpoint. Do not reuse the same `tjxy.toml` when switching between native and
 Docker runtimes or between managed and external databases. `tjxy-setup` detects
 this situation and requires a new `--config-dir` instead of silently rewriting
 an installation.
+
+## Build from Source
+
+Source builds are for maintainers. They require Node.js 22.12 or newer, npm,
+prepared frontend dependencies in `admin/node_modules`, and Rust 1.88 or newer
+when compiling the server. HeroUI Pro is a licensed build dependency. Store
+`HEROUI_KEY` as a GitHub Actions repository secret before publishing a release.
+For a local source build, install it without committing the key:
+
+```bash
+cd admin
+HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
+npm run build
+cd ..
+```
+
+The `Release` workflow uses that secret only while producing `admin/dist`; the
+published image and Linux archives already contain the built frontend. The
+secret is never needed on a deployment host. To build Docker from the checkout
+instead of pulling GHCR, omit `--image` and `TJXY_IMAGE`:
+
+```bash
+./tjxy-setup --runtime docker --database postgres --media /path/to/media
+```
+
+For a manual release, open **Actions > Release > Run workflow** and enter a
+version such as `0.0.1` or `v0.0.1`. CI builds the current `main` branch and
+creates the tag, GitHub Release, portable archives, and container image. An
+existing tag is not required. Pushing a matching `vX.Y.Z` tag remains supported
+and keeps the stricter Cargo workspace version check.
 
 ## Development
 

@@ -17,8 +17,8 @@ TJXY 将影视或音乐条目与实际提供文件内容的存储位置分离。
 或 OneDrive 的一个或多个可播放来源。
 
 项目包含浏览器媒体客户端、管理员控制台、Rust HTTP 服务端和终端诊断工具。
-它可以直接在宿主机运行，也可以通过 Docker Compose 部署，并支持自动管理的
-PostgreSQL 或已有外部数据库。
+推荐安装方式是拉取已经发布的 Docker 镜像。本地构建、源码构建和 Linux
+发行包仍可供维护者使用。
 
 > [!IMPORTANT]
 > TJXY 仍在持续开发中，尚未实现完整的 Jellyfin API。在依赖特定 Jellyfin
@@ -45,74 +45,51 @@ PostgreSQL 或已有外部数据库。
 - **运维工具**：健康检查、结构化滚动日志、终端诊断界面、Docker 健康检查和
   持久化安装配置。
 
-## 使用 Docker 快速安装
+## 快速安装
 
-推荐的最终用户部署方式是从 GHCR 拉取已经构建好的镜像。启动脚本会创建持久化
-目录、启动 Compose 服务，并等待所有服务通过健康检查。维护者仍可以从源码构建。
+推荐的最终用户安装方式是拉取已经发布的 Docker 镜像。启动脚本会创建持久化
+目录、启动 Compose 服务，并等待所有服务通过健康检查。部署主机不需要
+Node.js、Rust 或 `HEROUI_KEY`。
 
 ### 环境要求
 
 - Docker Engine 和较新的 Compose v2 插件
-- 从源码构建时还需要 Node.js 22.12 或更高版本、npm，以及已经准备好的
-  `admin/node_modules` 前端依赖。
 
-### 使用已发布镜像
+### 使用已发布 Docker 镜像
 
-Release CI 会将多架构镜像发布到 `ghcr.io/youtonghy/tjxy:latest`，同时发布
-类似 `ghcr.io/youtonghy/tjxy:0.1.0` 的版本标签。通过启动脚本拉取镜像，不再
-执行本地前端构建：
+当前版本为 `ghcr.io/youtonghy/tjxy:0.0.1`（`linux/amd64` 和 `linux/arm64`）。
+`latest` 标签指向同一镜像。生产环境请固定使用版本标签。
+
+仓库和 GHCR 镜像包目前是私有的，首次拉取前需要先登录：
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+docker login ghcr.io
+./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media
 ```
 
-也可以使用等价参数：`--image ghcr.io/youtonghy/tjxy:latest`。如果 GHCR
-镜像包是私有的，请先执行 `docker login ghcr.io`。使用已发布镜像时不需要
-Node.js、npm 或 `HEROUI_KEY`。
-
-生产环境可以把 `latest` 替换成固定版本标签。更新时重新执行同一命令即可拉取
-新镜像并重建应用容器。
-
-### 从源码构建
-
-HeroUI Pro 是受许可保护的构建依赖。维护者在发布版本前，必须将
-`HEROUI_KEY` 保存为 GitHub Actions repository secret。本地准备源码时也可以
-在 `admin/` 包中安装，但不要把密钥提交到仓库：
-
-```bash
-cd admin
-HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
-npm run build
-cd ..
-```
-
-`Release` workflow 只在生成 `admin/dist` 和发布镜像时使用该 secret。部署主机
-永远不需要这个密钥。第一次发布后，如果需要匿名拉取并且 HeroUI Pro 许可证
-允许这种分发方式，请把 GHCR package 的可见性设置为 public。若要从当前源码
-构建而不是拉取镜像，请在下面的启动命令中去掉 `TJXY_IMAGE` 和 `--image`。
-
-手动发布时，进入 **Actions > Release > Run workflow**，输入例如 `0.2.0` 或
-`v0.2.0`。CI 会直接构建当前 `main`，并创建 `v0.2.0` tag、GitHub Release、
-便携发行包和容器镜像，不需要提前创建 tag。继续支持直接推送 `vX.Y.Z` tag；
-这种方式仍会严格检查 Cargo workspace 版本。
+`TJXY_IMAGE=ghcr.io/youtonghy/tjxy:0.0.1` 与 `--image` 等价。更新时重新执行
+同一命令即可拉取新标签并重建应用容器。
 
 ### 自动管理 PostgreSQL
 
-运行交互式启动脚本：
+上面的命令会自动创建 PostgreSQL。也可以运行交互式启动脚本，同时传入已发布
+镜像：
 
 ```bash
-./tjxy-setup
+./tjxy-setup --image ghcr.io/youtonghy/tjxy:0.0.1
 ```
 
 选择 **Docker 启动** 和 **自动安装并管理 PostgreSQL**，也可以直接传入参数：
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media \
   --port 8096
 ```
@@ -130,9 +107,10 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 选择 external 模式即可使用已有的 SQLite、PostgreSQL 或 MySQL：
 
 ```bash
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
+./tjxy-setup \
   --runtime docker \
   --database external \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --media /path/to/media
 ```
 
@@ -149,18 +127,17 @@ TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest ./tjxy-setup \
 | `--media PATH` | `./media` | `/media`，可在媒体库文件浏览器中选择 |
 | `--media-mode ro` | `rw` | 以只读方式挂载媒体目录 |
 | `--port PORT` | `8096` | 发布 TJXY HTTP 服务端口 |
-| `--image IMAGE` | 从源码构建 | 拉取已发布镜像并跳过前端构建 |
+| `--image IMAGE` | 未设置时从源码构建 | 推荐使用 `ghcr.io/youtonghy/tjxy:0.0.1`。仅在从当前源码构建时省略 |
 
 默认只监听宿主机的 `127.0.0.1`。使用同一台机器上的反向代理或 SSH 隧道时，
 建议保持该设置。若需要直接从局域网访问，可以显式监听所有网卡，并通过防火墙
 限制端口：
 
 ```bash
-TJXY_PUBLISH_HOST=0.0.0.0 \
-TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest \
-./tjxy-setup \
+TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
   --runtime docker \
   --database postgres \
+  --image ghcr.io/youtonghy/tjxy:0.0.1 \
   --port 8096
 ```
 
@@ -176,9 +153,7 @@ TJXY_IMAGE=ghcr.io/youtonghy/tjxy:latest \
 
 `stop` 会删除容器和 Compose 网络，但不会删除宿主机挂载文件或 PostgreSQL
 volume。升级发布镜像部署前，应先备份数据库和宿主机目录，再把原命令中的镜像
-版本改为新版本并重新执行；脚本会先拉取镜像，然后重建 TJXY。升级源码部署时，
-需要停止 TJXY、更新仓库；若前端锁文件发生变化，还需要重新准备前端依赖，
-最后重新执行源码构建命令。
+版本改为新版本并重新执行；脚本会先拉取镜像，然后重建 TJXY。
 
 除非确定要永久删除自动管理的 PostgreSQL 数据，否则不要运行
 `docker compose down --volumes`。
@@ -225,8 +200,8 @@ TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf tjxy-v0.1.0-linux-x86_64-gnu.tar.gz
-cd tjxy-v0.1.0-linux-x86_64-gnu
+tar -xzf tjxy-v0.0.1-linux-x86_64-gnu.tar.gz
+cd tjxy-v0.0.1-linux-x86_64-gnu
 ./tjxy
 ```
 
@@ -246,6 +221,34 @@ cd tjxy-v0.1.0-linux-x86_64-gnu
 在自动管理与外部数据库之间切换时，不要复用同一个 `tjxy.toml`。
 `tjxy-setup` 会检测这种情况，并要求使用新的 `--config-dir`，不会静默修改
 已有安装。
+
+## 从源码构建
+
+源码构建面向维护者。需要 Node.js 22.12 或更高版本、npm、已经准备好的
+`admin/node_modules` 前端依赖；编译服务端时还需要 Rust 1.88 或更高版本。
+HeroUI Pro 是受许可保护的构建依赖。发布版本前，必须将 `HEROUI_KEY` 保存为
+GitHub Actions repository secret。本地准备源码时也可以在 `admin/` 中安装，
+但不要把密钥提交到仓库：
+
+```bash
+cd admin
+HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
+npm run build
+cd ..
+```
+
+`Release` workflow 只在生成 `admin/dist` 时使用该 secret。已发布镜像和
+Linux 发行包已经包含构建好的前端，部署主机永远不需要这个密钥。若要从当前
+源码构建 Docker 而不是拉取 GHCR 镜像，请省略 `--image` 和 `TJXY_IMAGE`：
+
+```bash
+./tjxy-setup --runtime docker --database postgres --media /path/to/media
+```
+
+手动发布时，进入 **Actions > Release > Run workflow**，输入例如 `0.0.1` 或
+`v0.0.1`。CI 会直接构建当前 `main`，并创建 tag、GitHub Release、便携发行包
+和容器镜像，不需要提前创建 tag。继续支持直接推送 `vX.Y.Z` tag；这种方式仍会
+严格检查 Cargo workspace 版本。
 
 ## 开发
 
