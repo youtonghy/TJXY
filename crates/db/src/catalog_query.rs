@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult,
     sea_query::{
@@ -81,6 +81,7 @@ pub struct CatalogItemsQuery {
     sorts: Vec<CatalogSort>,
     genre: Option<String>,
     production_year: Option<i32>,
+    favorite_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +114,7 @@ impl CatalogItemsQuery {
             sorts: Vec::new(),
             genre: None,
             production_year: None,
+            favorite_only: false,
         }
     }
 
@@ -159,6 +161,12 @@ impl CatalogItemsQuery {
     }
 
     #[must_use]
+    pub const fn with_favorite_only(mut self, favorite_only: bool) -> Self {
+        self.favorite_only = favorite_only;
+        self
+    }
+
+    #[must_use]
     pub const fn scope(&self) -> CatalogItemsScope {
         self.scope
     }
@@ -196,6 +204,11 @@ impl CatalogItemsQuery {
     #[must_use]
     pub const fn production_year(&self) -> Option<i32> {
         self.production_year
+    }
+
+    #[must_use]
+    pub const fn favorite_only(&self) -> bool {
+        self.favorite_only
     }
 }
 
@@ -351,6 +364,8 @@ pub struct CatalogItemRecord {
     id: CatalogItemId,
     parent_id: Option<CatalogItemId>,
     series_id: Option<CatalogItemId>,
+    #[serde(default)]
+    series_name: Option<String>,
     item_type: String,
     name: String,
     original_title: Option<String>,
@@ -371,6 +386,53 @@ pub struct CatalogItemRecord {
     series_primary_image_tag: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LatestItemRecord {
+    item: CatalogItemRecord,
+    child_count: Option<u64>,
+}
+
+enum LatestSeed {
+    Item(Box<CatalogItemRecord>),
+    Series {
+        series_id: CatalogItemId,
+        latest_date: DateTime<Utc>,
+    },
+}
+
+impl LatestSeed {
+    fn latest_date(&self) -> DateTime<Utc> {
+        match self {
+            Self::Item(item) => item.date_created(),
+            Self::Series { latest_date, .. } => *latest_date,
+        }
+    }
+
+    fn stable_id(&self) -> Uuid {
+        match self {
+            Self::Item(item) => item.id().as_uuid(),
+            Self::Series { series_id, .. } => series_id.as_uuid(),
+        }
+    }
+}
+
+impl LatestItemRecord {
+    #[must_use]
+    pub const fn new(item: CatalogItemRecord, child_count: Option<u64>) -> Self {
+        Self { item, child_count }
+    }
+
+    #[must_use]
+    pub const fn item(&self) -> &CatalogItemRecord {
+        &self.item
+    }
+
+    #[must_use]
+    pub const fn child_count(&self) -> Option<u64> {
+        self.child_count
+    }
+}
+
 impl CatalogItemRecord {
     #[must_use]
     pub const fn id(&self) -> CatalogItemId {
@@ -385,6 +447,11 @@ impl CatalogItemRecord {
     #[must_use]
     pub const fn series_id(&self) -> Option<CatalogItemId> {
         self.series_id
+    }
+
+    #[must_use]
+    pub fn series_name(&self) -> Option<&str> {
+        self.series_name.as_deref()
     }
 
     #[must_use]
@@ -1431,27 +1498,91 @@ impl<'connection> CatalogQueryRepository<'connection> {
         library_id: Option<Uuid>,
         item_types: &[CatalogItemType],
         limit: u64,
-    ) -> Result<Vec<CatalogItemRecord>, CatalogQueryError> {
+        group_items: bool,
+        is_played: Option<bool>,
+    ) -> Result<Vec<LatestItemRecord>, CatalogQueryError> {
         if limit == 0 || limit > MAX_PAGE_SIZE {
             return Err(CatalogQueryError::InvalidPage);
         }
-        let ci = Alias::new("ci");
         let default_types = [
             CatalogItemType::Movie,
             CatalogItemType::Audio,
-            CatalogItemType::Series,
             CatalogItemType::Episode,
         ];
-        let item_types = if item_types.is_empty() {
+        let collection_type = self.latest_collection_type(library_id).await?;
+        let tv_types = [CatalogItemType::Episode];
+        let item_types = if item_types.is_empty() && collection_type.as_deref() == Some("tvshows") {
+            tv_types.as_slice()
+        } else if item_types.is_empty() {
             default_types.as_slice()
         } else {
             item_types
         };
+        if !group_items || !item_types.contains(&CatalogItemType::Episode) {
+            return self
+                .latest_item_rows(user_id, library_id, item_types, limit, is_played, None)
+                .await
+                .map(|items| {
+                    items
+                        .into_iter()
+                        .map(|item| LatestItemRecord::new(item, None))
+                        .collect()
+                });
+        }
+
+        self.grouped_latest_items(user_id, library_id, item_types, limit, is_played)
+            .await
+    }
+
+    async fn latest_collection_type(
+        &self,
+        library_id: Option<Uuid>,
+    ) -> Result<Option<String>, CatalogQueryError> {
+        let Some(library_id) = library_id else {
+            return Ok(None);
+        };
+        let query = Query::select()
+            .column(Alias::new("collection_type"))
+            .from(Alias::new("libraries"))
+            .and_where(Expr::col(Alias::new("id")).eq(library_id))
+            .and_where(Expr::col(Alias::new("is_enabled")).eq(true))
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        self.database
+            .query_one(backend.build(&query))
+            .await?
+            .map(|row| row.try_get("", "collection_type"))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    async fn latest_item_rows(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        item_types: &[CatalogItemType],
+        limit: u64,
+        is_played: Option<bool>,
+        series_is_null: Option<bool>,
+    ) -> Result<Vec<CatalogItemRecord>, CatalogQueryError> {
+        if item_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ci = Alias::new("ci");
         let database_types = item_types
             .iter()
             .map(|item_type| item_type.as_database_value())
             .collect::<Vec<_>>();
         let mut query = home_item_query(user_id, &database_types, library_id);
+        apply_latest_played_filter(&mut query, is_played);
+        if let Some(series_is_null) = series_is_null {
+            let series = Expr::col((ci.clone(), Alias::new("structure_owner_item_id")));
+            query.and_where(if series_is_null {
+                series.is_null()
+            } else {
+                series.is_not_null()
+            });
+        }
         select_item_columns(&mut query, ItemQuerySource::Catalog);
         query
             .order_by((ci.clone(), Alias::new("date_created")), Order::Desc)
@@ -1467,6 +1598,334 @@ impl<'connection> CatalogQueryRepository<'connection> {
             .collect::<Result<Vec<_>, _>>()?;
         attach_image_tags(self.database, &mut items).await?;
         Ok(items)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn grouped_latest_items(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        item_types: &[CatalogItemType],
+        limit: u64,
+        is_played: Option<bool>,
+    ) -> Result<Vec<LatestItemRecord>, CatalogQueryError> {
+        let result_limit = usize::try_from(limit).map_err(|_| CatalogQueryError::InvalidPage)?;
+        let other_types = item_types
+            .iter()
+            .copied()
+            .filter(|item_type| *item_type != CatalogItemType::Episode)
+            .collect::<Vec<_>>();
+        let mut seeds = self
+            .latest_item_rows(user_id, library_id, &other_types, limit, is_played, None)
+            .await?
+            .into_iter()
+            .map(|item| LatestSeed::Item(Box::new(item)))
+            .collect::<Vec<_>>();
+        seeds.extend(
+            self.latest_item_rows(
+                user_id,
+                library_id,
+                &[CatalogItemType::Episode],
+                limit,
+                is_played,
+                Some(true),
+            )
+            .await?
+            .into_iter()
+            .map(|item| LatestSeed::Item(Box::new(item))),
+        );
+
+        let ci = Alias::new("ci");
+        let mut group_query = home_item_query(user_id, &["Episode"], library_id);
+        apply_latest_played_filter(&mut group_query, is_played);
+        group_query
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("structure_owner_item_id"))),
+                Alias::new("series_id"),
+            )
+            .expr_as(
+                Func::max(Expr::col((ci.clone(), Alias::new("date_created")))),
+                Alias::new("latest_date"),
+            )
+            .and_where(Expr::col((ci.clone(), Alias::new("structure_owner_item_id"))).is_not_null())
+            .group_by_col((ci.clone(), Alias::new("structure_owner_item_id")))
+            .order_by(Alias::new("latest_date"), Order::Desc)
+            .order_by((ci, Alias::new("structure_owner_item_id")), Order::Asc)
+            .limit(limit);
+        let backend = self.database.get_database_backend();
+        let series_rows = self.database.query_all(backend.build(&group_query)).await?;
+        for row in series_rows {
+            seeds.push(LatestSeed::Series {
+                series_id: CatalogItemId::from_uuid(row.try_get("", "series_id")?),
+                latest_date: row.try_get("", "latest_date")?,
+            });
+        }
+        seeds.sort_by(|left, right| {
+            right
+                .latest_date()
+                .cmp(&left.latest_date())
+                .then_with(|| left.stable_id().cmp(&right.stable_id()))
+        });
+        seeds.truncate(result_limit);
+
+        let selected_series = seeds
+            .iter()
+            .filter_map(|seed| match seed {
+                LatestSeed::Series { series_id, .. } => Some(*series_id),
+                LatestSeed::Item(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if selected_series.is_empty() {
+            return Ok(seeds
+                .into_iter()
+                .filter_map(|seed| match seed {
+                    LatestSeed::Item(item) => Some(LatestItemRecord::new(*item, None)),
+                    LatestSeed::Series { .. } => None,
+                })
+                .collect());
+        }
+
+        let global_cutoff = seeds
+            .iter()
+            .filter_map(|seed| match seed {
+                LatestSeed::Series { latest_date, .. } => Some(*latest_date - Duration::hours(24)),
+                LatestSeed::Item(_) => None,
+            })
+            .min()
+            .expect("selected Series have a latest date");
+        let series_ids = selected_series
+            .iter()
+            .map(|id| id.as_uuid())
+            .collect::<Vec<_>>();
+        let mut episode_query = home_item_query(user_id, &["Episode"], library_id);
+        apply_latest_played_filter(&mut episode_query, is_played);
+        episode_query
+            .and_where(
+                Expr::col((Alias::new("ci"), Alias::new("structure_owner_item_id")))
+                    .is_in(series_ids.iter().copied()),
+            )
+            .and_where(
+                Expr::col((Alias::new("ci"), Alias::new("date_created"))).gte(global_cutoff),
+            );
+        select_item_columns(&mut episode_query, ItemQuerySource::Catalog);
+        episode_query
+            .order_by((Alias::new("ci"), Alias::new("date_created")), Order::Desc)
+            .order_by((Alias::new("ci"), Alias::new("id")), Order::Asc);
+        let mut episodes = self
+            .database
+            .query_all(backend.build(&episode_query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut episodes).await?;
+
+        let mut episodes_by_series = BTreeMap::<Uuid, Vec<CatalogItemRecord>>::new();
+        for episode in episodes {
+            if let Some(series_id) = episode.series_id() {
+                episodes_by_series
+                    .entry(series_id.as_uuid())
+                    .or_default()
+                    .push(episode);
+            }
+        }
+        let season_ids_by_series = self
+            .latest_season_ids_by_series(user_id, library_id, &selected_series)
+            .await?;
+        let recent_season_ids = episodes_by_series
+            .values()
+            .flatten()
+            .filter_map(CatalogItemRecord::parent_id)
+            .map(CatalogItemId::as_uuid)
+            .collect::<BTreeSet<_>>();
+        let episode_counts_by_season = self
+            .latest_episode_counts_by_season(user_id, library_id, &recent_season_ids)
+            .await?;
+
+        let mut decisions = BTreeMap::<Uuid, (Uuid, u64)>::new();
+        for series_id in &selected_series {
+            let series_uuid = series_id.as_uuid();
+            let Some(series_episodes) = episodes_by_series.get(&series_uuid) else {
+                continue;
+            };
+            let Some(latest_episode) = series_episodes.first() else {
+                continue;
+            };
+            let cutoff = latest_episode.date_created() - Duration::hours(24);
+            let recent = series_episodes
+                .iter()
+                .take_while(|episode| episode.date_created() >= cutoff)
+                .collect::<Vec<_>>();
+            let season_ids = recent
+                .iter()
+                .filter_map(|episode| episode.parent_id())
+                .map(CatalogItemId::as_uuid)
+                .collect::<BTreeSet<_>>();
+            let recent_count = u64::try_from(recent.len()).unwrap_or(u64::MAX);
+            let target = match season_ids.iter().copied().collect::<Vec<_>>().as_slice() {
+                [season_id] => {
+                    let total_episodes = episode_counts_by_season
+                        .get(season_id)
+                        .copied()
+                        .unwrap_or(recent_count);
+                    let is_batch = recent_count > 1 || recent_count == total_episodes;
+                    let total_seasons = season_ids_by_series
+                        .get(&series_uuid)
+                        .map_or(1, BTreeSet::len);
+                    if is_batch && total_seasons > 1 {
+                        *season_id
+                    } else if is_batch {
+                        series_uuid
+                    } else {
+                        latest_episode.id().as_uuid()
+                    }
+                }
+                [] if recent_count > 1 => series_uuid,
+                [] => latest_episode.id().as_uuid(),
+                _ => series_uuid,
+            };
+            decisions.insert(series_uuid, (target, recent_count));
+        }
+
+        let parent_ids = decisions
+            .values()
+            .map(|(target, _)| *target)
+            .filter(|target| {
+                !episodes_by_series
+                    .values()
+                    .flatten()
+                    .any(|episode| episode.id().as_uuid() == *target)
+            })
+            .collect::<BTreeSet<_>>();
+        let parent_items = self
+            .latest_items_by_id(user_id, library_id, &parent_ids)
+            .await?;
+
+        let mut result = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            match seed {
+                LatestSeed::Item(item) => result.push(LatestItemRecord::new(*item, None)),
+                LatestSeed::Series { series_id, .. } => {
+                    let series_uuid = series_id.as_uuid();
+                    let Some(episodes) = episodes_by_series.get(&series_uuid) else {
+                        continue;
+                    };
+                    let Some(fallback) = episodes.first().cloned() else {
+                        continue;
+                    };
+                    let Some((target, count)) = decisions.get(&series_uuid).copied() else {
+                        result.push(LatestItemRecord::new(fallback, None));
+                        continue;
+                    };
+                    if target == fallback.id().as_uuid() {
+                        result.push(LatestItemRecord::new(fallback, None));
+                    } else if let Some(parent) = parent_items.get(&target) {
+                        result.push(LatestItemRecord::new(parent.clone(), Some(count)));
+                    } else {
+                        result.push(LatestItemRecord::new(fallback, None));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn latest_season_ids_by_series(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        series_ids: &[CatalogItemId],
+    ) -> Result<BTreeMap<Uuid, BTreeSet<Uuid>>, CatalogQueryError> {
+        let ci = Alias::new("ci");
+        let mut query = home_item_query(user_id, &["Episode"], library_id);
+        query
+            .distinct()
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("structure_owner_item_id"))),
+                Alias::new("series_id"),
+            )
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("parent_id"))),
+                Alias::new("season_id"),
+            )
+            .and_where(
+                Expr::col((ci.clone(), Alias::new("structure_owner_item_id")))
+                    .is_in(series_ids.iter().map(|id| id.as_uuid())),
+            )
+            .and_where(Expr::col((ci, Alias::new("parent_id"))).is_not_null());
+        let backend = self.database.get_database_backend();
+        let mut result = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+        for row in self.database.query_all(backend.build(&query)).await? {
+            let series_id = row.try_get("", "series_id")?;
+            let season_id = row.try_get("", "season_id")?;
+            result.entry(series_id).or_default().insert(season_id);
+        }
+        Ok(result)
+    }
+
+    async fn latest_episode_counts_by_season(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        season_ids: &BTreeSet<Uuid>,
+    ) -> Result<BTreeMap<Uuid, u64>, CatalogQueryError> {
+        if season_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ci = Alias::new("ci");
+        let mut query = home_item_query(user_id, &["Episode"], library_id);
+        query
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("parent_id"))),
+                Alias::new("season_id"),
+            )
+            .expr_as(
+                Expr::col((ci.clone(), Alias::new("id"))).count(),
+                Alias::new("episode_count"),
+            )
+            .and_where(
+                Expr::col((ci.clone(), Alias::new("parent_id"))).is_in(season_ids.iter().copied()),
+            )
+            .group_by_col((ci, Alias::new("parent_id")));
+        let backend = self.database.get_database_backend();
+        let mut result = BTreeMap::new();
+        for row in self.database.query_all(backend.build(&query)).await? {
+            let season_id = row.try_get("", "season_id")?;
+            let count: i64 = row.try_get("", "episode_count")?;
+            result.insert(
+                season_id,
+                u64::try_from(count).map_err(|_| CatalogQueryError::InvalidCount)?,
+            );
+        }
+        Ok(result)
+    }
+
+    async fn latest_items_by_id(
+        &self,
+        user_id: UserId,
+        library_id: Option<Uuid>,
+        item_ids: &BTreeSet<Uuid>,
+    ) -> Result<BTreeMap<Uuid, CatalogItemRecord>, CatalogQueryError> {
+        if item_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ci = Alias::new("ci");
+        let mut query = home_item_query(user_id, &["Series", "Season"], library_id);
+        query.and_where(Expr::col((ci, Alias::new("id"))).is_in(item_ids.iter().copied()));
+        select_item_columns(&mut query, ItemQuerySource::Catalog);
+        let backend = self.database.get_database_backend();
+        let mut items = self
+            .database
+            .query_all(backend.build(&query))
+            .await?
+            .iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_image_tags(self.database, &mut items).await?;
+        Ok(items
+            .into_iter()
+            .map(|item| (item.id().as_uuid(), item))
+            .collect())
     }
 
     /// Returns at most one earliest unplayed episode from each visible Series.
@@ -2101,6 +2560,9 @@ fn apply_catalog_filters(
     source: ItemQuerySource,
     query: &CatalogItemsQuery,
 ) {
+    if query.favorite_only() {
+        statement.and_where(Expr::col((Alias::new("ud"), Alias::new("is_favorite"))).eq(true));
+    }
     if let Some(year) = query.production_year() {
         statement.and_where(source.field_expr(CatalogSortField::ProductionYear).eq(year));
     }
@@ -3072,6 +3534,23 @@ fn home_item_query(
     query
 }
 
+fn apply_latest_played_filter(query: &mut SelectStatement, is_played: Option<bool>) {
+    let ud = Alias::new("ud");
+    match is_played {
+        Some(true) => {
+            query.and_where(Expr::col((ud, Alias::new("is_played"))).eq(true));
+        }
+        Some(false) => {
+            query.cond_where(
+                Condition::any()
+                    .add(Expr::col((ud.clone(), Alias::new("is_played"))).is_null())
+                    .add(Expr::col((ud, Alias::new("is_played"))).eq(false)),
+            );
+        }
+        None => {}
+    }
+}
+
 fn next_up_query(
     user_id: UserId,
     series_id: Option<CatalogItemId>,
@@ -3753,6 +4232,7 @@ fn item_from_row(row: &QueryResult) -> Result<CatalogItemRecord, CatalogQueryErr
         series_id: row
             .try_get::<Option<Uuid>>("", "series_id")?
             .map(CatalogItemId::from_uuid),
+        series_name: None,
         item_type: row.try_get("", "item_type")?,
         name: row.try_get("", "name")?,
         original_title: row.try_get("", "original_title")?,
@@ -3794,6 +4274,34 @@ async fn attach_image_tags(
         .flatten()
         .map(CatalogItemId::as_uuid)
         .collect::<BTreeSet<_>>();
+    let series_ids = items
+        .iter()
+        .filter_map(CatalogItemRecord::series_id)
+        .map(CatalogItemId::as_uuid)
+        .collect::<BTreeSet<_>>();
+    let series = Alias::new("series");
+    let series_names = if series_ids.is_empty() {
+        BTreeMap::new()
+    } else {
+        database
+            .query_all(
+                database.get_database_backend().build(
+                    Query::select()
+                        .columns([
+                            (series.clone(), Alias::new("id")),
+                            (series.clone(), Alias::new("name")),
+                        ])
+                        .from_as(Alias::new("catalog_items"), series.clone())
+                        .and_where(
+                            Expr::col((series, Alias::new("id"))).is_in(series_ids.iter().copied()),
+                        ),
+                ),
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get("", "id")?, row.try_get("", "name")?)))
+            .collect::<Result<BTreeMap<Uuid, String>, CatalogQueryError>>()?
+    };
     let asset = Alias::new("asset");
     let blob = Alias::new("blob");
     let mut query = Query::select();
@@ -3914,6 +4422,9 @@ async fn attach_image_tags(
         }
     }
     for item in items {
+        item.series_name = item
+            .series_id
+            .and_then(|series_id| series_names.get(&series_id.as_uuid()).cloned());
         item.series_primary_image_tag = item.series_id.and_then(|series_id| {
             by_item
                 .get(&series_id.as_uuid())

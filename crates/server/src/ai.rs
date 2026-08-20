@@ -1037,10 +1037,12 @@ impl AiService {
                             None,
                             vec![CatalogItemType::Movie, CatalogItemType::Series],
                             limit,
+                            true,
+                            None,
                         )
                         .await
                         .map_err(|_| AiServiceError::ToolUnavailable)?;
-                    Ok(output_from_items(&items))
+                    Ok(output_from_latest_items(&items))
                 }
             }
             _ => Err(AiServiceError::InvalidToolArguments),
@@ -1608,6 +1610,17 @@ fn provider_history(conversation: &AiConversationRecord) -> Vec<Value> {
 
 fn output_from_items(items: &[CatalogItemRecord]) -> ToolOutput {
     let sources = items.iter().map(SourceDto::from_item).collect::<Vec<_>>();
+    ToolOutput {
+        value: json!({"Items": sources}),
+        sources,
+    }
+}
+
+fn output_from_latest_items(items: &[tjxy_db::LatestItemRecord]) -> ToolOutput {
+    let sources = items
+        .iter()
+        .map(|latest| SourceDto::from_item(latest.item()))
+        .collect::<Vec<_>>();
     ToolOutput {
         value: json!({"Items": sources}),
         sources,

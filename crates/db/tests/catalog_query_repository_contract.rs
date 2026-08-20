@@ -1721,14 +1721,14 @@ async fn latest_items_are_date_ordered_and_library_scoped() {
     set_date_created(&database, foreign, Utc::now()).await;
 
     let items = CatalogQueryRepository::new(&database)
-        .latest_items(user, Some(first_library), &[], 20)
+        .latest_items(user, Some(first_library), &[], 20, true, None)
         .await
         .unwrap();
 
     assert_eq!(
         items
             .iter()
-            .map(tjxy_db::CatalogItemRecord::name)
+            .map(|latest| latest.item().name())
             .collect::<Vec<_>>(),
         ["Newer", "Older"]
     );
@@ -1811,6 +1811,13 @@ async fn next_up_returns_the_first_unplayed_episode_per_series() {
             .collect::<Vec<_>>(),
         expected
     );
+    let series_names = page
+        .items()
+        .iter()
+        .map(|item| (item.id().as_uuid(), item.series_name()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(series_names[&next_episode.as_uuid()], Some("First"));
+    assert_eq!(series_names[&other_episode.as_uuid()], Some("Second"));
 
     UserDataRepository::new(&database)
         .commit(

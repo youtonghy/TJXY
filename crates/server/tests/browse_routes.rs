@@ -2458,7 +2458,7 @@ async fn jellyfin_media_player_bootstrap_routes_match_its_request_dialect() {
         get(
             &app.router,
             &format!(
-                "/Users/{user_id}/Items/Latest?Limit=16&Fields=PrimaryImageAspectRatio%2CPath&ImageTypeLimit=1&EnableImageTypes=Primary%2CBackdrop%2CThumb&ParentId={library}"
+                "/Users/{user_id}/Items/Latest?ParentId={library}&Fields=BasicSyncInfo%2CCanDelete%2CContainer%2CPrimaryImageAspectRatio%2CProductionYear%2CStatus%2CEndDate&Recursive=true&MediaTypes=Video&Limit=20&ImageTypeLimit=1&IsPlayed=false&EnableImageTypes=Primary%2CBackdrop%2CThumb"
             ),
             Some(&token),
         )
@@ -2490,7 +2490,7 @@ async fn jellyfin_media_player_bootstrap_routes_match_its_request_dialect() {
         get(
             &app.router,
             &format!(
-                "/Shows/NextUp?UserId={user_id}&NextUpDateCutoff=2026-08-19T00%3A00%3A00Z&DisableFirstEpisode=false&EnableRewatching=false"
+                "/Shows/NextUp?Fields=PrimaryImageAspectRatio%2CDateCreated%2CBasicSyncInfo%2CPath%2CMediaSourceCount&UserId={user_id}&MediaTypes=Video&Limit=20&ImageTypeLimit=1&EnableTotalRecordCount=false&DisableFirstEpisode=false&EnableRewatching=false&EnableImageTypes=Primary%2CBackdrop%2CThumb"
             ),
             Some(&token),
         )
@@ -2690,6 +2690,7 @@ async fn user_views_and_root_items_return_enabled_libraries_in_the_query_wrapper
 
     for path in [
         format!("/UserViews?userId={user_id}"),
+        format!("/Users/{user_id}/Views?IncludeExternalContent=false"),
         format!("/Items?userId={user_id}"),
     ] {
         let response = get(&app.router, &path, Some(&token)).await;
@@ -2712,6 +2713,52 @@ async fn user_views_and_root_items_return_enabled_libraries_in_the_query_wrapper
     assert_eq!(result["StartIndex"], 1);
     assert_eq!(result["Items"].as_array().unwrap().len(), 1);
     assert_eq!(result["Items"][0]["Name"], "Zeta");
+}
+
+#[tokio::test]
+async fn vidhub_favorite_filter_returns_only_favorites() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let favorite = seed_item(&app.database, library, "Favorite", "Movie").await;
+    seed_item(&app.database, library, "Ordinary", "Movie").await;
+    let (user_id, _, token) = login(&app.router).await;
+
+    let response = post(
+        &app.router,
+        &format!("/UserItems/{favorite}/UserData"),
+        &token,
+        json!({"IsFavorite": true}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = get(
+        &app.router,
+        &format!(
+            "/Users/{user_id}/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie&SortBy=SortName&SortOrder=Ascending"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(result["TotalRecordCount"], 1);
+    assert_eq!(result["Items"][0]["Id"], favorite.to_string());
+
+    let unsupported = get(
+        &app.router,
+        &format!(
+            "/Users/{user_id}/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=BoxSet"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(unsupported.status(), StatusCode::OK);
+    let unsupported: Value =
+        serde_json::from_slice(&unsupported.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(unsupported["TotalRecordCount"], 0);
 }
 
 #[tokio::test]
@@ -3409,7 +3456,10 @@ async fn latest_and_next_up_return_user_scoped_home_rows() {
         serde_json::from_slice(&next_up.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(next_up["TotalRecordCount"], 1);
     assert_eq!(next_up["Items"][0]["Id"], second.to_string());
+    assert_eq!(next_up["Items"][0]["Type"], "Episode");
+    assert_eq!(next_up["Items"][0]["Name"], "S01E02");
     assert_eq!(next_up["Items"][0]["SeriesId"], series.to_string());
+    assert_eq!(next_up["Items"][0]["SeriesName"], "Series");
     assert_eq!(
         next_up["Items"][0]["SeriesPrimaryImageTag"],
         series_image_tag
@@ -3422,6 +3472,168 @@ async fn latest_and_next_up_return_user_scoped_home_rows() {
         next_up["Items"][0]["ParentPrimaryImageTag"],
         series_image_tag
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The fixture expresses three TV grouping scenarios end to end.
+async fn latest_tv_items_group_recent_batches_before_applying_limit() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "TV", true).await;
+    let first_series = seed_item(&app.database, library, "The Simpsons", "Series").await;
+    let first_season = seed_item(&app.database, library, "Season 1", "Season").await;
+    let first_episode = seed_item(&app.database, library, "S01E01", "Episode").await;
+    let second_episode = seed_item(&app.database, library, "S01E02", "Episode").await;
+    let second_series = seed_item(&app.database, library, "Severance", "Series").await;
+    let second_season = seed_item(&app.database, library, "Season 1", "Season").await;
+    let third_episode = seed_item(&app.database, library, "S01E01", "Episode").await;
+    let third_series = seed_item(&app.database, library, "Slow Horses", "Series").await;
+    let third_season = seed_item(&app.database, library, "Season 1", "Season").await;
+    let old_episode = seed_item(&app.database, library, "S01E01", "Episode").await;
+    let latest_episode = seed_item(&app.database, library, "S01E02", "Episode").await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("collection_type"), "tvshows")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    for (season, series) in [
+        (first_season, first_series),
+        (second_season, second_series),
+        (third_season, third_series),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .values([
+                            (Alias::new("parent_id"), series.as_uuid().into()),
+                            (
+                                Alias::new("structure_owner_item_id"),
+                                series.as_uuid().into(),
+                            ),
+                        ])
+                        .and_where(Expr::col(Alias::new("id")).eq(season.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    for (episode, season, series) in [
+        (first_episode, first_season, first_series),
+        (second_episode, first_season, first_series),
+        (third_episode, second_season, second_series),
+        (old_episode, third_season, third_series),
+        (latest_episode, third_season, third_series),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .values([
+                            (Alias::new("parent_id"), season.as_uuid().into()),
+                            (
+                                Alias::new("structure_owner_item_id"),
+                                series.as_uuid().into(),
+                            ),
+                        ])
+                        .and_where(Expr::col(Alias::new("id")).eq(episode.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let now = Utc::now();
+    for (item, date) in [
+        (first_episode, now),
+        (second_episode, now - Duration::hours(1)),
+        (third_episode, now - Duration::hours(2)),
+        (latest_episode, now - Duration::hours(3)),
+        (old_episode, now - Duration::hours(28)),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("date_created"), date)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let (user_id, _, token) = login(&app.router).await;
+    let grouped = get(
+        &app.router,
+        &format!("/Users/{user_id}/Items/Latest?ParentId={library}&Limit=3"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(grouped.status(), StatusCode::OK);
+    let grouped: Value =
+        serde_json::from_slice(&grouped.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(grouped.as_array().unwrap().len(), 3);
+    assert_eq!(grouped[0]["Id"], first_series.to_string());
+    assert_eq!(grouped[0]["Type"], "Series");
+    assert_eq!(grouped[0]["ChildCount"], 2);
+    assert_eq!(grouped[1]["Id"], second_series.to_string());
+    assert_eq!(grouped[1]["ChildCount"], 1);
+    assert_eq!(grouped[2]["Id"], latest_episode.to_string());
+    assert_eq!(grouped[2]["Type"], "Episode");
+    assert!(grouped[2].get("ChildCount").is_none());
+
+    let ungrouped = get(
+        &app.router,
+        &format!("/Users/{user_id}/Items/Latest?ParentId={library}&Limit=3&GroupItems=false"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(ungrouped.status(), StatusCode::OK);
+    let ungrouped: Value =
+        serde_json::from_slice(&ungrouped.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(ungrouped[0]["Id"], first_episode.to_string());
+    assert_eq!(ungrouped[1]["Id"], second_episode.to_string());
+    assert_eq!(ungrouped[2]["Id"], third_episode.to_string());
+    assert!(
+        ungrouped
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["Type"] == "Episode")
+    );
+
+    assert_eq!(
+        post_empty(
+            &app.router,
+            &format!("/Users/{user_id}/PlayedItems/{first_episode}"),
+            Some(&token),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let played = get(
+        &app.router,
+        &format!(
+            "/Users/{user_id}/Items/Latest?ParentId={library}&Limit=3&GroupItems=false&IsPlayed=true"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(played.status(), StatusCode::OK);
+    let played: Value =
+        serde_json::from_slice(&played.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(played.as_array().unwrap().len(), 1);
+    assert_eq!(played[0]["Id"], first_episode.to_string());
 }
 
 #[tokio::test]
@@ -4381,7 +4593,7 @@ async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions
                 .unwrap();
         assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
         assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], expected);
         assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], expected);
     }
 }

@@ -87,6 +87,8 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     series_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    series_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     season_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     series_primary_image_tag: Option<String>,
@@ -110,6 +112,8 @@ pub struct BaseItemDto {
     community_rating: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_count: Option<u64>,
     is_folder: bool,
     image_tags: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,6 +177,7 @@ impl BaseItemDto {
             id,
             parent_id: None,
             series_id: None,
+            series_name: None,
             season_id: None,
             series_primary_image_tag: None,
             parent_primary_image_item_id: None,
@@ -185,6 +190,7 @@ impl BaseItemDto {
             overview: None,
             community_rating: None,
             index_number: None,
+            child_count: None,
             is_folder: true,
             image_tags: BTreeMap::new(),
             user_data: None,
@@ -233,6 +239,7 @@ impl BaseItemDto {
             series_id: (item_type == BaseItemKind::Season)
                 .then_some(parent_id)
                 .flatten(),
+            series_name: None,
             season_id: (item_type == BaseItemKind::Episode)
                 .then_some(parent_id)
                 .flatten(),
@@ -247,6 +254,7 @@ impl BaseItemDto {
             overview,
             community_rating: None,
             index_number: None,
+            child_count: None,
             is_folder: item_type.is_folder(),
             image_tags: BTreeMap::new(),
             user_data,
@@ -282,10 +290,16 @@ impl BaseItemDto {
     }
 
     #[must_use]
-    pub fn with_series_image(mut self, series_id: Option<Uuid>, tag: Option<String>) -> Self {
+    pub fn with_series_metadata(
+        mut self,
+        series_id: Option<Uuid>,
+        series_name: Option<String>,
+        tag: Option<String>,
+    ) -> Self {
         if series_id.is_some() {
             self.series_id = series_id;
         }
+        self.series_name = series_name;
         self.series_primary_image_tag.clone_from(&tag);
         if tag.is_some() {
             self.parent_primary_image_item_id = self.series_id;
@@ -310,6 +324,12 @@ impl BaseItemDto {
     #[must_use]
     pub const fn with_runtime_ticks(mut self, runtime_ticks: Option<i64>) -> Self {
         self.run_time_ticks = runtime_ticks;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_child_count(mut self, child_count: Option<u64>) -> Self {
+        self.child_count = child_count;
         self
     }
 

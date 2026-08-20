@@ -13,9 +13,9 @@ use tjxy_db::{
     BrowseParent, CatalogFilterFacets, CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType,
     CatalogItemsQuery, CatalogItemsScope, CatalogPage, CatalogPageRequest, CatalogPublicationError,
     CatalogPublicationRepository, CatalogQueryError, CatalogQueryRepository, CatalogSortField,
-    CatalogSortOrder, LazyCatalogWorkTarget, LibraryViewRecord, PlaystateRepository,
-    PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError, WorkJobRepository,
-    WorkJobRepositoryError, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
+    CatalogSortOrder, LatestItemRecord, LazyCatalogWorkTarget, LibraryViewRecord,
+    PlaystateRepository, PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError,
+    WorkJobRepository, WorkJobRepositoryError, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -374,9 +374,10 @@ impl CatalogQueryService {
     pub async fn warm_home(&self, users: &[UserId]) -> Result<(), CatalogServiceError> {
         for &user in users {
             let views = self.user_views(user, None).await?;
-            self.latest_items(user, None, None, Vec::new(), 20).await?;
+            self.latest_items(user, None, None, Vec::new(), 20, true, None)
+                .await?;
             for view in views.into_iter().take(MAX_HOME_LATEST_LIBRARIES) {
-                self.latest_items(user, None, Some(view.id()), Vec::new(), 20)
+                self.latest_items(user, None, Some(view.id()), Vec::new(), 20, true, None)
                     .await?;
             }
             let page = CatalogPageRequest::new(0, 100)?;
@@ -558,6 +559,7 @@ impl CatalogQueryService {
     /// # Errors
     ///
     /// Returns [`CatalogServiceError`] for impersonation or query failures.
+    #[allow(clippy::too_many_arguments)] // Mirrors the Jellyfin Latest query boundary.
     pub async fn latest_items(
         &self,
         principal: UserId,
@@ -565,12 +567,21 @@ impl CatalogQueryService {
         library_id: Option<Uuid>,
         item_types: Vec<CatalogItemType>,
         limit: u64,
-    ) -> Result<Vec<CatalogItemRecord>, CatalogServiceError> {
+        group_items: bool,
+        is_played: Option<bool>,
+    ) -> Result<Vec<LatestItemRecord>, CatalogServiceError> {
         authorize_user(principal, requested_user)?;
         let repository = CatalogQueryRepository::new(&self.database);
         let Some(cache) = &self.cache else {
             return repository
-                .latest_items(principal, library_id, &item_types, limit)
+                .latest_items(
+                    principal,
+                    library_id,
+                    &item_types,
+                    limit,
+                    group_items,
+                    is_played,
+                )
                 .await
                 .map_err(Into::into);
         };
@@ -581,7 +592,7 @@ impl CatalogQueryService {
             .collect::<Vec<_>>();
         type_names.sort_unstable();
         let descriptor = format!(
-            "library={library_id:?};limit={limit};types={}",
+            "library={library_id:?};limit={limit};group={group_items};played={is_played:?};types={}",
             type_names.join(",")
         );
         let key = cache.keys.user_scoped(
@@ -594,12 +605,26 @@ impl CatalogQueryService {
         match cache_lookup(cache, &key).await {
             CacheLookup::Hit(items) => Ok(items),
             CacheLookup::Fallback => repository
-                .latest_items(principal, library_id, &item_types, limit)
+                .latest_items(
+                    principal,
+                    library_id,
+                    &item_types,
+                    limit,
+                    group_items,
+                    is_played,
+                )
                 .await
                 .map_err(Into::into),
             CacheLookup::Leader(_leader) => {
                 let items = repository
-                    .latest_items(principal, library_id, &item_types, limit)
+                    .latest_items(
+                        principal,
+                        library_id,
+                        &item_types,
+                        limit,
+                        group_items,
+                        is_played,
+                    )
                     .await?;
                 let ttl = if items.is_empty() {
                     cache.empty_ttl
@@ -1473,8 +1498,9 @@ fn items_cache_descriptor(query: &CatalogItemsQuery) -> String {
                 CatalogItemsScope::Parent(BrowseParent::Library(_))
             ));
     format!(
-        "query-items/v2;scope={scope};recursive={};search-length={};search={search};genre-length={};genre={genre};production-year={production_year};start={};limit={};types={};sorts={sorts}",
+        "query-items/v2;scope={scope};recursive={};favorite-only={};search-length={};search={search};genre-length={};genre={genre};production-year={production_year};start={};limit={};types={};sorts={sorts}",
         recursive,
+        query.favorite_only(),
         search.len(),
         genre.len(),
         page.start_index(),
@@ -1583,6 +1609,7 @@ mod tests {
             CatalogSortField::DateCreated,
             CatalogSortOrder::Descending,
         )]);
+        let favorite = sorted.clone().with_favorite_only(true);
         let library = CatalogItemsQuery::new(
             CatalogItemsScope::Parent(BrowseParent::Library(uuid::Uuid::new_v4())),
             CatalogPageRequest::new(0, 20).unwrap(),
@@ -1594,6 +1621,7 @@ mod tests {
             search,
             recursive,
             sorted,
+            favorite,
             library,
             library_default_recursive,
         ]
@@ -1601,6 +1629,6 @@ mod tests {
         .map(items_cache_descriptor)
         .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(descriptors.len(), 6);
+        assert_eq!(descriptors.len(), 7);
     }
 }

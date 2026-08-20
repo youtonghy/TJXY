@@ -589,6 +589,35 @@ async fn wrong_and_unknown_credentials_have_the_same_response() {
 }
 
 #[tokio::test]
+async fn vidhub_login_ignores_its_legacy_password_compatibility_field() {
+    let response = app()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "Username": "alice",
+                        "Pw": "correct horse",
+                        "Password": "client compatibility field"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let authentication = json_response(response).await;
+    assert_eq!(authentication["SessionInfo"]["UserName"], "Alice");
+    assert!(authentication["AccessToken"].as_str().is_some());
+}
+
+#[tokio::test]
 async fn client_identity_is_required_and_exact_legacy_aliases_are_supported() {
     let response = app()
         .await

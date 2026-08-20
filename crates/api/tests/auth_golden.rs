@@ -26,6 +26,19 @@ fn login_request_uses_the_pinned_pascal_case_names() {
 }
 
 #[test]
+fn login_request_ignores_vidhub_password_compatibility_field() {
+    let request: AuthenticateUserByName = serde_json::from_value(json!({
+        "Username": "Alice",
+        "Pw": "canonical password",
+        "Password": "legacy compatibility field"
+    }))
+    .unwrap();
+
+    assert_eq!(request.username, "Alice");
+    assert_eq!(request.password, "canonical password");
+}
+
+#[test]
 fn authentication_result_matches_the_l1_contract() {
     let server_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
     let user_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();

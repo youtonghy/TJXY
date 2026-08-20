@@ -586,6 +586,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/Users/{user_id}/Policy", post(auth::update_user_policy))
         .route("/UserViews", get(browse::user_views))
+        .route("/Users/{user_id}/Views", get(browse::user_views_legacy))
         .route("/Discover/Popular", get(client_portal::popular))
         .route("/Discover/Tmdb/Popular", get(client_portal::tmdb_top))
         .route("/Discover/Server/Top", get(client_portal::server_top))

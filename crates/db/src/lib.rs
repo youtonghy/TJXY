@@ -87,8 +87,8 @@ pub use catalog_query::{
     AssetRecord, BrowseParent, CacheRevisions, CatalogCreditRecord, CatalogFilterFacets,
     CatalogItemDetailRecord, CatalogItemRecord, CatalogItemType, CatalogItemsQuery,
     CatalogItemsScope, CatalogNamedCodeRecord, CatalogPage, CatalogPageRequest, CatalogQueryError,
-    CatalogQueryRepository, CatalogSort, CatalogSortField, CatalogSortOrder, LazyCatalogWorkTarget,
-    LazyStorageScope, LibraryViewRecord,
+    CatalogQueryRepository, CatalogSort, CatalogSortField, CatalogSortOrder, LatestItemRecord,
+    LazyCatalogWorkTarget, LazyStorageScope, LibraryViewRecord,
 };
 pub use catalog_visibility::catalog_item_visibility_condition;
 pub use dashboard::{

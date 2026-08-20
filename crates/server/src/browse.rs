@@ -19,7 +19,9 @@ use tjxy_application::{
     PlaybackSource, SessionCapabilities,
 };
 use tjxy_common::{CatalogItemId, PresentationKey, UserId};
-use tjxy_db::{CatalogItemDetailRecord, CatalogItemRecord, CatalogPage, LibraryViewRecord};
+use tjxy_db::{
+    CatalogItemDetailRecord, CatalogItemRecord, CatalogPage, LatestItemRecord, LibraryViewRecord,
+};
 use uuid::Uuid;
 
 use crate::{AppState, auth};
@@ -209,6 +211,20 @@ pub(crate) async fn user_views(
     }
 }
 
+pub(crate) async fn user_views_legacy(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    user_views(
+        State(state),
+        headers,
+        RawQuery(Some(query_for_user(raw_query.as_deref(), user_id))),
+    )
+    .await
+}
+
 pub(crate) async fn items(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -226,13 +242,23 @@ pub(crate) async fn items(
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
+    if query.item_type_selection == ItemTypeSelection::UnsupportedOnly {
+        return Json(BaseItemDtoQueryResult::new(
+            Vec::new(),
+            query.page.start_index(),
+            0,
+        ))
+        .into_response();
+    }
+    let has_catalog_selection = query.has_catalog_selection();
     let catalog_query = CatalogItemsQuery::new(CatalogItemsScope::AllVisible, query.page.clone())
         .with_search_term(query.search_term)
         .with_recursive(query.recursive)
         .with_recursive_for_library(query.recursive_for_library)
         .with_sorts(query.sorts)
         .with_genre(query.genre)
-        .with_production_year(query.production_year);
+        .with_production_year(query.production_year)
+        .with_favorite_only(query.favorite_only);
     if let Some(parent_id) = query.parent_id {
         return match catalog
             .query_items_by_parent_id(
@@ -252,7 +278,7 @@ pub(crate) async fn items(
         };
     }
 
-    if query.has_catalog_selection {
+    if has_catalog_selection {
         return match catalog
             .query_items(principal.user().id(), query.user_id, catalog_query)
             .await
@@ -441,6 +467,8 @@ pub(crate) async fn latest_items(
             query.parent_id,
             query.item_types,
             query.limit,
+            query.group_items,
+            query.is_played,
         )
         .await
     {
@@ -1097,7 +1125,26 @@ struct ItemsQuery {
     sorts: Vec<CatalogSort>,
     genre: Option<String>,
     production_year: Option<i32>,
-    has_catalog_selection: bool,
+    favorite_only: bool,
+    item_type_selection: ItemTypeSelection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemTypeSelection {
+    Omitted,
+    Supported,
+    UnsupportedOnly,
+}
+
+impl ItemsQuery {
+    fn has_catalog_selection(&self) -> bool {
+        self.recursive
+            || self.search_term.is_some()
+            || !self.page.item_types().is_empty()
+            || self.genre.is_some()
+            || self.production_year.is_some()
+            || self.favorite_only
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1124,6 +1171,8 @@ struct LatestQuery {
     parent_id: Option<Uuid>,
     item_types: Vec<CatalogItemType>,
     limit: u64,
+    group_items: bool,
+    is_played: Option<bool>,
 }
 
 struct NextUpQuery {
@@ -1206,6 +1255,15 @@ fn take_alias(
 fn parse_user_views_query(raw_query: Option<&str>) -> Result<UserViewsQuery, HttpBrowseError> {
     let mut parameters = endpoint_parameters(raw_query)?;
     let user_id = take_user_id(&mut parameters)?;
+    for unsupported_when_true in ["includeExternalContent", "includeHidden"] {
+        if take_bool(&mut parameters, unsupported_when_true)?.unwrap_or(false) {
+            return Err(HttpBrowseError::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported user views option",
+            ));
+        }
+    }
+    parameters.remove("presetViews");
     reject_remaining(&parameters)?;
     Ok(UserViewsQuery { user_id })
 }
@@ -1216,7 +1274,15 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     let parent_id = take_uuid(&mut parameters, "parentId")?;
     let start_index = take_u64(&mut parameters, "startIndex")?.unwrap_or(0);
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(100);
+    let item_types_requested = parameters.contains_key("includeItemTypes");
     let item_types = take_item_types(&mut parameters);
+    let item_type_selection = if !item_types_requested {
+        ItemTypeSelection::Omitted
+    } else if item_types.is_empty() {
+        ItemTypeSelection::UnsupportedOnly
+    } else {
+        ItemTypeSelection::Supported
+    };
     let recursive = take_bool(&mut parameters, "recursive")?;
     let recursive_for_library = recursive.is_none() && !item_types.is_empty();
     let recursive = recursive.unwrap_or(false);
@@ -1224,6 +1290,9 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     let sorts = take_catalog_sorts(&mut parameters);
     let genre = take_filter_text(&mut parameters, "genre")?;
     let production_year = take_production_year(&mut parameters)?;
+    let favorite_only = parameters
+        .remove("filters")
+        .is_some_and(|filters| filters.split(',').any(|filter| filter == "IsFavorite"));
     for boolean in ["enableUserData", "enableImages", "enableTotalRecordCount"] {
         take_bool(&mut parameters, boolean)?;
     }
@@ -1233,11 +1302,6 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
     parameters.remove("fields");
     parameters.remove("mediaTypes");
     parameters.remove("enableImageTypes");
-    let has_catalog_selection = recursive
-        || search_term.is_some()
-        || !item_types.is_empty()
-        || genre.is_some()
-        || production_year.is_some();
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?
         .with_item_types(item_types);
@@ -1251,7 +1315,8 @@ fn parse_items_query(raw_query: Option<&str>) -> Result<ItemsQuery, HttpBrowseEr
         sorts,
         genre,
         production_year,
-        has_catalog_selection,
+        favorite_only,
+        item_type_selection,
     })
 }
 
@@ -1329,6 +1394,7 @@ fn parse_resume_query(raw_query: Option<&str>) -> Result<ResumeQuery, HttpBrowse
     }
     parameters.remove("fields");
     parameters.remove("enableImageTypes");
+    parameters.remove("mediaTypes");
     reject_remaining(&parameters)?;
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?;
@@ -1345,26 +1411,22 @@ fn parse_latest_query(raw_query: Option<&str>) -> Result<LatestQuery, HttpBrowse
     let parent_id = take_uuid(&mut parameters, "parentId")?;
     let limit = take_u64(&mut parameters, "limit")?.unwrap_or(20);
     let item_types = take_item_types(&mut parameters);
-    if take_bool(&mut parameters, "groupItems")?.unwrap_or(false) {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "grouped latest items are not supported",
-        ));
-    }
-    for boolean in ["enableUserData", "enableImages"] {
+    let group_items = take_bool(&mut parameters, "groupItems")?.unwrap_or(true);
+    for boolean in [
+        "recursive",
+        "enableUserData",
+        "enableImages",
+        "enableTotalRecordCount",
+    ] {
         take_bool(&mut parameters, boolean)?;
     }
     if parameters.contains_key("imageTypeLimit") {
         take_u64(&mut parameters, "imageTypeLimit")?;
     }
-    if parameters.contains_key("isPlayed") {
-        return Err(HttpBrowseError::new(
-            StatusCode::BAD_REQUEST,
-            "played-state latest filtering is not supported",
-        ));
-    }
+    let is_played = take_bool(&mut parameters, "isPlayed")?;
     parameters.remove("fields");
     parameters.remove("enableImageTypes");
+    parameters.remove("mediaTypes");
     reject_remaining(&parameters)?;
     CatalogPageRequest::new(0, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?;
@@ -1373,6 +1435,8 @@ fn parse_latest_query(raw_query: Option<&str>) -> Result<LatestQuery, HttpBrowse
         parent_id,
         item_types,
         limit,
+        group_items,
+        is_played,
     })
 }
 
@@ -1413,6 +1477,7 @@ fn parse_next_up_query(raw_query: Option<&str>) -> Result<NextUpQuery, HttpBrows
     }
     parameters.remove("fields");
     parameters.remove("enableImageTypes");
+    parameters.remove("mediaTypes");
     reject_remaining(&parameters)?;
     let page = CatalogPageRequest::new(start_index, limit)
         .map_err(|_| HttpBrowseError::new(StatusCode::BAD_REQUEST, "invalid catalog page"))?;
@@ -1757,16 +1822,18 @@ fn resume_result(
 
 fn latest_result(
     server_id: Uuid,
-    items: &[CatalogItemRecord],
+    items: &[LatestItemRecord],
 ) -> Result<Vec<BaseItemDto>, HttpBrowseError> {
     items
         .iter()
-        .map(|item| {
+        .map(|latest| {
+            let item = latest.item();
             item_dto(
                 server_id,
                 item.parent_id().map(CatalogItemId::as_uuid),
                 item,
             )
+            .map(|dto| dto.with_child_count(latest.child_count()))
         })
         .collect()
 }
@@ -1814,9 +1881,12 @@ fn item_dto(
         item.backdrop_image_tags().to_vec(),
         item.primary_image_aspect_ratio(),
     )
-    .with_series_image(
+    .with_series_metadata(
         matches!(item_type, BaseItemKind::Season | BaseItemKind::Episode)
             .then(|| item.series_id().map(CatalogItemId::as_uuid))
+            .flatten(),
+        matches!(item_type, BaseItemKind::Season | BaseItemKind::Episode)
+            .then(|| item.series_name().map(str::to_owned))
             .flatten(),
         item.series_primary_image_tag().map(str::to_owned),
     )

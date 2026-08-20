@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+// Jellyfin clients may include legacy or client-specific fields alongside Username/Pw.
+#[serde(rename_all = "PascalCase")]
 pub struct AuthenticateUserByName {
     pub username: String,
     #[serde(rename = "Pw", default, deserialize_with = "null_as_default")]

@@ -502,7 +502,7 @@ async fn requested_user_must_match_the_authenticated_principal() {
         )
         .await;
     let latest = service
-        .latest_items(principal, Some(other), None, Vec::new(), 20)
+        .latest_items(principal, Some(other), None, Vec::new(), 20, true, None)
         .await;
     let next_up = service
         .next_up_items(
