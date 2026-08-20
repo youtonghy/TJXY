@@ -137,6 +137,39 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
 }
 
 #[tokio::test]
+async fn administrator_personal_sessions_exclude_other_users() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let service = Arc::new(
+        AuthService::new(database, SystemClock, Some(Duration::days(30)), 2)
+            .await
+            .unwrap(),
+    );
+    service
+        .create_user("Alice", "correct horse", true)
+        .await
+        .unwrap();
+    service
+        .create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    let identity = ServerIdentity::new(Uuid::parse_str(SERVER_ID).unwrap(), "TJXY", "Linux")
+        .with_startup_wizard_completed(true);
+    let app = build_router(AppState::new(identity).with_auth(service).with_ready(true));
+    let alice = json_response(login(app.clone(), "correct horse").await).await;
+    let alice_token = alice["AccessToken"].as_str().unwrap();
+    let bob = json_response(login_as(app.clone(), "bob", "ordinary password").await).await;
+
+    let response = token_request(app, Method::GET, "/Users/Me/Sessions", alice_token, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sessions = json_response(response).await;
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["Id"], alice["SessionInfo"]["Id"]);
+    assert_ne!(sessions[0]["Id"], bob["SessionInfo"]["Id"]);
+}
+
+#[tokio::test]
 async fn ordinary_users_can_read_only_their_own_jellyfin_user_resource() {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();

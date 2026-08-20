@@ -59,6 +59,7 @@ export function ProfilePage() {
   const [sessions, setSessions] = useState<PersonalSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionBusy, setSessionBusy] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string>();
   const [range, setRange] = useState<InsightRange>('today');
   const [editing, setEditing] = useState(false);
   const [server, setServer] = useState(getStoredApiBaseUrl() ?? 'http://127.0.0.1:8096');
@@ -131,9 +132,11 @@ export function ProfilePage() {
         loading={sessionsLoading}
         sessions={sessions}
         busy={sessionBusy}
+        error={sessionError}
         onRevoke={async (session) => {
           if (sessionBusy !== null) return;
           setSessionBusy(session.Id);
+          setSessionError(undefined);
           try {
             await revokePersonalSession(session.Id);
             if (session.IsCurrent) {
@@ -142,6 +145,8 @@ export function ProfilePage() {
               return;
             }
             setSessions((current) => current.filter((item) => item.Id !== session.Id));
+          } catch (reason) {
+            setSessionError(reason instanceof Error ? reason.message : tr('Unable to revoke this session.', '无法注销此会话。'));
           } finally {
             setSessionBusy(null);
           }
@@ -187,45 +192,101 @@ function SessionManagement({
   loading,
   sessions,
   busy,
+  error,
   onRevoke,
 }: {
   loading: boolean;
   sessions: PersonalSession[];
   busy: string | null;
+  error?: string;
   onRevoke: (session: PersonalSession) => Promise<void>;
 }) {
   const tr = useTranslate();
+  const [isOpen, setIsOpen] = useState(false);
+  const sortedSessions = [...sessions].sort(
+    (left, right) => Date.parse(right.LastActivityDate) - Date.parse(left.LastActivityDate),
+  );
+  const recentSessions = sortedSessions.slice(0, 4);
   return (
-    <Card>
-      <Card.Header>
-        <Card.Title>{tr('Signed-in devices', '已登录设备')}</Card.Title>
-        <Card.Description>{tr('Review active sessions and sign out older logins.', '查看当前会话并注销较早的登录。')}</Card.Description>
-      </Card.Header>
-      <Card.Content>
-        {loading ? <div aria-label={tr('Loading signed-in devices', '正在加载已登录设备')} className="h-24 animate-pulse rounded-xl bg-default" role="status" /> : sessions.length === 0 ? (
-          <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
-        ) : (
-          <ul aria-label={tr('Signed-in devices', '已登录设备')} className="divide-y divide-border">
-            {sessions.map((session) => (
-              <li className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between" key={session.Id}>
-                <div className="min-w-0">
-                  <p className="font-medium text-foreground">{session.DeviceName} {session.IsCurrent ? <span className="text-xs text-accent">({tr('This device', '此设备')})</span> : null}</p>
-                  <p className="text-sm text-muted">{session.ClientName} · {session.ApplicationVersion}</p>
-                  <p className="text-xs text-muted">{tr('Last active', '最近活动')}：{formatTimelineDate(session.LastActivityDate, localeForDate())}</p>
-                </div>
-                <Button
-                  isDisabled={busy !== null}
-                  isPending={busy === session.Id}
-                  onPress={() => { void onRevoke(session); }}
-                  size="sm"
-                  variant={session.IsCurrent ? 'tertiary' : 'danger-soft'}
-                >{session.IsCurrent ? tr('Sign out', '退出登录') : tr('Revoke', '注销')}</Button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card.Content>
-    </Card>
+    <>
+      <Card>
+        <Card.Header>
+          <Card.Title>{tr('Signed-in devices', '已登录设备')}</Card.Title>
+          <Card.Description>{tr('Your four most recently active sessions.', '最近活跃的四个会话。')}</Card.Description>
+        </Card.Header>
+        <Card.Content className="space-y-4">
+          {loading ? <div aria-label={tr('Loading signed-in devices', '正在加载已登录设备')} className="h-24 animate-pulse rounded-xl bg-default" role="status" /> : sessions.length === 0 ? (
+            <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
+          ) : (
+            <>
+              <SessionList sessions={recentSessions} />
+              <Button onPress={() => { setIsOpen(true); }} variant="secondary">
+                {tr(`Manage all ${String(sessions.length)} devices`, `管理全部 ${String(sessions.length)} 台设备`)}
+              </Button>
+            </>
+          )}
+        </Card.Content>
+      </Card>
+
+      <Modal isOpen={isOpen} onOpenChange={(open) => { if (!open && busy === null) setIsOpen(false); }}>
+        <Modal.Backdrop isDismissable={busy === null} isKeyboardDismissDisabled={busy !== null}>
+          <Modal.Container placement="center" scroll="inside" size="md">
+            <Modal.Dialog className="max-h-[min(44rem,calc(100vh-2rem))]">
+              <Modal.CloseTrigger aria-label={tr('Close device manager', '关闭设备管理')} isDisabled={busy !== null} />
+              <Modal.Header>
+                <Modal.Heading>{tr('Manage signed-in devices', '管理已登录设备')}</Modal.Heading>
+                <p className="text-sm text-muted">{tr(`${String(sessions.length)} active sessions`, `${String(sessions.length)} 个活跃会话`)}</p>
+              </Modal.Header>
+              <Modal.Body className="min-h-0">
+                {error ? <p className="mb-3 text-sm text-danger" role="alert">{error}</p> : null}
+                {sessions.length === 0
+                  ? <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
+                  : <SessionList busy={busy} onRevoke={onRevoke} sessions={sortedSessions} showActions />}
+              </Modal.Body>
+              <Modal.Footer>
+                <Button isDisabled={busy !== null} onPress={() => { setIsOpen(false); }} variant="tertiary">{tr('Done', '完成')}</Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+    </>
+  );
+}
+
+function SessionList({
+  sessions,
+  busy = null,
+  onRevoke,
+  showActions = false,
+}: {
+  sessions: PersonalSession[];
+  busy?: string | null;
+  onRevoke?: (session: PersonalSession) => Promise<void>;
+  showActions?: boolean;
+}) {
+  const tr = useTranslate();
+  return (
+    <ul aria-label={tr('Signed-in devices', '已登录设备')} className="divide-y divide-border">
+      {sessions.map((session) => (
+        <li className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between" key={session.Id}>
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">{session.DeviceName} {session.IsCurrent ? <span className="text-xs text-accent">({tr('This device', '此设备')})</span> : null}</p>
+            <p className="text-sm text-muted">{session.ClientName} · {session.ApplicationVersion}</p>
+            <p className="text-xs tabular-nums text-muted">{tr('Last active', '最近活动')}：{formatTimelineDate(session.LastActivityDate, localeForDate())}</p>
+          </div>
+          {showActions && onRevoke ? (
+            <Button
+              isDisabled={busy !== null}
+              isPending={busy === session.Id}
+              onPress={() => { void onRevoke(session); }}
+              size="sm"
+              variant={session.IsCurrent ? 'tertiary' : 'danger-soft'}
+            >{session.IsCurrent ? tr('Sign out', '退出登录') : tr('Revoke', '注销')}</Button>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 

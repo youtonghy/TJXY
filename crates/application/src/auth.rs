@@ -66,6 +66,7 @@ pub struct SessionCapabilities {
 pub struct SessionListFilter {
     device_id: Option<String>,
     active_within_seconds: Option<u32>,
+    visible_user_id: Option<UserId>,
     controllable_by_user_id: Option<UserId>,
 }
 
@@ -79,6 +80,12 @@ impl SessionListFilter {
     #[must_use]
     pub const fn with_active_within_seconds(mut self, seconds: u32) -> Self {
         self.active_within_seconds = Some(seconds);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_visible_user_id(mut self, user_id: UserId) -> Self {
+        self.visible_user_id = Some(user_id);
         self
     }
 
@@ -792,9 +799,11 @@ where
         filter: SessionListFilter,
     ) -> Result<Vec<AuthSessionRecord>, AuthError> {
         validate_session_filter(&filter)?;
-        if filter.controllable_by_user_id.is_some_and(|requested| {
-            requested != principal.user().id() && !principal.user().is_admin()
-        }) {
+        if [filter.visible_user_id, filter.controllable_by_user_id]
+            .into_iter()
+            .flatten()
+            .any(|requested| requested != principal.user().id() && !principal.user().is_admin())
+        {
             return Err(AuthError::Forbidden);
         }
         let now = self.clock.now();
@@ -804,8 +813,9 @@ where
         AuthRepository::new(&self.database)
             .list_active_sessions(
                 AuthSessionQuery {
-                    visible_user_id: (!principal.user().is_admin())
-                        .then_some(principal.user().id()),
+                    visible_user_id: filter.visible_user_id.or_else(|| {
+                        (!principal.user().is_admin()).then_some(principal.user().id())
+                    }),
                     controllable_by_user_id: filter.controllable_by_user_id,
                     device_id: filter.device_id,
                     active_after,

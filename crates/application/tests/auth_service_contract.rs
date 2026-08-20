@@ -318,6 +318,16 @@ async fn session_listing_is_scoped_recent_and_logout_revokes_the_current_token()
     assert_eq!(bob_session.playable_media_types(), ["Video", "Audio"]);
     assert!(bob_session.supports_media_control());
 
+    let administrator_personal_sessions = service
+        .sessions(
+            &alice_principal,
+            SessionListFilter::default().with_visible_user_id(alice.id()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(administrator_personal_sessions.len(), 1);
+    assert_eq!(administrator_personal_sessions[0].user_id(), alice.id());
+
     let bob_sessions = service
         .sessions(&bob_principal, SessionListFilter::default())
         .await

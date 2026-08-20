@@ -114,7 +114,10 @@ pub(crate) async fn list_personal(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match service
-        .sessions(&principal, SessionListFilter::default())
+        .sessions(
+            &principal,
+            SessionListFilter::default().with_visible_user_id(principal.user().id()),
+        )
         .await
     {
         Ok(sessions) => Json(

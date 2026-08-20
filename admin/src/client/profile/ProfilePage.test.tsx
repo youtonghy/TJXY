@@ -13,6 +13,17 @@ const api = vi.hoisted(() => ({
   updateProfile: vi.fn(),
 }));
 
+const sessions = Array.from({ length: 6 }, (_, index) => ({
+  ApplicationVersion: '0.1.0',
+  ClientName: 'TJXY Web',
+  CreatedAt: `2026-08-20T${String(10 + index).padStart(2, '0')}:00:00Z`,
+  DeviceId: `device-${String(index + 1)}`,
+  DeviceName: `Browser ${String(index + 1)}`,
+  Id: `session-${String(index + 1)}`,
+  IsCurrent: index === 5,
+  LastActivityDate: `2026-08-20T${String(10 + index).padStart(2, '0')}:00:00Z`,
+}));
+
 vi.mock('../api/portalApi', () => api);
 vi.mock('../auth/ClientAuthContext', () => ({ useClientAuth: () => ({ signOut: vi.fn() }) }));
 
@@ -65,6 +76,45 @@ it('shows profile details and opens one dedicated edit dialog', async () => {
   expect(screen.getByRole('textbox', { name: 'Biography' })).toHaveValue('Film lover.');
   expect(screen.getByLabelText('Current password')).toBeVisible();
   expect(screen.getByLabelText('New password')).toBeVisible();
+});
+
+it('shows only the four latest sessions and manages every session in a dialog', async () => {
+  api.listPersonalSessions.mockResolvedValueOnce([...sessions].reverse());
+  const user = userEvent.setup();
+  render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+
+  await screen.findByRole('heading', { name: 'Admin' });
+  const summary = screen.getByRole('list', { name: 'Signed-in devices' });
+  expect(summary).toHaveTextContent('Browser 6');
+  expect(summary).toHaveTextContent('Browser 3');
+  expect(summary).not.toHaveTextContent('Browser 2');
+  expect(summary).not.toHaveTextContent('Browser 1');
+  expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'Manage all 6 devices' }));
+
+  const dialog = await screen.findByRole('dialog', { name: 'Manage signed-in devices' });
+  expect(dialog).toHaveTextContent('Browser 6');
+  expect(dialog).toHaveTextContent('Browser 1');
+  expect(screen.getAllByRole('button', { name: 'Revoke' })).toHaveLength(5);
+  expect(screen.getByRole('button', { name: 'Sign out' })).toBeVisible();
+});
+
+it('revokes an older session from the device manager and removes it from the list', async () => {
+  api.listPersonalSessions.mockResolvedValueOnce(sessions);
+  api.revokePersonalSession.mockResolvedValueOnce(undefined);
+  const user = userEvent.setup();
+  render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+  await screen.findByRole('heading', { name: 'Admin' });
+  await user.click(screen.getByRole('button', { name: 'Manage all 6 devices' }));
+
+  const firstRevoke = screen.getAllByRole('button', { name: 'Revoke' }).at(0);
+  if (!firstRevoke) throw new Error('Expected at least one revocable session.');
+  await user.click(firstRevoke);
+
+  expect(api.revokePersonalSession).toHaveBeenCalledWith('session-5');
+  expect(await screen.findByText('5 active sessions')).toBeVisible();
+  expect(screen.getByRole('dialog', { name: 'Manage signed-in devices' })).not.toHaveTextContent('Browser 5');
 });
 
 it('reloads all statistic cards when the selected range changes', async () => {
