@@ -1,5 +1,4 @@
 import { ApiError, apiRequest } from '../api/httpClient';
-import type { FilesystemSelection } from './filesystemApi';
 
 export type ScanProfile = 'Full' | 'Lazy' | 'Manual';
 export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | 'homevideos';
@@ -17,7 +16,7 @@ export interface CreateLibraryRequest {
   scanProfile: ScanProfile;
   metadataSourceMode: MetadataSourceMode;
   localMetadataAccessMode: LocalMetadataAccessMode;
-  filesystemSelection?: FilesystemSelection;
+  path?: string;
 }
 
 export interface EffectiveLibraryPolicy {
@@ -78,12 +77,7 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
         MetadataSourceMode: request.metadataSourceMode,
         LocalMetadataAccessMode: request.localMetadataAccessMode,
       },
-      ...(request.filesystemSelection === undefined ? {} : {
-        FilesystemSelection: {
-          RootId: request.filesystemSelection.rootId,
-          RelativePath: request.filesystemSelection.relativePath,
-        },
-      }),
+      ...(request.path === undefined ? {} : { Path: requireText(request.path, 'A media path is required.') }),
     }),
   });
 }

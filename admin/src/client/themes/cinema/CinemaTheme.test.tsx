@@ -10,9 +10,8 @@ vi.mock('../../../settings/systemSettingsApi', () => ({
   getPublicSystemSettings: vi.fn().mockResolvedValue({
     locale: 'en-US', siteTitle: 'TJXY', siteSubtitle: 'Your media library',
     logoUrl: '/brand/tjxy-mark.webp', iconUrl: '/brand/favicon.svg', publicUrl: '',
-    listenHost: '127.0.0.1', port: 8096, mediaBrowserRoots: [],
-    invalidMediaBrowserRootIndexes: [], revision: 0, restartRequired: false,
-    environmentOverrides: { siteTitle: false, publicUrl: false, listenAddress: false, mediaBrowserRoots: false },
+    listenHost: '127.0.0.1', port: 8096, revision: 0, restartRequired: false,
+    environmentOverrides: { siteTitle: false, publicUrl: false, listenAddress: false },
     theme: { id: 'cinema', schemaVersion: 1, options: {}, revision: 0 },
   }),
 }));

@@ -8,8 +8,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use tjxy_api::{
-    AddVirtualFolderDto, AttachVirtualFolderPathDto, FilesystemSelectionDto, LibraryOptionsDto,
-    UpdateLibraryOptionsDto, VirtualFolderInfo,
+    AddVirtualFolderDto, AttachVirtualFolderPathDto, LibraryOptionsDto, UpdateLibraryOptionsDto,
+    VirtualFolderInfo,
 };
 use tjxy_application::{LibraryPolicyOverrides, LibraryService, LibraryServiceError};
 use tjxy_common::{LibraryId, StorageRootId};
@@ -130,9 +130,23 @@ pub(crate) async fn add_virtual_folder(
                 options.local_metadata_access_mode(),
             )
         });
-    let selection = request.filesystem_selection();
-    let result = if let Some(selection) = selection {
-        let Ok((backend, draft)) = browser_filesystem_root(&state, selection).await else {
+    let result = if let Some(path) = request.path().filter(|path| !path.trim().is_empty()) {
+        let Ok(backend) = FilesystemBackend::new(path).await.map(Arc::new) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Some(root_path) = backend.root_path().to_str() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let display_name = backend
+            .root_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&query.name);
+        let Ok(draft) = FilesystemRootDraft::new(
+            root_path,
+            backend.root_id().provider_object_id(),
+            display_name,
+        ) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
         let result = libraries
@@ -237,9 +251,28 @@ pub(crate) async fn attach_virtual_folder_path(
     let Some(libraries) = state.libraries.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Ok((backend, draft)) =
-        browser_filesystem_root(&state, request.filesystem_selection()).await
-    else {
+    let (backend, draft) = if let Some(path) = request.path().filter(|path| !path.trim().is_empty())
+    {
+        let Ok(backend) = FilesystemBackend::new(path).await.map(Arc::new) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Some(root_path) = backend.root_path().to_str() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let display_name = backend
+            .root_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Media");
+        let Ok(draft) = FilesystemRootDraft::new(
+            root_path,
+            backend.root_id().provider_object_id(),
+            display_name,
+        ) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        (backend, draft)
+    } else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let result = libraries
@@ -249,38 +282,6 @@ pub(crate) async fn attach_virtual_folder_path(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => library_error_response(&error),
     }
-}
-
-async fn browser_filesystem_root(
-    state: &AppState,
-    selection: &FilesystemSelectionDto,
-) -> Result<(Arc<FilesystemBackend>, FilesystemRootDraft), ()> {
-    let browser = state.filesystem_browser.as_ref().ok_or(())?;
-    let resolved = browser
-        .resolve(
-            selection.root_id(),
-            std::path::Path::new(selection.relative_path()),
-        )
-        .await
-        .map_err(|_| ())?;
-    let backend = Arc::new(
-        FilesystemBackend::new(resolved.path())
-            .await
-            .map_err(|_| ())?,
-    );
-    let root_path = backend.root_path().to_str().ok_or(())?;
-    let display_name = backend
-        .root_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Media");
-    let draft = FilesystemRootDraft::new(
-        root_path,
-        backend.root_id().provider_object_id(),
-        display_name,
-    )
-    .map_err(|_| ())?;
-    Ok((backend, draft))
 }
 
 async fn activate_created_filesystem_root(

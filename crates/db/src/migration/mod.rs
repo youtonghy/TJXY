@@ -64,6 +64,7 @@ mod m20260813_000063_direct_local_metadata;
 mod m20260815_000064_ai_token_limits;
 mod m20260816_000065_qr_login_challenges;
 mod m20260818_000066_strm_locator;
+mod m20260821_000067_remove_media_browser_roots;
 
 use std::collections::HashSet;
 
@@ -206,7 +207,6 @@ async fn validate_current_schema(
         ("publication_catalog_items", "index_number"),
         ("media_sources", "naming_hints"),
         ("publication_media_sources", "naming_hints"),
-        ("system_settings", "media_browser_roots"),
         ("site_theme_settings", "active_theme_id"),
         ("site_theme_settings", "configurations"),
         ("site_theme_settings", "revision"),
@@ -303,6 +303,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260815_000064_ai_token_limits::Migration),
             Box::new(m20260816_000065_qr_login_challenges::Migration),
             Box::new(m20260818_000066_strm_locator::Migration),
+            Box::new(m20260821_000067_remove_media_browser_roots::Migration),
         ]
     }
 }

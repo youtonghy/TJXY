@@ -257,6 +257,47 @@ async fn resolves_relative_and_absolute_local_references_inside_the_root() {
     assert_eq!(bytes, b"cdef");
 }
 
+#[tokio::test]
+async fn process_root_backend_resolves_an_absolute_reference_outside_a_library_root() {
+    let parent = tempdir().unwrap();
+    let library = parent.path().join("library");
+    let target = parent.path().join("targets");
+    fs::create_dir(&library).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(library.join("episode.strm"), b"unused").unwrap();
+    fs::write(target.join("episode.mkv"), b"abcdefgh").unwrap();
+    let library_backend = FilesystemBackend::new(&library).await.unwrap();
+    let fallback = FilesystemBackend::new(parent.path()).await.unwrap();
+    let target_path = fs::canonicalize(target.join("episode.mkv")).unwrap();
+    let files = library_backend
+        .list_children(library_backend.root_id(), None)
+        .await
+        .unwrap();
+    let descriptor = files.objects.first().unwrap();
+
+    assert_eq!(
+        library_backend
+            .resolve_local_reference(descriptor.id(), target_path.to_str().unwrap(),)
+            .await,
+        Err(tjxy_storage::BackendError::NotFound)
+    );
+
+    let resolved = fallback
+        .resolve_local_reference(descriptor.id(), target_path.to_str().unwrap())
+        .await
+        .unwrap();
+    let bytes = fallback
+        .open_range(resolved.id(), ByteRange::new(1, 5).unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .concat();
+
+    assert_eq!(bytes, b"bcde");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn local_references_reject_dot_components_and_symlink_targets() {

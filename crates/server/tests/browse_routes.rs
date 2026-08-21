@@ -19,13 +19,11 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tjxy_application::{
-    AssetReadService, AuthService, CatalogQueryService, FilesystemBrowser, LibraryService,
-    MediaCollectionService, MediaInspector, MediaReadService, PlaybackTicketService,
-    PlaystateService, ProbeInput, ProbeService, ProbeServiceError, SourceIndexService, SystemClock,
-    TaskService, UserDataService,
+    AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
+    MediaInspector, MediaReadService, PlaybackTicketService, PlaystateService, ProbeInput,
+    ProbeService, ProbeServiceError, SourceIndexService, SystemClock, TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
-use tjxy_db::{SystemSettingsInput, SystemSettingsRepository};
 use tjxy_server::{AppState, ServerIdentity, build_router};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
@@ -348,7 +346,6 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
     tokio::fs::create_dir(media.path().join("Movies"))
         .await
         .unwrap();
-    let filesystem_browser = Arc::new(FilesystemBrowser::from_roots([media.path()]).await.unwrap());
     let media_account = Uuid::new_v4();
     let (
         cloud_account,
@@ -373,7 +370,6 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
                 .with_auth(auth)
                 .with_catalog(catalog)
                 .with_libraries(libraries)
-                .with_filesystem_browser(filesystem_browser)
                 .with_assets(asset_reader)
                 .with_media(media_reader)
                 .with_playback_tickets(playback_tickets)
@@ -399,87 +395,6 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
         cloud_subtitle_object_id,
         cloud_backend,
     }
-}
-
-#[tokio::test]
-async fn filesystem_browser_requires_an_administrator_and_exposes_only_relative_paths() {
-    let app = test_app().await;
-    let response = get(&app.router, "/Admin/Filesystem/Roots", None).await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-    let (_, _, token) = login(&app.router).await;
-    let response = get(&app.router, "/Admin/Filesystem/Roots", Some(&token)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let roots: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(roots.as_array().unwrap().len(), 1);
-    assert_eq!(
-        roots[0]["Name"],
-        app.media.path().file_name().unwrap().to_str().unwrap()
-    );
-    assert!(roots[0].get("Path").is_none());
-    let root_id = roots[0]["Id"].as_str().unwrap();
-
-    let response = get(
-        &app.router,
-        &format!("/Admin/Filesystem/Directories?RootId={root_id}&Path="),
-        Some(&token),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(page["Items"][0]["Name"], "Movies");
-    assert_eq!(page["Items"][0]["RelativePath"], "Movies");
-    assert!(
-        !page
-            .to_string()
-            .contains(app.media.path().to_str().unwrap())
-    );
-}
-
-#[tokio::test]
-async fn administrator_can_attach_a_validated_browser_selection_to_an_existing_library() {
-    let app = test_app().await;
-    let (_, _, token) = login(&app.router).await;
-    assert_eq!(
-        post(
-            &app.router,
-            "/Library/VirtualFolders?name=Movies&collectionType=movies",
-            &token,
-            "{}",
-        )
-        .await
-        .status(),
-        StatusCode::NO_CONTENT
-    );
-    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
-    let folders: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let library_id = folders[0]["ItemId"].as_str().unwrap();
-    let response = get(&app.router, "/Admin/Filesystem/Roots", Some(&token)).await;
-    let roots: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let root_id = roots[0]["Id"].as_str().unwrap();
-
-    let response = post(
-        &app.router,
-        "/Library/VirtualFolders/Paths",
-        &token,
-        json!({
-            "LibraryId": library_id,
-            "FilesystemSelection": {"RootId": root_id, "RelativePath": "Movies"}
-        })
-        .to_string(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
-    let folders: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(folders[0]["Locations"].as_array().unwrap().len(), 1);
-    assert!(!folders[0]["Locations"][0].as_str().unwrap().is_empty());
 }
 
 async fn login(router: &axum::Router) -> (Uuid, Uuid, String) {
@@ -7671,7 +7586,6 @@ async fn assert_visibility_sensitive_routes_hide_item(
 async fn administrator_can_manage_complete_system_settings() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;
-    let media_browser_root = app.media.path().to_string_lossy().into_owned();
 
     let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -7681,7 +7595,6 @@ async fn administrator_can_manage_complete_system_settings() {
     assert_eq!(settings["SiteTitle"], "TJXY");
     assert_eq!(settings["ListenHost"], "127.0.0.1");
     assert_eq!(settings["Port"], 8096);
-    assert_eq!(settings["MediaBrowserRoots"], json!([]));
 
     let response = put(
         &app.router,
@@ -7695,8 +7608,7 @@ async fn administrator_can_manage_complete_system_settings() {
             "IconUrl": "/brand/favicon.svg",
             "PublicUrl": "https://media.example.com",
             "ListenHost": "0.0.0.0",
-            "Port": 9000,
-            "MediaBrowserRoots": [media_browser_root]
+            "Port": 9000
         })
         .to_string(),
     )
@@ -7706,10 +7618,6 @@ async fn administrator_can_manage_complete_system_settings() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(saved["SiteTitle"], "Cinema");
     assert_eq!(saved["Port"], 9000);
-    assert_eq!(
-        saved["MediaBrowserRoots"],
-        json!([app.media.path().to_string_lossy()])
-    );
     assert_eq!(saved["RestartRequired"], true);
     assert_eq!(saved["Revision"], 1);
 
@@ -7717,7 +7625,6 @@ async fn administrator_can_manage_complete_system_settings() {
     assert_eq!(response.status(), StatusCode::OK);
     let public: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert!(public.get("MediaBrowserRoots").is_none());
     assert_eq!(
         public["Theme"],
         json!({
@@ -7862,60 +7769,6 @@ async fn site_theme_settings_enforce_admin_revision_and_input_validation() {
 }
 
 #[tokio::test]
-async fn system_settings_reject_missing_media_browser_roots_without_advancing_revision() {
-    let app = test_app().await;
-    let (_, _, token) = login(&app.router).await;
-
-    let response = put(
-        &app.router,
-        "/Admin/System/Settings",
-        &token,
-        json!({
-            "Locale": "zh-CN",
-            "SiteTitle": "TJXY",
-            "SiteSubtitle": "Your media library",
-            "LogoUrl": "/brand/tjxy-mark.webp",
-            "IconUrl": "/brand/favicon.svg",
-            "PublicUrl": null,
-            "ListenHost": "127.0.0.1",
-            "Port": 8096,
-            "MediaBrowserRoots": [app.media.path().join("missing")]
-        })
-        .to_string(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
-    let settings: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(settings["Revision"], 0);
-    assert_eq!(settings["MediaBrowserRoots"], json!([]));
-}
-
-#[tokio::test]
-async fn system_settings_report_unavailable_persisted_media_browser_roots() {
-    let app = test_app().await;
-    let (_, _, token) = login(&app.router).await;
-    let missing = app.media.path().join("missing");
-    let settings = SystemSettingsInput {
-        media_browser_roots: vec![missing.to_string_lossy().into_owned()],
-        ..SystemSettingsInput::default()
-    };
-    SystemSettingsRepository::new(&app.database)
-        .put(&settings, None)
-        .await
-        .unwrap();
-
-    let response = get(&app.router, "/Admin/System/Settings", Some(&token)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let settings: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-
-    assert_eq!(settings["InvalidMediaBrowserRootIndexes"], json!([0]));
-}
-
-#[tokio::test]
 async fn concurrent_system_settings_updates_return_one_conflict() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;
@@ -7927,8 +7780,7 @@ async fn concurrent_system_settings_updates_return_one_conflict() {
         "IconUrl": "/brand/favicon.svg",
         "PublicUrl": null,
         "ListenHost": "127.0.0.1",
-        "Port": 8096,
-        "MediaBrowserRoots": []
+        "Port": 8096
     });
     let response = put(
         &app.router,
@@ -7948,7 +7800,6 @@ async fn concurrent_system_settings_updates_return_one_conflict() {
         "PublicUrl": null,
         "ListenHost": "127.0.0.1",
         "Port": 8096,
-        "MediaBrowserRoots": [],
         "Revision": 1
     });
     let mut second = first.clone();

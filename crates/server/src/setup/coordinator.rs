@@ -418,7 +418,6 @@ impl SetupCoordinator {
                     public_url: pending.network().public_url().map(str::to_owned),
                     listen_host: pending.network().listen_host().to_owned(),
                     port: pending.network().port(),
-                    media_browser_roots: Vec::new(),
                 },
                 expected_revision,
             )

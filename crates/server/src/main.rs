@@ -258,12 +258,6 @@ async fn serve_application(
         .map_or(Ok(true), |value| value.parse::<bool>())
         .map_err(|_| StartupError::InvalidFilesystemRealtime)?;
     startup = startup.with_filesystem_realtime_enabled(filesystem_realtime);
-    if let Some(value) = env::var_os("TJXY_MEDIA_BROWSER_ROOTS") {
-        let roots = env::split_paths(&value).collect::<Vec<_>>();
-        if !roots.is_empty() {
-            startup = startup.with_filesystem_browser_roots(roots);
-        }
-    }
     if let Ok(value) = env::var("TJXY_LEGACY_AUTH") {
         let enabled = value
             .parse::<bool>()

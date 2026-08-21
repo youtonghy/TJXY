@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 pub struct StorageBackendRegistry {
     entries: Arc<RwLock<HashMap<Uuid, RegisteredStorageBackend>>>,
+    local_reference_fallback: Arc<RwLock<Option<Arc<dyn StorageBackend>>>>,
 }
 
 struct RegisteredStorageBackend {
@@ -21,6 +22,17 @@ impl StorageBackendRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Installs a read-only fallback for absolute local references such as STRM targets.
+    ///
+    /// The fallback is not registered as a storage account and therefore cannot participate in
+    /// inventory, synchronization, or library authorization.
+    pub fn set_local_reference_fallback(&self, backend: Arc<dyn StorageBackend>) {
+        *self
+            .local_reference_fallback
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(backend);
     }
 
     /// Registers one account backend without replacing an already active account.
@@ -164,6 +176,24 @@ impl StorageBackendRegistry {
                 Err(BackendError::NotFound | BackendError::UnsupportedCapability { .. }) => {}
                 Err(error) => return Err(error),
             }
+        }
+        let fallback = self
+            .local_reference_fallback
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if std::path::Path::new(reference).is_absolute()
+            && let Some(backend) = fallback
+        {
+            let object = backend
+                .resolve_local_reference(descriptor, reference)
+                .await?;
+            return Ok(ResolvedLocalReference {
+                account_id: preferred_account,
+                backend,
+                object,
+            });
         }
         Err(BackendError::NotFound)
     }

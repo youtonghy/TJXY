@@ -174,8 +174,6 @@ const enUS: Record<string, string> = {
   'admin.system.mediaBrowserHint': 'Changes apply after TJXY restarts. Existing library bindings are not removed.',
   'admin.system.mediaBrowserRoot': 'Media browser root {index}',
   'admin.system.mediaBrowserRootUnavailable': 'This folder is missing, unmounted, or currently inaccessible.',
-  'admin.system.mediaBrowserRootsUnavailable': 'Some media browser folders are unavailable',
-  'admin.system.mediaBrowserRootsUnavailableDescription': 'TJXY skipped these folders and continued running. Check their paths, mounts, and permissions.',
   'admin.system.removeMediaBrowserRoot': 'Remove media browser root {index}',
   'admin.system.network': 'Network',
   'admin.system.networkDescription': 'Changes to the listen address or port apply after TJXY restarts.',

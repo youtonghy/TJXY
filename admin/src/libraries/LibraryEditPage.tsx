@@ -23,7 +23,6 @@ import { AsyncContent } from '../ui/AsyncContent';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { PageHeader } from '../ui/PageHeader';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
-import { FolderPickerDialog } from './FolderPickerDialog';
 import { attachFilesystemFolder } from './filesystemApi';
 import type {
   EffectiveLibraryPolicy,
@@ -69,7 +68,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
   const [policyPending, setPolicyPending] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
   const [attachPending, setAttachPending] = useState(false);
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [attachPath, setAttachPath] = useState('');
   const renameRef = useRef(false);
   const policyRef = useRef(false);
   const deleteRef = useRef(false);
@@ -174,13 +173,16 @@ function LibraryEditPageContent({ id }: { id: string }) {
     }
   };
 
-  const attachFolder = async (selection: { rootId: string; relativePath: string }) => {
+  const attachFolder = async () => {
     if (library === null || attachPending) return;
+    const path = attachPath.trim();
+    if (path.length === 0) return;
     setAttachPending(true);
     try {
-      await attachFilesystemFolder(library.id, selection);
+      await attachFilesystemFolder(library.id, path);
       if (!isMounted()) return;
       notify('Media folder attached.', { type: 'success' });
+      setAttachPath('');
       reloadAll();
     } catch (error: unknown) {
       if (!isMounted()) return;
@@ -284,9 +286,11 @@ function LibraryEditPageContent({ id }: { id: string }) {
               localMetadataAccessMode={localMetadataAccessMode}
             />
             <StorageFoldersSection
+              attachPath={attachPath}
               isPending={attachPending}
               library={library}
-              onBrowse={() => { setFolderPickerOpen(true); }}
+              onAttach={() => { void attachFolder(); }}
+              onPathChange={setAttachPath}
             />
             <DangerZone
               isDisabled={renamePending || policyPending}
@@ -297,24 +301,22 @@ function LibraryEditPageContent({ id }: { id: string }) {
           </div>
         )}
       </AsyncContent>
-      <FolderPickerDialog
-        isDisabled={attachPending}
-        isOpen={folderPickerOpen}
-        onClose={() => { setFolderPickerOpen(false); }}
-        onSelect={(selection) => { void attachFolder(selection); }}
-      />
     </div>
   );
 }
 
 function StorageFoldersSection({
+  attachPath,
   isPending,
   library,
-  onBrowse,
+  onAttach,
+  onPathChange,
 }: {
+  attachPath: string;
   isPending: boolean;
   library: LibraryOption;
-  onBrowse: () => void;
+  onAttach: () => void;
+  onPathChange: (path: string) => void;
 }) {
   return (
     <section aria-labelledby="storage-folders-heading" className="space-y-5 border-t border-border py-7">
@@ -323,7 +325,19 @@ function StorageFoldersSection({
           <h2 className="text-base font-semibold text-foreground" id="storage-folders-heading">Media folders</h2>
           <p className="mt-1 text-sm text-muted">Attach server folders that contain this library's media.</p>
         </div>
-        <Button isPending={isPending} onPress={onBrowse} variant="secondary">
+      </div>
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <TextField fullWidth>
+          <Label>Absolute folder path</Label>
+          <Input
+            disabled={isPending}
+            maxLength={4096}
+            onChange={(event) => { onPathChange(event.currentTarget.value); }}
+            placeholder="/mnt/media"
+            value={attachPath}
+          />
+        </TextField>
+        <Button isDisabled={attachPath.trim().length === 0} isPending={isPending} onPress={onAttach} variant="secondary">
           {isPending
             ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
             : <FolderPlus aria-hidden="true" className="size-4" />}

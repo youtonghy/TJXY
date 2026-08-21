@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::IpAddr, path::Path};
+use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -27,7 +27,6 @@ pub struct SystemSettingsRecord {
     public_url: Option<String>,
     listen_host: String,
     port: u16,
-    media_browser_roots: Vec<String>,
     revision: i64,
     updated_at: DateTime<Utc>,
 }
@@ -66,10 +65,6 @@ impl SystemSettingsRecord {
         self.port
     }
     #[must_use]
-    pub fn media_browser_roots(&self) -> &[String] {
-        &self.media_browser_roots
-    }
-    #[must_use]
     pub const fn revision(&self) -> i64 {
         self.revision
     }
@@ -89,7 +84,6 @@ pub struct SystemSettingsInput {
     pub public_url: Option<String>,
     pub listen_host: String,
     pub port: u16,
-    pub media_browser_roots: Vec<String>,
 }
 
 impl Default for SystemSettingsInput {
@@ -103,7 +97,6 @@ impl Default for SystemSettingsInput {
             public_url: None,
             listen_host: DEFAULT_LISTEN_HOST.to_owned(),
             port: DEFAULT_PORT,
-            media_browser_roots: Vec::new(),
         }
     }
 }
@@ -119,7 +112,6 @@ impl From<&SystemSettingsRecord> for SystemSettingsInput {
             public_url: value.public_url.clone(),
             listen_host: value.listen_host.clone(),
             port: value.port,
-            media_browser_roots: value.media_browser_roots.clone(),
         }
     }
 }
@@ -209,7 +201,6 @@ async fn put_on(
                     Alias::new("public_url"),
                     Alias::new("listen_host"),
                     Alias::new("port"),
-                    Alias::new("media_browser_roots"),
                     Alias::new("revision"),
                     Alias::new("created_at"),
                     Alias::new("updated_at"),
@@ -224,7 +215,6 @@ async fn put_on(
                     input.public_url.clone().into(),
                     input.listen_host.clone().into(),
                     i32::from(input.port).into(),
-                    media_browser_roots_json(input).into(),
                     1_i64.into(),
                     now.into(),
                     now.into(),
@@ -258,10 +248,6 @@ async fn put_on(
                     (Alias::new("public_url"), input.public_url.clone().into()),
                     (Alias::new("listen_host"), input.listen_host.clone().into()),
                     (Alias::new("port"), i32::from(input.port).into()),
-                    (
-                        Alias::new("media_browser_roots"),
-                        media_browser_roots_json(input).into(),
-                    ),
                     (Alias::new("revision"), revision.into()),
                     (Alias::new("updated_at"), now.into()),
                 ])
@@ -296,7 +282,6 @@ async fn get_on(
             Alias::new("public_url"),
             Alias::new("listen_host"),
             Alias::new("port"),
-            Alias::new("media_browser_roots"),
             Alias::new("revision"),
             Alias::new("updated_at"),
         ])
@@ -315,15 +300,6 @@ fn settings_from_row(
     row: &QueryResult,
 ) -> Result<SystemSettingsRecord, SystemSettingsRepositoryError> {
     let port: i32 = row.try_get("", "port")?;
-    let media_browser_roots = row
-        .try_get::<Option<serde_json::Value>>("", "media_browser_roots")?
-        .map_or_else(
-            || Ok(Vec::new()),
-            |value| {
-                serde_json::from_value(value)
-                    .map_err(|_| SystemSettingsRepositoryError::InvalidMediaBrowserRoots)
-            },
-        )?;
     Ok(SystemSettingsRecord {
         locale: row.try_get("", "locale")?,
         site_title: row.try_get("", "site_title")?,
@@ -333,21 +309,9 @@ fn settings_from_row(
         public_url: row.try_get("", "public_url")?,
         listen_host: row.try_get("", "listen_host")?,
         port: u16::try_from(port).map_err(|_| SystemSettingsRepositoryError::InvalidPort)?,
-        media_browser_roots,
         revision: row.try_get("", "revision")?,
         updated_at: row.try_get("", "updated_at")?,
     })
-}
-
-fn media_browser_roots_json(input: &SystemSettingsInput) -> serde_json::Value {
-    serde_json::Value::Array(
-        input
-            .media_browser_roots
-            .iter()
-            .cloned()
-            .map(serde_json::Value::String)
-            .collect(),
-    )
 }
 
 async fn finish<T>(
@@ -399,23 +363,6 @@ fn validate(
     if listen_host.parse::<IpAddr>().is_err() {
         return Err(SystemSettingsRepositoryError::InvalidListenHost);
     }
-    if input.media_browser_roots.len() > 64 {
-        return Err(SystemSettingsRepositoryError::InvalidMediaBrowserRoots);
-    }
-    let mut roots = Vec::with_capacity(input.media_browser_roots.len());
-    let mut unique = HashSet::with_capacity(input.media_browser_roots.len());
-    for root in &input.media_browser_roots {
-        let root = root.trim();
-        if root.is_empty()
-            || root.len() > 4096
-            || root.chars().any(char::is_control)
-            || !Path::new(root).is_absolute()
-            || !unique.insert(root.to_owned())
-        {
-            return Err(SystemSettingsRepositoryError::InvalidMediaBrowserRoots);
-        }
-        roots.push(root.to_owned());
-    }
     Ok(SystemSettingsInput {
         locale: input.locale.clone(),
         site_title: site_title.to_owned(),
@@ -425,7 +372,6 @@ fn validate(
         public_url: public_url.map(str::to_owned),
         listen_host: listen_host.to_owned(),
         port: input.port,
-        media_browser_roots: roots,
     })
 }
 
@@ -463,8 +409,6 @@ pub enum SystemSettingsRepositoryError {
     InvalidListenHost,
     #[error("system port is invalid")]
     InvalidPort,
-    #[error("system media browser roots are invalid")]
-    InvalidMediaBrowserRoots,
     #[error("system settings revision is invalid")]
     InvalidRevision,
     #[error("system settings revision conflict")]

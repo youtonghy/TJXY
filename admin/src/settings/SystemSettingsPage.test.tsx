@@ -32,15 +32,12 @@ const settings = {
   publicUrl: 'https://media.example.com',
   listenHost: '127.0.0.1',
   port: 8096,
-  mediaBrowserRoots: ['/media/movies'],
-  invalidMediaBrowserRootIndexes: [],
   revision: 2,
   restartRequired: false,
   environmentOverrides: {
     siteTitle: false,
     publicUrl: false,
     listenAddress: false,
-    mediaBrowserRoots: false,
   },
   theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
 };
@@ -114,45 +111,4 @@ it('offers an explicit restart beside the shared save action', async () => {
   await user.click(await screen.findByRole('button', { name: 'Restart service' }));
 
   await waitFor(() => { expect(restartMock).toHaveBeenCalledOnce(); });
-});
-
-it('manages multiple media browser roots through the shared save action', async () => {
-  renderWithAdmin(<SystemSettingsPage />, { initialEntries: ['/admin/settings/system'] });
-  const user = userEvent.setup();
-
-  const firstRoot = await screen.findByLabelText('Media browser root 1');
-  await user.clear(firstRoot);
-  await user.type(firstRoot, '/media/music');
-  await user.click(screen.getByRole('button', { name: 'Add media browser root' }));
-  await user.type(screen.getByLabelText('Media browser root 2'), '/media/concerts');
-  await user.click(screen.getByRole('button', { name: 'Save settings' }));
-
-  await waitFor(() => {
-    expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({
-      mediaBrowserRoots: ['/media/music', '/media/concerts'],
-    }));
-  });
-});
-
-it('warns without blocking settings when persisted media browser roots are unavailable', async () => {
-  const warningToast = vi.spyOn(Toast.toast, 'warning').mockReturnValue('root-warning');
-  getMock.mockResolvedValue({
-    ...settings,
-    mediaBrowserRoots: ['/missing/media'],
-    invalidMediaBrowserRootIndexes: [0],
-  });
-
-  renderWithAdmin(
-    <><SystemSettingsPage /><AdminNotifications /></>,
-    { initialEntries: ['/admin/settings/system'] },
-  );
-
-  expect(await screen.findByRole('alert')).toHaveTextContent('Some media browser folders are unavailable');
-  expect(screen.getByLabelText('Media browser root 1')).toBeInvalid();
-  await waitFor(() => {
-    expect(warningToast).toHaveBeenCalledWith(
-      'Some media browser folders are unavailable',
-      { timeout: 8000 },
-    );
-  });
 });

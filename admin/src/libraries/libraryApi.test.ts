@@ -18,7 +18,7 @@ beforeEach(() => {
   requestMock.mockReset();
 });
 
-it('creates a library from an opaque filesystem selection and metadata source mode', async () => {
+it('creates a library from an absolute filesystem path and metadata source mode', async () => {
   requestMock.mockResolvedValue(undefined);
 
   await createLibrary({
@@ -28,7 +28,7 @@ it('creates a library from an opaque filesystem selection and metadata source mo
     scanProfile: 'Lazy',
     metadataSourceMode: 'local_only',
     localMetadataAccessMode: 'direct',
-    filesystemSelection: { rootId: 'root-1', relativePath: 'Movies' },
+    path: '/mnt/media/Movies',
   });
 
   expect(requestMock).toHaveBeenCalledWith(
@@ -42,11 +42,10 @@ it('creates a library from an opaque filesystem selection and metadata source mo
           MetadataSourceMode: 'local_only',
           LocalMetadataAccessMode: 'direct',
         },
-        FilesystemSelection: { RootId: 'root-1', RelativePath: 'Movies' },
+        Path: '/mnt/media/Movies',
       }),
     },
   );
-  expect(JSON.stringify(requestMock.mock.calls)).not.toContain('/Movies');
 });
 
 it('defaults a missing metadata source mode from an older server to automatic scrape', async () => {

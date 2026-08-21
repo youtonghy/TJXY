@@ -124,7 +124,7 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 | --- | --- | --- |
 | `--config-dir PATH` | `.tjxy/config` | `/config`，包含 `tjxy.toml` |
 | `--data-dir PATH` | `.tjxy/data` | `/data`，包含资源和日志 |
-| `--media PATH` | `./media` | `/media`，可在媒体库文件浏览器中选择 |
+| `--media PATH` | `./media` | `/media`，可供媒体库和 STRM 目标访问 |
 | `--media-mode ro` | `rw` | 以只读方式挂载媒体目录 |
 | `--port PORT` | `8096` | 发布 TJXY HTTP 服务端口 |
 | `--image IMAGE` | 未设置时从源码构建 | 推荐使用 `ghcr.io/youtonghy/tjxy:0.0.1`。仅在从当前源码构建时省略 |

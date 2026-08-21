@@ -137,7 +137,7 @@ Docker Desktop.
 | --- | --- | --- |
 | `--config-dir PATH` | `.tjxy/config` | `/config`, including `tjxy.toml` |
 | `--data-dir PATH` | `.tjxy/data` | `/data`, including assets and logs |
-| `--media PATH` | `./media` | `/media`, visible to the library browser |
+| `--media PATH` | `./media` | `/media`, available for media libraries and STRM targets |
 | `--media-mode ro` | `rw` | Mount media read-only |
 | `--port PORT` | `8096` | Publish the TJXY HTTP service |
 | `--image IMAGE` | unset (source build) | Recommended: `ghcr.io/youtonghy/tjxy:0.0.1`. Omit only when building from a checkout |

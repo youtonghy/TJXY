@@ -10,11 +10,9 @@ import {
   Switch,
   TextField,
 } from '@heroui/react';
-import { FolderOpen, LoaderCircle, Plus } from 'lucide-react';
+import { LoaderCircle, Plus } from 'lucide-react';
 import { useState, type SyntheticEvent } from 'react';
 
-import { FolderPickerDialog } from './FolderPickerDialog';
-import type { FilesystemSelection } from './filesystemApi';
 import type {
   CreateLibraryRequest,
   LibraryCollectionType,
@@ -44,9 +42,7 @@ export function LibraryCreateDialog({
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
   const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
   const [localMetadataAccessMode, setLocalMetadataAccessMode] = useState<LocalMetadataAccessMode>('import');
-  const [filesystemSelection, setFilesystemSelection] = useState<FilesystemSelection | null>(null);
-  const [folderLabel, setFolderLabel] = useState('');
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [path, setPath] = useState('');
   const [enabled, setEnabled] = useState(true);
 
   const reset = () => {
@@ -55,9 +51,7 @@ export function LibraryCreateDialog({
     setScanProfile('Lazy');
     setMetadataSourceMode('automatic_scrape');
     setLocalMetadataAccessMode('import');
-    setFilesystemSelection(null);
-    setFolderLabel('');
-    setFolderPickerOpen(false);
+    setPath('');
     setEnabled(true);
   };
 
@@ -70,7 +64,8 @@ export function LibraryCreateDialog({
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     const normalizedName = name.trim();
-    if (isPending || normalizedName.length === 0 || filesystemSelection === null) return;
+    const normalizedPath = path.trim();
+    if (isPending || normalizedName.length === 0 || normalizedPath.length === 0) return;
     if (await onCreate({
       name: normalizedName,
       collectionType,
@@ -78,7 +73,7 @@ export function LibraryCreateDialog({
       scanProfile,
       metadataSourceMode,
       localMetadataAccessMode,
-      filesystemSelection,
+      path: normalizedPath,
     })) {
       reset();
     }
@@ -115,18 +110,16 @@ export function LibraryCreateDialog({
                   ))}
                   value={collectionType}
                 />
-                <div className="space-y-2">
-                  <span className="text-sm font-medium text-foreground">{tr('Media folder', '媒体文件夹')}</span>
-                  <div className="flex min-h-12 items-center gap-3 border border-border px-3">
-                    <FolderOpen aria-hidden="true" className="size-5 shrink-0 text-accent" />
-                    <span className={`min-w-0 flex-1 break-words text-sm ${folderLabel.length > 0 ? 'text-foreground' : 'text-muted'}`}>
-                      {folderLabel.length > 0 ? folderLabel : tr('No folder selected', '未选择文件夹')}
-                    </span>
-                    <Button isDisabled={isPending} onPress={() => { setFolderPickerOpen(true); }} size="sm" variant="secondary">
-                      {tr('Browse', '浏览')}
-                    </Button>
-                  </div>
-                </div>
+                <TextField fullWidth isRequired name="mediaPath">
+                  <Label>{tr('Media folder', '媒体文件夹')}</Label>
+                  <Input
+                    disabled={isPending}
+                    maxLength={4096}
+                    onChange={(event) => { setPath(event.currentTarget.value); }}
+                    placeholder="/mnt/media"
+                    value={path}
+                  />
+                </TextField>
                 <RadioGroup
                   isDisabled={isPending}
                   onChange={(value) => {
@@ -182,7 +175,7 @@ export function LibraryCreateDialog({
               <Button isDisabled={isPending} onPress={close} variant="tertiary">{tr('Cancel', '取消')}</Button>
               <Button
                 form="create-library-form"
-                isDisabled={name.trim().length === 0 || filesystemSelection === null}
+                isDisabled={name.trim().length === 0 || path.trim().length === 0}
                 isPending={isPending}
                 type="submit"
               >
@@ -194,15 +187,6 @@ export function LibraryCreateDialog({
         </Modal.Container>
       </Modal.Backdrop>
       </Modal>
-      <FolderPickerDialog
-        isDisabled={isPending}
-        isOpen={folderPickerOpen}
-        onClose={() => { setFolderPickerOpen(false); }}
-        onSelect={(selection, displayPath) => {
-          setFilesystemSelection(selection);
-          setFolderLabel(displayPath);
-        }}
-      />
     </>
   );
 }

@@ -5,11 +5,10 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
-    CatalogQueryService, DirectMetadataReadService, DisplayPreferencesService, FilesystemBrowser,
-    FilesystemBrowserError, LibraryService, MediaCollectionService, MediaReadService,
-    MetadataImageFetchError, MetadataImportService, MetadataResolveService, PlaybackTicketService,
-    PlaystateService, ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry,
-    SystemClock, TaskService, UserDataService,
+    CatalogQueryService, DirectMetadataReadService, DisplayPreferencesService, LibraryService,
+    MediaCollectionService, MediaReadService, MetadataImageFetchError, MetadataImportService,
+    MetadataResolveService, PlaybackTicketService, PlaystateService, ProbeService,
+    ReqwestMetadataImageFetcher, StorageBackendRegistry, SystemClock, TaskService, UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
@@ -17,7 +16,7 @@ use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
     MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
     StorageAccountRepository, StorageAccountRepositoryError, StorageCredentialRepository,
-    StorageCredentialRepositoryError, SystemSettingsRepository, SystemSettingsRepositoryError,
+    StorageCredentialRepositoryError, SystemSettingsRepositoryError,
 };
 use tjxy_metadata::{
     MetadataError, MetadataProvider, MusicBrainzProvider, ReloadableMetadataProvider,
@@ -73,7 +72,6 @@ pub struct StartupOptions {
     assets_dir_source: &'static str,
     lazy_wait_timeout: StdDuration,
     filesystem_backends: Vec<(Uuid, PathBuf)>,
-    filesystem_browser_roots: Option<Vec<PathBuf>>,
     filesystem_realtime_enabled: bool,
     storage_backends: Vec<ConfiguredStorageBackend>,
     credential_cipher: Option<Arc<CredentialCipher>>,
@@ -129,10 +127,6 @@ impl fmt::Debug for StartupOptions {
             .field("lazy_wait_timeout", &self.lazy_wait_timeout)
             .field("filesystem_backend_count", &self.filesystem_backends.len())
             .field(
-                "filesystem_browser_root_count",
-                &self.filesystem_browser_roots.as_ref().map_or(0, Vec::len),
-            )
-            .field(
                 "filesystem_realtime_enabled",
                 &self.filesystem_realtime_enabled,
             )
@@ -182,7 +176,6 @@ impl StartupOptions {
             assets_dir_source: "Default",
             lazy_wait_timeout: StdDuration::from_millis(2_500),
             filesystem_backends: Vec::new(),
-            filesystem_browser_roots: None,
             filesystem_realtime_enabled: true,
             storage_backends: Vec::new(),
             credential_cipher: None,
@@ -260,16 +253,6 @@ impl StartupOptions {
     #[must_use]
     pub fn with_filesystem_backend(mut self, account_id: Uuid, root: impl Into<PathBuf>) -> Self {
         self.filesystem_backends.push((account_id, root.into()));
-        self
-    }
-
-    #[must_use]
-    pub fn with_filesystem_browser_roots<I, P>(mut self, roots: I) -> Self
-    where
-        I: IntoIterator<Item = P>,
-        P: Into<PathBuf>,
-    {
-        self.filesystem_browser_roots = Some(roots.into_iter().map(Into::into).collect());
         self
     }
 
@@ -508,32 +491,6 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
             options.assets_dir_source = "Database";
         }
     }
-    let filesystem_browser_roots = match options.filesystem_browser_roots.clone() {
-        Some(roots) => roots,
-        None => SystemSettingsRepository::new(&database)
-            .get()
-            .await?
-            .map_or_else(Vec::new, |settings| {
-                settings
-                    .media_browser_roots()
-                    .iter()
-                    .map(PathBuf::from)
-                    .collect()
-            }),
-    };
-    let (filesystem_browser, invalid_root_indexes) =
-        FilesystemBrowser::from_available_roots(filesystem_browser_roots).await;
-    if !invalid_root_indexes.is_empty() {
-        tracing::error!(
-            "Filesystem browser skipped unavailable root indexes: {}",
-            invalid_root_indexes
-                .iter()
-                .map(|index| (index + 1).to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    let filesystem_browser = filesystem_browser.map(Arc::new);
     load_persisted_tmdb_settings(
         &database,
         metadata_settings_cipher.as_deref(),
@@ -643,6 +600,8 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
             unavailable_filesystem_accounts.len()
         );
     }
+    let local_reference_fallback: Arc<dyn tjxy_storage::StorageBackend> =
+        Arc::new(FilesystemBackend::new(std::path::Path::new("/")).await?);
     let mut metadata_providers = options.metadata_providers;
     metadata_providers.insert(
         0,
@@ -660,6 +619,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         metadata_providers,
         asset_writer,
         image_fetcher,
+        local_reference_fallback,
         options.filesystem_realtime_enabled,
     )?;
     let direct_metadata = Arc::new(direct_metadata);
@@ -730,7 +690,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let display_preferences = Arc::new(DisplayPreferencesService::new(database.clone()));
     let user_data = Arc::new(UserDataService::new(database.clone()));
     let warm_home_cache = cache.is_enabled();
-    let mut state = AppState::new(
+    let state = AppState::new(
         options
             .identity
             .with_startup_wizard_completed(has_enabled_admin),
@@ -763,9 +723,6 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_realtime_events(realtime_events)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_ready(true);
-    if let Some(browser) = filesystem_browser {
-        state = state.with_filesystem_browser(browser);
-    }
     if warm_home_cache {
         worker::spawn_home_cache_warm_worker(auth, catalog);
     }
@@ -1013,6 +970,7 @@ fn configure_storage(
     metadata_providers: Vec<Arc<dyn MetadataProvider>>,
     asset_writer: Arc<AssetWriteService>,
     image_fetcher: Arc<ReqwestMetadataImageFetcher>,
+    local_reference_fallback: Arc<dyn tjxy_storage::StorageBackend>,
     filesystem_realtime_enabled: bool,
 ) -> Result<
     (
@@ -1023,6 +981,7 @@ fn configure_storage(
     crate::runtime_storage::RuntimeStorageError,
 > {
     let backends = StorageBackendRegistry::new();
+    backends.set_local_reference_fallback(local_reference_fallback);
     let media = MediaReadService::new(database.clone()).with_backend_registry(backends.clone());
     let direct_metadata =
         DirectMetadataReadService::new(database.clone()).with_backend_registry(backends.clone());
@@ -1167,8 +1126,6 @@ pub enum InitializationError {
     MetadataImage(#[from] MetadataImageFetchError),
     #[error("filesystem storage backend initialization failed: {0}")]
     StorageBackend(#[from] tjxy_storage::BackendError),
-    #[error("filesystem browser configuration is invalid: {0}")]
-    FilesystemBrowser(#[from] FilesystemBrowserError),
     #[error("cache initialization failed: {0}")]
     Cache(#[from] CacheStartupError),
     #[error("Google storage backend loading failed: {0}")]

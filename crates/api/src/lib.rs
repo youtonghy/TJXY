@@ -5,7 +5,6 @@ mod auth;
 mod browse;
 mod device;
 mod display_preferences;
-mod filesystem_browser;
 mod library;
 mod playback;
 mod playstate;
@@ -25,12 +24,9 @@ pub use browse::{
 };
 pub use device::{DeviceInfoDto, DeviceInfoDtoQueryResult, DeviceOptionsDto};
 pub use display_preferences::{DisplayPreferencesDto, ScrollDirection, SortOrder};
-pub use filesystem_browser::{
-    FilesystemDirectoryEntryDto, FilesystemDirectoryPageDto, FilesystemRootDto,
-};
 pub use library::{
-    AddVirtualFolderDto, AttachVirtualFolderPathDto, CreateLibraryOptions, FilesystemSelectionDto,
-    LibraryOptionsDto, UpdateLibraryOptions, UpdateLibraryOptionsDto, VirtualFolderInfo,
+    AddVirtualFolderDto, AttachVirtualFolderPathDto, CreateLibraryOptions, LibraryOptionsDto,
+    UpdateLibraryOptions, UpdateLibraryOptionsDto, VirtualFolderInfo,
 };
 pub use playback::{
     DeliveryMethod, MediaProtocol, MediaSourceInfo, MediaStream, MediaStreamType,

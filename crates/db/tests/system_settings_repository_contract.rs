@@ -98,7 +98,6 @@ async fn locale_update_preserves_other_fields_and_increments_revision() {
     let mut initial = input("Cinema");
     initial.site_subtitle = "Private screenings".to_owned();
     initial.public_url = Some("https://media.example.com".to_owned());
-    initial.media_browser_roots = vec!["/media/movies".to_owned()];
     repository.put(&initial, None).await.unwrap();
 
     let updated = repository.put_locale("en-US", Some(1)).await.unwrap();
@@ -107,7 +106,6 @@ async fn locale_update_preserves_other_fields_and_increments_revision() {
     assert_eq!(updated.site_title(), "Cinema");
     assert_eq!(updated.site_subtitle(), "Private screenings");
     assert_eq!(updated.public_url(), Some("https://media.example.com"));
-    assert_eq!(updated.media_browser_roots(), ["/media/movies"]);
 }
 
 #[tokio::test]

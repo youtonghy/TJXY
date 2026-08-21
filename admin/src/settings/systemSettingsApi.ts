@@ -5,7 +5,6 @@ export interface EnvironmentOverrides {
   siteTitle: boolean;
   publicUrl: boolean;
   listenAddress: boolean;
-  mediaBrowserRoots: boolean;
 }
 
 export interface PublicSiteThemeSettings {
@@ -24,8 +23,6 @@ export interface SystemSettings {
   publicUrl: string;
   listenHost: string;
   port: number;
-  mediaBrowserRoots: string[];
-  invalidMediaBrowserRootIndexes: number[];
   revision: number;
   restartRequired: boolean;
   environmentOverrides: EnvironmentOverrides;
@@ -34,7 +31,7 @@ export interface SystemSettings {
 
 export type SaveSystemSettings = Omit<
   SystemSettings,
-  'restartRequired' | 'environmentOverrides' | 'invalidMediaBrowserRootIndexes' | 'theme'
+  'restartRequired' | 'environmentOverrides' | 'theme'
 >;
 type SettingsResponse = Record<string, unknown>;
 
@@ -65,7 +62,6 @@ export async function saveSystemSettings(settings: SaveSystemSettings): Promise<
       PublicUrl: settings.publicUrl.trim() || null,
       ListenHost: settings.listenHost,
       Port: settings.port,
-      MediaBrowserRoots: settings.mediaBrowserRoots,
       ...(settings.revision > 0 ? { Revision: settings.revision } : {}),
     }),
   });
@@ -109,10 +105,6 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     publicUrl: typeof value.PublicUrl === 'string' ? value.PublicUrl : '',
     listenHost: admin ? stringValue(value.ListenHost) ?? '127.0.0.1' : '127.0.0.1',
     port: admin ? numberValue(value.Port) ?? 8096 : 8096,
-    mediaBrowserRoots: admin ? stringArray(value.MediaBrowserRoots) : [],
-    invalidMediaBrowserRootIndexes: admin
-      ? nonNegativeIntegerArray(value.InvalidMediaBrowserRootIndexes)
-      : [],
     revision,
     restartRequired: value.RestartRequired === true,
     environmentOverrides: isOverrides(overrides)
@@ -121,7 +113,6 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
         siteTitle: false,
         publicUrl: false,
         listenAddress: false,
-        mediaBrowserRoots: false,
       },
     theme,
   };
@@ -157,32 +148,10 @@ function defaultTheme(): PublicSiteThemeSettings {
 
 function stringValue(value: unknown): string | null { return typeof value === 'string' ? value : null; }
 function numberValue(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    throw new Error('Invalid media browser roots');
-  }
-  const roots: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== 'string') throw new Error('Invalid media browser roots');
-    roots.push(entry);
-  }
-  return roots;
-}
-function nonNegativeIntegerArray(value: unknown): number[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error('Invalid media browser root diagnostics');
-  return value.map((entry) => {
-    if (!Number.isInteger(entry) || typeof entry !== 'number' || entry < 0) {
-      throw new Error('Invalid media browser root diagnostics');
-    }
-    return entry;
-  });
-}
 function isOverrides(value: unknown): value is EnvironmentOverrides {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return typeof candidate.siteTitle === 'boolean'
     && typeof candidate.publicUrl === 'boolean'
-    && typeof candidate.listenAddress === 'boolean'
-    && typeof candidate.mediaBrowserRoots === 'boolean';
+    && typeof candidate.listenAddress === 'boolean';
 }

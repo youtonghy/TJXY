@@ -1,7 +1,6 @@
 import { Toast } from '@heroui/react';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmin';
@@ -14,20 +13,6 @@ vi.mock('./libraryApi', () => ({
   createLibrary: vi.fn(),
   listLibraries: vi.fn(),
 }));
-vi.mock('./FolderPickerDialog', () => ({
-  FolderPickerDialog: ({ isOpen, onSelect }: {
-    isOpen: boolean;
-    onSelect: (selection: { rootId: string; relativePath: string }, label: string) => void;
-  }) => {
-    const selectRef = useRef(onSelect);
-    selectRef.current = onSelect;
-    useEffect(() => {
-      if (isOpen) selectRef.current({ rootId: 'root-1', relativePath: 'Shows' }, 'Media / Shows');
-    }, [isOpen]);
-    return null;
-  },
-}));
-
 const listMock = vi.mocked(listLibraries);
 const createMock = vi.mocked(createLibrary);
 const libraryId = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
@@ -160,8 +145,7 @@ it('creates with approved defaults, closes the modal, and reloads the authoritat
 
   await user.click(screen.getByRole('button', { name: 'Add library' }));
   await user.type(screen.getByRole('textbox', { name: 'Library name' }), 'Shows');
-  await user.click(screen.getByRole('button', { name: 'Browse' }));
-  expect(await screen.findByText('Media / Shows')).toBeVisible();
+  await user.type(screen.getByRole('textbox', { name: 'Media folder' }), '/mnt/media/Shows');
   await user.click(screen.getByRole('button', { name: 'Create library' }));
 
   expect(createMock).toHaveBeenCalledWith({
@@ -171,7 +155,7 @@ it('creates with approved defaults, closes the modal, and reloads the authoritat
     scanProfile: 'Lazy',
     metadataSourceMode: 'automatic_scrape',
     localMetadataAccessMode: 'import',
-    filesystemSelection: { rootId: 'root-1', relativePath: 'Shows' },
+    path: '/mnt/media/Shows',
   });
   await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
   await waitFor(() => {
@@ -189,8 +173,7 @@ it('preserves the create draft and reports only safe copy after failure', async 
   await user.click(screen.getByRole('button', { name: 'Add library' }));
   const name = screen.getByRole('textbox', { name: 'Library name' });
   await user.type(name, 'Shows');
-  await user.click(screen.getByRole('button', { name: 'Browse' }));
-  expect(await screen.findByText('Media / Shows')).toBeVisible();
+  await user.type(screen.getByRole('textbox', { name: 'Media folder' }), '/mnt/media/Shows');
   await user.click(screen.getByRole('button', { name: 'Create library' }));
 
   await waitFor(() => {

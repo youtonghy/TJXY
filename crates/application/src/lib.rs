@@ -9,7 +9,6 @@ mod device_profile;
 mod direct_metadata;
 mod discover;
 mod display_preferences;
-mod filesystem_browser;
 mod full_scan;
 mod library;
 mod media;
@@ -49,10 +48,6 @@ pub use device_profile::DeviceProfile;
 pub use direct_metadata::{DirectMetadataReadError, DirectMetadataReadService, OpenedDirectImage};
 pub use discover::{DiscoverTitlesReport, DiscoverTitlesService, DiscoverTitlesServiceError};
 pub use display_preferences::{DisplayPreferencesService, DisplayPreferencesServiceError};
-pub use filesystem_browser::{
-    FilesystemBrowser, FilesystemBrowserError, FilesystemBrowserRoot, FilesystemDirectoryEntry,
-    FilesystemDirectoryPage, ResolvedFilesystemDirectory,
-};
 pub use full_scan::{FullScanError, FullScanResult, FullScanService};
 pub use library::{LibraryPolicyOverrides, LibraryService, LibraryServiceError};
 pub use media::{
