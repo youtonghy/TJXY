@@ -202,6 +202,16 @@ cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
 
+Local builds report product version `0.0.0`. To stamp a build manually, pass the
+same version to both build pipelines:
+
+```bash
+VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
+TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
+```
+
+The release workflow injects its validated release version automatically.
+
 Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.

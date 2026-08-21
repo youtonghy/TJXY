@@ -161,7 +161,7 @@ async fn serve_application(
     let musicbrainz_user_agent = env::var("TJXY_MUSICBRAINZ_USER_AGENT").unwrap_or_else(|_| {
         format!(
             "TJXY/{} (https://github.com/youtonghy/TJXY)",
-            env!("CARGO_PKG_VERSION")
+            tjxy_server::BUILD_VERSION
         )
     });
     startup = startup

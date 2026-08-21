@@ -188,6 +188,16 @@ cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
 
+本地构建默认显示产品版本 `0.0.0`。需要手动写入构建版本时，应向前后端传入同一
+版本：
+
+```bash
+VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
+TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
+```
+
+发布工作流会自动注入已经校验的发布版本。
+
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
 保存在当前平台的配置目录中；可以通过 `TJXY_CONFIG_FILE` 指定明确路径。
 

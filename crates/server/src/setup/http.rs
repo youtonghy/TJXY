@@ -363,7 +363,7 @@ async fn status(
         } else {
             "native"
         },
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::BUILD_VERSION,
         configuration_writable: state.coordinator.configuration_writable(),
         source_eligible: true,
         blocking_overrides: blocking_environment_overrides(),

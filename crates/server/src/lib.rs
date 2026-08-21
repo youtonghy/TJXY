@@ -67,6 +67,11 @@ use tjxy_application::{
 };
 use uuid::Uuid;
 
+pub const BUILD_VERSION: &str = match option_env!("TJXY_BUILD_VERSION") {
+    Some(version) => version,
+    None => "0.0.0",
+};
+
 pub use admin_assets::AdminAssetsError;
 pub use ai_admission::{AiAdmissionConfig, AiAdmissionConfigError};
 pub use ai_provider::{
@@ -139,7 +144,7 @@ impl ServerIdentity {
             server_name: self.server_name.clone(),
             version: JELLYFIN_API_COMPAT_VERSION.to_owned(),
             product_name: "TJXY".to_owned(),
-            product_version: env!("CARGO_PKG_VERSION").to_owned(),
+            product_version: BUILD_VERSION.to_owned(),
             operating_system: self.operating_system.clone(),
             id: self.id,
             startup_wizard_completed: self.startup_wizard_completed,

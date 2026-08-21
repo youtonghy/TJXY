@@ -1,5 +1,6 @@
 import { getAccessToken, getDeviceId } from '../auth/session';
 import { desktopAwareFetch, getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../client/api/apiBase';
+import { BUILD_VERSION } from './buildVersion';
 
 export type ApiErrorCategory =
   | 'network'
@@ -42,7 +43,7 @@ const ERROR_MESSAGES: Record<ApiErrorCategory, string> = {
 };
 
 export function mediaBrowserIdentityHeader(): string {
-  return `MediaBrowser Client="TJXY Admin", Device="Browser", DeviceId="${getDeviceId()}", Version="0.1.0"`;
+  return `MediaBrowser Client="TJXY Admin", Device="Browser", DeviceId="${getDeviceId()}", Version="${BUILD_VERSION}"`;
 }
 
 export async function apiRequest<T = undefined>(

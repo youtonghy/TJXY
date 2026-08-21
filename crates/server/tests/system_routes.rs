@@ -4,7 +4,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tjxy_server::{AppState, ServerIdentity, build_router};
+use tjxy_server::{AppState, BUILD_VERSION, ServerIdentity, build_router};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ async fn public_system_info_distinguishes_api_compatibility_from_product_version
     assert_eq!(info["ProductName"], "TJXY");
     assert_eq!(info["LocalAddress"], Value::Null);
     assert_eq!(info["Version"], "10.11.11");
-    assert_eq!(info["ProductVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["ProductVersion"], BUILD_VERSION);
     assert_eq!(info["ServerName"], "Living Room");
     assert_eq!(info["OperatingSystem"], "Linux");
     assert_eq!(info["Id"], "018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11");

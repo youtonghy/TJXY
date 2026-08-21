@@ -29,7 +29,7 @@ it('sends canonical identity headers for login without query credentials', async
   const requestUrl = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
   expect(requestUrl).not.toContain('secret');
   expect(headers.get('Authorization')).toBe(
-    'MediaBrowser Client="TJXY Admin", Device="Browser", DeviceId="018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11", Version="0.1.0"',
+    'MediaBrowser Client="TJXY Admin", Device="Browser", DeviceId="018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11", Version="0.0.0"',
   );
   expect(headers.get('Content-Type')).toBe('application/json');
 });

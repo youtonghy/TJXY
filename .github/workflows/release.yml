@@ -67,6 +67,8 @@ jobs:
   frontend:
     needs: validate
     runs-on: ubuntu-24.04
+    env:
+      VITE_TJXY_VERSION: ${{ needs.validate.outputs.release_version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -137,6 +139,7 @@ jobs:
     needs: [validate, frontend, rust]
     env:
       RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      TJXY_BUILD_VERSION: ${{ needs.validate.outputs.release_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -234,6 +237,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.RELEASE_TAG }}
+          build-args: |
+            TJXY_BUILD_VERSION=${{ needs.validate.outputs.release_version }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=tjxy-image-${{ matrix.pair }}
           cache-to: type=gha,mode=max,scope=tjxy-image-${{ matrix.pair }}

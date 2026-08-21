@@ -1,4 +1,6 @@
 FROM node:22.22.3-bookworm-slim AS frontend
+ARG TJXY_BUILD_VERSION=0.0.0
+ENV VITE_TJXY_VERSION=${TJXY_BUILD_VERSION}
 WORKDIR /build/admin
 COPY admin/package.json admin/package-lock.json ./
 RUN npm ci
@@ -6,6 +8,8 @@ COPY admin/ ./
 RUN npm run build
 
 FROM rust:1.88.0-bookworm AS server
+ARG TJXY_BUILD_VERSION=0.0.0
+ENV TJXY_BUILD_VERSION=${TJXY_BUILD_VERSION}
 WORKDIR /build
 COPY . .
 RUN cargo build --release --locked -p tjxy-server --bin tjxy-server

@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 FROM rust:1.88.0-bookworm AS server
+ARG TJXY_BUILD_VERSION=0.0.0
+ENV TJXY_BUILD_VERSION=${TJXY_BUILD_VERSION}
 WORKDIR /build
 COPY . .
 RUN cargo build --release --locked -p tjxy-server --bin tjxy-server
