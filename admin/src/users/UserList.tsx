@@ -106,12 +106,12 @@ function UserListView() {
     setFilters(nextFilters);
   };
 
-  const isRefreshing = isFetching === true && !isPending;
+  const hasData = data !== undefined || retainedResult !== null;
+  const isRefreshing = isFetching === true && hasData;
   const showsRetainedResult = data === undefined || isRefreshing;
   const records = showsRetainedResult
     ? retainedResult?.data ?? data ?? []
     : data;
-  const hasData = data !== undefined || retainedResult !== null;
   const listMeta = showsRetainedResult
     ? retainedResult?.meta ?? null
     : parseUserListMeta(rawMeta);

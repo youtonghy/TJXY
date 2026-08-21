@@ -319,7 +319,10 @@ it('marks placeholder rows as updating and disables stale actions until the next
   expect(within(table).getByText('First page user')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Next page' }));
 
-  const updating = await screen.findByText('Updating user results...');
+  await waitFor(() => {
+    expect(getList).toHaveBeenCalledTimes(2);
+  });
+  const updating = await screen.findByText('Updating user results...', {}, { timeout: 3000 });
   expect(updating).toHaveAttribute('role', 'status');
   expect(screen.getByText('1-25 of 26')).toBeVisible();
   expect(screen.queryByRole('link', { name: 'View First page user' })).not.toBeInTheDocument();
