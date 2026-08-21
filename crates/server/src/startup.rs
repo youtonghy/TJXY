@@ -612,16 +612,16 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         Arc::clone(&the_audio_db_provider) as Arc<dyn MetadataProvider>,
     );
     metadata_providers.insert(0, Arc::clone(&tmdb_provider) as Arc<dyn MetadataProvider>);
-    let (media, direct_metadata, storage_runtime) = configure_storage(
-        &database,
+    let (media, direct_metadata, storage_runtime) = configure_storage(StorageConfiguration {
+        database: &database,
         filesystem_backends,
         storage_backends,
         metadata_providers,
         asset_writer,
         image_fetcher,
         local_reference_fallback,
-        options.filesystem_realtime_enabled,
-    )?;
+        filesystem_realtime_enabled: options.filesystem_realtime_enabled,
+    })?;
     let direct_metadata = Arc::new(direct_metadata);
     let mut catalog = CatalogQueryService::new(database.clone())
         .with_lazy_wait_timeout(options.lazy_wait_timeout)
@@ -963,8 +963,8 @@ fn backend_error_category(error: &tjxy_storage::BackendError) -> &'static str {
     }
 }
 
-fn configure_storage(
-    database: &sea_orm::DatabaseConnection,
+struct StorageConfiguration<'a> {
+    database: &'a sea_orm::DatabaseConnection,
     filesystem_backends: Vec<PreparedFilesystemBackend>,
     storage_backends: Vec<ConfiguredStorageBackend>,
     metadata_providers: Vec<Arc<dyn MetadataProvider>>,
@@ -972,6 +972,10 @@ fn configure_storage(
     image_fetcher: Arc<ReqwestMetadataImageFetcher>,
     local_reference_fallback: Arc<dyn tjxy_storage::StorageBackend>,
     filesystem_realtime_enabled: bool,
+}
+
+fn configure_storage(
+    config: StorageConfiguration<'_>,
 ) -> Result<
     (
         MediaReadService,
@@ -980,6 +984,16 @@ fn configure_storage(
     ),
     crate::runtime_storage::RuntimeStorageError,
 > {
+    let StorageConfiguration {
+        database,
+        filesystem_backends,
+        storage_backends,
+        metadata_providers,
+        asset_writer,
+        image_fetcher,
+        local_reference_fallback,
+        filesystem_realtime_enabled,
+    } = config;
     let backends = StorageBackendRegistry::new();
     backends.set_local_reference_fallback(local_reference_fallback);
     let media = MediaReadService::new(database.clone()).with_backend_registry(backends.clone());
