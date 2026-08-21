@@ -169,13 +169,18 @@ impl<'connection> DirectMetadataRepository<'connection> {
                 Expr::col((reference.clone(), Alias::new("resource_kind"))).eq(resource_kind),
             )
             .and_where(Expr::col((reference.clone(), Alias::new("priority"))).eq(priority))
-            .and_where(
-                Expr::col((item.clone(), Alias::new("metadata_resolved_revision")))
-                    .equals((item, Alias::new("metadata_revision"))),
-            )
             .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
             .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
             .and_where(Expr::exists(imported).not())
+            // Direct metadata is intentionally not imported into catalog_items.  Its
+            // durable readiness is represented by the reference row and its input
+            // revision, so a later catalog metadata revision must not hide a still
+            // readable source object.  Prefer the newest observation when multiple
+            // references exist for the same library/resource.
+            .order_by(
+                (reference.clone(), Alias::new("input_revision")),
+                Order::Desc,
+            )
             .order_by((reference, Alias::new("library_id")), Order::Asc)
             .limit(1)
             .to_owned();

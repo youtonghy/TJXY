@@ -14,8 +14,8 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use tempfile::TempDir;
 use tjxy_application::{
-    AssetWriteService, MetadataImageBytes, MetadataImageFetchError, MetadataImageFetcher,
-    MetadataResolveError, MetadataResolveService,
+    AssetWriteService, DirectMetadataReadService, MetadataImageBytes, MetadataImageFetchError,
+    MetadataImageFetcher, MetadataResolveError, MetadataResolveService,
 };
 use tjxy_common::{CatalogItemId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_db::{
@@ -697,6 +697,33 @@ async fn direct_local_metadata_indexes_refs_without_importing_catalog_or_asset_b
     assert_eq!(
         refs[0].try_get::<String>("", "resource_kind").unwrap(),
         "Nfo"
+    );
+    // A later catalog revision must not hide an already indexed direct reference.
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 2_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let registry = tjxy_application::StorageBackendRegistry::new();
+    let storage_backend: Arc<dyn StorageBackend> = fixture.backend.clone();
+    registry
+        .register(fixture.account, "local", storage_backend)
+        .unwrap();
+    let document = DirectMetadataReadService::new(fixture.database.clone())
+        .with_backend_registry(registry)
+        .nfo(fixture.item)
+        .await
+        .unwrap();
+    assert_eq!(
+        document.as_ref().map(|value| value.title()),
+        Some(Some("Arrival"))
     );
     assert!(
         fixture
