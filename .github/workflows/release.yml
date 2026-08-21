@@ -186,9 +186,18 @@ jobs:
 
   docker-image:
     needs: [validate, frontend, rust]
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            pair: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            pair: linux-arm64
+    runs-on: ${{ matrix.runner }}
     env:
-      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
       RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
     permissions:
       contents: read
@@ -202,8 +211,6 @@ jobs:
         with:
           name: admin-dist
           path: admin/dist
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -212,37 +219,84 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Prepare image tags
+      - name: Prepare image name
         id: image
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          {
-            echo "name=$image"
-            echo 'tags<<EOF'
-            echo "$image:$RELEASE_VERSION"
-            echo "$image:latest"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-      - name: Build and push multi-platform image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.prebuilt
           build-contexts: |
             frontend=./admin/dist
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.RELEASE_TAG }}
-          cache-from: type=gha,scope=tjxy-image
-          cache-to: type=gha,mode=max,scope=tjxy-image
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=tjxy-image-${{ matrix.pair }}
+          cache-to: type=gha,mode=max,scope=tjxy-image-${{ matrix.pair }}
           provenance: true
           sbom: true
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          test -n "$digest"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-${{ matrix.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-manifest:
+    needs: [validate, docker-image]
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Download digests
+        uses: actions/download-artifact@v5
+        with:
+          pattern: docker-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - name: Create multi-platform manifest
+        working-directory: /tmp/digests
+        run: |
+          set -eu
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          refs=()
+          for digest in *; do
+            refs+=("$image@sha256:$digest")
+          done
+          test "${#refs[@]}" -eq 2
+          docker buildx imagetools create \
+            --tag "$image:$RELEASE_VERSION" \
+            --tag "$image:latest" \
+            "${refs[@]}"
+      - name: Inspect image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools inspect "$image:$RELEASE_VERSION"
 
   publish:
-    needs: [validate, package, docker-image]
+    needs: [validate, package, docker-manifest]
     runs-on: ubuntu-24.04
     env:
       RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
