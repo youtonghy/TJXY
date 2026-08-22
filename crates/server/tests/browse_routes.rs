@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -21,7 +22,8 @@ use tempfile::TempDir;
 use tjxy_application::{
     AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
     MediaInspector, MediaReadService, PlaybackTicketService, PlaystateService, ProbeInput,
-    ProbeService, ProbeServiceError, SourceIndexService, SystemClock, TaskService, UserDataService,
+    ProbeService, ProbeServiceError, SourceIndexService, StorageBackendRegistry, SystemClock,
+    TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
 use tjxy_server::{AppState, ServerIdentity, build_router};
@@ -62,11 +64,28 @@ struct TestApp {
     media_object_id: String,
     empty_media_object_id: String,
     subtitle_object_id: String,
+    strm_object_id: String,
+    strm_target_path: PathBuf,
+    strm_descriptor_size: u64,
+    media_backend: Arc<FilesystemBackend>,
+    process_backend: Arc<FilesystemBackend>,
     cloud_account: Uuid,
     cloud_object_id: String,
     cloud_alternate_object_id: String,
     cloud_subtitle_object_id: String,
     cloud_backend: Arc<MemoryCloudBackend>,
+}
+
+struct FilesystemFixture {
+    root: TempDir,
+    library_backend: Arc<FilesystemBackend>,
+    process_backend: Arc<FilesystemBackend>,
+    media_object_id: String,
+    empty_media_object_id: String,
+    subtitle_object_id: String,
+    strm_object_id: String,
+    strm_target_path: PathBuf,
+    strm_descriptor_size: u64,
 }
 
 struct TcpTestServer {
@@ -233,23 +252,39 @@ impl StorageBackend for MemoryCloudBackend {
     }
 }
 
-async fn filesystem_fixture() -> (TempDir, Arc<FilesystemBackend>, String, String, String) {
-    let media = TempDir::new().unwrap();
-    tokio::fs::write(media.path().join("Arrival.mkv"), b"0123456789")
+async fn filesystem_fixture() -> FilesystemFixture {
+    let root = TempDir::new().unwrap();
+    let library_root = root.path().join("library");
+    let external_root = root.path().join("external");
+    tokio::fs::create_dir_all(library_root.join("Movies"))
         .await
         .unwrap();
-    tokio::fs::write(media.path().join("Empty.mkv"), b"")
+    tokio::fs::create_dir_all(&external_root).await.unwrap();
+    tokio::fs::write(library_root.join("Arrival.mkv"), b"0123456789")
+        .await
+        .unwrap();
+    tokio::fs::write(library_root.join("Empty.mkv"), b"")
         .await
         .unwrap();
     tokio::fs::write(
-        media.path().join("Arrival.srt"),
+        library_root.join("Arrival.srt"),
         b"1\n00:00:01,000 --> 00:00:02,000\nArrival\n",
     )
     .await
     .unwrap();
-    let backend = Arc::new(FilesystemBackend::new(media.path()).await.unwrap());
-    let page = backend
-        .list_children(backend.root_id(), None)
+    let strm_target_path = external_root.join("Outside.mkv");
+    tokio::fs::write(&strm_target_path, b"strm-target-bytes")
+        .await
+        .unwrap();
+    let strm_target_path = tokio::fs::canonicalize(strm_target_path).await.unwrap();
+    let descriptor = strm_target_path.to_string_lossy().into_owned();
+    tokio::fs::write(library_root.join("Outside.strm"), descriptor.as_bytes())
+        .await
+        .unwrap();
+    let library_backend = Arc::new(FilesystemBackend::new(&library_root).await.unwrap());
+    let process_backend = Arc::new(FilesystemBackend::new(root.path()).await.unwrap());
+    let page = library_backend
+        .list_children(library_backend.root_id(), None)
         .await
         .unwrap();
     let object_id = |name: &str| {
@@ -261,13 +296,17 @@ async fn filesystem_fixture() -> (TempDir, Arc<FilesystemBackend>, String, Strin
             .provider_object_id()
             .to_owned()
     };
-    (
-        media,
-        backend,
-        object_id("Arrival.mkv"),
-        object_id("Empty.mkv"),
-        object_id("Arrival.srt"),
-    )
+    FilesystemFixture {
+        root,
+        library_backend,
+        process_backend,
+        media_object_id: object_id("Arrival.mkv"),
+        empty_media_object_id: object_id("Empty.mkv"),
+        subtitle_object_id: object_id("Arrival.srt"),
+        strm_object_id: object_id("Outside.strm"),
+        strm_target_path,
+        strm_descriptor_size: descriptor.len() as u64,
+    }
 }
 
 fn cloud_fixture() -> (Uuid, String, String, String, Arc<MemoryCloudBackend>) {
@@ -341,11 +380,7 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
     );
     let identity = ServerIdentity::new(Uuid::parse_str(SERVER_ID).unwrap(), "TJXY", "Linux")
         .with_startup_wizard_completed(true);
-    let (media, backend, media_object_id, empty_media_object_id, subtitle_object_id) =
-        filesystem_fixture().await;
-    tokio::fs::create_dir(media.path().join("Movies"))
-        .await
-        .unwrap();
+    let fixture = filesystem_fixture().await;
     let media_account = Uuid::new_v4();
     let (
         cloud_account,
@@ -354,9 +389,14 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
         cloud_subtitle_object_id,
         cloud_backend,
     ) = cloud_fixture();
+    let backends = StorageBackendRegistry::new();
+    backends.set_local_reference_fallback(
+        Arc::clone(&fixture.process_backend) as Arc<dyn StorageBackend>
+    );
     let media_reader = Arc::new(
         MediaReadService::new(database.clone())
-            .with_backend(media_account, backend)
+            .with_backend_registry(backends)
+            .with_backend(media_account, Arc::clone(&fixture.library_backend))
             .with_backend(cloud_account, Arc::clone(&cloud_backend)),
     );
     let media_collections = Arc::new(MediaCollectionService::new(database.clone()));
@@ -384,11 +424,16 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
         ),
         database,
         assets,
-        media,
+        media: fixture.root,
         media_account,
-        media_object_id,
-        empty_media_object_id,
-        subtitle_object_id,
+        media_object_id: fixture.media_object_id,
+        empty_media_object_id: fixture.empty_media_object_id,
+        subtitle_object_id: fixture.subtitle_object_id,
+        strm_object_id: fixture.strm_object_id,
+        strm_target_path: fixture.strm_target_path,
+        strm_descriptor_size: fixture.strm_descriptor_size,
+        media_backend: fixture.library_backend,
+        process_backend: fixture.process_backend,
         cloud_account,
         cloud_object_id,
         cloud_alternate_object_id,
@@ -4408,11 +4453,14 @@ async fn playback_info_without_a_device_profile_returns_available_direct_play_so
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
     assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
+    assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
+    assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
 }
 
 #[tokio::test]
-async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions() {
+async fn playback_info_forces_direct_play_for_incompatible_device_profiles() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
     let item = seed_item(&app.database, library, "Arrival", "Movie").await;
@@ -4454,12 +4502,12 @@ async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions
     let (_, _, token) = login(&app.router).await;
     let uri = format!("/Items/{item}/PlaybackInfo");
 
-    for (video_codec, max_width, profile, max_level, expected) in [
-        ("hevc", "3840", "High", "41", false),
-        ("h264", "1280", "High", "41", false),
-        ("h264", "1920", "Baseline", "41", false),
-        ("h264", "1920", "High", "40", false),
-        ("h264", "1920", "High", "41", true),
+    for (video_codec, max_width, profile, max_level) in [
+        ("hevc", "3840", "High", "41"),
+        ("h264", "1280", "High", "41"),
+        ("h264", "1920", "Baseline", "41"),
+        ("h264", "1920", "High", "40"),
+        ("h264", "1920", "High", "41"),
     ] {
         let response = post(
             &app.router,
@@ -4508,8 +4556,10 @@ async fn playback_info_keeps_incompatible_sources_and_evaluates_codec_conditions
                 .unwrap();
         assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
         assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], expected);
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], expected);
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
+        assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
+        assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
+        assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
     }
 }
 
@@ -4576,7 +4626,50 @@ async fn playback_info_query_overrides_body_identity_source_and_direct_play_flag
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
     assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], false);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
+    assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
+    assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
+}
+
+#[tokio::test]
+async fn playback_info_ignores_client_compatibility_query_hints_and_accepts_an_empty_body() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (user_id, _, token) = login(&app.router).await;
+
+    let compatible = post_empty(
+        &app.router,
+        &format!(
+            "/Items/{item}/PlaybackInfo?StartTimeTicks=0&AutoOpenLiveStream=false&UserId={user_id}&MaxStreamingBitrate=500000000&reqformat=json&IsPlayback=true"
+        ),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(compatible.status(), StatusCode::OK);
+    let payload: Value =
+        serde_json::from_slice(&compatible.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+
+    let malformed = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo?enableDirectPlay=maybe"),
+        &token,
+        "{}".to_owned(),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
 }
 
 #[allow(clippy::too_many_lines)] // Covers GET, HEAD, range slicing, If-Range, and 416 range error semantics.
@@ -4635,6 +4728,82 @@ async fn media_stream_supports_get_head_range_if_range_and_416() {
         .status(),
         StatusCode::OK
     );
+    for uri in [
+        format!("/videos/{item}/stream.mp4?Static=true&MediaSourceId={presentation}"),
+        format!("/videos/{item}/stream.mp4?Static=true&MediaSourceId="),
+        format!("/videos/{item}/stream.mp4?Static=true"),
+        format!("/videos/{item}/stream.mp4?Static=true&MediaSourceId={item}"),
+    ] {
+        let compatible = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+        assert_eq!(
+            compatible.status(),
+            StatusCode::OK,
+            "compatible stream URL should resolve: {uri}"
+        );
+        assert_eq!(
+            compatible.headers()[header::CONTENT_TYPE],
+            "video/x-matroska"
+        );
+    }
+    let unknown_source = format!(
+        "/videos/{item}/stream.mp4?Static=true&MediaSourceId={}",
+        Uuid::new_v4()
+    );
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &unknown_source,
+            Some(&token),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &format!("/videos/{item}/stream.mp4?Static=true"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for uri in [
+        format!("/videos/{item}/stream.mp4?MediaSourceId={presentation}"),
+        format!("/videos/{item}/stream.mp4?Static=false&MediaSourceId={presentation}"),
+        format!(
+            "/videos/{item}/stream.mp4?static=false&MediaSourceId={presentation}&container=mp4&videoCodec=h264&audioCodec=aac&width=1920&height=1080&maxStreamingBitrate=5000000&transcodeReasons=ContainerNotSupported&allowVideoStreamCopy=false&allowAudioStreamCopy=false&subtitleMethod=Encode"
+        ),
+    ] {
+        let fallback = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+        assert_eq!(
+            fallback.status(),
+            StatusCode::OK,
+            "fallback URL should resolve: {uri}"
+        );
+        assert_eq!(fallback.headers()[header::CONTENT_TYPE], "video/x-matroska");
+        assert_eq!(
+            fallback.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"0123456789")
+        );
+    }
+    let invalid_static = stream_request(
+        &app.router,
+        "GET",
+        &format!("/videos/{item}/stream.mp4?Static=maybe&MediaSourceId={presentation}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(invalid_static.status(), StatusCode::BAD_REQUEST);
     let duplicate_source = format!(
         "/Videos/{item}/stream?static=true&mediaSourceId={presentation}&MediaSourceId={presentation}"
     );
@@ -4776,6 +4945,21 @@ async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
     let body = full.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"0123456789");
 
+    let lowercase = stream_request(
+        &app.router,
+        "GET",
+        &format!("/audio/{item}/stream.mkv?Static=true"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(lowercase.status(), StatusCode::OK);
+    assert_eq!(
+        lowercase.headers()[header::CONTENT_TYPE],
+        "audio/x-matroska"
+    );
+
     let partial = stream_request(
         &app.router,
         "GET",
@@ -4862,6 +5046,19 @@ async fn playback_ticket_is_scoped_revocable_and_authorizes_range_streaming() {
     assert_eq!(ticket.len(), 64);
     assert_ne!(ticket, login_token);
     assert!(issued["ExpiresAt"].as_str().is_some());
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &format!("/videos/{item}/stream.mkv?Static=true&PlaybackTicket={ticket}"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
 
     let partial = stream_request(
         &app.router,
@@ -5229,6 +5426,163 @@ async fn cloud_source_probe_uses_the_registered_backend_and_a_bounded_range() {
     );
     assert_eq!(source.try_get::<String>("", "container").unwrap(), "mkv");
     assert_eq!(source.try_get::<i64>("", "probe_revision").unwrap(), 2);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercises the persisted STRM candidate, Probe, and HTTP read path together.
+async fn absolute_strm_target_outside_the_library_root_probes_and_streams_via_fallback() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "STRM movies", true).await;
+    let item = seed_item(&app.database, library, "Outside", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.strm_object_id,
+        i64::try_from(app.strm_descriptor_size).unwrap(),
+        &app.subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    let source_id: Uuid = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("container"), Option::<String>::None)
+                    .value(Alias::new("locator_kind"), "strm")
+                    .value(Alias::new("probe_state"), "NotProbed")
+                    .and_where(Expr::col(Alias::new("id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("publication_media_sources"))
+                    .value(Alias::new("container"), Option::<String>::None)
+                    .value(Alias::new("locator_kind"), "strm")
+                    .and_where(Expr::col(Alias::new("media_source_id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("name"), "Outside.strm")
+                    .value(Alias::new("normalized_name"), "outside.strm")
+                    .and_where(
+                        Expr::col(Alias::new("provider_object_id")).eq(app.strm_object_id.as_str()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    let submission = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(tjxy_common::MediaSourceId::from_uuid(source_id)),
+                1,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "absolute-strm-probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), submission.job().id());
+
+    let registry = StorageBackendRegistry::new();
+    registry
+        .set_local_reference_fallback(Arc::clone(&app.process_backend) as Arc<dyn StorageBackend>);
+    ProbeService::new(app.database.clone())
+        .with_backend_registry(registry)
+        .with_backend(app.media_account, Arc::clone(&app.media_backend))
+        .with_inspector(Arc::new(CloudProbeInspector))
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    let source = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("probe_state"), Alias::new("container")])
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source.try_get::<String>("", "probe_state").unwrap(),
+        "Probed"
+    );
+    assert_eq!(source.try_get::<String>("", "container").unwrap(), "mkv");
+    let stored_objects = app
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("storage_objects")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored_objects.len(), 2);
+
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Videos/{item}/stream?static=true&mediaSourceId={presentation}");
+    let streamed = stream_request(&app.router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert_eq!(streamed.headers()[header::CONTENT_TYPE], "video/x-matroska");
+    assert_eq!(
+        streamed.into_body().collect().await.unwrap().to_bytes(),
+        Bytes::from_static(b"strm-target-bytes")
+    );
+    let process_root = tokio::fs::canonicalize(app.media.path()).await.unwrap();
+    assert!(
+        app.strm_target_path
+            .starts_with(process_root.join("external"))
+    );
+    assert!(
+        !app.strm_target_path
+            .starts_with(process_root.join("library"))
+    );
 }
 
 async fn cloud_object_availability(

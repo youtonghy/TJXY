@@ -787,12 +787,16 @@ pub(crate) async fn playback_info_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    if !auth::is_json_content_type(&headers) {
-        return error(StatusCode::BAD_REQUEST, "invalid playback request");
-    }
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(serde_json::Value::Object(payload)) => serde_json::Value::Object(payload),
-        _ => return error(StatusCode::BAD_REQUEST, "invalid playback request"),
+    let payload = if body.is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        if !auth::is_json_content_type(&headers) {
+            return error(StatusCode::BAD_REQUEST, "invalid playback request");
+        }
+        match serde_json::from_slice(&body) {
+            Ok(serde_json::Value::Object(payload)) => serde_json::Value::Object(payload),
+            _ => return error(StatusCode::BAD_REQUEST, "invalid playback request"),
+        }
     };
     let profile = payload
         .get("DeviceProfile")
@@ -806,7 +810,7 @@ pub(crate) async fn playback_info_post(
         Ok(media_source_id) => media_source_id.map(PresentationKey::from_uuid),
         Err(error) => return error.into_response(),
     };
-    let enable_direct_play = match json_bool(&payload, "EnableDirectPlay", "enableDirectPlay") {
+    let _enable_direct_play = match json_bool(&payload, "EnableDirectPlay", "enableDirectPlay") {
         Ok(enable_direct_play) => enable_direct_play,
         Err(error) => return error.into_response(),
     };
@@ -818,7 +822,6 @@ pub(crate) async fn playback_info_post(
         PlaybackInfoRequest {
             user_id,
             media_source_id,
-            enable_direct_play,
             profile,
         },
     )
@@ -843,7 +846,6 @@ async fn playback_info(
     };
     request.user_id = query.user_id.or(request.user_id);
     request.media_source_id = query.media_source_id.or(request.media_source_id);
-    request.enable_direct_play = query.enable_direct_play.or(request.enable_direct_play);
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
@@ -889,21 +891,17 @@ async fn playback_info(
                     requested_source.is_none_or(|requested| source.presentation_key() == requested)
                 })
                 .map(|source| {
-                    let compatible = request.enable_direct_play.unwrap_or(true)
-                        && profile
-                            .as_ref()
-                            .is_none_or(|profile| profile.supports_direct_play(&source));
                     let codec_compatibility = profile
                         .as_ref()
                         .map_or(0, |profile| profile.codec_compatibility_rank(&source));
-                    (compatible, codec_compatibility, source)
+                    (codec_compatibility, source)
                 })
                 .collect::<Vec<_>>();
             sort_playback_sources(&mut sources);
             let media_sources = sources
                 .into_iter()
-                .map(|(compatible, _, source)| {
-                    media_source_info(item_id, &source, compatible, source.presentation_key())
+                .map(|(_, source)| {
+                    media_source_info(item_id, &source, true, source.presentation_key())
                 })
                 .collect::<Result<Vec<_>, _>>();
             match media_sources {
@@ -920,23 +918,23 @@ async fn playback_info(
     }
 }
 
-fn sort_playback_sources(sources: &mut [(bool, u8, PlaybackSource)]) {
+fn sort_playback_sources(sources: &mut [(u8, PlaybackSource)]) {
     sources.sort_by(|left, right| {
         right
-            .0
-            .cmp(&left.0)
-            .then_with(|| right.2.is_last_used().cmp(&left.2.is_last_used()))
-            .then_with(|| right.2.is_default().cmp(&left.2.is_default()))
-            .then_with(|| right.2.admin_priority().cmp(&left.2.admin_priority()))
-            .then_with(|| right.2.resolution_pixels().cmp(&left.2.resolution_pixels()))
-            .then_with(|| right.1.cmp(&left.1))
-            .then_with(|| right.2.account_health().cmp(&left.2.account_health()))
-            .then_with(|| right.2.location_priority().cmp(&left.2.location_priority()))
+            .1
+            .is_last_used()
+            .cmp(&left.1.is_last_used())
+            .then_with(|| right.1.is_default().cmp(&left.1.is_default()))
+            .then_with(|| right.1.admin_priority().cmp(&left.1.admin_priority()))
+            .then_with(|| right.1.resolution_pixels().cmp(&left.1.resolution_pixels()))
+            .then_with(|| right.0.cmp(&left.0))
+            .then_with(|| right.1.account_health().cmp(&left.1.account_health()))
+            .then_with(|| right.1.location_priority().cmp(&left.1.location_priority()))
             .then_with(|| {
-                left.2
+                left.1
                     .presentation_key()
                     .as_uuid()
-                    .cmp(&right.2.presentation_key().as_uuid())
+                    .cmp(&right.1.presentation_key().as_uuid())
             })
     });
 }
@@ -1035,14 +1033,12 @@ fn jellyfin_media_source_id(
 struct PlaybackInfoRequest {
     user_id: Option<UserId>,
     media_source_id: Option<PresentationKey>,
-    enable_direct_play: Option<bool>,
     profile: Option<serde_json::Value>,
 }
 
 struct PlaybackInfoQuery {
     user_id: Option<UserId>,
     media_source_id: Option<PresentationKey>,
-    enable_direct_play: Option<bool>,
 }
 
 fn parse_playback_info_query(
@@ -1052,7 +1048,7 @@ fn parse_playback_info_query(
     let user_id = take_user_id(&mut parameters)?;
     let media_source_id =
         take_uuid(&mut parameters, "mediaSourceId")?.map(PresentationKey::from_uuid);
-    let enable_direct_play = take_bool(&mut parameters, "enableDirectPlay")?;
+    let _enable_direct_play = take_bool(&mut parameters, "enableDirectPlay")?;
     for parameter in [
         "maxStreamingBitrate",
         "startTimeTicks",
@@ -1068,11 +1064,12 @@ fn parse_playback_info_query(
     ] {
         parameters.remove(parameter);
     }
-    reject_remaining(&parameters)?;
+    // Jellyfin's model binding ignores unrecognized query keys. Keep that
+    // endpoint-level behavior for compatibility hints such as `reqformat` and
+    // `IsPlayback`; recognized values above remain strictly validated.
     Ok(PlaybackInfoQuery {
         user_id,
         media_source_id,
-        enable_direct_play,
     })
 }
 

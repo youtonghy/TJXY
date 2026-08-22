@@ -201,6 +201,22 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
 保存在当前平台的配置目录中；可以通过 `TJXY_CONFIG_FILE` 指定明确路径。
 
+### Jellyfin 客户端播放兼容性
+
+TJXY 实现的是 Jellyfin 的原文件 Direct Play 子集，不提供转封装或转码。
+PlaybackInfo 接受可选或空的 POST body，并忽略 Jellyfin 服务端模型绑定同样会
+忽略的客户端查询提示。原文件接口兼容 Jellyfin 使用的小写 `/videos`、`/audio`
+路径和可选容器后缀；已认证请求缺少 `MediaSourceId` 时，会选择当前用户有权访问的
+第一个可播放来源。`stream.mp4` 之类的后缀仅用于路由兼容，不会转换文件或改变真实
+响应 MIME。`static` 缺失或为 false 时仍交付原文件；这些 progressive 接口会将常见
+转码查询参数作为兼容提示接受，但仍返回原始字节和真实 MIME。仅使用 PlaybackTicket
+的请求仍必须携带票据绑定的明确媒体来源。
+
+TJXY 浏览器客户端只声明浏览器稳定支持的 Direct Play 容器，因此不声明 MKV；
+Jellyfin Media Player 的原生 MPV 路径可以播放服务端返回的兼容 MKV 来源。客户端
+请求转码时会回退到同一原文件交付；TJXY 不提供 HLS manifest，也不会承诺原本不支持
+对应容器或编解码器的客户端能够解码这些字节。
+
 ## Linux 发行包
 
 [GitHub Releases](https://github.com/youtonghy/TJXY/releases) 为 glibc 2.35

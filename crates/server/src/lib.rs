@@ -650,11 +650,27 @@ pub fn build_router(state: AppState) -> Router {
             get(stream::get_with_container).head(stream::head_with_container),
         )
         .route(
+            "/videos/{item_id}/stream",
+            get(stream::get).head(stream::head),
+        )
+        .route(
+            "/videos/{item_id}/stream.{container}",
+            get(stream::get_with_container).head(stream::head_with_container),
+        )
+        .route(
             "/Audio/{item_id}/stream",
             get(stream::get).head(stream::head),
         )
         .route(
             "/Audio/{item_id}/stream.{container}",
+            get(stream::get_with_container).head(stream::head_with_container),
+        )
+        .route(
+            "/audio/{item_id}/stream",
+            get(stream::get).head(stream::head),
+        )
+        .route(
+            "/audio/{item_id}/stream.{container}",
             get(stream::get_with_container).head(stream::head_with_container),
         )
         .route(

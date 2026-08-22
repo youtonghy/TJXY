@@ -236,6 +236,26 @@ When neither source is available, the server root continues to open `/app/`.
 The current compatibility baseline is Jellyfin Web 10.11.11; newer client
 releases need to be validated before changing the mounted distribution.
 
+TJXY implements the Jellyfin direct-play subset rather than remuxing or
+transcoding. Playback negotiation accepts optional or empty POST bodies and
+ignores client-specific query hints that Jellyfin model binding would ignore.
+The original-file endpoints accept Jellyfin's lowercase `/videos` and `/audio`
+forms, their optional container suffix, and authenticated requests without a
+`MediaSourceId` by selecting the first authorized playable source. A container
+suffix such as `stream.mp4` is only a route alias: it neither converts the file
+nor changes the response MIME type. Direct file delivery also applies when the
+`static` hint is absent or false; ticket-only URLs retain an explicit
+ticket-bound media source. Transcoding-shaped query parameters on these
+progressive endpoints are accepted as compatibility hints but still return the
+original bytes and actual MIME type.
+
+The TJXY browser client intentionally limits direct playback to containers that
+the browser can handle reliably and therefore does not advertise MKV. Jellyfin
+Media Player's native MPV path can play compatible MKV sources returned by the
+server. Requests for transcoding fall back to the same original-file delivery;
+TJXY does not expose HLS manifests or claim that an unsupported client codec can
+decode those bytes.
+
 ## Linux Release Archive
 
 [GitHub Releases](https://github.com/youtonghy/TJXY/releases) provide

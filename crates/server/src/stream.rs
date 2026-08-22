@@ -13,6 +13,105 @@ use crate::{AppState, auth};
 
 const MAX_BITRATE_TEST_BYTES: usize = 4 * 1024 * 1024;
 
+const STREAM_COMPATIBILITY_HINTS: &[&str] = &[
+    "deviceId",
+    "DeviceId",
+    "playSessionId",
+    "PlaySessionId",
+    "tag",
+    "Tag",
+    "maxStreamingBitrate",
+    "MaxStreamingBitrate",
+    "audioStreamIndex",
+    "AudioStreamIndex",
+    "subtitleStreamIndex",
+    "SubtitleStreamIndex",
+    "startTimeTicks",
+    "StartTimeTicks",
+    "container",
+    "Container",
+    "params",
+    "Params",
+    "deviceProfileId",
+    "DeviceProfileId",
+    "segmentContainer",
+    "SegmentContainer",
+    "segmentLength",
+    "SegmentLength",
+    "minSegments",
+    "MinSegments",
+    "audioCodec",
+    "AudioCodec",
+    "enableAutoStreamCopy",
+    "EnableAutoStreamCopy",
+    "allowVideoStreamCopy",
+    "AllowVideoStreamCopy",
+    "allowAudioStreamCopy",
+    "AllowAudioStreamCopy",
+    "audioSampleRate",
+    "AudioSampleRate",
+    "maxAudioBitDepth",
+    "MaxAudioBitDepth",
+    "audioBitRate",
+    "AudioBitRate",
+    "audioChannels",
+    "AudioChannels",
+    "maxAudioChannels",
+    "MaxAudioChannels",
+    "profile",
+    "Profile",
+    "level",
+    "Level",
+    "framerate",
+    "Framerate",
+    "maxFramerate",
+    "MaxFramerate",
+    "copyTimestamps",
+    "CopyTimestamps",
+    "width",
+    "Width",
+    "height",
+    "Height",
+    "maxWidth",
+    "MaxWidth",
+    "maxHeight",
+    "MaxHeight",
+    "videoBitRate",
+    "VideoBitRate",
+    "subtitleMethod",
+    "SubtitleMethod",
+    "maxRefFrames",
+    "MaxRefFrames",
+    "maxVideoBitDepth",
+    "MaxVideoBitDepth",
+    "requireAvc",
+    "RequireAvc",
+    "deInterlace",
+    "DeInterlace",
+    "requireNonAnamorphic",
+    "RequireNonAnamorphic",
+    "transcodingMaxAudioChannels",
+    "TranscodingMaxAudioChannels",
+    "cpuCoreLimit",
+    "CpuCoreLimit",
+    "liveStreamId",
+    "LiveStreamId",
+    "enableMpegtsM2TsMode",
+    "EnableMpegtsM2TsMode",
+    "videoCodec",
+    "VideoCodec",
+    "subtitleCodec",
+    "SubtitleCodec",
+    "transcodeReasons",
+    "TranscodeReasons",
+    "videoStreamIndex",
+    "VideoStreamIndex",
+    "context",
+    "Context",
+    "enableAudioVbrEncoding",
+    "EnableAudioVbrEncoding",
+];
+
 pub(crate) async fn bitrate_test(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -103,16 +202,52 @@ async fn serve(
         Ok(query) => query,
         Err((status, message)) => return response(status, message),
     };
-    let user_id = if headers.contains_key(header::AUTHORIZATION)
+    let authenticated = headers.contains_key(header::AUTHORIZATION)
         || query.api_key_present
         || headers.contains_key("X-Emby-Token")
-        || headers.contains_key("X-MediaBrowser-Token")
-    {
-        match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
-            Ok(principal) => principal.user().id(),
-            Err(response) => return response,
-        }
+        || headers.contains_key("X-MediaBrowser-Token");
+    let (user_id, presentation) = if authenticated {
+        let principal =
+            match auth::authenticated_principal(&state, &headers, raw_query.as_deref()).await {
+                Ok(principal) => principal,
+                Err(response) => return response,
+            };
+        let requested = query
+            .presentation
+            .filter(|presentation| presentation.as_uuid() != item_id);
+        let presentation = if let Some(requested) = requested {
+            requested
+        } else {
+            let Some(catalog) = state.catalog.as_ref() else {
+                return response(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
+            };
+            let sources = match catalog
+                .available_playback_sources(
+                    principal.user().id(),
+                    None,
+                    CatalogItemId::from_uuid(item_id),
+                )
+                .await
+            {
+                Ok(Some(sources)) => sources,
+                Ok(None) => return response(StatusCode::NOT_FOUND, "media source was not found"),
+                Err(_) => {
+                    return response(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
+                }
+            };
+            let Some(presentation) = sources
+                .first()
+                .map(tjxy_application::PlaybackSource::presentation_key)
+            else {
+                return response(StatusCode::NOT_FOUND, "media source was not found");
+            };
+            presentation
+        };
+        (principal.user().id(), presentation)
     } else if let Some(ticket) = query.playback_ticket.as_deref() {
+        let Some(presentation) = query.presentation else {
+            return response(StatusCode::BAD_REQUEST, "invalid stream query");
+        };
         let Some(service) = state.playback_tickets.as_ref() else {
             return response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -120,14 +255,10 @@ async fn serve(
             );
         };
         match service
-            .authorize(
-                ticket,
-                CatalogItemId::from_uuid(item_id),
-                query.presentation,
-            )
+            .authorize(ticket, CatalogItemId::from_uuid(item_id), presentation)
             .await
         {
-            Ok(Some(grant)) => grant.user_id(),
+            Ok(Some(grant)) => (grant.user_id(), presentation),
             Ok(None) | Err(_) => {
                 return response(StatusCode::UNAUTHORIZED, "authentication required");
             }
@@ -142,11 +273,7 @@ async fn serve(
         );
     };
     let resolved = match media
-        .resolve(
-            user_id,
-            CatalogItemId::from_uuid(item_id),
-            query.presentation,
-        )
+        .resolve(user_id, CatalogItemId::from_uuid(item_id), presentation)
         .await
     {
         Ok(Some(resolved)) => resolved,
@@ -222,7 +349,7 @@ async fn serve(
 }
 
 struct StreamQuery {
-    presentation: PresentationKey,
+    presentation: Option<PresentationKey>,
     playback_ticket: Option<String>,
     api_key_present: bool,
 }
@@ -232,36 +359,27 @@ fn stream_query(raw_query: Option<&str>) -> Result<StreamQuery, (StatusCode, &'s
         .map_err(|()| (StatusCode::BAD_REQUEST, "invalid stream query"))?;
     let api_key_present = query.remove("ApiKey").is_some() || query.remove("api_key").is_some();
     let playback_ticket = query.remove("PlaybackTicket");
-    let static_value = take_alias(&mut query, "static", "Static")?;
-    if !static_value.is_some_and(|value| value.eq_ignore_ascii_case("true")) {
+    if let Some(static_value) = take_alias(&mut query, "static", "Static")?
+        && !static_value.eq_ignore_ascii_case("true")
+        && !static_value.eq_ignore_ascii_case("false")
+    {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
-    let presentation = take_alias(&mut query, "mediaSourceId", "MediaSourceId")?
-        .ok_or((StatusCode::BAD_REQUEST, "invalid stream query"))?;
-    for hint in [
-        "deviceId",
-        "DeviceId",
-        "playSessionId",
-        "PlaySessionId",
-        "tag",
-        "Tag",
-        "maxStreamingBitrate",
-        "MaxStreamingBitrate",
-        "audioStreamIndex",
-        "AudioStreamIndex",
-        "subtitleStreamIndex",
-        "SubtitleStreamIndex",
-        "startTimeTicks",
-        "StartTimeTicks",
-    ] {
-        query.remove(hint);
+    let presentation =
+        take_alias(&mut query, "mediaSourceId", "MediaSourceId")?.filter(|value| !value.is_empty());
+    for hint in STREAM_COMPATIBILITY_HINTS {
+        query.remove(*hint);
     }
     if !query.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "invalid stream query"));
     }
-    let presentation = Uuid::parse_str(&presentation)
-        .map(PresentationKey::from_uuid)
-        .map_err(|_| (StatusCode::NOT_FOUND, "media source was not found"))?;
+    let presentation = presentation
+        .map(|presentation| {
+            Uuid::parse_str(&presentation)
+                .map(PresentationKey::from_uuid)
+                .map_err(|_| (StatusCode::NOT_FOUND, "media source was not found"))
+        })
+        .transpose()?;
     Ok(StreamQuery {
         presentation,
         playback_ticket,
