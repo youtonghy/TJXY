@@ -1,0 +1,46 @@
+name: Pre-release CI
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: 1.88.0
+
+jobs:
+  frontend-format-check:
+    name: Frontend checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix admin ci
+      - name: Typecheck frontend
+        run: npm --prefix admin run typecheck
+      - name: Lint frontend
+        run: npm --prefix admin run lint
+
+  rust-format-check:
+    name: Rust format check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --no-self-update
+          rustup default "$RUST_VERSION"
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
