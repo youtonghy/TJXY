@@ -42,7 +42,7 @@ import { useClientAuth } from '../auth/ClientAuthContext';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
 import { ServerAddressField } from '../ui/ServerAddressField';
 import { PasswordStrength } from '../../ui/passwordStrength';
-import { deletePasskey, listPasskeys, registerPasskey, type PasskeySummary } from '../auth/passkeyApi';
+import { deletePasskey, listPasskeys, passkeyErrorMessage, registerPasskey, type PasskeySummary } from '../auth/passkeyApi';
 import { useTranslate } from '../../settings/i18n';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 
@@ -557,7 +557,7 @@ function PasskeyManager() {
             setError('');
             void registerPasskey()
               .then(refresh)
-              .catch(() => { setError(tr('Passkey registration failed.', 'Passkey 注册失败。')); })
+              .catch((reason: unknown) => { setError(`${tr('Passkey registration failed.', 'Passkey 注册失败。')} ${passkeyErrorMessage(reason)}`); })
               .finally(() => { setPending(false); });
           }}
           type="button"

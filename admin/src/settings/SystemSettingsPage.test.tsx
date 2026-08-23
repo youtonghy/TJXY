@@ -76,6 +76,23 @@ it('edits branding and network settings through one save action', async () => {
   expect(screen.getByText('Restart TJXY to apply the pending system settings.')).toBeVisible();
 });
 
+it('uses a Passkey switch and persists its selected state', async () => {
+  renderWithAdmin(<SystemSettingsPage />, { initialEntries: ['/admin/settings/system'] });
+  const user = userEvent.setup();
+
+  const passkeySwitch = await screen.findByRole('switch', { name: 'Enable Passkey login' });
+  expect(passkeySwitch).not.toBeChecked();
+  expect(screen.getByText('Passkey login is off')).toBeVisible();
+  await user.click(passkeySwitch);
+  expect(passkeySwitch).toBeChecked();
+  expect(screen.getByText('Passkey login is on')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+  await waitFor(() => {
+    expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({ passkeyEnabled: true }));
+  });
+});
+
 it('reminds the administrator to restart after saving restart-sensitive settings', async () => {
   const restartWarning = vi.spyOn(Toast.toast, 'warning').mockReturnValue('restart-warning');
   renderWithAdmin(

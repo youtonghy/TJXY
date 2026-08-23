@@ -65,6 +65,9 @@ uuid = { version = "1.16.0", features = ["serde", "v4", "v5"] }
 webauthn-rs = { version = "0.5.3", features = ["conditional-ui", "danger-allow-state-serialisation"] }
 zeroize = { version = "1.8.1", features = ["alloc", "serde"] }
 
+[patch.crates-io]
+webauthn-rs = { path = "vendor/webauthn-rs" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

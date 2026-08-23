@@ -3,15 +3,16 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Input,
   Label,
   ListBox,
   Select,
   Spinner,
+  Switch,
   TextField,
 } from '@heroui/react';
 import {
+  KeyRound,
   Image as ImageIcon,
   Palette,
   RefreshCw,
@@ -192,11 +193,30 @@ export function SystemSettingsPage() {
       </Card>
 
       <Card>
-        <Card.Header><Card.Title>{tr('admin.system.passkeyTitle')}</Card.Title><Card.Description>{tr('admin.system.passkeyDescription')}</Card.Description></Card.Header>
-        <Card.Content>
-          <Checkbox isSelected={settings.passkeyEnabled} onChange={(selected) => { patch('passkeyEnabled', selected); }}>
-            {tr('admin.system.passkeyEnabled')}
-          </Checkbox>
+        <Card.Header className="items-start gap-3">
+          <KeyRound className="mt-0.5 size-5 shrink-0 text-accent" />
+          <div>
+            <Card.Title>{tr('admin.system.passkeyTitle')}</Card.Title>
+            <Card.Description>{tr('admin.system.passkeyDescription')}</Card.Description>
+          </div>
+        </Card.Header>
+        <Card.Content className="pt-0">
+          <Switch
+            aria-label={tr('admin.system.passkeyEnabled')}
+            className="w-full"
+            isSelected={settings.passkeyEnabled}
+            onChange={(selected) => { patch('passkeyEnabled', selected); }}
+          >
+            <Switch.Content className="flex w-full items-center justify-between gap-4 rounded-lg border border-border bg-surface-secondary p-4 transition-colors hover:bg-default sm:p-5">
+              <span className="min-w-0">
+                <span className="block font-medium text-foreground">
+                  {settings.passkeyEnabled ? tr('admin.system.passkeyStatusEnabled') : tr('admin.system.passkeyStatusDisabled')}
+                </span>
+                <span className="mt-1 block text-sm leading-5 text-muted">{tr('admin.system.passkeyHint')}</span>
+              </span>
+              <Switch.Control className="shrink-0"><Switch.Thumb /></Switch.Control>
+            </Switch.Content>
+          </Switch>
         </Card.Content>
       </Card>
 

@@ -4551,8 +4551,6 @@ dependencies = [
 [[package]]
 name = "webauthn-rs"
 version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c548915e0e92ee946bbf2aecf01ea21bef53d974b0793cc6732ba81a03fc422"
 dependencies = [
  "base64urlsafedata",
  "serde",
