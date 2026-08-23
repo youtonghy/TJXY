@@ -6,7 +6,7 @@ import {
   Label,
   TextField,
 } from '@heroui/react';
-import { TriangleAlert, UserPlus } from 'lucide-react';
+import { Dices, TriangleAlert, UserPlus } from 'lucide-react';
 import { CreateBase, Form, useNotify, useRedirect } from 'ra-core';
 import { useState } from 'react';
 import { Controller, useFormContext, useFormState } from 'react-hook-form';
@@ -14,6 +14,8 @@ import { Controller, useFormContext, useFormState } from 'react-hook-form';
 import type { UserRecord } from '../api/types';
 import { useTranslate } from '../settings/i18n';
 import { PageHeader } from '../ui/PageHeader';
+import { PasswordStrength } from '../ui/passwordStrength';
+import { generatePassword } from '../ui/passwordStrengthUtils';
 
 interface UserCreateInput {
   Name: string;
@@ -159,6 +161,10 @@ function CreateFields({ isPending }: { isPending: boolean }) {
               type="password"
               value={field.value}
             />
+            <div className="mt-2 flex items-start gap-2">
+              <div className="min-w-0 flex-1"><PasswordStrength password={field.value} /></div>
+              <Button aria-label={tr('Generate random password', '随机生成密码')} isDisabled={isPending} isIconOnly onPress={() => { field.onChange(generatePassword()); }} size="sm" type="button" variant="ghost"><Dices aria-hidden="true" className="size-4" /></Button>
+            </div>
             <FieldError>{fieldState.error?.message}</FieldError>
           </TextField>
         )}

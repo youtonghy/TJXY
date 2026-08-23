@@ -19,6 +19,7 @@ import {
 
 const AccessPage = lazyComponent(() => import('./access/AccessPage'), 'AccessPage');
 const AiSettingsPage = lazyComponent(() => import('./settings/AiSettingsPage'), 'AiSettingsPage');
+const AboutPage = lazyComponent(() => import('./settings/AboutPage'), 'AboutPage');
 const AnnouncementsPage = lazyComponent(() => import('./announcements/AnnouncementsPage'), 'AnnouncementsPage');
 const ClientApp = lazyComponent(() => import('./client/ClientApp'), 'ClientApp');
 const GoogleDrivePage = lazyComponent(() => import('./storage/GoogleDrivePage'), 'GoogleDrivePage');
@@ -129,6 +130,7 @@ function ApplicationRoutes() {
                 <Route element={<MetadataSettingsPage />} path="/settings/metadata" />
                 <Route element={<AiSettingsPage />} path="/settings/ai" />
                 <Route element={<SystemSettingsPage />} path="/settings/system" />
+                <Route element={<AboutPage />} path="/settings/about" />
                 <Route element={<ThemeSettingsPage />} path="/settings/theme" />
                 <Route element={<GoogleDrivePage />} path="/storage/google-drive" />
                 <Route element={<OneDrivePage />} path="/storage/onedrive" />

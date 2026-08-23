@@ -1889,12 +1889,23 @@ async fn enqueue_or_join(
             .transpose()?
             .ok_or(WorkJobRepositoryError::MissingEnqueuedJob)?;
     }
-    if spec.local_metadata_access_mode == Some(LocalMetadataAccessMode::Import)
-        && job.local_metadata_access_mode != Some(LocalMetadataAccessMode::Import)
-    {
+    if let (Some(spec_mode), Some(job_mode)) = (
+        spec.local_metadata_access_mode,
+        job.local_metadata_access_mode,
+    ) {
+        let merged_mode = LocalMetadataAccessMode::from_imports(
+            spec_mode.imports_metadata() || job_mode.imports_metadata(),
+            spec_mode.imports_images() || job_mode.imports_images(),
+        );
+        if merged_mode == job_mode {
+            return Ok(WorkJobSubmission { job, created });
+        }
         let upgrade = Query::update()
             .table(Alias::new("work_jobs"))
-            .value(Alias::new("local_metadata_access_mode"), "import")
+            .value(
+                Alias::new("local_metadata_access_mode"),
+                merged_mode.as_str(),
+            )
             .and_where(Expr::col(Alias::new("id")).eq(job.id.as_uuid()))
             .and_where(Expr::col(Alias::new("state")).is_in([STATE_PENDING, STATE_RUNNING]))
             .to_owned();

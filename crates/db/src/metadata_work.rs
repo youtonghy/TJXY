@@ -413,6 +413,130 @@ impl<'connection> MetadataWorkRepository<'connection> {
         }
     }
 
+    /// Commits a metadata job with independently imported or direct-read NFO and image resources.
+    pub async fn commit_mixed(
+        &self,
+        claimed: &ClaimedWorkJob,
+        snapshot: &MetadataWorkSnapshot,
+        resolution: Option<&MetadataResolution>,
+        asset_publications: &[&AssetPublication],
+        direct_nfo: bool,
+        direct_images: bool,
+        used_nfo: bool,
+        warnings: Vec<String>,
+    ) -> Result<MetadataWorkCommitReport, MetadataWorkError> {
+        let WorkScope::CatalogItem(item_id) = claimed.job().scope() else {
+            return Err(MetadataWorkError::InvalidClaim);
+        };
+        let input_revision = claimed
+            .job()
+            .input_sync_revision()
+            .ok_or(MetadataWorkError::MissingSyncRevision)?;
+        let transaction = self.database.begin().await?;
+        let result = async {
+            let requirement = fence_metadata_requirement(&transaction, claimed).await?;
+            fence_metadata_revision(&transaction, item_id, claimed.job().expected_revision())
+                .await?;
+            let scope = metadata_storage_scope(
+                &transaction,
+                item_id,
+                claimed.job().storage_root_affinity(),
+            )
+            .await?;
+            if !scope.has_same_inventory(snapshot.scope)
+                || !scope.accepts_metadata_input(input_revision)
+                || !crate::catalog_storage_scope::storage_scope_is_reconciled(
+                    &transaction,
+                    scope,
+                    scope.children_indexed(),
+                )
+                .await?
+            {
+                return Err(MetadataWorkError::StaleOrUnavailable);
+            }
+            revalidate_metadata_snapshot(&transaction, item_id, scope, input_revision, snapshot)
+                .await?;
+            let metadata_changed = if let Some(resolution) = resolution {
+                crate::metadata::publish_in_transaction(
+                    &transaction,
+                    item_id,
+                    resolution,
+                    requirement,
+                )
+                .await?
+                .changed()
+            } else {
+                false
+            };
+            advance_metadata_watermark(
+                &transaction,
+                item_id,
+                claimed.job().expected_revision(),
+                requirement,
+            )
+            .await?;
+            let mut asset_changed = false;
+            for asset in asset_publications {
+                let report = crate::asset::publish_in_transaction(
+                    &transaction,
+                    asset,
+                    !metadata_changed && !asset_changed,
+                )
+                .await?;
+                asset_changed |= report.reference_changed();
+            }
+            if direct_nfo || direct_images {
+                let library_modes =
+                    direct_library_modes(&transaction, item_id, scope.storage_root_id()).await?;
+                replace_direct_refs_filtered(
+                    &transaction,
+                    item_id,
+                    &library_modes,
+                    snapshot,
+                    input_revision,
+                    direct_nfo,
+                    direct_images,
+                )
+                .await?;
+            }
+            let changed = metadata_changed || asset_changed || direct_nfo || direct_images;
+            WorkJobRepository::new(self.database).complete_in_transaction(
+                &transaction,
+                claimed,
+                WorkJobResult::success(
+                    json!({
+                        "changed": changed,
+                        "image_changed": asset_changed,
+                        "matched": resolution.is_some_and(|value| !value.provider_ids().is_empty()),
+                        "state": resolution.map_or("Partial", |value| value.state().as_str()),
+                        "used_nfo": used_nfo,
+                        "direct_nfo": direct_nfo,
+                        "direct_images": direct_images
+                    }),
+                    warnings,
+                ),
+            ).await?;
+            if (direct_nfo || direct_images) && !metadata_changed && !asset_changed {
+                crate::advance_catalog_generation(&transaction).await?;
+            }
+            Ok(MetadataWorkCommitReport {
+                changed,
+                asset_changed,
+            })
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(error)
+            }
+        }
+    }
+
     /// Publishes only source-object references for Direct mode without importing metadata bytes.
     /// Commits direct metadata references for a claimed metadata job.
     ///
@@ -544,6 +668,130 @@ async fn direct_library_ids(
         .into_iter()
         .map(|row| row.try_get("", "library_id"))
         .collect()
+}
+
+async fn direct_library_modes(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    root_id: StorageRootId,
+) -> Result<Vec<(Uuid, String)>, DbErr> {
+    let membership = Alias::new("direct_membership");
+    let library = Alias::new("direct_library");
+    let binding = Alias::new("direct_binding");
+    let query = Query::select()
+        .columns([
+            (library.clone(), Alias::new("id")),
+            (library.clone(), Alias::new("local_metadata_access_mode")),
+        ])
+        .from_as(Alias::new("library_catalog_items"), membership.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("libraries"),
+            library.clone(),
+            Expr::col((library.clone(), Alias::new("id")))
+                .equals((membership.clone(), Alias::new("library_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            binding.clone(),
+            Expr::col((binding.clone(), Alias::new("library_id")))
+                .equals((library.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::col((membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .and_where(Expr::col((binding, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .to_owned();
+    connection
+        .query_all(connection.get_database_backend().build(&query))
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("", "id")?,
+                row.try_get("", "local_metadata_access_mode")?,
+            ))
+        })
+        .collect()
+}
+
+async fn replace_direct_refs_filtered(
+    transaction: &sea_orm::DatabaseTransaction,
+    item_id: CatalogItemId,
+    library_modes: &[(Uuid, String)],
+    snapshot: &MetadataWorkSnapshot,
+    input_revision: i64,
+    direct_nfo: bool,
+    direct_images: bool,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let delete = Query::delete()
+        .from_table(Alias::new("direct_metadata_refs"))
+        .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()))
+        .and_where(
+            Expr::col(Alias::new("storage_root_id")).eq(snapshot.storage_root_id().as_uuid()),
+        )
+        .to_owned();
+    transaction.execute(backend.build(&delete)).await?;
+    for (library_id, mode) in library_modes {
+        let mode = mode
+            .parse::<tjxy_domain::LocalMetadataAccessMode>()
+            .map_err(|_| DbErr::Custom("invalid local metadata access mode".to_owned()))?;
+        let include_nfo = direct_nfo && mode.uses_direct_metadata();
+        let include_images = direct_images && mode.uses_direct_images();
+        if !include_nfo && !include_images {
+            continue;
+        }
+        let mut resources = Vec::new();
+        if include_nfo {
+            if let Some(file) = snapshot.sidecar.as_ref() {
+                resources.push((file, "Nfo", 0_i32));
+            }
+        }
+        if include_images {
+            let mut primary = 0_i32;
+            let mut backdrop = 0_i32;
+            for image in &snapshot.images {
+                let (kind, priority) = if image.image_type() == ImageType::Primary {
+                    let value = primary;
+                    primary = primary.saturating_add(1);
+                    ("Primary", value)
+                } else {
+                    let value = backdrop;
+                    backdrop = backdrop.saturating_add(1);
+                    ("Backdrop", value)
+                };
+                resources.push((image.file(), kind, priority));
+            }
+        }
+        for (file, kind, priority) in resources {
+            let insert = Query::insert()
+                .into_table(Alias::new("direct_metadata_refs"))
+                .columns([
+                    Alias::new("id"),
+                    Alias::new("library_id"),
+                    Alias::new("catalog_item_id"),
+                    Alias::new("storage_root_id"),
+                    Alias::new("storage_object_id"),
+                    Alias::new("resource_kind"),
+                    Alias::new("priority"),
+                    Alias::new("input_revision"),
+                ])
+                .values_panic([
+                    Uuid::new_v4().into(),
+                    (*library_id).into(),
+                    item_id.as_uuid().into(),
+                    snapshot.storage_root_id().as_uuid().into(),
+                    file.record_id().as_uuid().into(),
+                    kind.into(),
+                    priority.into(),
+                    input_revision.into(),
+                ])
+                .to_owned();
+            transaction.execute(backend.build(&insert)).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn replace_direct_refs(

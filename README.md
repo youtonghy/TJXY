@@ -210,6 +210,8 @@ VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
 TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
 ```
 
+Optionally set `VITE_TJXY_COMMIT` to show the build commit hash on the administrator About page.
+
 The release workflow injects its validated release version automatically.
 
 Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is

@@ -2031,7 +2031,8 @@ async fn metadata_policy_for_item(
     let backend = transaction.get_database_backend();
     let mut requirement = None;
     let mut source_mode = MetadataSourceMode::LocalOnly;
-    let mut access_mode = LocalMetadataAccessMode::Direct;
+    let mut import_metadata = false;
+    let mut import_images = false;
     for row in transaction.query_all(backend.build(&query)).await? {
         let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
             "none" => None,
@@ -2046,16 +2047,20 @@ async fn metadata_policy_for_item(
                 "local_only" => {}
                 _ => return Err(CatalogPublicationError::InvalidMetadataPolicy),
             }
-            match row
+            let access_mode = row
                 .try_get::<String>("", "local_metadata_access_mode")?
-                .as_str()
-            {
-                "import" => access_mode = LocalMetadataAccessMode::Import,
-                "direct" => {}
-                _ => return Err(CatalogPublicationError::InvalidMetadataPolicy),
-            }
+                .parse::<LocalMetadataAccessMode>()
+                .map_err(|_| CatalogPublicationError::InvalidMetadataPolicy)?;
+            import_metadata |= access_mode.imports_metadata();
+            import_images |= access_mode.imports_images();
         }
     }
+    let access_mode = match (import_metadata, import_images) {
+        (true, true) => LocalMetadataAccessMode::Import,
+        (true, false) => LocalMetadataAccessMode::ImportMetadataOnly,
+        (false, true) => LocalMetadataAccessMode::ImportImagesOnly,
+        (false, false) => LocalMetadataAccessMode::Direct,
+    };
     Ok(requirement.map(|requirement| EffectiveMetadataPolicy {
         requirement,
         source_mode,

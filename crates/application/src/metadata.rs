@@ -11,7 +11,7 @@ use tjxy_db::{
     MetadataPublicationRepository, MetadataWorkError, MetadataWorkRepository,
     StorageSyncRepositoryError, WorkScope,
 };
-use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
+use tjxy_domain::MetadataSourceMode;
 use tjxy_metadata::{
     MetadataError, MetadataImageReference, MetadataItemKind, MetadataProvider,
     MetadataProviderError, MetadataResolution, MetadataResolver, MetadataState, NfoDocument,
@@ -330,7 +330,13 @@ impl MetadataResolveService {
     ) -> Result<MetadataResolveReport, MetadataResolveError> {
         let repository = MetadataWorkRepository::new(&self.database);
         let snapshot = repository.snapshot(claimed).await?;
-        if claimed.job().local_metadata_access_mode() == Some(LocalMetadataAccessMode::Direct) {
+        let access_mode = claimed
+            .job()
+            .local_metadata_access_mode()
+            .ok_or(MetadataResolveError::Work(MetadataWorkError::InvalidClaim))?;
+        let import_metadata = access_mode.imports_metadata();
+        let import_images = access_mode.imports_images();
+        if !import_metadata && !import_images {
             if claimed.job().metadata_source_mode() != Some(MetadataSourceMode::LocalOnly) {
                 return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
             }
@@ -362,7 +368,9 @@ impl MetadataResolveService {
             ) && providers.iter().any(|provider| provider.name() == "Tmdb");
         let resolver = MetadataResolver::new(providers)?;
         let mut execution_warnings = Vec::new();
-        let (mut resolution, used_nfo) = if let Some(sidecar) = snapshot.sidecar() {
+        let (mut resolution, used_nfo) = if !import_metadata {
+            (resolver.resolve(snapshot.lookup()).await, false)
+        } else if let Some(sidecar) = snapshot.sidecar() {
             let backend = self
                 .backends
                 .backend_for_drive(sidecar.storage_account_id(), sidecar.provider_drive_id())
@@ -442,12 +450,16 @@ impl MetadataResolveService {
         let WorkScope::CatalogItem(item_id) = claimed.job().scope() else {
             return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
         };
-        let mut prepared_assets = self
-            .prepare_local_images(item_id, snapshot.images(), &mut execution_warnings)
-            .await?;
-        if !prepared_assets
-            .iter()
-            .any(|asset| asset.publication().image_type() == ImageType::Primary)
+        let mut prepared_assets = if import_images {
+            self.prepare_local_images(item_id, snapshot.images(), &mut execution_warnings)
+                .await?
+        } else {
+            Vec::new()
+        };
+        if import_images
+            && !prepared_assets
+                .iter()
+                .any(|asset| asset.publication().image_type() == ImageType::Primary)
             && let Some(remote) = self
                 .prepare_primary_image(item_id, &resolution, &mut execution_warnings)
                 .await?
@@ -459,11 +471,13 @@ impl MetadataResolveService {
             .map(PreparedAssetPublication::publication)
             .collect::<Vec<_>>();
         let publication = repository
-            .commit(
+            .commit_mixed(
                 claimed,
                 &snapshot,
-                &resolution,
+                import_metadata.then_some(&resolution),
                 &asset_publications,
+                !import_metadata,
+                !import_images,
                 used_nfo,
                 execution_warnings,
             )

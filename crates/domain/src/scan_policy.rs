@@ -13,14 +13,28 @@ pub enum LocalMetadataAccessMode {
     #[default]
     Import,
     Direct,
+    ImportMetadataOnly,
+    ImportImagesOnly,
 }
 
 impl LocalMetadataAccessMode {
+    #[must_use]
+    pub const fn from_imports(import_metadata: bool, import_images: bool) -> Self {
+        match (import_metadata, import_images) {
+            (true, true) => Self::Import,
+            (true, false) => Self::ImportMetadataOnly,
+            (false, true) => Self::ImportImagesOnly,
+            (false, false) => Self::Direct,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Import => "import",
             Self::Direct => "direct",
+            Self::ImportMetadataOnly => "import_metadata_only",
+            Self::ImportImagesOnly => "import_images_only",
         }
     }
 }
@@ -32,8 +46,32 @@ impl FromStr for LocalMetadataAccessMode {
         match value {
             "import" => Ok(Self::Import),
             "direct" => Ok(Self::Direct),
+            "import_metadata_only" => Ok(Self::ImportMetadataOnly),
+            "import_images_only" => Ok(Self::ImportImagesOnly),
             _ => Err(InvalidLocalMetadataAccessMode),
         }
+    }
+}
+
+impl LocalMetadataAccessMode {
+    #[must_use]
+    pub const fn imports_metadata(self) -> bool {
+        matches!(self, Self::Import | Self::ImportMetadataOnly)
+    }
+
+    #[must_use]
+    pub const fn imports_images(self) -> bool {
+        matches!(self, Self::Import | Self::ImportImagesOnly)
+    }
+
+    #[must_use]
+    pub const fn uses_direct_metadata(self) -> bool {
+        !self.imports_metadata()
+    }
+
+    #[must_use]
+    pub const fn uses_direct_images(self) -> bool {
+        !self.imports_images()
     }
 }
 

@@ -293,7 +293,10 @@ impl LibraryPolicyUpdate {
         local_metadata_access_mode: impl Into<String>,
     ) -> Result<Self, LibraryRepositoryError> {
         let mode = local_metadata_access_mode.into();
-        if !matches!(mode.as_str(), "import" | "direct") {
+        if !matches!(
+            mode.as_str(),
+            "import" | "direct" | "import_metadata_only" | "import_images_only"
+        ) {
             return Err(LibraryRepositoryError::InvalidStoredPolicy);
         }
         self.local_metadata_access_mode = Some(mode);
@@ -333,7 +336,11 @@ impl<'connection> LibraryRepository<'connection> {
                 .as_deref()
                 .unwrap_or("import"),
         )?;
-        if policy.local_metadata_access_mode.as_deref() == Some("direct") {
+        if policy
+            .local_metadata_access_mode
+            .as_deref()
+            .is_some_and(is_direct_mode)
+        {
             return Err(LibraryRepositoryError::DirectRequiresFilesystemRoot);
         }
         let transaction = self.database.begin().await?;
@@ -722,7 +729,7 @@ impl<'connection> LibraryRepository<'connection> {
             .as_deref()
             .unwrap_or(&stored_access_mode);
         validate_metadata_modes(effective_source_mode, effective_access_mode)?;
-        if effective_access_mode == "direct" && has_non_filesystem_root {
+        if is_direct_mode(effective_access_mode) && has_non_filesystem_root {
             return Err(LibraryRepositoryError::DirectRequiresFilesystemRoot);
         }
         let mut statement = Query::update();
@@ -1435,13 +1442,23 @@ fn validate_metadata_modes(
     local_metadata_access_mode: &str,
 ) -> Result<(), LibraryRepositoryError> {
     if !matches!(metadata_source_mode, "automatic_scrape" | "local_only")
-        || !matches!(local_metadata_access_mode, "import" | "direct")
-        || (local_metadata_access_mode == "direct" && metadata_source_mode != "local_only")
+        || !matches!(
+            local_metadata_access_mode,
+            "import" | "direct" | "import_metadata_only" | "import_images_only"
+        )
+        || (local_metadata_access_mode != "import" && metadata_source_mode != "local_only")
     {
         Err(LibraryRepositoryError::InvalidStoredPolicy)
     } else {
         Ok(())
     }
+}
+
+fn is_direct_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "direct" | "import_metadata_only" | "import_images_only"
+    )
 }
 
 fn validate_policy_values(

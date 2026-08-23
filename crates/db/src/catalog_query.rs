@@ -933,10 +933,7 @@ impl LazyCatalogWorkTarget {
     #[must_use]
     pub fn should_retry_metadata(self) -> bool {
         self.metadata_requirement.is_some_and(|requirement| {
-            if matches!(
-                self.local_metadata_access_mode,
-                LocalMetadataAccessMode::Direct
-            ) {
+            if !self.local_metadata_access_mode.imports_metadata() {
                 self.needs_metadata_resolution(requirement)
             } else {
                 (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
@@ -970,10 +967,8 @@ impl LazyCatalogWorkTarget {
 
     #[must_use]
     pub const fn needs_metadata_resolution(self, requirement: MetadataRequirement) -> bool {
-        (!matches!(
-            self.local_metadata_access_mode,
-            LocalMetadataAccessMode::Direct
-        ) && self.requires_metadata_payload_upgrade())
+        (self.local_metadata_access_mode.imports_metadata()
+            && self.requires_metadata_payload_upgrade())
             || self.metadata_resolved_revision < self.metadata_revision
             || match self.metadata_resolved_requirement {
                 Some(current) => current.as_i32() < requirement.as_i32(),
@@ -2317,7 +2312,8 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let backend = self.database.get_database_backend();
         let mut requirement = None;
         let mut source_mode = MetadataSourceMode::LocalOnly;
-        let mut access_mode = LocalMetadataAccessMode::Direct;
+        let mut import_metadata = false;
+        let mut import_images = false;
         for row in self.database.query_all(backend.build(&query)).await? {
             let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
                 "none" => None,
@@ -2332,16 +2328,20 @@ impl<'connection> CatalogQueryRepository<'connection> {
                     "local_only" => {}
                     _ => return Err(CatalogQueryError::InvalidMetadataSourceMode),
                 }
-                match row
+                let access_mode = row
                     .try_get::<String>("", "local_metadata_access_mode")?
-                    .as_str()
-                {
-                    "import" => access_mode = LocalMetadataAccessMode::Import,
-                    "direct" => {}
-                    _ => return Err(CatalogQueryError::InvalidMetadataSourceMode),
-                }
+                    .parse::<LocalMetadataAccessMode>()
+                    .map_err(|_| CatalogQueryError::InvalidMetadataSourceMode)?;
+                import_metadata |= access_mode.imports_metadata();
+                import_images |= access_mode.imports_images();
             }
         }
+        let access_mode = match (import_metadata, import_images) {
+            (true, true) => LocalMetadataAccessMode::Import,
+            (true, false) => LocalMetadataAccessMode::ImportMetadataOnly,
+            (false, true) => LocalMetadataAccessMode::ImportImagesOnly,
+            (false, false) => LocalMetadataAccessMode::Direct,
+        };
         Ok(requirement.map(|requirement| (requirement, source_mode, access_mode)))
     }
 

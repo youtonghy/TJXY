@@ -120,7 +120,7 @@ impl<'connection> DirectMetadataRepository<'connection> {
                     )
                     .add(
                         Expr::col((import_library, Alias::new("local_metadata_access_mode")))
-                            .eq("import"),
+                            .is_in(["import", "import_metadata_only"]),
                     )
                     .into(),
             )

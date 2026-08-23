@@ -1,8 +1,8 @@
 use tjxy_common::{CatalogItemId, MediaSourceId, PresentationKey};
 use tjxy_domain::{
-    CatalogItem, CatalogItemKind, EffectiveScanPolicy, MediaLocation, MediaSource, MetadataPolicy,
-    MetadataSourceMode, ObjectSelectionScope, PresenceState, ProbePolicy, ScanProfile,
-    StructureExpansionPolicy,
+    CatalogItem, CatalogItemKind, EffectiveScanPolicy, LocalMetadataAccessMode, MediaLocation,
+    MediaSource, MetadataPolicy, MetadataSourceMode, ObjectSelectionScope, PresenceState,
+    ProbePolicy, ScanProfile, StructureExpansionPolicy,
 };
 
 #[test]
@@ -79,4 +79,20 @@ fn only_confirmed_absence_can_detach_catalog_locations() {
     assert!(!PresenceState::Present.allows_detach());
     assert!(!PresenceState::TemporarilyUnavailable.allows_detach());
     assert!(PresenceState::ConfirmedAbsent.allows_detach());
+}
+
+#[test]
+fn local_metadata_access_modes_split_nfo_and_image_imports() {
+    assert!(LocalMetadataAccessMode::Import.imports_metadata());
+    assert!(LocalMetadataAccessMode::Import.imports_images());
+    assert!(LocalMetadataAccessMode::ImportMetadataOnly.imports_metadata());
+    assert!(!LocalMetadataAccessMode::ImportMetadataOnly.imports_images());
+    assert!(!LocalMetadataAccessMode::ImportImagesOnly.imports_metadata());
+    assert!(LocalMetadataAccessMode::ImportImagesOnly.imports_images());
+    assert_eq!(
+        "import_images_only"
+            .parse::<LocalMetadataAccessMode>()
+            .unwrap(),
+        LocalMetadataAccessMode::ImportImagesOnly
+    );
 }

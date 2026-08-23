@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Checkbox, ComboBox, Description, Input, Label, ListBox, NumberField, Radio, RadioGroup, Select, Skeleton, Switch, TextArea, TextField, Tooltip } from '@heroui/react';
+import { Alert, Button, Card, Checkbox, ComboBox, Description, Disclosure, Input, Label, ListBox, NumberField, Radio, RadioGroup, Select, Skeleton, Switch, TextArea, TextField, Tooltip } from '@heroui/react';
 import { ArrowDown, ArrowUp, Bot, Download, Eye, EyeOff, FlaskConical, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
 import { useCallback, useContext, useRef, useState } from 'react';
@@ -183,9 +183,16 @@ export function AiSettingsPage() {
         title={tr('AI assistant', 'AI 助手')}
       />
       {loading && settings === null ? <SettingsSkeleton /> : error !== null && settings === null ? <PageError error={error} headingLevel={2} onRetry={() => { void load(); }} /> : settings !== null ? (
-        <Card>
-          <Card.Header className="flex items-start gap-3 p-5 sm:p-6"><span className="grid size-9 place-items-center rounded-lg bg-accent text-accent-foreground"><Bot aria-hidden="true" className="size-5" /></span><div><Card.Title>{tr('Provider and policy', '提供商与策略')}</Card.Title><Card.Description>{tr('The API key stays on the server and is never returned after saving.', 'API 密钥仅保存在服务器上，保存后不会再次返回。')}</Card.Description></div></Card.Header>
-          <Card.Content className="px-5 pb-6 sm:px-6"><fieldset className="space-y-6" disabled={locked}>
+        <Disclosure className="overflow-hidden rounded-lg border border-border bg-surface" defaultExpanded={false}>
+          <Disclosure.Heading>
+            <Disclosure.Trigger className="flex w-full items-start justify-between gap-4 p-5 text-left hover:bg-default/50 sm:p-6">
+              <span className="flex items-start gap-3"><span className="grid size-9 place-items-center rounded-lg bg-accent text-accent-foreground"><Bot aria-hidden="true" className="size-5" /></span><span><span className="block text-base font-semibold text-foreground">{tr('Provider and policy', '提供商与策略')}</span><span className="mt-1 block text-sm text-muted">{tr('The API key stays on the server and is never returned after saving.', 'API 密钥仅保存在服务器上，保存后不会再次返回。')}</span></span></span>
+              <Disclosure.Indicator className="mt-1 size-5 shrink-0 text-muted" />
+            </Disclosure.Trigger>
+          </Disclosure.Heading>
+          <Disclosure.Content>
+            <Disclosure.Body className="border-t border-border px-5 pb-6 pt-5 sm:px-6">
+              <fieldset className="space-y-6" disabled={locked}>
             {conflict && <Alert role="alert" status="warning"><Alert.Content><Alert.Title>{tr('Settings changed elsewhere', '设置已在其他位置变更')}</Alert.Title><Alert.Description>{tr('Reload the latest revision before saving this draft.', '请加载最新版本后再保存当前草稿。')}</Alert.Description></Alert.Content><Button onPress={() => { void load(); }} size="sm" variant="tertiary">{tr('Reload latest', '加载最新设置')}</Button></Alert>}
             {error !== null && <Alert role="alert" status="danger"><Alert.Content><Alert.Title>{tr('Settings could not be reloaded', '无法重新加载设置')}</Alert.Title><Alert.Description>{tr('The current draft is still shown. Reload before saving changes.', '当前草稿仍然保留，请重新加载后再保存修改。')}</Alert.Description></Alert.Content><Button onPress={() => { void load(); }} size="sm" variant="tertiary">{tr('Reload', '重新加载')}</Button></Alert>}
             {!settings.encryptionAvailable && <Alert role="alert" status="danger"><Alert.Content><Alert.Title>{tr('Credential encryption is unavailable', '凭据加密不可用')}</Alert.Title><Alert.Description>{tr('Configure TJXY_CREDENTIAL_KEYRING before saving provider settings.', '保存提供商设置前，请先配置 TJXY_CREDENTIAL_KEYRING。')}</Alert.Description></Alert.Content></Alert>}
@@ -273,9 +280,11 @@ export function AiSettingsPage() {
               </RadioGroup>
             </div>
             <Switch isSelected={enabled} onChange={setEnabled}><Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>{tr('Enable the AI assistant', '启用 AI 助手')}</Switch.Content></Switch>
-          </fieldset></Card.Content>
-          <Card.Footer className="flex flex-wrap justify-between gap-3 border-t border-border p-5 sm:p-6"><ConfirmDialog confirmLabel={tr('Remove settings', '移除设置')} description={tr('Delete the encrypted provider key, model aliases, and assistant policy. Existing user conversations are retained, but the assistant will be unavailable until it is configured again.', '删除加密的提供商密钥、模型别名和助手策略。已有用户对话会保留，但重新配置前助手将不可用。')} errorDescription={tr('The AI settings remain active. Reload the latest revision and try again.', 'AI 设置仍然有效，请加载最新版本后重试。')} isPending={operation === 'delete'} onConfirm={remove} title={tr('Remove AI assistant settings?', '移除 AI 助手设置？')} trigger={<Button isDisabled={!settings.configured || locked} variant="danger-soft"><Trash2 className="size-4" />{tr('Remove settings', '移除设置')}</Button>} /><div className="flex gap-2"><Button isDisabled={locked} isPending={operation === 'test'} onPress={() => { void test(); }} variant="secondary"><FlaskConical className="size-4" />{tr('Test connection', '测试连接')}</Button><Button isDisabled={locked || !settings.encryptionAvailable || error !== null || conflict} isPending={operation === 'save'} onPress={() => { void save(); }}><Save className="size-4" />{tr('Save settings', '保存设置')}</Button></div></Card.Footer>
-        </Card>
+              </fieldset>
+              <div className="mt-6 flex flex-wrap justify-between gap-3 border-t border-border pt-5"><ConfirmDialog confirmLabel={tr('Remove settings', '移除设置')} description={tr('Delete the encrypted provider key, model aliases, and assistant policy. Existing user conversations are retained, but the assistant will be unavailable until it is configured again.', '删除加密的提供商密钥、模型别名和助手策略。已有用户对话会保留，但重新配置前助手将不可用。')} errorDescription={tr('The AI settings remain active. Reload the latest revision and try again.', 'AI 设置仍然有效，请加载最新版本后重试。')} isPending={operation === 'delete'} onConfirm={remove} title={tr('Remove AI assistant settings?', '移除 AI 助手设置？')} trigger={<Button isDisabled={!settings.configured || locked} variant="danger-soft"><Trash2 className="size-4" />{tr('Remove settings', '移除设置')}</Button>} /><div className="flex gap-2"><Button isDisabled={locked} isPending={operation === 'test'} onPress={() => { void test(); }} variant="secondary"><FlaskConical className="size-4" />{tr('Test connection', '测试连接')}</Button><Button isDisabled={locked || !settings.encryptionAvailable || error !== null || conflict} isPending={operation === 'save'} onPress={() => { void save(); }}><Save className="size-4" />{tr('Save settings', '保存设置')}</Button></div></div>
+            </Disclosure.Body>
+          </Disclosure.Content>
+        </Disclosure>
       ) : null}
       <AiAnalyticsPanel analytics={analytics} error={analyticsError} loading={analyticsLoading} onRetry={() => { void loadAnalytics(); }} />
     </div>

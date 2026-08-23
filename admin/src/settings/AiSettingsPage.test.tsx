@@ -34,8 +34,19 @@ beforeEach(() => {
   getMock.mockResolvedValue(settings); analyticsMock.mockResolvedValue(analytics); deleteMock.mockResolvedValue(undefined); discoverMock.mockResolvedValue(['gpt-cinema', 'gpt-media']); saveMock.mockResolvedValue({ ...settings, revision: 3 }); testMock.mockResolvedValue(undefined);
 });
 
-it('loads redacted settings and exposes the configured model controls', async () => {
+async function renderAiSettings() {
   renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await userEvent.setup().click(await screen.findByRole('button', { name: /Provider and policy/u }));
+}
+
+it('collapses provider settings by default', async () => {
+  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  const trigger = await screen.findByRole('button', { name: /Provider and policy/u });
+  expect(trigger).toHaveAttribute('aria-expanded', 'false');
+});
+
+it('loads redacted settings and exposes the configured model controls', async () => {
+  await renderAiSettings();
   expect(await screen.findByRole('heading', { name: 'AI assistant' })).toBeVisible();
   expect(await screen.findByRole('heading', { name: 'AI 运行统计' })).toBeVisible();
   expect(screen.getByLabelText('API key')).toHaveValue('');
@@ -52,7 +63,7 @@ it('loads redacted settings and exposes the configured model controls', async ()
 });
 
 it('saves the reasoning effort selected for a model', async () => {
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const effort = await screen.findByLabelText('思考强度');
   await user.click(effort);
@@ -66,7 +77,7 @@ it('saves the reasoning effort selected for a model', async () => {
 });
 
 it('saves daily total and per-user token limits', async () => {
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const total = await screen.findByRole('textbox', { name: 'Daily total limit' });
   const perUser = screen.getByRole('textbox', { name: 'Daily limit per user' });
@@ -81,7 +92,7 @@ it('saves daily total and per-user token limits', async () => {
 it('makes a selected default model visible before saving', async () => {
   const secondModel = { id: '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f12', upstreamId: 'gpt-cinema', displayName: 'Film Expert', reasoningEffort: 'medium' as const, isVisible: false, isDefault: false, sortOrder: 1 };
   getMock.mockResolvedValueOnce({ ...settings, models: [...settings.models, secondModel] });
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const radios = await screen.findAllByRole('radio', { name: '默认模型' });
   const secondRadio = radios[1];
@@ -103,7 +114,7 @@ it('makes a selected default model visible before saving', async () => {
 });
 
 it('tests and saves a write-only draft while preserving the revision fence', async () => {
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const key = await screen.findByLabelText('API key');
   await user.type(key, 'draft-secret');
@@ -115,7 +126,7 @@ it('tests and saves a write-only draft while preserving the revision fence', asy
 });
 
 it('fetches provider models for selection while keeping manual entry editable', async () => {
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const input = await screen.findByDisplayValue('gpt-media');
   await user.click(screen.getByRole('button', { name: /^Fetch available models for Cinema Guide/u }));
@@ -129,14 +140,14 @@ it('fetches provider models for selection while keeping manual entry editable', 
 
 it('disables persistence when credential encryption is unavailable', async () => {
   getMock.mockResolvedValueOnce({ ...settings, encryptionAvailable: false });
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   expect(await screen.findByText('Credential encryption is unavailable')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled();
 });
 
 it('allows revision-fenced removal without encryption and requires confirmation', async () => {
   getMock.mockResolvedValueOnce({ ...settings, encryptionAvailable: false });
-  renderWithAdmin(<AiSettingsPage />, { initialEntries: ['/admin/settings/ai'], strict: true });
+  await renderAiSettings();
   const user = userEvent.setup();
   const trigger = await screen.findByRole('button', { name: 'Remove settings' });
   expect(trigger).toBeEnabled();

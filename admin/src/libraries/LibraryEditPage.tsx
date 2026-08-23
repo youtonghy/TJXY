@@ -27,7 +27,6 @@ import { attachFilesystemFolder } from './filesystemApi';
 import type {
   EffectiveLibraryPolicy,
   LibraryOption,
-  LocalMetadataAccessMode,
   MetadataSourceMode,
   ScanProfile,
 } from './libraryApi';
@@ -60,7 +59,8 @@ function LibraryEditPageContent({ id }: { id: string }) {
   const [enabled, setEnabled] = useState(false);
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
   const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
-  const [localMetadataAccessMode, setLocalMetadataAccessMode] = useState<LocalMetadataAccessMode>('import');
+  const [importMetadata, setImportMetadata] = useState(true);
+  const [importImages, setImportImages] = useState(true);
   const [advanced, setAdvanced] = useState(false);
   const [policy, setPolicy] = useState<EffectiveLibraryPolicy>(defaultPolicy);
   const [policyConflict, setPolicyConflict] = useState(false);
@@ -97,7 +97,9 @@ function LibraryEditPageContent({ id }: { id: string }) {
           setEnabled(result.record.enabled);
           setScanProfile(result.record.scanProfile);
           setMetadataSourceMode(result.record.metadataSourceMode);
-          setLocalMetadataAccessMode(result.record.localMetadataAccessMode);
+          const mode = result.record.localMetadataAccessMode;
+          setImportMetadata(mode === 'import' || mode === 'import_metadata_only');
+          setImportImages(mode === 'import' || mode === 'import_images_only');
           setAdvanced(false);
           setPolicy(policyFromLibrary(result.record));
         }
@@ -151,7 +153,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
         scanProfile,
         profileVersion: library.profileVersion,
         metadataSourceMode,
-        localMetadataAccessMode,
+        localMetadataAccessMode: resolveLocalMetadataAccessMode(importMetadata, importImages),
         ...(advanced ? { effectivePolicy: policy } : {}),
       });
       if (!isMounted()) return;
@@ -275,7 +277,8 @@ function LibraryEditPageContent({ id }: { id: string }) {
               onAdvancedChange={setAdvanced}
               onEnabledChange={setEnabled}
               onMetadataSourceModeChange={setMetadataSourceMode}
-              onLocalMetadataAccessModeChange={setLocalMetadataAccessMode}
+              onImportMetadataChange={setImportMetadata}
+              onImportImagesChange={setImportImages}
               onPolicyChange={setPolicy}
               onProfileChange={setScanProfile}
               onReloadLatest={reloadAll}
@@ -283,7 +286,8 @@ function LibraryEditPageContent({ id }: { id: string }) {
               policy={policy}
               scanProfile={scanProfile}
               metadataSourceMode={metadataSourceMode}
-              localMetadataAccessMode={localMetadataAccessMode}
+              importMetadata={importMetadata}
+              importImages={importImages}
             />
             <StorageFoldersSection
               attachPath={attachPath}
@@ -303,6 +307,13 @@ function LibraryEditPageContent({ id }: { id: string }) {
       </AsyncContent>
     </div>
   );
+}
+
+function resolveLocalMetadataAccessMode(importMetadata: boolean, importImages: boolean) {
+  if (importMetadata && importImages) return 'import' as const;
+  if (importMetadata) return 'import_metadata_only' as const;
+  if (importImages) return 'import_images_only' as const;
+  return 'direct' as const;
 }
 
 function StorageFoldersSection({

@@ -16,10 +16,10 @@ import { useState, type SyntheticEvent } from 'react';
 import type {
   CreateLibraryRequest,
   LibraryCollectionType,
-  LocalMetadataAccessMode,
   MetadataSourceMode,
   ScanProfile,
 } from './libraryApi';
+import { localMetadataAccessMode } from './libraryApi';
 import { collectionOptions, scanProfileOptions } from './libraryUi';
 import { useTranslate } from '../settings/i18n';
 
@@ -41,7 +41,8 @@ export function LibraryCreateDialog({
   const [collectionType, setCollectionType] = useState<LibraryCollectionType>('movies');
   const [scanProfile, setScanProfile] = useState<ScanProfile>('Lazy');
   const [metadataSourceMode, setMetadataSourceMode] = useState<MetadataSourceMode>('automatic_scrape');
-  const [localMetadataAccessMode, setLocalMetadataAccessMode] = useState<LocalMetadataAccessMode>('import');
+  const [importMetadata, setImportMetadata] = useState(true);
+  const [importImages, setImportImages] = useState(true);
   const [path, setPath] = useState('');
   const [enabled, setEnabled] = useState(true);
 
@@ -50,7 +51,8 @@ export function LibraryCreateDialog({
     setCollectionType('movies');
     setScanProfile('Lazy');
     setMetadataSourceMode('automatic_scrape');
-    setLocalMetadataAccessMode('import');
+    setImportMetadata(true);
+    setImportImages(true);
     setPath('');
     setEnabled(true);
   };
@@ -72,7 +74,7 @@ export function LibraryCreateDialog({
       enabled,
       scanProfile,
       metadataSourceMode,
-      localMetadataAccessMode,
+      localMetadataAccessMode: localMetadataAccessMode(importMetadata, importImages),
       path: normalizedPath,
     })) {
       reset();
@@ -125,7 +127,10 @@ export function LibraryCreateDialog({
                   onChange={(value) => {
                     const mode = value as MetadataSourceMode;
                     setMetadataSourceMode(mode);
-                    if (mode === 'automatic_scrape') setLocalMetadataAccessMode('import');
+                    if (mode === 'automatic_scrape') {
+                      setImportMetadata(true);
+                      setImportImages(true);
+                    }
                   }}
                   value={metadataSourceMode}
                 >
@@ -146,15 +151,15 @@ export function LibraryCreateDialog({
                   </Radio>
                 </RadioGroup>
                 {metadataSourceMode === 'local_only' && (
-                  <RadioGroup
-                    isDisabled={isPending}
-                    onChange={(value) => { setLocalMetadataAccessMode(value as LocalMetadataAccessMode); }}
-                    value={localMetadataAccessMode}
-                  >
-                    <Label>{tr('Local metadata access', '本地元数据访问')}</Label>
-                    <Radio value="import"><Radio.Control><Radio.Indicator /></Radio.Control><Radio.Content><span className="font-medium">{tr('Import', '导入')}</span><span className="text-sm text-muted">{tr('Store parsed metadata and copied artwork in TJXY.', '在 TJXY 中保存解析后的元数据和复制的图片。')}</span></Radio.Content></Radio>
-                    <Radio value="direct"><Radio.Control><Radio.Indicator /></Radio.Control><Radio.Content><span className="font-medium">{tr('Direct', '直接读取')}</span><span className="text-sm text-muted">{tr('Read NFO and artwork from the media folder without copying them.', '直接从媒体文件夹读取 NFO 和图片，不复制文件。')}</span></Radio.Content></Radio>
-                  </RadioGroup>
+                  <div className="space-y-3 rounded-lg border border-border p-4">
+                    <Label>{tr('Local imports', '本地导入')}</Label>
+                    <Switch isSelected={importMetadata} onChange={setImportMetadata}>
+                      <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>{tr('Import NFO metadata', '导入 NFO 元数据')}</Switch.Content>
+                    </Switch>
+                    <Switch isSelected={importImages} onChange={setImportImages}>
+                      <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>{tr('Import local images', '导入本地图片')}</Switch.Content>
+                    </Switch>
+                  </div>
                 )}
                 <OptionSelect
                   isDisabled={isPending}

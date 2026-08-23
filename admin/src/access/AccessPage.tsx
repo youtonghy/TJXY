@@ -29,13 +29,14 @@ export function AccessPage() {
       />
 
       <Tabs
+        className="overflow-hidden rounded-lg border border-border bg-surface"
         aria-label={tr('Access management', '访问控制管理')}
         onSelectionChange={selectTab}
         selectedKey={tab}
         variant="secondary"
       >
-        <Tabs.ListContainer>
-          <Tabs.List>
+        <Tabs.ListContainer className="border-b border-border px-2 pt-2">
+          <Tabs.List className="w-full sm:w-auto">
             <Tabs.Tab id="devices">
               {tr('Devices', '设备')}
               <Tabs.Indicator />
@@ -46,7 +47,7 @@ export function AccessPage() {
             </Tabs.Tab>
           </Tabs.List>
         </Tabs.ListContainer>
-        <Tabs.Panel className="pt-6" id={tab} key={tab}>
+        <Tabs.Panel className="p-4 sm:p-6" id={tab} key={tab}>
           {tab === 'devices' ? <DevicesPanel /> : <ApiKeysPanel />}
         </Tabs.Panel>
       </Tabs>

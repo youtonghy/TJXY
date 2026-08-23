@@ -5,7 +5,21 @@ export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | '
 export type ObjectSelectionScope = 'all_synced_objects' | 'title_layer' | 'library_roots';
 export type MetadataPolicy = 'full' | 'basic' | 'none';
 export type MetadataSourceMode = 'automatic_scrape' | 'local_only';
-export type LocalMetadataAccessMode = 'import' | 'direct';
+export type LocalMetadataAccessMode = 'import' | 'direct' | 'import_metadata_only' | 'import_images_only';
+
+export function localMetadataAccessMode(importMetadata: boolean, importImages: boolean): LocalMetadataAccessMode {
+  if (importMetadata && importImages) return 'import';
+  if (importMetadata) return 'import_metadata_only';
+  if (importImages) return 'import_images_only';
+  return 'direct';
+}
+
+export function localMetadataImportOptions(mode: LocalMetadataAccessMode): { importMetadata: boolean; importImages: boolean } {
+  return {
+    importMetadata: mode === 'import' || mode === 'import_metadata_only',
+    importImages: mode === 'import' || mode === 'import_images_only',
+  };
+}
 export type ExpansionPolicy = 'eager' | 'on_browse' | 'manual';
 export type ProbePolicy = 'eager' | 'on_playback' | 'manual';
 
@@ -208,7 +222,10 @@ function isMetadataSourceMode(value: unknown): value is MetadataSourceMode {
 }
 
 function isLocalMetadataAccessMode(value: unknown): value is LocalMetadataAccessMode {
-  return value === 'import' || value === 'direct';
+  return value === 'import'
+    || value === 'direct'
+    || value === 'import_metadata_only'
+    || value === 'import_images_only';
 }
 
 function isExpansionPolicy(value: unknown): value is ExpansionPolicy {

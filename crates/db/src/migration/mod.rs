@@ -65,6 +65,7 @@ mod m20260815_000064_ai_token_limits;
 mod m20260816_000065_qr_login_challenges;
 mod m20260818_000066_strm_locator;
 mod m20260821_000067_remove_media_browser_roots;
+mod m20260823_000068_expand_local_metadata_access_mode;
 
 use std::collections::HashSet;
 
@@ -304,6 +305,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260816_000065_qr_login_challenges::Migration),
             Box::new(m20260818_000066_strm_locator::Migration),
             Box::new(m20260821_000067_remove_media_browser_roots::Migration),
+            Box::new(m20260823_000068_expand_local_metadata_access_mode::Migration),
         ]
     }
 }

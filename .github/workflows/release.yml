@@ -69,6 +69,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       VITE_TJXY_VERSION: ${{ needs.validate.outputs.release_version }}
+      VITE_TJXY_COMMIT: ${{ needs.validate.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v6
         with:

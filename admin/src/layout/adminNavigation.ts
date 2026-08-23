@@ -11,6 +11,7 @@ import {
   Settings2,
   Sparkles,
   UsersRound,
+  Info,
 } from 'lucide-react';
 import type { ComponentType } from 'react';
 
@@ -55,6 +56,7 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
       { labelKey: 'admin.navigation.ai', to: '/admin/settings/ai', icon: Sparkles },
       { labelKey: 'admin.navigation.theme', to: '/admin/settings/theme', icon: Palette },
       { labelKey: 'admin.navigation.systemSettings', to: '/admin/settings/system', icon: Settings2 },
+      { labelKey: 'admin.navigation.about', to: '/admin/settings/about', icon: Info },
     ],
   },
 ];

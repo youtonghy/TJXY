@@ -196,6 +196,8 @@ VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
 TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
 ```
 
+可以额外通过 `VITE_TJXY_COMMIT` 将构建提交哈希显示在管理后台的“关于”页面。
+
 发布工作流会自动注入已经校验的发布版本。
 
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
