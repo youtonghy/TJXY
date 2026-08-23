@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Input,
   Label,
   ListBox,
@@ -42,6 +43,7 @@ const initialSettings: SystemSettings = {
   publicUrl: '',
   listenHost: '127.0.0.1',
   port: 8096,
+  passkeyEnabled: false,
   revision: 0,
   restartRequired: false,
   environmentOverrides: {
@@ -186,6 +188,15 @@ export function SystemSettingsPage() {
             uploadLabel={tr('admin.system.uploadIcon')}
             value={settings.iconUrl}
           />
+        </Card.Content>
+      </Card>
+
+      <Card>
+        <Card.Header><Card.Title>{tr('admin.system.passkeyTitle')}</Card.Title><Card.Description>{tr('admin.system.passkeyDescription')}</Card.Description></Card.Header>
+        <Card.Content>
+          <Checkbox isSelected={settings.passkeyEnabled} onChange={(selected) => { patch('passkeyEnabled', selected); }}>
+            {tr('admin.system.passkeyEnabled')}
+          </Checkbox>
         </Card.Content>
       </Card>
 

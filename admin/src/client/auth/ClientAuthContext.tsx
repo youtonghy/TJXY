@@ -3,9 +3,10 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { CLIENT_AUTH_INVALIDATED_EVENT, ClientApiError, clientRequest } from '../api/clientApi';
 import { clearClientToken, getClientToken, setClientToken } from './clientSession';
 import type { QrAuthentication } from './qrLoginApi';
+import { authenticateWithPasskey } from './passkeyApi';
 
 export interface ClientUser { Id: string; Name: string; Policy?: { IsDisabled?: boolean; IsAdministrator?: boolean }; }
-interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string) => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
+interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string) => Promise<void>; signInWithPasskey: () => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
 const ClientAuthContext = createContext<ClientAuthValue | null>(null);
 
 export function ClientAuthProvider({ children }: { children: ReactNode }) {
@@ -54,6 +55,13 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
         if (current.Policy?.IsDisabled) throw new ClientApiError(403, 'authorization');
         setUser(current);
       } catch (error) { clearClientToken(); setUser(null); throw error; }
+    },
+    async signInWithPasskey() {
+      const auth = await authenticateWithPasskey();
+      if (!auth.AccessToken) throw new ClientApiError(200, 'invalid-response');
+      setClientToken(auth.AccessToken);
+      const current = await clientRequest<ClientUser>('/Users/Me');
+      setUser(current);
     },
     adoptAuthentication(authentication) {
       if (!authentication.AccessToken) throw new ClientApiError(200, 'invalid-response');

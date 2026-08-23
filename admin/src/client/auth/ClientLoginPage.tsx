@@ -15,7 +15,7 @@ import { ServerAddressField } from '../ui/ServerAddressField';
 import { QrLoginPanel } from './QrLoginPanel';
 
 export function ClientLoginPage() {
-  const { adoptAuthentication, isLoading, signIn, user } = useClientAuth();
+  const { adoptAuthentication, isLoading, signIn, signInWithPasskey, user } = useClientAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const saved = loadSavedCredentials();
@@ -30,7 +30,8 @@ export function ClientLoginPage() {
   const [serverError, setServerError] = useState<string>();
   const [serverOk, setServerOk] = useState(false);
   const [mode, setMode] = useState<'password' | 'qr'>('password');
-  const { locale, setLocale, siteTitle, siteSubtitle, logoUrl } = useSystemLocale();
+  const [passkeyPending, setPasskeyPending] = useState(false);
+  const { locale, setLocale, siteTitle, siteSubtitle, logoUrl, passkeyEnabled } = useSystemLocale();
   const { definition, options } = useActiveClientTheme();
   const tr = useTranslate();
   const destination = safeClientDestination(new URLSearchParams(location.search).get('redirect'));
@@ -132,6 +133,7 @@ export function ClientLoginPage() {
           </Checkbox.Content>
         </Checkbox>
         <Button fullWidth isDisabled={pending || serverPending} type="submit">{pending ? tr('Signing in…', '登录中…') : tr('Sign in', '登录')}</Button>
+        {passkeyEnabled ? <Button fullWidth isDisabled={pending || passkeyPending || serverPending} isPending={passkeyPending} onPress={() => { setPasskeyPending(true); void signInWithPasskey().then(() => { navigate(destination, { replace: true }); }).catch(() => { setFailed(true); }).finally(() => { setPasskeyPending(false); }); }} type="button" variant="secondary">{tr('Sign in with Passkey', 'Passkey 登录')}</Button> : null}
         </form>
         </Tabs.Panel>
         <Tabs.Panel className="pt-4" id="qr"><QrLoginPanel onAuthenticated={adoptQrAuthentication} /></Tabs.Panel>

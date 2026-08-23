@@ -37,6 +37,7 @@ interface SystemLocaleContextValue {
   siteSubtitle: string;
   logoUrl: string;
   iconUrl: string;
+  passkeyEnabled: boolean;
   theme: PublicSiteThemeSettings;
   settingsLoadFailed: boolean;
   setLocale: (locale: SystemLocale) => void;
@@ -49,6 +50,7 @@ const fallback: SystemLocaleContextValue = {
   siteSubtitle: 'Your media library',
   logoUrl: '/brand/tjxy-mark.webp',
   iconUrl: '/brand/favicon.svg',
+  passkeyEnabled: false,
   theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
   settingsLoadFailed: false,
   setLocale: () => undefined,
@@ -65,6 +67,7 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
     publicUrl: '',
     listenHost: '127.0.0.1',
     port: 8096,
+    passkeyEnabled: false,
     revision: 0,
     restartRequired: false,
     environmentOverrides: {
@@ -127,6 +130,7 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
         siteSubtitle: detail.siteSubtitle,
         logoUrl: detail.logoUrl,
         iconUrl: detail.iconUrl,
+        passkeyEnabled: detail.passkeyEnabled,
       }));
     };
     window.addEventListener('tjxy-system-settings', update);
@@ -154,6 +158,7 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
     siteSubtitle: settings.siteSubtitle,
     logoUrl,
     iconUrl,
+    passkeyEnabled: settings.passkeyEnabled,
     theme: settings.theme,
     settingsLoadFailed,
     setLocale: selectLocale,

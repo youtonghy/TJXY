@@ -28,6 +28,7 @@ pub struct SystemSettingsRecord {
     listen_host: String,
     port: u16,
     revision: i64,
+    passkey_enabled: bool,
     updated_at: DateTime<Utc>,
 }
 
@@ -69,6 +70,10 @@ impl SystemSettingsRecord {
         self.revision
     }
     #[must_use]
+    pub const fn passkey_enabled(&self) -> bool {
+        self.passkey_enabled
+    }
+    #[must_use]
     pub const fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
     }
@@ -84,6 +89,7 @@ pub struct SystemSettingsInput {
     pub public_url: Option<String>,
     pub listen_host: String,
     pub port: u16,
+    pub passkey_enabled: bool,
 }
 
 impl Default for SystemSettingsInput {
@@ -97,6 +103,7 @@ impl Default for SystemSettingsInput {
             public_url: None,
             listen_host: DEFAULT_LISTEN_HOST.to_owned(),
             port: DEFAULT_PORT,
+            passkey_enabled: false,
         }
     }
 }
@@ -112,6 +119,7 @@ impl From<&SystemSettingsRecord> for SystemSettingsInput {
             public_url: value.public_url.clone(),
             listen_host: value.listen_host.clone(),
             port: value.port,
+            passkey_enabled: value.passkey_enabled,
         }
     }
 }
@@ -201,6 +209,7 @@ async fn put_on(
                     Alias::new("public_url"),
                     Alias::new("listen_host"),
                     Alias::new("port"),
+                    Alias::new("passkey_enabled"),
                     Alias::new("revision"),
                     Alias::new("created_at"),
                     Alias::new("updated_at"),
@@ -215,6 +224,7 @@ async fn put_on(
                     input.public_url.clone().into(),
                     input.listen_host.clone().into(),
                     i32::from(input.port).into(),
+                    input.passkey_enabled.into(),
                     1_i64.into(),
                     now.into(),
                     now.into(),
@@ -248,6 +258,7 @@ async fn put_on(
                     (Alias::new("public_url"), input.public_url.clone().into()),
                     (Alias::new("listen_host"), input.listen_host.clone().into()),
                     (Alias::new("port"), i32::from(input.port).into()),
+                    (Alias::new("passkey_enabled"), input.passkey_enabled.into()),
                     (Alias::new("revision"), revision.into()),
                     (Alias::new("updated_at"), now.into()),
                 ])
@@ -282,6 +293,7 @@ async fn get_on(
             Alias::new("public_url"),
             Alias::new("listen_host"),
             Alias::new("port"),
+            Alias::new("passkey_enabled"),
             Alias::new("revision"),
             Alias::new("updated_at"),
         ])
@@ -310,6 +322,7 @@ fn settings_from_row(
         listen_host: row.try_get("", "listen_host")?,
         port: u16::try_from(port).map_err(|_| SystemSettingsRepositoryError::InvalidPort)?,
         revision: row.try_get("", "revision")?,
+        passkey_enabled: row.try_get("", "passkey_enabled")?,
         updated_at: row.try_get("", "updated_at")?,
     })
 }
@@ -372,6 +385,7 @@ fn validate(
         public_url: public_url.map(str::to_owned),
         listen_host: listen_host.to_owned(),
         port: input.port,
+        passkey_enabled: input.passkey_enabled,
     })
 }
 

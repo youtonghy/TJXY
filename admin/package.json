@@ -20,6 +20,7 @@
     "@heroui/styles": "3.2.2",
     "@number-flow/react": "^0.6.2",
     "@react-aria/utils": "^3.34.1",
+    "@simplewebauthn/browser": "^13.3.0",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-http": "^2.5.0",
     "@tiptap/core": "^3.29.2",

@@ -44,6 +44,7 @@ toml.workspace = true
 tower-http = { version = "0.7.0", features = ["fs"] }
 url.workspace = true
 uuid.workspace = true
+webauthn-rs.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -8,7 +8,7 @@ use chrono::Duration;
 use http_body_util::BodyExt;
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
-use tjxy_application::{AuthService, SystemClock};
+use tjxy_application::{AuthError, AuthService, ClientIdentity, SystemClock};
 use tjxy_server::{AppState, ServerIdentity, build_router};
 use tjxy_test_support::test_database;
 use tower::ServiceExt;
@@ -134,6 +134,35 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
     let user: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(user["Name"], "Alice");
     assert_eq!(user["Id"], authentication["User"]["Id"]);
+}
+
+#[tokio::test]
+async fn externally_verified_authentication_rejects_a_disabled_user() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let service = AuthService::new(database, SystemClock, Some(Duration::days(30)), 2)
+        .await
+        .unwrap();
+    service
+        .create_user("Alice", "correct horse", true)
+        .await
+        .unwrap();
+    let bob = service
+        .create_user("Bob", "ordinary password", false)
+        .await
+        .unwrap();
+    let disabled = service
+        .update_user_policy(bob.id(), false, true)
+        .await
+        .unwrap();
+    let client = ClientIdentity::new("TJXY Web", "Browser", "browser-1", "0.1.0").unwrap();
+
+    let error = service
+        .authenticate_verified_user(disabled, client)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AuthError::Forbidden));
 }
 
 #[tokio::test]

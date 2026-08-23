@@ -43,6 +43,7 @@ struct PublicSystemSettingsDto {
     logo_url: String,
     icon_url: String,
     revision: i64,
+    passkey_enabled: bool,
     supported_locales: [&'static str; 2],
     theme: PublicThemeSettingsDto,
 }
@@ -67,6 +68,7 @@ struct AdminSystemSettingsDto {
     public_url: Option<String>,
     listen_host: String,
     port: u16,
+    passkey_enabled: bool,
     revision: i64,
     restart_required: bool,
     environment_overrides: EnvironmentOverridesDto,
@@ -106,6 +108,7 @@ struct UpdateSystemSettingsRequest {
     public_url: Option<String>,
     listen_host: String,
     port: u16,
+    passkey_enabled: bool,
     revision: Option<i64>,
 }
 
@@ -299,6 +302,7 @@ pub(crate) async fn put_admin(
         public_url: request.public_url,
         listen_host: request.listen_host,
         port: request.port,
+        passkey_enabled: request.passkey_enabled,
     };
     match service.put(&input, request.revision).await {
         Ok(record) => {
@@ -558,6 +562,10 @@ fn public_dto(
         logo_url: record.map_or(fallback.logo_url, |value| value.logo_url().to_owned()),
         icon_url: record.map_or(fallback.icon_url, |value| value.icon_url().to_owned()),
         revision: record.map_or(0, SystemSettingsRecord::revision),
+        passkey_enabled: record.map_or(
+            fallback.passkey_enabled,
+            SystemSettingsRecord::passkey_enabled,
+        ),
         supported_locales: ["zh-CN", "en-US"],
         theme: public_theme_dto(theme),
     }
@@ -632,6 +640,10 @@ fn admin_dto(
         }),
         listen_host: record.map_or(fallback.listen_host, |value| value.listen_host().to_owned()),
         port: record.map_or(fallback.port, SystemSettingsRecord::port),
+        passkey_enabled: record.map_or(
+            fallback.passkey_enabled,
+            SystemSettingsRecord::passkey_enabled,
+        ),
         revision: record.map_or(0, SystemSettingsRecord::revision),
         restart_required,
         environment_overrides: EnvironmentOverridesDto {

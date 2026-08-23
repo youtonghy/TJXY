@@ -12,6 +12,12 @@ const api = vi.hoisted(() => ({
   revokePersonalSession: vi.fn(),
   updateProfile: vi.fn(),
 }));
+const passkeyApi = vi.hoisted(() => ({
+  deletePasskey: vi.fn(),
+  listPasskeys: vi.fn(),
+  registerPasskey: vi.fn(),
+}));
+const systemSettings = vi.hoisted(() => ({ passkeyEnabled: false }));
 
 const sessions = Array.from({ length: 6 }, (_, index) => ({
   ApplicationVersion: '0.1.0',
@@ -26,8 +32,16 @@ const sessions = Array.from({ length: 6 }, (_, index) => ({
 
 vi.mock('../api/portalApi', () => api);
 vi.mock('../auth/ClientAuthContext', () => ({ useClientAuth: () => ({ signOut: vi.fn() }) }));
+vi.mock('../auth/passkeyApi', () => passkeyApi);
+vi.mock('../../settings/SystemLocaleProvider', () => ({
+  useSystemLocale: () => ({ locale: 'en-US', passkeyEnabled: systemSettings.passkeyEnabled }),
+}));
 
 beforeEach(() => {
+  systemSettings.passkeyEnabled = false;
+  passkeyApi.listPasskeys.mockResolvedValue([]);
+  passkeyApi.deletePasskey.mockResolvedValue(undefined);
+  passkeyApi.registerPasskey.mockResolvedValue(undefined);
   api.updateProfile.mockResolvedValue({ Bio: 'Updated.', Username: 'Admin Two' });
   api.getProfile.mockResolvedValue({ Bio: 'Film lover.', Username: 'Admin' });
   api.listPersonalSessions.mockResolvedValue([]);
@@ -76,6 +90,30 @@ it('shows profile details and opens one dedicated edit dialog', async () => {
   expect(screen.getByRole('textbox', { name: 'Biography' })).toHaveValue('Film lover.');
   expect(screen.getByLabelText('Current password')).toBeVisible();
   expect(screen.getByLabelText('New password')).toBeVisible();
+  expect(screen.queryByText('Passkey')).not.toBeInTheDocument();
+});
+
+it('lists and deletes Passkeys when passwordless login is enabled', async () => {
+  systemSettings.passkeyEnabled = true;
+  passkeyApi.listPasskeys.mockResolvedValueOnce([{
+    CreatedAt: '2026-08-23T10:00:00Z',
+    Id: 'passkey-1',
+    LastUsedAt: '2026-08-23T10:00:00Z',
+    Name: 'MacBook Touch ID',
+  }]);
+  const user = userEvent.setup();
+  render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+
+  await screen.findByRole('heading', { name: 'Admin' });
+  await user.click(screen.getByRole('button', { name: 'Edit profile' }));
+  expect(await screen.findByText('MacBook Touch ID')).toBeVisible();
+
+  api.updateProfile.mockClear();
+  await user.click(screen.getByRole('button', { name: 'Delete MacBook Touch ID' }));
+
+  expect(passkeyApi.deletePasskey).toHaveBeenCalledWith('passkey-1');
+  expect(screen.queryByText('MacBook Touch ID')).not.toBeInTheDocument();
+  expect(api.updateProfile).not.toHaveBeenCalled();
 });
 
 it('shows only the four latest sessions and manages every session in a dialog', async () => {

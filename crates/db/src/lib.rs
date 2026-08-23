@@ -34,6 +34,7 @@ mod metadata_work;
 mod migration;
 mod natural_key;
 mod outbox;
+mod passkey;
 mod playback_ticket;
 mod playstate;
 mod probe;
@@ -157,6 +158,7 @@ pub use outbox::{
     BackloggedStorageRoot, ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason,
     OutboxRepository, OutboxRepositoryError, SystemClock,
 };
+pub use passkey::{PasskeyChallenge, PasskeyCredential, PasskeyRepository, PasskeyRepositoryError};
 pub use playback_ticket::{
     PlaybackTicketDraft, PlaybackTicketGrant, PlaybackTicketRepository,
     PlaybackTicketRepositoryError,

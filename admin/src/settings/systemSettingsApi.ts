@@ -23,6 +23,7 @@ export interface SystemSettings {
   publicUrl: string;
   listenHost: string;
   port: number;
+  passkeyEnabled: boolean;
   revision: number;
   restartRequired: boolean;
   environmentOverrides: EnvironmentOverrides;
@@ -62,6 +63,7 @@ export async function saveSystemSettings(settings: SaveSystemSettings): Promise<
       PublicUrl: settings.publicUrl.trim() || null,
       ListenHost: settings.listenHost,
       Port: settings.port,
+      PasskeyEnabled: settings.passkeyEnabled,
       ...(settings.revision > 0 ? { Revision: settings.revision } : {}),
     }),
   });
@@ -105,6 +107,7 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     publicUrl: typeof value.PublicUrl === 'string' ? value.PublicUrl : '',
     listenHost: admin ? stringValue(value.ListenHost) ?? '127.0.0.1' : '127.0.0.1',
     port: admin ? numberValue(value.Port) ?? 8096 : 8096,
+    passkeyEnabled: value.PasskeyEnabled === true,
     revision,
     restartRequired: value.RestartRequired === true,
     environmentOverrides: isOverrides(overrides)

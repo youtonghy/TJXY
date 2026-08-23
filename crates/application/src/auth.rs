@@ -265,7 +265,7 @@ where
         self
     }
 
-    pub(crate) const fn database(&self) -> &sea_orm::DatabaseConnection {
+    pub const fn database(&self) -> &sea_orm::DatabaseConnection {
         &self.database
     }
 
@@ -602,6 +602,48 @@ where
             })?;
         Ok(IssuedAuthentication {
             user: credential.user().clone(),
+            session_id: issued.id(),
+            client,
+            access_token,
+            expires_at: issued.expires_at(),
+        })
+    }
+
+    /// Issues a normal session after an upstream authenticator has already
+    /// verified the user's identity (for example, WebAuthn).
+    pub async fn authenticate_verified_user(
+        &self,
+        user: AuthUser,
+        client: ClientIdentity,
+    ) -> Result<IssuedAuthentication, AuthError> {
+        if user.is_disabled() {
+            return Err(AuthError::Forbidden);
+        }
+        let now = self.clock.now();
+        let expires_at = match self.session_lifetime {
+            Some(lifetime) => Some(
+                now.checked_add_signed(lifetime)
+                    .ok_or(AuthError::TimestampOverflow)?,
+            ),
+            None => None,
+        };
+        let access_token = generate_session_token();
+        let draft = SessionDraft {
+            id: Uuid::new_v4(),
+            token_digest: digest_token(access_token.expose_secret()),
+            device_id: client.device_id.clone(),
+            device_name: client.device_name.clone(),
+            client_name: client.client_name.clone(),
+            client_version: client.client_version.clone(),
+            created_at: now,
+            expires_at,
+        };
+        let issued = AuthRepository::new(&self.database)
+            .issue_session_for_user(user.id(), user.auth_revision(), draft)
+            .await
+            .map_err(AuthError::Repository)?;
+        Ok(IssuedAuthentication {
+            user,
             session_id: issued.id(),
             client,
             access_token,

@@ -32,6 +32,7 @@ const settings = {
   publicUrl: 'https://media.example.com',
   listenHost: '127.0.0.1',
   port: 8096,
+  passkeyEnabled: false,
   revision: 2,
   restartRequired: false,
   environmentOverrides: {

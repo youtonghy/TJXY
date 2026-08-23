@@ -418,6 +418,7 @@ impl SetupCoordinator {
                     public_url: pending.network().public_url().map(str::to_owned),
                     listen_host: pending.network().listen_host().to_owned(),
                     port: pending.network().port(),
+                    passkey_enabled: false,
                 },
                 expected_revision,
             )

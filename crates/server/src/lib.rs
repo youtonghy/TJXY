@@ -24,6 +24,7 @@ mod logging_runtime;
 mod media_collection;
 mod metadata_admin;
 mod metadata_settings_admin;
+mod passkey;
 mod playback_ticket;
 mod playstate;
 mod qr;
@@ -528,6 +529,14 @@ pub fn build_router(state: AppState) -> Router {
             post(auth::authenticate_by_name),
         )
         .route(
+            "/Auth/Passkey/Authenticate/Start",
+            post(passkey::authenticate_start),
+        )
+        .route(
+            "/Auth/Passkey/Authenticate/Finish",
+            post(passkey::authenticate_finish),
+        )
+        .route(
             "/Users/authenticatebyname",
             post(auth::authenticate_by_name),
         )
@@ -559,6 +568,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/Users/Me/Password",
             post(auth::update_current_user_password),
+        )
+        .route("/Users/Me/Passkeys", get(passkey::list))
+        .route(
+            "/Users/Me/Passkeys/{credential_id}",
+            axum::routing::delete(passkey::delete),
+        )
+        .route(
+            "/Users/Me/Passkeys/Register/Start",
+            post(passkey::register_start),
+        )
+        .route(
+            "/Users/Me/Passkeys/Register/Finish",
+            post(passkey::register_finish),
         )
         .route(
             "/Auth/Keys",

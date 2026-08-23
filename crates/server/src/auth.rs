@@ -506,7 +506,7 @@ pub(crate) fn client_identity_response(
     client_identity(headers, legacy_enabled).map_err(IntoResponse::into_response)
 }
 
-fn client_identity(
+pub(crate) fn client_identity(
     headers: &HeaderMap,
     legacy_enabled: bool,
 ) -> Result<ClientIdentity, HttpAuthError> {
@@ -728,7 +728,7 @@ fn parse_quoted(input: &str) -> Result<(String, &str), HttpAuthError> {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum HttpAuthError {
+pub(crate) enum HttpAuthError {
     BadRequest,
     Unauthorized,
     Forbidden,

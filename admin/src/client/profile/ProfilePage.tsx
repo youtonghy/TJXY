@@ -14,7 +14,7 @@ import { KPI } from '@heroui-pro/react/kpi';
 import { KPIGroup } from '@heroui-pro/react/kpi-group';
 import { PieChart } from '@heroui-pro/react/pie-chart';
 import { Timeline } from '@heroui-pro/react/timeline';
-import { CheckCircle2, Clock3, Film, Pencil, Play, Tags, Tv } from 'lucide-react';
+import { CheckCircle2, Clock3, Film, Pencil, Play, Tags, Trash2, Tv } from 'lucide-react';
 import { useEffect, useState, type SyntheticEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -42,6 +42,7 @@ import { useClientAuth } from '../auth/ClientAuthContext';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
 import { ServerAddressField } from '../ui/ServerAddressField';
 import { PasswordStrength } from '../../ui/passwordStrength';
+import { deletePasskey, listPasskeys, registerPasskey, type PasskeySummary } from '../auth/passkeyApi';
 import { useTranslate } from '../../settings/i18n';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 
@@ -444,6 +445,7 @@ function GenreRadar({ insights }: { insights?: UserInsights }) {
 
 function ProfileDialog({ profile, onClose, onSaved, onSessionInvalidated }: { profile: UserProfile; onClose: () => void; onSaved: (profile: UserProfile) => void; onSessionInvalidated: () => Promise<void> }) {
   const tr = useTranslate();
+  const { passkeyEnabled } = useSystemLocale();
   const [username, setUsername] = useState(profile.Username);
   const [bio, setBio] = useState(profile.Bio);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -471,7 +473,131 @@ function ProfileDialog({ profile, onClose, onSaved, onSessionInvalidated }: { pr
       setError(reason instanceof Error ? reason.message : tr('Unable to update this account.', '无法更新此账户。'));
     } finally { setPending(false); }
   };
- return <Modal isOpen onOpenChange={(open) => { if (!open) onClose(); }}><Modal.Backdrop isDismissable={!pending}><Modal.Container placement="center" size="md"><Modal.Dialog><Modal.CloseTrigger aria-label={tr('Close', '关闭')} isDisabled={pending} /><Modal.Header><Modal.Heading>{tr('Edit account', '编辑账户')}</Modal.Heading></Modal.Header><Modal.Body><form className="space-y-5" id="profile-form" onSubmit={(event) => { void submit(event); }}><TextField fullWidth isRequired><Label>{tr('Username', '用户名')}</Label><Input autoComplete="username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>{tr('Biography', '个人简介')}</Label><TextArea maxLength={500} value={bio} onChange={(event) => { setBio(event.currentTarget.value); }} /></TextField><div className="border-t border-border pt-5"><p className="mb-4 text-sm font-medium">{tr('Security confirmation', '安全确认')}</p><div className="space-y-4"><TextField fullWidth isRequired><Label>{tr('Current password', '当前密码')}</Label><Input autoComplete="current-password" type="password" value={currentPassword} onChange={(event) => { setCurrentPassword(event.currentTarget.value); }} /></TextField><TextField fullWidth><Label>{tr('New password', '新密码')}</Label><Input autoComplete="new-password" type="password" value={newPassword} onChange={(event) => { setNewPassword(event.currentTarget.value); }} /><PasswordStrength password={newPassword} /></TextField><TextField fullWidth isInvalid={Boolean(confirmPassword && confirmPassword !== newPassword)}><Label>{tr('Confirm new password', '确认新密码')}</Label><Input autoComplete="new-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.currentTarget.value); }} /></TextField></div></div>{error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}</form></Modal.Body><Modal.Footer><Button onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button><Button form="profile-form" isPending={pending} type="submit">{tr('Save changes', '保存更改')}</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop></Modal>;
+  return (
+    <Modal isOpen onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Modal.Backdrop isDismissable={!pending}>
+        <Modal.Container placement="center" size="md">
+          <Modal.Dialog>
+            <Modal.CloseTrigger aria-label={tr('Close', '关闭')} isDisabled={pending} />
+            <Modal.Header><Modal.Heading>{tr('Edit account', '编辑账户')}</Modal.Heading></Modal.Header>
+            <Modal.Body>
+              <form className="space-y-5" id="profile-form" onSubmit={(event) => { void submit(event); }}>
+                <TextField fullWidth isRequired>
+                  <Label>{tr('Username', '用户名')}</Label>
+                  <Input autoComplete="username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); }} />
+                </TextField>
+                <TextField fullWidth>
+                  <Label>{tr('Biography', '个人简介')}</Label>
+                  <TextArea maxLength={500} value={bio} onChange={(event) => { setBio(event.currentTarget.value); }} />
+                </TextField>
+                <div className="border-t border-border pt-5">
+                  <p className="mb-4 text-sm font-medium">{tr('Security confirmation', '安全确认')}</p>
+                  <div className="space-y-4">
+                    <TextField fullWidth isRequired>
+                      <Label>{tr('Current password', '当前密码')}</Label>
+                      <Input autoComplete="current-password" type="password" value={currentPassword} onChange={(event) => { setCurrentPassword(event.currentTarget.value); }} />
+                    </TextField>
+                    <TextField fullWidth>
+                      <Label>{tr('New password', '新密码')}</Label>
+                      <Input autoComplete="new-password" type="password" value={newPassword} onChange={(event) => { setNewPassword(event.currentTarget.value); }} />
+                      <PasswordStrength password={newPassword} />
+                    </TextField>
+                    <TextField fullWidth isInvalid={Boolean(confirmPassword && confirmPassword !== newPassword)}>
+                      <Label>{tr('Confirm new password', '确认新密码')}</Label>
+                      <Input autoComplete="new-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.currentTarget.value); }} />
+                    </TextField>
+                  </div>
+                </div>
+                {passkeyEnabled ? <PasskeyManager /> : null}
+                {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+              </form>
+            </Modal.Body>
+            <Modal.Footer>
+              <Button onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button>
+              <Button form="profile-form" isPending={pending} type="submit">{tr('Save changes', '保存更改')}</Button>
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
+  );
+}
+
+function PasskeyManager() {
+  const tr = useTranslate();
+  const [passkeys, setPasskeys] = useState<PasskeySummary[]>([]);
+  const [pending, setPending] = useState(false);
+  const [deletingId, setDeletingId] = useState<string>();
+  const [error, setError] = useState('');
+
+  const refresh = async () => {
+    const items = await listPasskeys();
+    setPasskeys(items);
+  };
+
+  useEffect(() => {
+    let active = true;
+    void listPasskeys()
+      .then((items) => { if (active) setPasskeys(items); })
+      .catch(() => { if (active) setError(tr('Unable to load Passkeys.', '无法加载 Passkey。')); });
+    return () => { active = false; };
+  }, [tr]);
+
+  return (
+    <section aria-labelledby="passkey-heading" className="border-t border-border pt-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium" id="passkey-heading">Passkey</p>
+          <p className="mt-1 text-sm text-muted">{tr('Register this device for passwordless sign-in.', '为此设备注册 Passkey，之后可免密登录。')}</p>
+        </div>
+        <Button
+          isPending={pending}
+          onPress={() => {
+            setPending(true);
+            setError('');
+            void registerPasskey()
+              .then(refresh)
+              .catch(() => { setError(tr('Passkey registration failed.', 'Passkey 注册失败。')); })
+              .finally(() => { setPending(false); });
+          }}
+          type="button"
+          variant="secondary"
+        >
+          {tr('Register', '注册')}
+        </Button>
+      </div>
+      {passkeys.length ? (
+        <ul aria-label={tr('Registered Passkeys', '已注册的 Passkey')} className="mt-4 divide-y divide-border border-y border-border">
+          {passkeys.map((passkey) => (
+            <li className="flex min-h-14 items-center gap-3 py-2" key={passkey.Id}>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{passkey.Name}</p>
+                <p className="text-xs text-muted">{tr('Created', '创建于')} {new Date(passkey.CreatedAt).toLocaleDateString()}</p>
+              </div>
+              <Button
+                aria-label={tr(`Delete ${passkey.Name}`, `删除 ${passkey.Name}`)}
+                isIconOnly
+                isPending={deletingId === passkey.Id}
+                onPress={() => {
+                  setDeletingId(passkey.Id);
+                  setError('');
+                  void deletePasskey(passkey.Id)
+                    .then(() => { setPasskeys((current) => current.filter((item) => item.Id !== passkey.Id)); })
+                    .catch(() => { setError(tr('Unable to delete this Passkey.', '无法删除此 Passkey。')); })
+                    .finally(() => { setDeletingId(undefined); });
+                }}
+                type="button"
+                variant="danger-soft"
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="mt-4 text-sm text-muted">{tr('No Passkeys registered.', '尚未注册 Passkey。')}</p>}
+      {error ? <p className="mt-3 text-sm text-danger" role="alert">{error}</p> : null}
+    </section>
+  );
 }
 
 function formatTicks(value = 0, locale = 'en-US'): string {

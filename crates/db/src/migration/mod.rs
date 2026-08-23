@@ -66,6 +66,7 @@ mod m20260816_000065_qr_login_challenges;
 mod m20260818_000066_strm_locator;
 mod m20260821_000067_remove_media_browser_roots;
 mod m20260823_000068_expand_local_metadata_access_mode;
+mod m20260823_000069_passkeys;
 
 use std::collections::HashSet;
 
@@ -190,6 +191,8 @@ async fn validate_current_schema(
         "logging_settings",
         "direct_metadata_refs",
         "qr_login_challenges",
+        "passkey_credentials",
+        "passkey_challenges",
     ] {
         if !manager.has_table(table).await? {
             missing.push(format!("table {table}"));
@@ -215,6 +218,7 @@ async fn validate_current_schema(
         ("ai_messages", "sequence_number"),
         ("ai_provider_settings", "daily_total_token_limit"),
         ("ai_provider_settings", "daily_user_token_limit"),
+        ("system_settings", "passkey_enabled"),
     ] {
         if !missing_tables.contains(table) && !manager.has_column(table, column).await? {
             missing.push(format!("column {table}.{column}"));
@@ -306,6 +310,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260818_000066_strm_locator::Migration),
             Box::new(m20260821_000067_remove_media_browser_roots::Migration),
             Box::new(m20260823_000068_expand_local_metadata_access_mode::Migration),
+            Box::new(m20260823_000069_passkeys::Migration),
         ]
     }
 }
