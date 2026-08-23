@@ -1223,10 +1223,10 @@ impl CatalogQueryService {
             .with_metadata_source_mode(target.metadata_source_mode())?
             .with_local_metadata_access_mode(target.local_metadata_access_mode())?
             .with_storage_root_affinity(scope.storage_root_id())?;
-        let submission = if !target.local_metadata_access_mode().imports_metadata() {
-            Some(jobs.enqueue_or_join(&spec).await?)
-        } else {
+        let submission = if target.local_metadata_access_mode().imports_metadata() {
             jobs.enqueue_metadata_retry_or_join(&spec).await?
+        } else {
+            Some(jobs.enqueue_or_join(&spec).await?)
         };
         let Some(submission) = submission else {
             return Ok(());

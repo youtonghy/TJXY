@@ -177,7 +177,7 @@ impl<'connection> PasskeyRepository<'connection> {
             == 1)
     }
 
-    /// Stores short-lived server-side WebAuthn ceremony state.
+    /// Stores short-lived server-side `WebAuthn` ceremony state.
     ///
     /// # Errors
     /// Returns a database error when cleanup or insertion fails.

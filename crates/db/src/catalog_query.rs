@@ -933,14 +933,14 @@ impl LazyCatalogWorkTarget {
     #[must_use]
     pub fn should_retry_metadata(self) -> bool {
         self.metadata_requirement.is_some_and(|requirement| {
-            if !self.local_metadata_access_mode.imports_metadata() {
-                self.needs_metadata_resolution(requirement)
-            } else {
+            if self.local_metadata_access_mode.imports_metadata() {
                 (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
                     && matches!(
                         self.metadata_source_mode,
                         MetadataSourceMode::AutomaticScrape
                     )
+            } else {
+                self.needs_metadata_resolution(requirement)
             }
         })
     }

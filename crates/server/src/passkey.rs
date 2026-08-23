@@ -43,11 +43,12 @@ async fn enabled_settings(state: &AppState) -> Result<SystemSettingsRecord, Resp
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn webauthn(settings: &SystemSettingsRecord) -> Result<Webauthn, Response> {
-    let origin = settings
-        .public_url()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", settings.port()));
+    let origin = settings.public_url().map_or_else(
+        || format!("http://127.0.0.1:{}", settings.port()),
+        str::to_owned,
+    );
     let origin =
         url::Url::parse(&origin).map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
     let rp_id = origin
@@ -58,6 +59,7 @@ fn webauthn(settings: &SystemSettingsRecord) -> Result<Webauthn, Response> {
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
 
+#[allow(clippy::result_large_err)]
 fn repository(state: &AppState) -> Result<PasskeyRepository<'_>, Response> {
     state
         .auth
@@ -83,9 +85,8 @@ pub(crate) async fn register_start(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let existing = match repo.list(principal.user().id().as_uuid()).await {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(existing) = repo.list(principal.user().id().as_uuid()).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let exclude = existing
         .iter()
@@ -107,9 +108,8 @@ pub(crate) async fn register_start(
     };
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let state_payload = match serde_json::to_vec(&registration) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(state_payload) = serde_json::to_vec(&registration) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let challenge = PasskeyChallenge {
         id,
@@ -175,9 +175,8 @@ pub(crate) async fn register_finish(
         return StatusCode::CONFLICT.into_response();
     }
     let now = Utc::now();
-    let payload = match serde_json::to_vec(&passkey) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(payload) = serde_json::to_vec(&passkey) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let record = PasskeyCredential {
         id: Uuid::new_v4(),
@@ -209,9 +208,8 @@ pub(crate) async fn authenticate_start(State(state): State<AppState>) -> Respons
     };
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let payload = match serde_json::to_vec(&authentication) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(payload) = serde_json::to_vec(&authentication) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let challenge = PasskeyChallenge {
         id,
@@ -284,9 +282,8 @@ pub(crate) async fn authenticate_finish(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let _ = passkey.update_credential(&result);
-    let payload = match serde_json::to_vec(&passkey) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(payload) = serde_json::to_vec(&passkey) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     if repo
         .update_payload(record.id, payload, i64::from(result.counter()), Utc::now())

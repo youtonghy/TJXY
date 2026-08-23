@@ -610,7 +610,11 @@ where
     }
 
     /// Issues a normal session after an upstream authenticator has already
-    /// verified the user's identity (for example, WebAuthn).
+    /// verified the user's identity (for example, `WebAuthn`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication error when the user is disabled or session issuance fails.
     pub async fn authenticate_verified_user(
         &self,
         user: AuthUser,

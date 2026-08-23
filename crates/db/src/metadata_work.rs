@@ -414,6 +414,12 @@ impl<'connection> MetadataWorkRepository<'connection> {
     }
 
     /// Commits a metadata job with independently imported or direct-read NFO and image resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns a work error when the claim or snapshot is invalid or stale, or when the
+    /// transaction cannot be committed.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn commit_mixed(
         &self,
         claimed: &ClaimedWorkJob,
@@ -743,10 +749,8 @@ async fn replace_direct_refs_filtered(
             continue;
         }
         let mut resources = Vec::new();
-        if include_nfo {
-            if let Some(file) = snapshot.sidecar.as_ref() {
-                resources.push((file, "Nfo", 0_i32));
-            }
+        if include_nfo && let Some(file) = snapshot.sidecar.as_ref() {
+            resources.push((file, "Nfo", 0_i32));
         }
         if include_images {
             let mut primary = 0_i32;
