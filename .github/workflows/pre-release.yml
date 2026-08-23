@@ -28,6 +28,18 @@ jobs:
           cache-dependency-path: admin/package-lock.json
       - name: Install frontend dependencies
         run: npm --prefix admin ci
+      - name: Configure HeroUI Pro
+        working-directory: admin
+        env:
+          HEROUI_KEY: ${{ secrets.HEROUI_KEY }}
+        run: |
+          if [ -z "$HEROUI_KEY" ]; then
+            echo 'Repository secret HEROUI_KEY is required for frontend checks.' >&2
+            exit 1
+          fi
+          npx -y hpsetup@4.7.0 --auto
+          test -f node_modules/@heroui-pro/react/dist/css/index.css
+          test -f node_modules/@heroui-pro/react/dist/components/index.d.ts
       - name: Typecheck frontend
         run: npm --prefix admin run typecheck
       - name: Lint frontend
