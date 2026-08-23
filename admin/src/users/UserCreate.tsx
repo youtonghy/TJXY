@@ -34,7 +34,7 @@ export function UserCreate() {
       mutationMode="pessimistic"
       mutationOptions={{
         onError: setSubmitError,
-        onSuccess: (record) => {
+        onSuccess: (record: UserRecord) => {
           notify(tr('User created.', '用户已创建。'), { type: 'success' });
           redirect('show', 'users', record.id);
         },
