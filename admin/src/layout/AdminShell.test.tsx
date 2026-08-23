@@ -39,6 +39,7 @@ describe('AdminShell', () => {
       'AI assistant',
       'Themes',
       'System settings',
+      'About',
     ]);
     expect(within(navigation).getByRole('link', { name: 'Tasks' })).toHaveAttribute(
       'aria-current',

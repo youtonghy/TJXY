@@ -7,14 +7,18 @@ import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmi
 import { AdminNotifications } from '../ui/AdminNotifications';
 import { LibrariesPage } from './LibrariesPage';
 import type { LibraryOption } from './libraryApi';
-import { createLibrary, listLibraries } from './libraryApi';
+import { createLibrary, listLibraries, localMetadataAccessMode } from './libraryApi';
 
 vi.mock('./libraryApi', () => ({
   createLibrary: vi.fn(),
   listLibraries: vi.fn(),
+  localMetadataAccessMode: vi.fn((importMetadata: boolean, importImages: boolean) => (
+    importMetadata && importImages ? 'import' : importMetadata ? 'import_metadata_only' : importImages ? 'import_images_only' : 'direct'
+  )),
 }));
 const listMock = vi.mocked(listLibraries);
 const createMock = vi.mocked(createLibrary);
+const localMetadataAccessModeMock = vi.mocked(localMetadataAccessMode);
 const libraryId = '018f17ac-4e99-7ec5-b4fd-8f15ca9f4f11';
 const movies = {
   id: libraryId,
@@ -57,6 +61,7 @@ async function librariesGrid() {
 beforeEach(() => {
   listMock.mockReset();
   createMock.mockReset();
+  localMetadataAccessModeMock.mockClear();
   listMock.mockResolvedValue([movies]);
   createMock.mockResolvedValue(undefined);
 });
