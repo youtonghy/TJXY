@@ -7962,7 +7962,8 @@ async fn administrator_can_manage_complete_system_settings() {
             "IconUrl": "/brand/favicon.svg",
             "PublicUrl": "https://media.example.com",
             "ListenHost": "0.0.0.0",
-            "Port": 9000
+            "Port": 9000,
+            "PasskeyEnabled": false
         })
         .to_string(),
     )
@@ -8134,7 +8135,8 @@ async fn concurrent_system_settings_updates_return_one_conflict() {
         "IconUrl": "/brand/favicon.svg",
         "PublicUrl": null,
         "ListenHost": "127.0.0.1",
-        "Port": 8096
+        "Port": 8096,
+        "PasskeyEnabled": false
     });
     let response = put(
         &app.router,
@@ -8154,6 +8156,7 @@ async fn concurrent_system_settings_updates_return_one_conflict() {
         "PublicUrl": null,
         "ListenHost": "127.0.0.1",
         "Port": 8096,
+        "PasskeyEnabled": false,
         "Revision": 1
     });
     let mut second = first.clone();
