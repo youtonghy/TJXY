@@ -743,6 +743,123 @@ async fn direct_local_metadata_indexes_refs_without_importing_catalog_or_asset_b
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // The contract verifies one end-to-end mixed metadata transaction.
+async fn metadata_only_import_keeps_local_images_directly_readable() {
+    let fixture = fixture().await;
+    let backend = fixture.database.get_database_backend();
+    let poster_record = StorageObjectRecordId::new();
+    let poster_bytes = png_bytes();
+    fixture.backend.extra_objects.lock().unwrap().insert(
+        "direct-poster-object".to_owned(),
+        (
+            "poster.png".to_owned(),
+            poster_bytes.clone(),
+            "poster-r1".to_owned(),
+        ),
+    );
+    insert_storage_object(
+        &fixture.database,
+        fixture.account,
+        poster_record,
+        "direct-poster-object",
+        "poster.png",
+        "File",
+        Some(i64::try_from(poster_bytes.len()).unwrap()),
+        Some("poster-r1"),
+    )
+    .await;
+    insert_root_object(
+        &fixture.database,
+        fixture.root,
+        poster_record,
+        Some(fixture.parent),
+        false,
+    )
+    .await;
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(
+                        Alias::new("local_metadata_access_mode"),
+                        "import_metadata_only",
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+        .unwrap()
+        .with_local_metadata_access_mode(LocalMetadataAccessMode::ImportMetadataOnly)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata-only-import-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let registry = tjxy_application::StorageBackendRegistry::new();
+    let storage_backend: Arc<dyn StorageBackend> = fixture.backend.clone();
+    registry
+        .register(fixture.account, "local", storage_backend)
+        .unwrap();
+    let service =
+        DirectMetadataReadService::new(fixture.database.clone()).with_backend_registry(registry);
+    let report = MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(ForbiddenRemoteProvider))
+        .execute(&claimed)
+        .await
+        .unwrap();
+
+    assert!(report.used_nfo());
+    assert!(service.nfo(fixture.item).await.unwrap().is_none());
+    let image = service
+        .image(fixture.item, tjxy_common::ImageType::Primary, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(image.mime_type(), "image/png");
+    assert_eq!(image.size(), poster_bytes.len() as u64);
+    assert!(
+        fixture
+            .database
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("id"))
+                        .from(Alias::new("item_assets"))
+                        .limit(1),
+                ),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn newer_scope_observation_does_not_stale_an_unchanged_children_snapshot() {
     let fixture = fixture().await;
     let backend = fixture.database.get_database_backend();

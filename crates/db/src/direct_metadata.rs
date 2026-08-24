@@ -89,6 +89,11 @@ impl<'connection> DirectMetadataRepository<'connection> {
         resource_kind: &str,
         priority: i32,
     ) -> Result<Option<DirectMetadataObjectRecord>, DbErr> {
+        let imported_access_modes = match resource_kind {
+            "Nfo" => ["import", "import_metadata_only"],
+            "Primary" | "Backdrop" => ["import", "import_images_only"],
+            _ => return Ok(None),
+        };
         let reference = Alias::new("direct_ref");
         let object = Alias::new("direct_object");
         let account = Alias::new("direct_account");
@@ -120,7 +125,7 @@ impl<'connection> DirectMetadataRepository<'connection> {
                     )
                     .add(
                         Expr::col((import_library, Alias::new("local_metadata_access_mode")))
-                            .is_in(["import", "import_metadata_only"]),
+                            .is_in(imported_access_modes),
                     )
                     .into(),
             )
