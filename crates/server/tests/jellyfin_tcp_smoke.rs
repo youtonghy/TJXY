@@ -1203,7 +1203,6 @@ async fn tcp_manual_root_full_scan_completes_the_series_pipeline() {
         "explicit root Full Series pipeline",
     )
     .await;
-    assert_root_full_job_graph(&client, &second, &token).await;
 
     let series = wait_for_child(
         &client,
@@ -1238,6 +1237,7 @@ async fn tcp_manual_root_full_scan_completes_the_series_pipeline() {
     )
     .await;
     let episode_id = episode["Id"].as_str().expect("root Full Episode ID");
+    assert_root_full_job_graph(&client, &second, &token).await;
     let playback = json_response(
         client
             .post(format!(
