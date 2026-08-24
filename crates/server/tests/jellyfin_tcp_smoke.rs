@@ -1029,39 +1029,54 @@ async fn assert_playback_delivery_contract(
 }
 
 async fn assert_root_full_job_graph(client: &Client, server: &TestServer, token: &str) {
-    let jobs = json_response(
-        client
-            .get(format!("{}/Admin/Tasks/Jobs?Limit=100", server.base_url))
-            .header("Authorization", token_header(token))
-            .send()
-            .await
-            .expect("read root Full task graph"),
-        StatusCode::OK,
-        "read root Full task graph",
-    )
-    .await;
-    let task_kinds = jobs
-        .as_array()
-        .expect("root Full jobs")
-        .iter()
-        .filter_map(|job| job["TaskKind"].as_str())
-        .collect::<HashSet<_>>();
-    for expected in [
+    let expected = [
         "FullLibraryRootScan",
         "ValidateStorageRoot",
         "DiscoverTitles",
         "ResolveMetadata",
         "ExpandItem",
         "ProbeMedia",
-    ] {
-        assert!(
-            task_kinds.contains(expected),
-            "root Full did not execute {expected}; observed {task_kinds:?}"
-        );
+    ];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_task_kinds = HashSet::new();
+    while Instant::now() < deadline {
+        let jobs = json_response(
+            client
+                .get(format!("{}/Admin/Tasks/Jobs?Limit=100", server.base_url))
+                .header("Authorization", token_header(token))
+                .send()
+                .await
+                .expect("read root Full task graph"),
+            StatusCode::OK,
+            "read root Full task graph",
+        )
+        .await;
+        last_task_kinds = jobs
+            .as_array()
+            .expect("root Full jobs")
+            .iter()
+            .filter_map(|job| job["TaskKind"].as_str())
+            .map(str::to_owned)
+            .collect();
+        if expected
+            .iter()
+            .all(|task_kind| last_task_kinds.contains(*task_kind))
+        {
+            assert!(
+                !last_task_kinds.contains("IndexMediaSources"),
+                "Series expansion must publish Episode sources without a redundant IndexMediaSources job"
+            );
+            return;
+        }
+        sleep(Duration::from_millis(200)).await;
     }
-    assert!(
-        !task_kinds.contains("IndexMediaSources"),
-        "Series expansion must publish Episode sources without a redundant IndexMediaSources job"
+    let missing = expected
+        .iter()
+        .filter(|task_kind| !last_task_kinds.contains(**task_kind))
+        .collect::<Vec<_>>();
+    panic!(
+        "root Full did not execute {missing:?}; observed {last_task_kinds:?}\n{}",
+        server.logs()
     );
 }
 
