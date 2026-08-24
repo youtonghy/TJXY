@@ -187,7 +187,7 @@ const enUS: Record<string, string> = {
   'admin.system.network': 'Network',
   'admin.system.networkDescription': 'Changes to the listen address or port apply after TJXY restarts.',
   'admin.system.passkeyTitle': 'Passkey login',
-  'admin.system.passkeyDescription': 'Allow users to sign in with a discoverable passkey without entering a username or password.',
+  'admin.system.passkeyDescription': 'Allow users to sign in with discoverable Passkeys or account-specific security keys.',
   'admin.system.passkeyEnabled': 'Enable Passkey login',
   'admin.system.passkeyHint': 'Users can register and manage their Passkeys from their account profile.',
   'admin.system.passkeyStatusDisabled': 'Passkey login is off',

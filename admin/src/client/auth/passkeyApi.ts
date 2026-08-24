@@ -66,7 +66,11 @@ async function startAuthenticationCompat(optionsJSON: PublicKeyCredentialRequest
     publicKey: {
       ...optionsJSON,
       challenge: decodeBase64Url(optionsJSON.challenge),
-      allowCredentials: optionsJSON.allowCredentials?.map((item) => ({ id: decodeBase64Url(item.id), type: item.type })),
+      allowCredentials: optionsJSON.allowCredentials?.map((item) => ({
+        id: decodeBase64Url(item.id),
+        type: item.type,
+        transports: item.transports?.filter((transport) => transport !== 'cable') as AuthenticatorTransport[] | undefined,
+      })),
     },
   });
   if (!(credential instanceof globalThis.PublicKeyCredential)) throw new Error('Authentication was not completed');
@@ -81,8 +85,11 @@ async function startAuthenticationCompat(optionsJSON: PublicKeyCredentialRequest
   };
 }
 
-export async function authenticateWithPasskey(): Promise<PasskeyAuthentication> {
-  const start = await clientRequest<CeremonyStart<PublicKeyCredentialRequestOptionsJSON>>('/Auth/Passkey/Authenticate/Start', { method: 'POST' });
+export async function authenticateWithPasskey(username?: string): Promise<PasskeyAuthentication> {
+  const start = await clientRequest<CeremonyStart<PublicKeyCredentialRequestOptionsJSON>>('/Auth/Passkey/Authenticate/Start', {
+    method: 'POST',
+    body: JSON.stringify(username ? { username } : {}),
+  });
   const response = await startAuthenticationCompat(start.Options.publicKey);
   return clientRequest('/Auth/Passkey/Authenticate/Finish', { method: 'POST', body: JSON.stringify({ challengeId: start.ChallengeId, response }) });
 }

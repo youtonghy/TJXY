@@ -190,6 +190,41 @@ async fn credential_verification_returns_the_user_without_creating_a_session() {
 }
 
 #[tokio::test]
+async fn username_lookup_uses_normalized_names_without_creating_a_session() {
+    let (service, _clock, database) = service().await;
+    let created = service.create_user("Ａlice", "right", false).await.unwrap();
+
+    let found = service.find_user_by_name("alice").await.unwrap().unwrap();
+
+    assert_eq!(found.id(), created.id());
+    assert!(
+        service
+            .find_user_by_name("missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        service.find_user_by_name("").await.unwrap_err(),
+        AuthError::InvalidUsername
+    );
+    let backend = database.get_database_backend();
+    let row = database
+        .query_one(
+            backend.build(
+                &Query::select()
+                    .expr_as(Expr::col(Asterisk).count(), Alias::new("count"))
+                    .from(Alias::new("auth_sessions"))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+}
+
+#[tokio::test]
 async fn empty_password_is_valid_and_session_expires_at_the_exact_boundary() {
     let (service, clock, _) = service().await;
     service.create_user("alice", "", false).await.unwrap();

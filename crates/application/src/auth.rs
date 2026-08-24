@@ -363,6 +363,24 @@ where
             .map_err(Into::into)
     }
 
+    /// Reads one local user by normalized username without verifying a password.
+    ///
+    /// This is intended for authentication methods that identify an account before
+    /// an external authenticator proves possession, such as username-first `WebAuthn`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidUsername`] when the username is malformed, or a
+    /// repository error when the authentication source of truth is unavailable.
+    pub async fn find_user_by_name(&self, username: &str) -> Result<Option<AuthUser>, AuthError> {
+        let username = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
+        AuthRepository::new(&self.database)
+            .find_credential(&username)
+            .await
+            .map(|credential| credential.map(|value| value.user().clone()))
+            .map_err(Into::into)
+    }
+
     /// Renames one local user and invalidates their existing sessions.
     ///
     /// # Errors

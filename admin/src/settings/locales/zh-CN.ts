@@ -222,7 +222,7 @@ const zhCN: Record<string, string> = {
   'admin.system.network': '网络',
   'admin.system.networkDescription': '监听地址或端口的修改将在 TJXY 重启后生效。',
   'admin.system.passkeyTitle': 'Passkey 登录',
-  'admin.system.passkeyDescription': '允许用户通过可发现的 Passkey 登录，无需输入用户名和密码。',
+  'admin.system.passkeyDescription': '允许用户通过可发现的 Passkey 或账户绑定的安全密钥登录。',
   'admin.system.passkeyEnabled': '启用 Passkey 登录',
   'admin.system.passkeyHint': '用户可在个人资料中注册和管理自己的 Passkey。',
   'admin.system.passkeyStatusDisabled': 'Passkey 登录已关闭',

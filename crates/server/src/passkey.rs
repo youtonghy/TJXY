@@ -9,12 +9,20 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tjxy_api::{AuthenticationResult, SessionInfoDto};
+use tjxy_api::{AuthenticationResult as ApiAuthenticationResult, SessionInfoDto};
 use tjxy_db::{PasskeyChallenge, PasskeyCredential, PasskeyRepository, SystemSettingsRecord};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 const CHALLENGE_TTL_MINUTES: i64 = 5;
+const DISCOVERABLE_AUTHENTICATION_KIND: &str = "authentication";
+const USER_AUTHENTICATION_KIND: &str = "user-auth";
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthenticationStart {
+    username: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -194,38 +202,153 @@ pub(crate) async fn register_finish(
     }
 }
 
-pub(crate) async fn authenticate_start(State(state): State<AppState>) -> Response {
+pub(crate) async fn authenticate_start(State(state): State<AppState>, body: Bytes) -> Response {
     let settings = match enabled_settings(&state).await {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let request = if body.is_empty() {
+        AuthenticationStart::default()
+    } else {
+        match serde_json::from_slice::<AuthenticationStart>(&body) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        }
     };
     let engine = match webauthn(&settings) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let Ok((options, authentication)) = engine.start_discoverable_authentication() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let id = Uuid::new_v4();
-    let now = Utc::now();
-    let Ok(payload) = serde_json::to_vec(&authentication) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let challenge = PasskeyChallenge {
-        id,
-        user_id: None,
-        kind: "authentication".to_owned(),
-        state: payload,
-        expires_at: now + Duration::minutes(CHALLENGE_TTL_MINUTES),
-    };
     let repo = match repository(&state) {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let username = request
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (options, state_payload, user_id, kind) = if let Some(username) = username {
+        let Some(service) = state.auth.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let user = match service.find_user_by_name(username).await {
+            Ok(Some(value)) => value,
+            Ok(None) | Err(tjxy_application::AuthError::InvalidUsername) => {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let records = match repo.list(user.id().as_uuid()).await {
+            Ok(value) if value.is_empty() => return StatusCode::UNAUTHORIZED.into_response(),
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let Ok(passkeys) = records
+            .iter()
+            .map(|record| serde_json::from_slice::<Passkey>(&record.public_key))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let Ok((options, authentication)) = engine.start_passkey_authentication(&passkeys) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Ok(payload) = serde_json::to_vec(&authentication) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        (
+            options,
+            payload,
+            Some(user.id().as_uuid()),
+            USER_AUTHENTICATION_KIND,
+        )
+    } else {
+        let Ok((options, authentication)) = engine.start_discoverable_authentication() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Ok(payload) = serde_json::to_vec(&authentication) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        (options, payload, None, DISCOVERABLE_AUTHENTICATION_KIND)
+    };
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    let challenge = PasskeyChallenge {
+        id,
+        user_id,
+        kind: kind.to_owned(),
+        state: state_payload,
+        expires_at: now + Duration::minutes(CHALLENGE_TTL_MINUTES),
     };
     if repo.put_challenge(&challenge, now).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Json(serde_json::json!({"ChallengeId": id, "Options": options})).into_response()
+}
+
+type VerifiedPasskeyAuthentication = (
+    Uuid,
+    PasskeyCredential,
+    Passkey,
+    webauthn_rs::prelude::AuthenticationResult,
+);
+
+#[allow(clippy::result_large_err)]
+async fn credential_for_user(
+    repo: &PasskeyRepository<'_>,
+    credential_id: &[u8],
+    user_id: Uuid,
+) -> Result<(PasskeyCredential, Passkey), Response> {
+    let credential_id = URL_SAFE_NO_PAD.encode(credential_id);
+    let record = match repo.find_by_credential_id(&credential_id).await {
+        Ok(Some(value)) if value.user_id == user_id => value,
+        Ok(Some(_) | None) => return Err(StatusCode::UNAUTHORIZED.into_response()),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    };
+    let passkey = serde_json::from_slice::<Passkey>(&record.public_key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    Ok((record, passkey))
+}
+
+#[allow(clippy::result_large_err)]
+async fn finish_discoverable(
+    engine: &Webauthn,
+    repo: &PasskeyRepository<'_>,
+    response: &PublicKeyCredential,
+    challenge: &PasskeyChallenge,
+) -> Result<VerifiedPasskeyAuthentication, Response> {
+    let authentication = serde_json::from_slice::<DiscoverableAuthentication>(&challenge.state)
+        .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    let (user_id, credential_id) = engine
+        .identify_discoverable_authentication(response)
+        .map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
+    let (record, passkey) = credential_for_user(repo, credential_id, user_id).await?;
+    let key = DiscoverableKey::from(&passkey);
+    let result = engine
+        .finish_discoverable_authentication(response, authentication, &[key])
+        .map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
+    Ok((user_id, record, passkey, result))
+}
+
+#[allow(clippy::result_large_err)]
+async fn finish_for_user(
+    engine: &Webauthn,
+    repo: &PasskeyRepository<'_>,
+    response: &PublicKeyCredential,
+    challenge: &PasskeyChallenge,
+) -> Result<VerifiedPasskeyAuthentication, Response> {
+    let user_id = challenge
+        .user_id
+        .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+    let authentication = serde_json::from_slice::<PasskeyAuthentication>(&challenge.state)
+        .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    let (record, passkey) =
+        credential_for_user(repo, response.get_credential_id(), user_id).await?;
+    let result = engine
+        .finish_passkey_authentication(response, &authentication)
+        .map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
+    Ok((user_id, record, passkey, result))
 }
 
 pub(crate) async fn authenticate_finish(
@@ -248,38 +371,25 @@ pub(crate) async fn authenticate_finish(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let Ok(Some(challenge)) = repo.take_challenge(challenge_id, Utc::now()).await else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if challenge.kind != "authentication" {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let Ok(authentication) = serde_json::from_slice::<DiscoverableAuthentication>(&challenge.state)
-    else {
-        return StatusCode::BAD_REQUEST.into_response();
+    let challenge = match repo.take_challenge(challenge_id, Utc::now()).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let engine = match webauthn(&settings) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let Ok((user_id, credential_id)) = engine.identify_discoverable_authentication(&response)
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let verified = match challenge.kind.as_str() {
+        DISCOVERABLE_AUTHENTICATION_KIND => {
+            finish_discoverable(&engine, &repo, &response, &challenge).await
+        }
+        USER_AUTHENTICATION_KIND => finish_for_user(&engine, &repo, &response, &challenge).await,
+        _ => Err(StatusCode::BAD_REQUEST.into_response()),
     };
-    let credential_id = URL_SAFE_NO_PAD.encode(credential_id);
-    let Ok(Some(record)) = repo.find_by_credential_id(&credential_id).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    if record.user_id != user_id {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Ok(mut passkey) = serde_json::from_slice::<Passkey>(&record.public_key) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let key = DiscoverableKey::from(&passkey);
-    let Ok(result) = engine.finish_discoverable_authentication(&response, authentication, &[key])
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let (user_id, record, mut passkey, result) = match verified {
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let _ = passkey.update_credential(&result);
     let Ok(payload) = serde_json::to_vec(&passkey) else {
@@ -319,7 +429,7 @@ pub(crate) async fn authenticate_finish(
         issued.client().client_version(),
         state.identity.id,
     );
-    Json(AuthenticationResult::new(
+    Json(ApiAuthenticationResult::new(
         user,
         session,
         issued.access_token().expose_secret(),

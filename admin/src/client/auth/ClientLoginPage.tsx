@@ -25,6 +25,7 @@ export function ClientLoginPage() {
   const [visible, setVisible] = useState(false);
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [passkeyFailed, setPasskeyFailed] = useState(false);
   const [server, setServer] = useState(getStoredApiBaseUrl() ?? 'http://127.0.0.1:8096');
   const [serverPending, setServerPending] = useState(false);
   const [serverError, setServerError] = useState<string>();
@@ -59,6 +60,7 @@ export function ClientLoginPage() {
     if (pending) return;
     setPending(true);
     setFailed(false);
+    setPasskeyFailed(false);
     try {
       if (isDesktopShell()) await connectServer();
       await signIn(username, password);
@@ -74,6 +76,23 @@ export function ClientLoginPage() {
   async function adoptQrAuthentication(authentication: Parameters<typeof adoptAuthentication>[0]) {
     await adoptAuthentication(authentication);
     navigate(destination, { replace: true });
+  }
+
+  async function submitPasskey() {
+    if (passkeyPending) return;
+    setFailed(false);
+    setPasskeyFailed(false);
+    setPasskeyPending(true);
+    try {
+      if (isDesktopShell()) await connectServer();
+      await signInWithPasskey(username.trim() || undefined);
+      navigate(destination, { replace: true });
+    } catch {
+      setPasskeyFailed(true);
+      setFailed(true);
+    } finally {
+      setPasskeyPending(false);
+    }
   }
 
   if (isLoading) return <div className="flex min-h-screen items-center justify-center bg-background"><Spinner aria-label={tr('Loading account', '正在加载账户')} /></div>;
@@ -111,8 +130,8 @@ export function ClientLoginPage() {
         <Alert className="mt-5" role="alert" status="danger">
           <Alert.Indicator><CircleAlert className="size-4" /></Alert.Indicator>
           <Alert.Content>
-            <Alert.Title>{tr('Sign in failed', '登录失败')}</Alert.Title>
-            <Alert.Description>{tr('Check your username and password.', '请检查用户名和密码。')}</Alert.Description>
+            <Alert.Title>{passkeyFailed ? tr('Passkey sign-in failed', 'Passkey 登录失败') : tr('Sign in failed', '登录失败')}</Alert.Title>
+            <Alert.Description>{passkeyFailed ? tr('The request was cancelled or no matching Passkey was found.', '请求已取消，或未找到匹配的 Passkey。') : tr('Check your username and password.', '请检查用户名和密码。')}</Alert.Description>
           </Alert.Content>
         </Alert>
       )}
@@ -133,7 +152,7 @@ export function ClientLoginPage() {
           </Checkbox.Content>
         </Checkbox>
         <Button fullWidth isDisabled={pending || serverPending} type="submit">{pending ? tr('Signing in…', '登录中…') : tr('Sign in', '登录')}</Button>
-        {passkeyEnabled ? <Button fullWidth isDisabled={pending || passkeyPending || serverPending} isPending={passkeyPending} onPress={() => { setPasskeyPending(true); void signInWithPasskey().then(() => { navigate(destination, { replace: true }); }).catch(() => { setFailed(true); }).finally(() => { setPasskeyPending(false); }); }} type="button" variant="secondary">{tr('Sign in with Passkey', 'Passkey 登录')}</Button> : null}
+        {passkeyEnabled ? <Button fullWidth isDisabled={pending || passkeyPending || serverPending} isPending={passkeyPending} onPress={() => { void submitPasskey(); }} type="button" variant="secondary">{tr('Sign in with Passkey', 'Passkey 登录')}</Button> : null}
         </form>
         </Tabs.Panel>
         <Tabs.Panel className="pt-4" id="qr"><QrLoginPanel onAuthenticated={adoptQrAuthentication} /></Tabs.Panel>
