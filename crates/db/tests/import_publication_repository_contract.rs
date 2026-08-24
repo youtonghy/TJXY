@@ -153,7 +153,7 @@ async fn sealed_generation_publishes_atomically_and_replays_idempotently() {
     assert_eq!(count(&database, "item_people").await, 1);
     assert_eq!(count(&database, "item_studios").await, 1);
     assert_eq!(count(&database, "user_data").await, 2);
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 1);
+    assert_eq!(count(&database, "cache_invalidation_outbox").await, 0);
     assert_eq!(
         ImportJobRepository::new(&database)
             .get(job)

@@ -1190,7 +1190,7 @@ async fn source_projection_becomes_visible_only_after_atomic_publish() {
         .unwrap();
 
     assert_eq!(generation, 1);
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 1);
+    assert_eq!(count(&database, "cache_invalidation_outbox").await, 0);
     let active = publications.active_sources(owner).await.unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id(), fixture.sources[0].id());

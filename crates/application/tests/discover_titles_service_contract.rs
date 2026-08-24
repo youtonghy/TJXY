@@ -157,7 +157,7 @@ async fn discover_titles_publishes_root_children_without_reading_a_backend() {
         .unwrap();
 
     assert_eq!(report.discovered(), 1);
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 1);
+    assert_eq!(count(&database, "cache_invalidation_outbox").await, 0);
     assert_eq!(
         jobs.get(claimed.id()).await.unwrap().unwrap().state(),
         WorkJobState::Completed

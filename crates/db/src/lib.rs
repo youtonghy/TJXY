@@ -54,6 +54,7 @@ mod system_settings;
 mod title_year;
 mod user_data;
 mod work_job;
+mod work_retention;
 
 pub use ai::{
     AI_PROVIDER_KEY, AiConversationRecord, AiConversationRepository, AiConversationRepositoryError,
@@ -222,3 +223,4 @@ pub use work_job::{
     WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState,
     WorkJobSubmission, WorkJobSystemClock, WorkScope, WorkStagingRow, WorkTaskKind,
 };
+pub use work_retention::{WorkRetentionError, WorkRetentionRepository, WorkRetentionRun};

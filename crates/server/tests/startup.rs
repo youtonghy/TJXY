@@ -1240,20 +1240,20 @@ async fn initialization_reconciles_preexisting_storage_outbox_without_a_backend(
                 .try_get::<i64>("", "reconciled_sync_revision")
                 .unwrap();
             if revision == 1 {
-                let invalidation = database
+                let processed_generation = database
                     .query_one(
                         backend.build(
                             Query::select()
-                                .column(Alias::new("state"))
-                                .from(Alias::new("cache_invalidation_outbox")),
+                                .column(Alias::new("processed_generation"))
+                                .from(Alias::new("cache_invalidation_state")),
                         ),
                     )
                     .await
                     .unwrap()
                     .unwrap()
-                    .try_get::<String>("", "state")
+                    .try_get::<i64>("", "processed_generation")
                     .unwrap();
-                if invalidation == "Processed" {
+                if processed_generation == 1 {
                     break;
                 }
             }

@@ -273,6 +273,24 @@ async fn expired_claim_is_fenced_from_completion() {
         .await
         .unwrap();
     assert_eq!(completion.reconciled_sync_revision, 1);
+    assert_eq!(outbox_event_count(&database).await, 0);
+}
+
+async fn outbox_event_count(database: &DatabaseConnection) -> i64 {
+    let backend = database.get_database_backend();
+    database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("count"))
+                    .from(Alias::new("storage_change_outbox")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "count")
+        .unwrap()
 }
 
 #[tokio::test]

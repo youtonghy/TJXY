@@ -92,6 +92,7 @@ pub struct StartupOptions {
         Option<crate::metadata_settings_admin::MusicProviderEnvironmentFallback>,
     musicbrainz_provider_factory: Arc<crate::metadata_settings_admin::MusicProviderFactory>,
     media_refresh_interval: Option<StdDuration>,
+    work_history_retention: Option<StdDuration>,
     ai_admission: AiAdmissionConfig,
     logging_runtime: Option<Arc<crate::LoggingRuntime>>,
 }
@@ -149,6 +150,7 @@ impl fmt::Debug for StartupOptions {
             .field("the_audio_db_provider", &"[RELOADABLE]")
             .field("musicbrainz_provider", &"[RELOADABLE]")
             .field("media_refresh_interval", &self.media_refresh_interval)
+            .field("work_history_retention", &self.work_history_retention)
             .field("ai_admission", &self.ai_admission)
             .finish_non_exhaustive()
     }
@@ -202,6 +204,7 @@ impl StartupOptions {
                     .map(|provider| Arc::new(provider) as Arc<dyn MetadataProvider>)
             }),
             media_refresh_interval: None,
+            work_history_retention: Some(StdDuration::from_secs(30 * 24 * 60 * 60)),
             ai_admission: AiAdmissionConfig::default(),
             logging_runtime: None,
         }
@@ -422,6 +425,13 @@ impl StartupOptions {
     #[must_use]
     pub fn with_media_refresh_interval(mut self, interval: StdDuration) -> Self {
         self.media_refresh_interval = (!interval.is_zero()).then_some(interval);
+        self
+    }
+
+    /// Configures forward-only cleanup for work completed by this program version.
+    #[must_use]
+    pub const fn with_work_history_retention(mut self, retention: Option<StdDuration>) -> Self {
+        self.work_history_retention = retention;
         self
     }
 }
@@ -655,6 +665,9 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         Arc::clone(&realtime_events),
     );
     worker::spawn_storage_change_reconciler(database.clone());
+    if let Some(retention) = options.work_history_retention {
+        worker::spawn_work_retention_worker(database.clone(), retention);
+    }
     worker::spawn_source_index_worker(database.clone());
     worker::spawn_discover_worker(database.clone());
     worker::spawn_series_expand_worker(database.clone());

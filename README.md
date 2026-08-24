@@ -218,6 +218,12 @@ Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.
 
+Work completed by the running version is retained for 30 days by default. Set
+`TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
+`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend forward retention. This
+policy does not enroll or delete work that was already complete when the schema
+was upgraded, and it does not shrink existing database files.
+
 ### Jellyfin Media Player
 
 Jellyfin Media Player 1.11 and newer loads a server-hosted Jellyfin Web client.

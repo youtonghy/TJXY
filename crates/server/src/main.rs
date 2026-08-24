@@ -59,6 +59,10 @@ enum StartupError {
     InvalidLazyWait,
     #[error("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS must be an integer from 0 through 2592000")]
     InvalidMediaRefreshInterval,
+    #[error("TJXY_WORK_HISTORY_RETENTION_ENABLED must be true or false")]
+    InvalidWorkHistoryRetentionEnabled,
+    #[error("TJXY_WORK_HISTORY_RETENTION_DAYS must be an integer from 1 through 3650")]
+    InvalidWorkHistoryRetentionDays,
     #[error("TJXY_FILESYSTEM_ACCOUNT_ID is not a valid UUID: {0}")]
     InvalidFilesystemAccount(#[source] uuid::Error),
     #[error("TJXY_FILESYSTEM_ACCOUNT_ID and TJXY_FILESYSTEM_ROOT must be set together")]
@@ -242,6 +246,23 @@ async fn serve_application(
     {
         startup = startup.with_media_refresh_interval(interval);
     }
+    let retention_enabled = env::var("TJXY_WORK_HISTORY_RETENTION_ENABLED")
+        .map_or(Ok(true), |value| value.parse::<bool>())
+        .map_err(|_| StartupError::InvalidWorkHistoryRetentionEnabled)?;
+    let retention_days = match env::var("TJXY_WORK_HISTORY_RETENTION_DAYS") {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (1..=3_650).contains(value))
+            .ok_or(StartupError::InvalidWorkHistoryRetentionDays)?,
+        Err(env::VarError::NotPresent) => 30,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(StartupError::InvalidWorkHistoryRetentionDays);
+        }
+    };
+    startup = startup.with_work_history_retention(retention_enabled.then_some(
+        Duration::from_secs(retention_days.saturating_mul(24 * 60 * 60)),
+    ));
     match (
         env::var("TJXY_FILESYSTEM_ACCOUNT_ID").ok(),
         env::var("TJXY_FILESYSTEM_ROOT").ok(),

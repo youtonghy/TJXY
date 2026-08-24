@@ -64,7 +64,7 @@ async fn disabled_cache_completes_the_durable_invalidation() {
             outcome: CacheInvalidationOutcome::SkippedDisabled,
         }
     ));
-    assert_eq!(event_state(&database).await, ("Processed".to_owned(), 0));
+    assert_eq!(invalidation_state(&database).await, (1, None, 0));
 }
 
 #[tokio::test]
@@ -81,7 +81,7 @@ async fn cache_failure_requeues_without_rolling_back_the_catalog_generation() {
             failure: CacheInvalidationFailureKind::Unavailable,
         }
     ));
-    assert_eq!(event_state(&database).await, ("Pending".to_owned(), 1));
+    assert_eq!(invalidation_state(&database).await, (0, Some(1), 1));
     let backend = database.get_database_backend();
     let row = database
         .query_one(
@@ -101,7 +101,7 @@ async fn cache_failure_requeues_without_rolling_back_the_catalog_generation() {
             backend.build(
                 Query::select()
                     .columns([Alias::new("available_at"), Alias::new("last_error")])
-                    .from(Alias::new("cache_invalidation_outbox")),
+                    .from(Alias::new("cache_invalidation_state")),
             ),
         )
         .await
@@ -134,24 +134,29 @@ async fn incomplete_batch_is_released_without_failure_backoff() {
             remaining: 1,
         }
     ));
-    assert_eq!(event_state(&database).await, ("Pending".to_owned(), 0));
+    assert_eq!(invalidation_state(&database).await, (0, Some(1), 0));
 }
 
-async fn event_state(database: &DatabaseConnection) -> (String, i32) {
+async fn invalidation_state(database: &DatabaseConnection) -> (i64, Option<i64>, i32) {
     let backend = database.get_database_backend();
     let row = database
         .query_one(
             backend.build(
                 Query::select()
-                    .columns([Alias::new("state"), Alias::new("attempt_count")])
-                    .from(Alias::new("cache_invalidation_outbox")),
+                    .columns([
+                        Alias::new("processed_generation"),
+                        Alias::new("target_generation"),
+                        Alias::new("attempt_count"),
+                    ])
+                    .from(Alias::new("cache_invalidation_state")),
             ),
         )
         .await
         .unwrap()
         .unwrap();
     (
-        row.try_get("", "state").unwrap(),
+        row.try_get("", "processed_generation").unwrap(),
+        row.try_get("", "target_generation").unwrap(),
         row.try_get("", "attempt_count").unwrap(),
     )
 }

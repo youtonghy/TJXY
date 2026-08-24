@@ -1,20 +1,17 @@
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Cond, Expr, Order, Query},
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait,
+    sea_query::{Alias, Cond, Expr, Query},
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-const STATE_PENDING: &str = "Pending";
-const STATE_PROCESSING: &str = "Processing";
-const STATE_PROCESSED: &str = "Processed";
 const MAX_LEASE_OWNER_CHARS: usize = 128;
 const MAX_ERROR_CHARS: usize = 256;
+const STATE_ROW_ID: i32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimedCacheInvalidation {
-    id: Uuid,
     generation: i64,
     attempt_count: i32,
     lease_token: String,
@@ -50,7 +47,7 @@ impl CacheInvalidationClock for CacheInvalidationSystemClock {
     }
 }
 
-/// Advances the catalog generation and records its invalidation in the same transaction.
+/// Advances the catalog generation in the same transaction as the catalog change.
 ///
 /// # Errors
 ///
@@ -116,28 +113,6 @@ where
             .await?
             .ok_or_else(|| DbErr::Custom("catalog generation row is missing".to_owned()))?
             .try_get::<i64>("", "generation")?;
-        transaction
-            .execute(
-                backend.build(
-                    Query::insert()
-                        .into_table(Alias::new("cache_invalidation_outbox"))
-                        .columns([
-                            Alias::new("id"),
-                            Alias::new("generation"),
-                            Alias::new("state"),
-                            Alias::new("attempt_count"),
-                            Alias::new("created_at"),
-                        ])
-                        .values_panic([
-                            Uuid::new_v4().into(),
-                            generation.into(),
-                            STATE_PENDING.into(),
-                            0_i32.into(),
-                            Utc::now().into(),
-                        ]),
-                ),
-            )
-            .await?;
         Ok(generation)
     }
 
@@ -257,35 +232,59 @@ async fn claim(
     now: DateTime<Utc>,
     expires: DateTime<Utc>,
 ) -> Result<Option<ClaimedCacheInvalidation>, CacheInvalidationRepositoryError> {
-    let condition = claimable(now);
     let backend = transaction.get_database_backend();
-    let Some(row) = transaction
+    let catalog_generation = transaction
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("generation"))
+                    .from(Alias::new("catalog_state"))
+                    .and_where(Expr::col(Alias::new("id")).eq(STATE_ROW_ID)),
+            ),
+        )
+        .await?
+        .ok_or_else(|| DbErr::Custom("catalog generation row is missing".to_owned()))?
+        .try_get::<i64>("", "generation")?;
+    let row = transaction
         .query_one(
             backend.build(
                 Query::select()
                     .columns([
-                        Alias::new("id"),
-                        Alias::new("generation"),
+                        Alias::new("processed_generation"),
+                        Alias::new("target_generation"),
                         Alias::new("attempt_count"),
                     ])
-                    .from(Alias::new("cache_invalidation_outbox"))
-                    .cond_where(condition.clone())
-                    .order_by(Alias::new("generation"), Order::Asc)
-                    .limit(1),
+                    .from(Alias::new("cache_invalidation_state"))
+                    .and_where(Expr::col(Alias::new("id")).eq(STATE_ROW_ID)),
             ),
         )
         .await?
+        .ok_or_else(|| DbErr::Custom("cache invalidation state row is missing".to_owned()))?;
+    let processed_generation = row.try_get::<i64>("", "processed_generation")?;
+    let observed_target = row.try_get::<Option<i64>>("", "target_generation")?;
+    let Some(generation) = observed_target
+        .or_else(|| (catalog_generation > processed_generation).then_some(catalog_generation))
     else {
         return Ok(None);
     };
-    let claimed = claimed_from_row(&row, token.to_owned())?;
+    let claimed = ClaimedCacheInvalidation {
+        generation,
+        attempt_count: row.try_get("", "attempt_count")?,
+        lease_token: token.to_owned(),
+    };
     let update = Query::update()
-        .table(Alias::new("cache_invalidation_outbox"))
-        .value(Alias::new("state"), STATE_PROCESSING)
+        .table(Alias::new("cache_invalidation_state"))
+        .value(Alias::new("target_generation"), generation)
         .value(Alias::new("lease_owner"), token)
         .value(Alias::new("lease_expires_at"), expires)
-        .and_where(Expr::col(Alias::new("id")).eq(claimed.id))
-        .cond_where(condition)
+        .value(Alias::new("updated_at"), now)
+        .and_where(Expr::col(Alias::new("id")).eq(STATE_ROW_ID))
+        .and_where(Expr::col(Alias::new("processed_generation")).eq(processed_generation))
+        .cond_where(match observed_target {
+            Some(target) => Cond::all().add(Expr::col(Alias::new("target_generation")).eq(target)),
+            None => Cond::all().add(Expr::col(Alias::new("target_generation")).is_null()),
+        })
+        .cond_where(claimable(now))
         .to_owned();
     if transaction
         .execute(backend.build(&update))
@@ -299,19 +298,15 @@ async fn claim(
 }
 
 fn claimable(now: DateTime<Utc>) -> Cond {
-    Cond::any()
+    Cond::all()
         .add(
-            Cond::all()
-                .add(Expr::col(Alias::new("state")).eq(STATE_PENDING))
-                .add(
-                    Cond::any()
-                        .add(Expr::col(Alias::new("available_at")).is_null())
-                        .add(Expr::col(Alias::new("available_at")).lte(now)),
-                ),
+            Cond::any()
+                .add(Expr::col(Alias::new("available_at")).is_null())
+                .add(Expr::col(Alias::new("available_at")).lte(now)),
         )
         .add(
-            Cond::all()
-                .add(Expr::col(Alias::new("state")).eq(STATE_PROCESSING))
+            Cond::any()
+                .add(Expr::col(Alias::new("lease_owner")).is_null())
                 .add(Expr::col(Alias::new("lease_expires_at")).lte(now)),
         )
 }
@@ -333,21 +328,24 @@ async fn update_claim(
 ) -> Result<(), CacheInvalidationRepositoryError> {
     let mut statement = Query::update();
     statement
-        .table(Alias::new("cache_invalidation_outbox"))
+        .table(Alias::new("cache_invalidation_state"))
         .value(Alias::new("lease_owner"), Option::<String>::None)
         .value(
             Alias::new("lease_expires_at"),
             Option::<DateTime<Utc>>::None,
-        );
+        )
+        .value(Alias::new("updated_at"), now);
     match update {
         ClaimUpdate::Complete => {
             statement
-                .value(Alias::new("state"), STATE_PROCESSED)
-                .value(Alias::new("processed_at"), now);
+                .value(Alias::new("processed_generation"), claimed.generation)
+                .value(Alias::new("target_generation"), Option::<i64>::None)
+                .value(Alias::new("attempt_count"), 0_i32)
+                .value(Alias::new("available_at"), Option::<DateTime<Utc>>::None)
+                .value(Alias::new("last_error"), Option::<String>::None);
         }
         ClaimUpdate::Release => {
             statement
-                .value(Alias::new("state"), STATE_PENDING)
                 .value(Alias::new("available_at"), Option::<DateTime<Utc>>::None)
                 .value(Alias::new("last_error"), Option::<String>::None);
         }
@@ -356,7 +354,6 @@ async fn update_claim(
             error,
         } => {
             statement
-                .value(Alias::new("state"), STATE_PENDING)
                 .value(
                     Alias::new("attempt_count"),
                     Expr::col(Alias::new("attempt_count")).add(1),
@@ -366,8 +363,8 @@ async fn update_claim(
         }
     }
     statement
-        .and_where(Expr::col(Alias::new("id")).eq(claimed.id))
-        .and_where(Expr::col(Alias::new("state")).eq(STATE_PROCESSING))
+        .and_where(Expr::col(Alias::new("id")).eq(STATE_ROW_ID))
+        .and_where(Expr::col(Alias::new("target_generation")).eq(claimed.generation))
         .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
         .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now));
     let backend = transaction.get_database_backend();
@@ -380,18 +377,6 @@ async fn update_claim(
         return Err(CacheInvalidationRepositoryError::LostLease);
     }
     Ok(())
-}
-
-fn claimed_from_row(
-    row: &QueryResult,
-    lease_token: String,
-) -> Result<ClaimedCacheInvalidation, DbErr> {
-    Ok(ClaimedCacheInvalidation {
-        id: row.try_get("", "id")?,
-        generation: row.try_get("", "generation")?,
-        attempt_count: row.try_get("", "attempt_count")?,
-        lease_token,
-    })
 }
 
 async fn finish<T>(

@@ -2624,6 +2624,7 @@ async fn change_page_atomically_updates_objects_removals_cursor_and_root_revisio
         .unwrap()
         .try_get::<i64>("", "generation")
         .unwrap();
+    assert!(generation > 0);
     let invalidations = fixture
         .database
         .query_one(
@@ -2641,7 +2642,7 @@ async fn change_page_atomically_updates_objects_removals_cursor_and_root_revisio
         .unwrap()
         .try_get::<i64>("", "count")
         .unwrap();
-    assert_eq!(invalidations, generation);
+    assert_eq!(invalidations, 0);
     let metadata_revision = fixture
         .database
         .query_one(

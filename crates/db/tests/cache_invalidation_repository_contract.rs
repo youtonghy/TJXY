@@ -34,7 +34,7 @@ async fn database() -> DatabaseConnection {
 }
 
 #[tokio::test]
-async fn generation_registration_is_atomic_and_unique() {
+async fn generation_advance_is_atomic_without_legacy_outbox_growth() {
     let database = database().await;
     let transaction = database.begin().await.unwrap();
 
@@ -73,6 +73,77 @@ async fn generation_registration_is_atomic_and_unique() {
     let generation = advance_catalog_generation(&transaction).await.unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(generation, 1);
+
+    let count = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("count"))
+                    .from(Alias::new("cache_invalidation_outbox")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count.try_get::<i64>("", "count").unwrap(), 0);
+}
+
+#[tokio::test]
+async fn claim_coalesces_multiple_generations_to_the_latest() {
+    let database = database().await;
+    let transaction = database.begin().await.unwrap();
+    for expected in 1..=50 {
+        assert_eq!(
+            advance_catalog_generation(&transaction).await.unwrap(),
+            expected
+        );
+    }
+    transaction.commit().await.unwrap();
+    let repository = CacheInvalidationRepository::new(&database);
+
+    let claimed = repository
+        .claim_next("worker", Duration::seconds(5))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(claimed.generation(), 50);
+    repository.complete(&claimed).await.unwrap();
+    assert!(
+        repository
+            .claim_next("worker", Duration::seconds(5))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn generation_created_during_a_claim_becomes_the_next_latest_target() {
+    let database = database().await;
+    let transaction = database.begin().await.unwrap();
+    advance_catalog_generation(&transaction).await.unwrap();
+    transaction.commit().await.unwrap();
+    let repository = CacheInvalidationRepository::new(&database);
+    let first = repository
+        .claim_next("worker", Duration::seconds(5))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let transaction = database.begin().await.unwrap();
+    advance_catalog_generation(&transaction).await.unwrap();
+    advance_catalog_generation(&transaction).await.unwrap();
+    transaction.commit().await.unwrap();
+    repository.complete(&first).await.unwrap();
+
+    let latest = repository
+        .claim_next("worker", Duration::seconds(5))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.generation(), 3);
+    repository.complete(&latest).await.unwrap();
 }
 
 #[tokio::test]

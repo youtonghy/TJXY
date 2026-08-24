@@ -68,6 +68,7 @@ mod m20260821_000067_remove_media_browser_roots;
 mod m20260823_000068_expand_local_metadata_access_mode;
 mod m20260823_000069_passkeys;
 mod m20260825_000070_restore_media_browser_roots;
+mod m20260825_000071_bounded_internal_queues;
 
 use std::collections::HashSet;
 
@@ -194,6 +195,8 @@ async fn validate_current_schema(
         "qr_login_challenges",
         "passkey_credentials",
         "passkey_challenges",
+        "cache_invalidation_state",
+        "work_job_retention_queue",
     ] {
         if !manager.has_table(table).await? {
             missing.push(format!("table {table}"));
@@ -313,6 +316,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260823_000068_expand_local_metadata_access_mode::Migration),
             Box::new(m20260823_000069_passkeys::Migration),
             Box::new(m20260825_000070_restore_media_browser_roots::Migration),
+            Box::new(m20260825_000071_bounded_internal_queues::Migration),
         ]
     }
 }

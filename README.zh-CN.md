@@ -203,6 +203,11 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
 保存在当前平台的配置目录中；可以通过 `TJXY_CONFIG_FILE` 指定明确路径。
 
+当前版本完成的工作任务默认保留 30 天。可将
+`TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
+`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停前向保留。该策略不会登记或
+删除升级前已经终结的任务，也不会缩小现有数据库文件。
+
 ### Jellyfin 客户端播放兼容性
 
 TJXY 实现的是 Jellyfin 的原文件 Direct Play 子集，不提供转封装或转码。

@@ -72,7 +72,7 @@ async fn content_addressed_write_deduplicates_bytes_and_publishes_readable_refer
     assert_eq!(count(&database, "asset_blobs").await, 1);
     assert_eq!(count(&database, "item_assets").await, 2);
     assert_eq!(generation(&database).await, 2);
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 2);
+    assert_eq!(count(&database, "cache_invalidation_outbox").await, 0);
     let reader = AssetReadService::new(database, root.path()).await.unwrap();
     let mut opened = reader
         .original(first, ImageType::Primary, 0)

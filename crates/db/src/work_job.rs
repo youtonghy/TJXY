@@ -1663,6 +1663,7 @@ async fn cancel_job(
     insert_result(
         transaction,
         job_id,
+        now,
         WorkJobResult {
             counters: Value::Object(serde_json::Map::new()),
             warnings: Vec::new(),
@@ -2076,6 +2077,7 @@ async fn fail_terminal_dependents(
             insert_result(
                 transaction,
                 id,
+                now,
                 WorkJobResult {
                     counters: Value::Object(serde_json::Map::new()),
                     warnings: Vec::new(),
@@ -2254,7 +2256,7 @@ async fn complete_in_transaction(
     {
         return Err(WorkJobRepositoryError::LostLease);
     }
-    insert_result(transaction, claimed.id(), result).await
+    insert_result(transaction, claimed.id(), now, result).await
 }
 
 async fn fail_terminal(
@@ -2290,6 +2292,7 @@ async fn fail_terminal(
     insert_result(
         transaction,
         claimed.id(),
+        now,
         WorkJobResult {
             counters: Value::Object(serde_json::Map::new()),
             warnings: Vec::new(),
@@ -2303,6 +2306,7 @@ async fn fail_terminal(
 async fn insert_result(
     transaction: &DatabaseTransaction,
     job_id: WorkJobId,
+    terminal_at: DateTime<Utc>,
     result: WorkJobResult,
 ) -> Result<(), WorkJobRepositoryError> {
     let backend = transaction.get_database_backend();
@@ -2328,6 +2332,28 @@ async fn insert_result(
         ])
         .to_owned();
     transaction.execute(backend.build(&result_insert)).await?;
+    let conflict = if backend == sea_orm::DbBackend::MySql {
+        OnConflict::new()
+            .update_column(Alias::new("job_id"))
+            .to_owned()
+    } else {
+        OnConflict::new().do_nothing().to_owned()
+    };
+    transaction
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("work_job_retention_queue"))
+                    .columns([
+                        Alias::new("job_id"),
+                        Alias::new("terminal_at"),
+                        Alias::new("attempt_count"),
+                    ])
+                    .values_panic([job_id.as_uuid().into(), terminal_at.into(), 0_i32.into()])
+                    .on_conflict(conflict),
+            ),
+        )
+        .await?;
     Ok(())
 }
 

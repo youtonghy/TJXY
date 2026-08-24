@@ -913,7 +913,7 @@ async fn inventory_lists_only_the_requested_scope_commits_pages_and_completes_th
         .unwrap()
         .unwrap();
     assert_eq!(counts.try_get::<i64>("", "objects").unwrap(), 3);
-    assert_eq!(counts.try_get::<i64>("", "events").unwrap(), 4);
+    assert_eq!(counts.try_get::<i64>("", "events").unwrap(), 0);
     let reconciled: i64 = fixture
         .database
         .query_one(Statement::from_string(

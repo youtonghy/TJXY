@@ -2521,7 +2521,7 @@ async fn structure_scope_migration_invalidates_legacy_active_projections() {
         .unwrap()
         .try_get::<i64>("", "count")
         .unwrap();
-    assert_eq!(invalidations, 1);
+    assert_eq!(invalidations, 0);
 }
 
 #[tokio::test]

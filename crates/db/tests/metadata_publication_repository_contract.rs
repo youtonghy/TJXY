@@ -149,7 +149,7 @@ async fn metadata_publication_is_atomic_provenanced_and_replay_safe() {
 
     assert!(first.changed());
     assert!(!replay.changed());
-    assert_eq!(count(&database, "cache_invalidation_outbox").await, 1);
+    assert_eq!(count(&database, "cache_invalidation_outbox").await, 0);
     let backend = database.get_database_backend();
     let row = database
         .query_one(

@@ -23,7 +23,7 @@ use tjxy_db::{
     ImportRuntimeRepository, ImportRuntimeRepositoryError, ImportStagingRepositoryError,
     MetadataPublicationError, MetadataWorkError, SeriesExpandRepositoryError,
     SourceIndexRepositoryError, StorageSyncRepositoryError, WorkJobRepository,
-    WorkJobRepositoryError, WorkTaskKind,
+    WorkJobRepositoryError, WorkRetentionRepository, WorkRetentionRun, WorkTaskKind,
 };
 use tjxy_import::{EmbyApiCredentials, EmbyApiImporter, EmbyImportError};
 use tjxy_storage::{BackendError, StorageBackend};
@@ -238,6 +238,32 @@ pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
                     tracing::error!(
                         "Storage change reconciler could not enumerate backlog: {error}"
                     );
+                    StdDuration::from_secs(1)
+                }
+            };
+            tokio::time::sleep(delay).await;
+        }
+    });
+}
+
+pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retention: StdDuration) {
+    tokio::spawn(async move {
+        let owner = format!("work-retention-{}", Uuid::new_v4());
+        let retention = Duration::from_std(retention).expect("validated work retention duration");
+        let repository = WorkRetentionRepository::new(&database);
+        loop {
+            let delay = match repository
+                .run_once(&owner, retention, Duration::seconds(30))
+                .await
+            {
+                Ok(
+                    WorkRetentionRun::Deleted { .. }
+                    | WorkRetentionRun::CompactedPublication { .. }
+                    | WorkRetentionRun::Deferred { .. },
+                ) => StdDuration::ZERO,
+                Ok(WorkRetentionRun::Idle) => StdDuration::from_secs(60),
+                Err(error) => {
+                    tracing::error!("Work history retention failed: {error}");
                     StdDuration::from_secs(1)
                 }
             };

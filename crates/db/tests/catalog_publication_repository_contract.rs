@@ -502,7 +502,7 @@ async fn structure_publication_is_invisible_until_one_atomic_pointer_switch() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(invalidations.try_get::<i64>("", "count").unwrap(), 1);
+    assert_eq!(invalidations.try_get::<i64>("", "count").unwrap(), 0);
     let season_page = browse
         .items(
             user,

@@ -413,15 +413,8 @@ async fn complete_in_transaction(
     now: DateTime<Utc>,
 ) -> Result<OutboxCompletion, OutboxRepositoryError> {
     let backend = transaction.get_database_backend();
-    let statement = Query::update()
-        .table(Alias::new("storage_change_outbox"))
-        .value(Alias::new("state"), STATE_PROCESSED)
-        .value(Alias::new("processed_at"), now)
-        .value(Alias::new("lease_owner"), Option::<String>::None)
-        .value(
-            Alias::new("lease_expires_at"),
-            Option::<DateTime<Utc>>::None,
-        )
+    let statement = Query::delete()
+        .from_table(Alias::new("storage_change_outbox"))
         .and_where(Expr::col(Alias::new("id")).eq(claimed.id))
         .and_where(Expr::col(Alias::new("state")).eq(STATE_PROCESSING))
         .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
@@ -435,11 +428,8 @@ async fn complete_in_transaction(
     {
         return Err(OutboxRepositoryError::LostLease);
     }
-    let storage_root_id = read_event_root(transaction, claimed.id)
-        .await?
-        .ok_or(OutboxRepositoryError::LostLease)?;
     let reconciled_sync_revision =
-        advance_contiguous_watermark(transaction, storage_root_id).await?;
+        advance_contiguous_watermark(transaction, claimed.storage_root_id).await?;
     Ok(OutboxCompletion {
         reconciled_sync_revision,
     })
@@ -535,26 +525,6 @@ async fn advance_contiguous_watermark(
         reconciled_revision = next;
     }
     Ok(reconciled_revision)
-}
-
-async fn read_event_root(
-    connection: &impl ConnectionTrait,
-    event_id: Uuid,
-) -> Result<Option<StorageRootId>, DbErr> {
-    let statement = Query::select()
-        .column(Alias::new("storage_root_id"))
-        .from(Alias::new("storage_change_outbox"))
-        .and_where(Expr::col(Alias::new("id")).eq(event_id))
-        .to_owned();
-    let backend = connection.get_database_backend();
-    connection
-        .query_one(backend.build(&statement))
-        .await?
-        .map(|row| {
-            row.try_get("", "storage_root_id")
-                .map(StorageRootId::from_uuid)
-        })
-        .transpose()
 }
 
 async fn read_root_revisions(
