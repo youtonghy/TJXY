@@ -22,6 +22,16 @@ vi.mock('./libraryApi', () => ({
   updateLibraryPolicy: vi.fn(),
 }));
 vi.mock('./filesystemApi', () => ({ attachFilesystemFolder: vi.fn() }));
+vi.mock('./FolderPickerDialog', () => ({
+  FolderPickerDialog: ({ isOpen, onSelect }: {
+    isOpen: boolean;
+    onSelect: (selection: { rootId: string; relativePath: string }) => void;
+  }) => isOpen ? (
+    <button onClick={() => { onSelect({ rootId: 'root-2', relativePath: 'Movies' }); }} type="button">
+      Choose media fixture
+    </button>
+  ) : null,
+}));
 
 const listMock = vi.mocked(listLibraries);
 const renameMock = vi.mocked(renameLibrary);
@@ -244,16 +254,16 @@ it('sends all advanced policy values as one versioned update', async () => {
   });
 });
 
-it('attaches an absolute server folder path', async () => {
+it('attaches a folder selected through the server folder picker', async () => {
   renderEdit();
   const user = userEvent.setup();
   await loadedNameInput();
 
-  await user.type(screen.getByRole('textbox', { name: 'Absolute folder path' }), '/mnt/media/Movies');
   await user.click(screen.getByRole('button', { name: 'Add folder' }));
+  await user.click(screen.getByRole('button', { name: 'Choose media fixture' }));
 
   await waitFor(() => {
-    expect(attachMock).toHaveBeenCalledWith(libraryId, '/mnt/media/Movies');
+    expect(attachMock).toHaveBeenCalledWith(libraryId, { rootId: 'root-2', relativePath: 'Movies' });
   });
 });
 

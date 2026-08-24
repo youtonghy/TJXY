@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  FieldError,
   Input,
   Label,
   ListBox,
@@ -13,19 +14,23 @@ import {
 } from '@heroui/react';
 import {
   KeyRound,
+  FolderCog,
   Image as ImageIcon,
   Palette,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Server,
+  Trash2,
+  TriangleAlert,
   Upload,
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
 import { useNotify } from 'ra-core';
 
 import { PageHeader } from '../ui/PageHeader';
-import { useTranslate } from './i18n';
+import { interpolate, useTranslate } from './i18n';
 import { useSystemLocale } from './SystemLocaleProvider';
 import {
   getSystemSettings,
@@ -44,6 +49,8 @@ const initialSettings: SystemSettings = {
   publicUrl: '',
   listenHost: '127.0.0.1',
   port: 8096,
+  mediaBrowserRoots: [],
+  invalidMediaBrowserRootIndexes: [],
   passkeyEnabled: false,
   revision: 0,
   restartRequired: false,
@@ -51,6 +58,7 @@ const initialSettings: SystemSettings = {
     siteTitle: false,
     publicUrl: false,
     listenAddress: false,
+    mediaBrowserRoots: false,
   },
   theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
 };
@@ -68,7 +76,12 @@ export function SystemSettingsPage() {
   const load = useCallback(() => {
     setLoading(true);
     void getSystemSettings()
-      .then(setSettings)
+      .then((loaded) => {
+        setSettings(loaded);
+        if (loaded.invalidMediaBrowserRootIndexes.length > 0) {
+          notify(tr('admin.system.mediaBrowserRootsUnavailable'), { type: 'warning' });
+        }
+      })
       .catch(() => { notify(tr('admin.system.saveFailed'), { type: 'error' }); })
       .finally(() => { setLoading(false); });
   }, [notify, tr]);
@@ -81,7 +94,10 @@ export function SystemSettingsPage() {
 
   const save = () => {
     setSaving(true);
-    void saveSystemSettings(settings)
+    void saveSystemSettings({
+      ...settings,
+      mediaBrowserRoots: settings.mediaBrowserRoots.map((root) => root.trim()).filter(Boolean),
+    })
       .then((saved) => {
         setSettings(saved);
         setLocale(saved.locale);
@@ -243,6 +259,32 @@ export function SystemSettingsPage() {
           {(settings.environmentOverrides.listenAddress || settings.environmentOverrides.publicUrl) && (
             <p className="text-xs text-warning md:col-span-2">{tr('admin.system.environmentOverride')}</p>
           )}
+        </Card.Content>
+      </Card>
+
+      <Card>
+        <Card.Header className="items-start gap-3">
+          <FolderCog className="mt-0.5 size-5 shrink-0 text-accent" />
+          <div><Card.Title>{tr('admin.system.mediaBrowser')}</Card.Title><Card.Description>{tr('admin.system.mediaBrowserDescription')}</Card.Description></div>
+        </Card.Header>
+        <Card.Content className="space-y-3">
+          {settings.invalidMediaBrowserRootIndexes.length > 0 && (
+            <Alert role="alert" status="warning"><Alert.Indicator><TriangleAlert className="size-4" /></Alert.Indicator><Alert.Content><Alert.Title>{tr('admin.system.mediaBrowserRootsUnavailable')}</Alert.Title><Alert.Description>{tr('admin.system.mediaBrowserRootsUnavailableDescription')}</Alert.Description></Alert.Content></Alert>
+          )}
+          {settings.mediaBrowserRoots.map((root, index) => (
+            <div className="flex items-end gap-2" key={`media-browser-root-${String(index)}`}>
+              <TextField className="min-w-0 flex-1" fullWidth isDisabled={settings.environmentOverrides.mediaBrowserRoots} isInvalid={settings.invalidMediaBrowserRootIndexes.includes(index)}>
+                <Label>{interpolate(tr('admin.system.mediaBrowserRoot'), { index: String(index + 1) })}</Label>
+                <Input placeholder="/srv/media" value={root} onChange={(event) => { const next = [...settings.mediaBrowserRoots]; next[index] = event.currentTarget.value; patch('mediaBrowserRoots', next); }} />
+                {settings.invalidMediaBrowserRootIndexes.includes(index) && <FieldError>{tr('admin.system.mediaBrowserRootUnavailable')}</FieldError>}
+              </TextField>
+              <Button aria-label={interpolate(tr('admin.system.removeMediaBrowserRoot'), { index: String(index + 1) })} isDisabled={settings.environmentOverrides.mediaBrowserRoots} isIconOnly onPress={() => { patch('mediaBrowserRoots', settings.mediaBrowserRoots.filter((_, itemIndex) => itemIndex !== index)); }} variant="ghost"><Trash2 className="size-4" /></Button>
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+            <p className="text-xs text-muted">{tr('admin.system.mediaBrowserHint')}</p>
+            <Button isDisabled={settings.environmentOverrides.mediaBrowserRoots} onPress={() => { patch('mediaBrowserRoots', [...settings.mediaBrowserRoots, '']); }} size="sm" variant="secondary"><Plus className="size-4" />{tr('admin.system.addMediaBrowserRoot')}</Button>
+          </div>
         </Card.Content>
       </Card>
 

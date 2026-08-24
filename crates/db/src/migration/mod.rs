@@ -67,6 +67,7 @@ mod m20260818_000066_strm_locator;
 mod m20260821_000067_remove_media_browser_roots;
 mod m20260823_000068_expand_local_metadata_access_mode;
 mod m20260823_000069_passkeys;
+mod m20260825_000070_restore_media_browser_roots;
 
 use std::collections::HashSet;
 
@@ -311,6 +312,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260821_000067_remove_media_browser_roots::Migration),
             Box::new(m20260823_000068_expand_local_metadata_access_mode::Migration),
             Box::new(m20260823_000069_passkeys::Migration),
+            Box::new(m20260825_000070_restore_media_browser_roots::Migration),
         ]
     }
 }

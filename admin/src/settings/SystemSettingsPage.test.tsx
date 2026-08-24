@@ -32,6 +32,8 @@ const settings = {
   publicUrl: 'https://media.example.com',
   listenHost: '127.0.0.1',
   port: 8096,
+  mediaBrowserRoots: ['/srv/media'],
+  invalidMediaBrowserRootIndexes: [],
   passkeyEnabled: false,
   revision: 2,
   restartRequired: false,
@@ -39,6 +41,7 @@ const settings = {
     siteTitle: false,
     publicUrl: false,
     listenAddress: false,
+    mediaBrowserRoots: false,
   },
   theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
 };

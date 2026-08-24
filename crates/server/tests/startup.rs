@@ -830,12 +830,16 @@ async fn initialization_migrates_bootstraps_auth_and_only_then_reports_ready() {
 }
 
 #[tokio::test]
-async fn startup_ignores_removed_media_browser_root_settings() {
+async fn media_browser_roots_load_from_database_and_skip_unavailable_entries() {
     let database = reconnectable_test_database().await.unwrap();
     tjxy_db::Migrator::up(database.connection(), None)
         .await
         .unwrap();
-    let settings = SystemSettingsInput::default();
+    let database_root = TempDir::new().unwrap();
+    let settings = SystemSettingsInput {
+        media_browser_roots: vec![database_root.path().to_string_lossy().into_owned()],
+        ..SystemSettingsInput::default()
+    };
     SystemSettingsRepository::new(database.connection())
         .put(&settings, None)
         .await
@@ -851,7 +855,57 @@ async fn startup_ignores_removed_media_browser_root_settings() {
     )
     .await
     .unwrap();
-    let _ = state;
+    let app = build_router(state);
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header(
+                    header::AUTHORIZATION,
+                    r#"MediaBrowser Client="Test", Device="Test", DeviceId="startup", Version="1""#,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": "Admin", "Pw": "first password"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let login: Value =
+        serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let token = login["AccessToken"].as_str().unwrap();
+    let roots = app
+        .oneshot(
+            Request::builder()
+                .uri("/Admin/Filesystem/Roots")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let roots: Value =
+        serde_json::from_slice(&roots.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(roots.as_array().unwrap().len(), 1);
+    assert_eq!(
+        roots[0]["Name"],
+        database_root.path().file_name().unwrap().to_str().unwrap()
+    );
+
+    let settings = SystemSettingsInput {
+        media_browser_roots: vec![format!("/definitely/missing/tjxy-{}", Uuid::new_v4())],
+        ..settings
+    };
+    SystemSettingsRepository::new(database.connection())
+        .put(&settings, Some(1))
+        .await
+        .unwrap();
 
     initialize(
         StartupOptions::new(

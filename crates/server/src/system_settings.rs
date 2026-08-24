@@ -68,6 +68,8 @@ struct AdminSystemSettingsDto {
     public_url: Option<String>,
     listen_host: String,
     port: u16,
+    media_browser_roots: Vec<String>,
+    invalid_media_browser_root_indexes: Vec<usize>,
     passkey_enabled: bool,
     revision: i64,
     restart_required: bool,
@@ -82,6 +84,7 @@ struct EnvironmentOverridesDto {
     site_title: bool,
     public_url: bool,
     listen_address: bool,
+    media_browser_roots: bool,
 }
 
 #[derive(Serialize)]
@@ -108,6 +111,7 @@ struct UpdateSystemSettingsRequest {
     public_url: Option<String>,
     listen_host: String,
     port: u16,
+    media_browser_roots: Option<Vec<String>>,
     passkey_enabled: bool,
     revision: Option<i64>,
 }
@@ -173,7 +177,10 @@ pub(crate) async fn get_admin(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match service.get().await {
-        Ok(record) => Json(admin_dto(record.as_ref(), false)).into_response(),
+        Ok(record) => {
+            let invalid = invalid_media_browser_root_indexes(record.as_ref()).await;
+            Json(admin_dto(record.as_ref(), false, invalid)).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -293,6 +300,30 @@ pub(crate) async fn put_admin(
     let Ok(previous) = service.get().await else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    let browser_roots_overridden = environment_media_browser_roots().is_some();
+    let media_browser_roots = if browser_roots_overridden {
+        previous
+            .as_ref()
+            .map_or_else(Vec::new, |value| value.media_browser_roots().to_vec())
+    } else {
+        request.media_browser_roots.unwrap_or_else(|| {
+            previous
+                .as_ref()
+                .map_or_else(Vec::new, |value| value.media_browser_roots().to_vec())
+        })
+    };
+    if !browser_roots_overridden && !media_browser_roots.is_empty() {
+        let roots = media_browser_roots
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if tjxy_application::FilesystemBrowser::from_roots(roots)
+            .await
+            .is_err()
+        {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    }
     let input = SystemSettingsInput {
         locale: request.locale,
         site_title: request.site_title,
@@ -302,14 +333,17 @@ pub(crate) async fn put_admin(
         public_url: request.public_url,
         listen_host: request.listen_host,
         port: request.port,
+        media_browser_roots,
         passkey_enabled: request.passkey_enabled,
     };
     match service.put(&input, request.revision).await {
         Ok(record) => {
             let restart_required = previous.as_ref().is_none_or(|value| {
-                value.listen_host() != record.listen_host() || value.port() != record.port()
+                value.listen_host() != record.listen_host()
+                    || value.port() != record.port()
+                    || value.media_browser_roots() != record.media_browser_roots()
             });
-            Json(admin_dto(Some(&record), restart_required)).into_response()
+            Json(admin_dto(Some(&record), restart_required, Vec::new())).into_response()
         }
         Err(error) => repository_error(&error),
     }
@@ -621,8 +655,15 @@ fn admin_theme_dto(record: Option<&SiteThemeSettingsRecord>) -> AdminThemeSettin
 fn admin_dto(
     record: Option<&SystemSettingsRecord>,
     restart_required: bool,
+    invalid_media_browser_root_indexes: Vec<usize>,
 ) -> AdminSystemSettingsDto {
     let fallback = defaults();
+    let roots = environment_media_browser_roots().unwrap_or_else(|| {
+        record.map_or_else(
+            || fallback.media_browser_roots.clone(),
+            |value| value.media_browser_roots().to_vec(),
+        )
+    });
     AdminSystemSettingsDto {
         locale: record.map_or(fallback.locale, |value| value.locale().to_owned()),
         site_title: env::var("TJXY_SERVER_NAME").unwrap_or_else(|_| {
@@ -640,6 +681,8 @@ fn admin_dto(
         }),
         listen_host: record.map_or(fallback.listen_host, |value| value.listen_host().to_owned()),
         port: record.map_or(fallback.port, SystemSettingsRecord::port),
+        media_browser_roots: roots,
+        invalid_media_browser_root_indexes,
         passkey_enabled: record.map_or(
             fallback.passkey_enabled,
             SystemSettingsRecord::passkey_enabled,
@@ -650,6 +693,7 @@ fn admin_dto(
             site_title: env::var_os("TJXY_SERVER_NAME").is_some(),
             public_url: env::var_os("TJXY_PUBLIC_ADDRESS").is_some(),
             listen_address: env::var_os("TJXY_BIND").is_some(),
+            media_browser_roots: env::var_os("TJXY_MEDIA_BROWSER_ROOTS").is_some(),
         },
         supported_locales: ["zh-CN", "en-US"],
     }
@@ -663,6 +707,7 @@ fn repository_error(error: &SystemSettingsRepositoryError) -> Response {
         | SystemSettingsRepositoryError::InvalidPublicUrl
         | SystemSettingsRepositoryError::InvalidListenHost
         | SystemSettingsRepositoryError::InvalidPort
+        | SystemSettingsRepositoryError::InvalidMediaBrowserRoots
         | SystemSettingsRepositoryError::InvalidRevision => StatusCode::BAD_REQUEST.into_response(),
         SystemSettingsRepositoryError::Database(_)
         | SystemSettingsRepositoryError::MissingPersistedSettings
@@ -670,6 +715,33 @@ fn repository_error(error: &SystemSettingsRepositoryError) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+pub(crate) fn configured_media_browser_roots(
+    record: Option<&SystemSettingsRecord>,
+) -> Vec<PathBuf> {
+    environment_media_browser_roots()
+        .unwrap_or_else(|| {
+            record.map_or_else(Vec::new, |value| value.media_browser_roots().to_vec())
+        })
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+async fn invalid_media_browser_root_indexes(record: Option<&SystemSettingsRecord>) -> Vec<usize> {
+    let roots = configured_media_browser_roots(record);
+    tjxy_application::FilesystemBrowser::from_available_roots(roots)
+        .await
+        .1
+}
+
+fn environment_media_browser_roots() -> Option<Vec<String>> {
+    env::var_os("TJXY_MEDIA_BROWSER_ROOTS").map(|value| {
+        env::split_paths(&value)
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    })
 }
 
 fn theme_repository_error(error: &SiteThemeSettingsRepositoryError) -> Response {

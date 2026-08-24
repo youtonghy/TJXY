@@ -67,6 +67,8 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
     publicUrl: '',
     listenHost: '127.0.0.1',
     port: 8096,
+    mediaBrowserRoots: [],
+    invalidMediaBrowserRootIndexes: [],
     passkeyEnabled: false,
     revision: 0,
     restartRequired: false,
@@ -74,6 +76,7 @@ export function SystemLocaleProvider({ children }: { children: ReactNode }) {
       siteTitle: false,
       publicUrl: false,
       listenAddress: false,
+      mediaBrowserRoots: false,
     },
     theme: { id: 'classic', schemaVersion: 1, options: {}, revision: 0 },
   }));

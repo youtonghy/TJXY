@@ -410,6 +410,7 @@ impl SetupCoordinator {
         settings
             .put(
                 &SystemSettingsInput {
+                    media_browser_roots: Vec::new(),
                     locale: pending.profile().locale().to_owned(),
                     site_title: pending.profile().site_title().to_owned(),
                     site_subtitle: pending.profile().site_subtitle().to_owned(),

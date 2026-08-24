@@ -20,10 +20,10 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tjxy_application::{
-    AssetReadService, AuthService, CatalogQueryService, LibraryService, MediaCollectionService,
-    MediaInspector, MediaReadService, PlaybackTicketService, PlaystateService, ProbeInput,
-    ProbeService, ProbeServiceError, SourceIndexService, StorageBackendRegistry, SystemClock,
-    TaskService, UserDataService,
+    AssetReadService, AuthService, CatalogQueryService, FilesystemBrowser, LibraryService,
+    MediaCollectionService, MediaInspector, MediaReadService, PlaybackTicketService,
+    PlaystateService, ProbeInput, ProbeService, ProbeServiceError, SourceIndexService,
+    StorageBackendRegistry, SystemClock, TaskService, UserDataService,
 };
 use tjxy_common::{CatalogItemId, SortKey};
 use tjxy_server::{AppState, ServerIdentity, build_router};
@@ -381,6 +381,11 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
     let identity = ServerIdentity::new(Uuid::parse_str(SERVER_ID).unwrap(), "TJXY", "Linux")
         .with_startup_wizard_completed(true);
     let fixture = filesystem_fixture().await;
+    let filesystem_browser = Arc::new(
+        FilesystemBrowser::from_roots([fixture.library_backend.root_path()])
+            .await
+            .unwrap(),
+    );
     let media_account = Uuid::new_v4();
     let (
         cloud_account,
@@ -410,6 +415,7 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
                 .with_auth(auth)
                 .with_catalog(catalog)
                 .with_libraries(libraries)
+                .with_filesystem_browser(filesystem_browser)
                 .with_assets(asset_reader)
                 .with_media(media_reader)
                 .with_playback_tickets(playback_tickets)
@@ -440,6 +446,36 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
         cloud_subtitle_object_id,
         cloud_backend,
     }
+}
+
+#[tokio::test]
+async fn filesystem_browser_requires_an_administrator_and_exposes_only_relative_paths() {
+    let app = test_app().await;
+    let response = get(&app.router, "/Admin/Filesystem/Roots", None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let (_, _, token) = login(&app.router).await;
+    let response = get(&app.router, "/Admin/Filesystem/Roots", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let roots: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(roots.as_array().unwrap().len(), 1);
+    assert_eq!(roots[0]["Name"], "library");
+    assert!(roots[0].get("Path").is_none());
+    let root_id = roots[0]["Id"].as_str().unwrap();
+
+    let response = get(
+        &app.router,
+        &format!("/Admin/Filesystem/Directories?RootId={root_id}&Path="),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["Items"][0]["Name"], "Movies");
+    assert_eq!(page["Items"][0]["RelativePath"], "Movies");
+    assert!(page["Items"][0].get("Path").is_none());
 }
 
 async fn login(router: &axum::Router) -> (Uuid, Uuid, String) {

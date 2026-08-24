@@ -5,10 +5,11 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
-    CatalogQueryService, DirectMetadataReadService, DisplayPreferencesService, LibraryService,
-    MediaCollectionService, MediaReadService, MetadataImageFetchError, MetadataImportService,
-    MetadataResolveService, PlaybackTicketService, PlaystateService, ProbeService,
-    ReqwestMetadataImageFetcher, StorageBackendRegistry, SystemClock, TaskService, UserDataService,
+    CatalogQueryService, DirectMetadataReadService, DisplayPreferencesService, FilesystemBrowser,
+    LibraryService, MediaCollectionService, MediaReadService, MetadataImageFetchError,
+    MetadataImportService, MetadataResolveService, PlaybackTicketService, PlaystateService,
+    ProbeService, ReqwestMetadataImageFetcher, StorageBackendRegistry, SystemClock, TaskService,
+    UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
@@ -16,7 +17,7 @@ use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
     MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
     StorageAccountRepository, StorageAccountRepositoryError, StorageCredentialRepository,
-    StorageCredentialRepositoryError, SystemSettingsRepositoryError,
+    StorageCredentialRepositoryError, SystemSettingsRepository, SystemSettingsRepositoryError,
 };
 use tjxy_metadata::{
     MetadataError, MetadataProvider, MusicBrainzProvider, ReloadableMetadataProvider,
@@ -491,6 +492,17 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
             options.assets_dir_source = "Database";
         }
     }
+    let settings = SystemSettingsRepository::new(&database).get().await?;
+    let browser_roots = crate::system_settings::configured_media_browser_roots(settings.as_ref());
+    let (filesystem_browser, invalid_root_indexes) =
+        FilesystemBrowser::from_available_roots(browser_roots).await;
+    if !invalid_root_indexes.is_empty() {
+        tracing::error!(
+            "Filesystem browser skipped unavailable root indexes: {:?}",
+            invalid_root_indexes
+        );
+    }
+    let filesystem_browser = filesystem_browser.map(Arc::new);
     load_persisted_tmdb_settings(
         &database,
         metadata_settings_cipher.as_deref(),
@@ -690,7 +702,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let display_preferences = Arc::new(DisplayPreferencesService::new(database.clone()));
     let user_data = Arc::new(UserDataService::new(database.clone()));
     let warm_home_cache = cache.is_enabled();
-    let state = AppState::new(
+    let mut state = AppState::new(
         options
             .identity
             .with_startup_wizard_completed(has_enabled_admin),
@@ -723,6 +735,9 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_realtime_events(realtime_events)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_ready(true);
+    if let Some(browser) = filesystem_browser {
+        state = state.with_filesystem_browser(browser);
+    }
     if warm_home_cache {
         worker::spawn_home_cache_warm_worker(auth, catalog);
     }

@@ -218,6 +218,8 @@ const zhCN: Record<string, string> = {
   'admin.system.mediaBrowserHint': '修改将在 TJXY 重启后生效，不会移除已有媒体库绑定。',
   'admin.system.mediaBrowserRoot': '媒体浏览根目录 {index}',
   'admin.system.mediaBrowserRootUnavailable': '该目录不存在、未挂载或当前无法访问。',
+  'admin.system.mediaBrowserRootsUnavailable': '部分媒体浏览根目录不可用',
+  'admin.system.mediaBrowserRootsUnavailableDescription': '请修复或移除标记的目录，然后重启 TJXY。',
   'admin.system.removeMediaBrowserRoot': '移除媒体浏览根目录 {index}',
   'admin.system.network': '网络',
   'admin.system.networkDescription': '监听地址或端口的修改将在 TJXY 重启后生效。',

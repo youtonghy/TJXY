@@ -112,6 +112,8 @@ pub struct AddVirtualFolderDto {
     library_options: Option<CreateLibraryOptions>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    filesystem_selection: Option<FilesystemSelectionDto>,
 }
 
 impl AddVirtualFolderDto {
@@ -124,6 +126,30 @@ impl AddVirtualFolderDto {
     pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
     }
+
+    #[must_use]
+    pub const fn filesystem_selection(&self) -> Option<&FilesystemSelectionDto> {
+        self.filesystem_selection.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct FilesystemSelectionDto {
+    root_id: Uuid,
+    relative_path: String,
+}
+
+impl FilesystemSelectionDto {
+    #[must_use]
+    pub const fn root_id(&self) -> Uuid {
+        self.root_id
+    }
+
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -132,6 +158,8 @@ pub struct AttachVirtualFolderPathDto {
     library_id: Uuid,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    filesystem_selection: Option<FilesystemSelectionDto>,
 }
 
 impl AttachVirtualFolderPathDto {
@@ -143,6 +171,11 @@ impl AttachVirtualFolderPathDto {
     #[must_use]
     pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn filesystem_selection(&self) -> Option<&FilesystemSelectionDto> {
+        self.filesystem_selection.as_ref()
     }
 }
 
