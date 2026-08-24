@@ -147,9 +147,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             asset_suffix: linux-x86_64-gnu
+            runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             asset_suffix: linux-aarch64-gnu
-    runs-on: ubuntu-22.04
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -159,11 +161,6 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
           rustup default "$RUST_VERSION"
           rustup target add "${{ matrix.target }}"
-      - name: Install ARM64 cross build dependencies
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gcc-aarch64-linux-gnu make perl
       - name: Download frontend distribution
         uses: actions/download-artifact@v5
         with:
@@ -171,11 +168,6 @@ jobs:
           path: admin/dist
       - name: Build Linux binaries
         run: |
-          if [ "${{ matrix.target }}" = 'aarch64-unknown-linux-gnu' ]; then
-            export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-          fi
           cargo build --profile dist --locked --target "${{ matrix.target }}" -p tjxy-server --bin tjxy-server
           cargo build --profile dist --locked --target "${{ matrix.target }}" -p tjxy-tui --bin tjxy-tui
       - name: Package portable release
