@@ -38,6 +38,7 @@ mod passkey;
 mod playback_ticket;
 mod playstate;
 mod probe;
+mod queue_maintenance;
 mod series_expand;
 mod site_theme_settings;
 mod source_index;
@@ -156,8 +157,9 @@ pub use metadata_work::{
 };
 pub use migration::{Migrator, SchemaMigrationError, migrate_database};
 pub use outbox::{
-    BackloggedStorageRoot, ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason,
-    OutboxRepository, OutboxRepositoryError, SystemClock,
+    BackloggedStorageRoot, ClaimedOutboxEvent, OutboxClock, OutboxCompletion,
+    OutboxFailureDisposition, OutboxFailureReason, OutboxRepository, OutboxRepositoryError,
+    SystemClock,
 };
 pub use passkey::{PasskeyChallenge, PasskeyCredential, PasskeyRepository, PasskeyRepositoryError};
 pub use playback_ticket::{
@@ -166,6 +168,9 @@ pub use playback_ticket::{
 };
 pub use playstate::{PlaybackSessionCommit, PlaystateRepository, PlaystateRepositoryError};
 pub use probe::{ProbeCandidate, ProbeRepository, ProbeRepositoryError, ProbeResult, ProbedStream};
+pub use queue_maintenance::{
+    QueueMaintenanceError, QueueMaintenanceRepository, QueueMaintenanceRun,
+};
 pub use series_expand::{
     SeriesExpandRepository, SeriesExpandRepositoryError, SeriesExpandSnapshot, SeriesStorageObject,
 };

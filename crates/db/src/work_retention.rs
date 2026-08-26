@@ -44,6 +44,12 @@ impl<'connection> WorkRetentionRepository<'connection> {
         let claim = claim_next(&transaction, lease_owner, now, cutoff, lease_expires_at).await;
         let claimed = finish(transaction, claim).await?;
         let Some(claimed) = claimed else {
+            let transaction = self.database.begin().await?;
+            let enrollment = enroll_legacy(&transaction, now, cutoff).await;
+            let count = finish(transaction, enrollment).await?;
+            if count != 0 {
+                return Ok(WorkRetentionRun::EnrolledLegacy { count });
+            }
             return Ok(WorkRetentionRun::Idle);
         };
 
@@ -56,9 +62,111 @@ impl<'connection> WorkRetentionRepository<'connection> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkRetentionRun {
     Idle,
+    EnrolledLegacy { count: u64 },
     Deleted { job_id: Uuid },
     CompactedPublication { job_id: Uuid },
     Deferred { job_id: Uuid },
+}
+
+async fn enroll_legacy(
+    transaction: &DatabaseTransaction,
+    now: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+) -> Result<u64, WorkRetentionError> {
+    const ENROLL_LIMIT: u64 = 1_000;
+    let backend = transaction.get_database_backend();
+    let job = Alias::new("legacy_job");
+    let queue = Alias::new("legacy_queue");
+    let publication = Alias::new("legacy_publication");
+    let rows = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        (job.clone(), Alias::new("id")),
+                        (job.clone(), Alias::new("completed_at")),
+                        (job.clone(), Alias::new("created_at")),
+                    ])
+                    .from_as(Alias::new("work_jobs"), job.clone())
+                    .join_as(
+                        JoinType::LeftJoin,
+                        Alias::new("work_job_retention_queue"),
+                        queue.clone(),
+                        Expr::col((queue.clone(), Alias::new("job_id")))
+                            .equals((job.clone(), Alias::new("id"))),
+                    )
+                    .join_as(
+                        JoinType::LeftJoin,
+                        Alias::new("catalog_publications"),
+                        publication.clone(),
+                        Expr::col((publication.clone(), Alias::new("job_id")))
+                            .equals((job.clone(), Alias::new("id"))),
+                    )
+                    .and_where(Expr::col((job.clone(), Alias::new("state"))).is_in(TERMINAL_STATES))
+                    .cond_where(
+                        Cond::any()
+                            .add(Expr::col((job.clone(), Alias::new("completed_at"))).lte(cutoff))
+                            .add(
+                                Cond::all()
+                                    .add(
+                                        Expr::col((job.clone(), Alias::new("completed_at")))
+                                            .is_null(),
+                                    )
+                                    .add(
+                                        Cond::any()
+                                            .add(
+                                                Expr::col((job.clone(), Alias::new("created_at")))
+                                                    .lte(cutoff),
+                                            )
+                                            .add(
+                                                Expr::col((job.clone(), Alias::new("created_at")))
+                                                    .is_null(),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .and_where(Expr::col((queue, Alias::new("job_id"))).is_null())
+                    .and_where(Expr::col((publication, Alias::new("job_id"))).is_null())
+                    .order_by((job.clone(), Alias::new("completed_at")), Order::Asc)
+                    .order_by((job, Alias::new("id")), Order::Asc)
+                    .limit(ENROLL_LIMIT),
+            ),
+        )
+        .await?;
+    let mut enrolled = 0_u64;
+    for row in rows {
+        let job_id: Uuid = row.try_get("", "id")?;
+        let terminal_at = row
+            .try_get::<Option<DateTime<Utc>>>("", "completed_at")?
+            .or(row.try_get::<Option<DateTime<Utc>>>("", "created_at")?)
+            .unwrap_or(now);
+        let conflict = if backend == sea_orm::DbBackend::MySql {
+            sea_orm::sea_query::OnConflict::new()
+                .update_column(Alias::new("job_id"))
+                .to_owned()
+        } else {
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned()
+        };
+        enrolled += transaction
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("work_job_retention_queue"))
+                        .columns([
+                            Alias::new("job_id"),
+                            Alias::new("terminal_at"),
+                            Alias::new("attempt_count"),
+                        ])
+                        .values_panic([job_id.into(), terminal_at.into(), 0_i32.into()])
+                        .on_conflict(conflict),
+                ),
+            )
+            .await?
+            .rows_affected();
+    }
+    Ok(enrolled)
 }
 
 struct RetentionClaim {

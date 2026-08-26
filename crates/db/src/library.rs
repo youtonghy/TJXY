@@ -100,6 +100,7 @@ impl CreatedFilesystemLibrary {
 pub struct FilesystemRootConfiguration {
     account_id: Uuid,
     root_path: String,
+    provider_object_id: String,
 }
 
 impl FilesystemRootConfiguration {
@@ -111,6 +112,11 @@ impl FilesystemRootConfiguration {
     #[must_use]
     pub fn root_path(&self) -> &str {
         &self.root_path
+    }
+
+    #[must_use]
+    pub fn provider_object_id(&self) -> &str {
+        &self.provider_object_id
     }
 }
 
@@ -514,6 +520,9 @@ impl<'connection> LibraryRepository<'connection> {
     ) -> Result<Vec<FilesystemRootConfiguration>, LibraryRepositoryError> {
         let config = Alias::new("filesystem_config");
         let account = Alias::new("filesystem_account");
+        let root = Alias::new("filesystem_root");
+        let relation = Alias::new("filesystem_root_relation");
+        let object = Alias::new("filesystem_root_object");
         let query = Query::select()
             .expr_as(
                 Expr::col((account.clone(), Alias::new("id"))),
@@ -523,6 +532,14 @@ impl<'connection> LibraryRepository<'connection> {
                 Expr::col((config.clone(), Alias::new("root_path"))),
                 Alias::new("root_path"),
             )
+            .expr_as(
+                Expr::col((object.clone(), Alias::new("provider_object_id"))),
+                Alias::new("provider_object_id"),
+            )
+            .expr_as(
+                Expr::col((root.clone(), Alias::new("provider_root_id"))),
+                Alias::new("provider_root_id"),
+            )
             .from_as(Alias::new("filesystem_storage_configs"), config.clone())
             .join_as(
                 JoinType::InnerJoin,
@@ -531,7 +548,30 @@ impl<'connection> LibraryRepository<'connection> {
                 Expr::col((account.clone(), Alias::new("id")))
                     .equals((config, Alias::new("storage_account_id"))),
             )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_roots"),
+                root.clone(),
+                Expr::col((root.clone(), Alias::new("storage_account_id")))
+                    .equals((account.clone(), Alias::new("id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_root_objects"),
+                relation.clone(),
+                Expr::col((relation.clone(), Alias::new("storage_root_id")))
+                    .equals((root, Alias::new("id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_objects"),
+                object.clone(),
+                Expr::col((object.clone(), Alias::new("id")))
+                    .equals((relation.clone(), Alias::new("storage_object_id"))),
+            )
+            .and_where(Expr::col((relation, Alias::new("parent_storage_object_id"))).is_null())
             .and_where(Expr::col((account.clone(), Alias::new("provider"))).eq("filesystem"))
+            .and_where(Expr::col((object, Alias::new("provider_drive_id"))).eq("local"))
             .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
             .order_by(Alias::new("storage_account_id"), Order::Asc)
             .to_owned();
@@ -541,9 +581,15 @@ impl<'connection> LibraryRepository<'connection> {
             .await?
             .into_iter()
             .map(|row| {
+                let provider_object_id: String = row.try_get("", "provider_object_id")?;
+                let provider_root_id: String = row.try_get("", "provider_root_id")?;
+                if provider_object_id != provider_root_id {
+                    return Err(LibraryRepositoryError::InvalidFilesystemRoot);
+                }
                 Ok(FilesystemRootConfiguration {
                     account_id: row.try_get("", "storage_account_id")?,
                     root_path: row.try_get("", "root_path")?,
+                    provider_object_id,
                 })
             })
             .collect()

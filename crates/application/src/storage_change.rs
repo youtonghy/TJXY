@@ -2,8 +2,9 @@ use sea_orm::DatabaseConnection;
 use thiserror::Error;
 use tjxy_common::StorageRootId;
 use tjxy_db::{
-    ClaimedOutboxEvent, OutboxCompletion, OutboxFailureReason, OutboxRepository,
-    OutboxRepositoryError, StorageChangeProjectionError, StorageChangeProjectionRepository,
+    ClaimedOutboxEvent, OutboxCompletion, OutboxFailureDisposition, OutboxFailureReason,
+    OutboxRepository, OutboxRepositoryError, StorageChangeProjectionError,
+    StorageChangeProjectionRepository,
 };
 use uuid::Uuid;
 
@@ -87,13 +88,21 @@ impl StorageChangeProjector {
             Ok(_) => Ok(ReconcileNext::Processed),
             Err(error) => {
                 if !projector_error_is_lost_lease(&error) {
-                    outbox
+                    let disposition = outbox
                         .fail(
                             &claimed,
                             outbox_retry_delay(claimed.attempt_count()),
                             outbox_failure_reason(&error),
                         )
                         .await?;
+                    if disposition == OutboxFailureDisposition::DeadLettered {
+                        tracing::error!(
+                            storage_root_id = %claimed.storage_root_id(),
+                            sync_revision = claimed.sync_revision(),
+                            event_id = %claimed.id(),
+                            "Storage change moved to dead letter after repeated failures"
+                        );
+                    }
                 }
                 Err(error)
             }

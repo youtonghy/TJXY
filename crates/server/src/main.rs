@@ -255,7 +255,7 @@ async fn serve_application(
             .ok()
             .filter(|value| (1..=3_650).contains(value))
             .ok_or(StartupError::InvalidWorkHistoryRetentionDays)?,
-        Err(env::VarError::NotPresent) => 30,
+        Err(env::VarError::NotPresent) => 7,
         Err(env::VarError::NotUnicode(_)) => {
             return Err(StartupError::InvalidWorkHistoryRetentionDays);
         }

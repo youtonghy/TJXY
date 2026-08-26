@@ -32,7 +32,8 @@ archives remain available for maintainers.
   files, alternate copies, subtitles, and storage locations.
 - **Local and cloud storage:** browse root-confined local files, Google Drive,
   Shared Drives, and OneDrive Personal without exposing provider credentials to
-  the browser.
+  the browser. On Unix, a verified device-number change for the same local root
+  inode preserves existing storage identities across restarts.
 - **Metadata pipeline:** discover movies, series, episodes, and music from file
   names and local NFO/artwork, with optional TMDb, MusicBrainz, and TheAudioDB
   enrichment.
@@ -218,11 +219,13 @@ Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.
 
-Work completed by the running version is retained for 30 days by default. Set
+Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
-`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend forward retention. This
-policy does not enroll or delete work that was already complete when the schema
-was upgraded, and it does not shrink existing database files.
+`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention
+worker also enrolls terminal work left by earlier versions in bounded batches.
+Legacy processed outbox rows are removed in bounded background batches; failed
+storage events are kept for seven days after they become dead letters. Deleting
+rows does not immediately shrink existing database files.
 
 ### Jellyfin Media Player
 

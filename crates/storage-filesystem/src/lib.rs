@@ -94,6 +94,8 @@ pub struct FilesystemBackend {
     root_directory: std::fs::File,
     root_id: StorageObjectId,
     root_identity: String,
+    #[cfg(unix)]
+    device_alias: Option<(u64, u64)>,
     paths: RwLock<HashMap<StorageObjectId, PathBuf>>,
 }
 
@@ -105,6 +107,30 @@ impl FilesystemBackend {
     /// Returns a [`BackendError`] when the root cannot be resolved, inspected,
     /// or is not a directory.
     pub async fn new(root: impl AsRef<Path>) -> Result<Self, BackendError> {
+        Self::open(root.as_ref(), None).await
+    }
+
+    /// Opens a canonical directory using its persisted root identity namespace.
+    ///
+    /// On Unix, a changed device number is accepted only when the root inode is unchanged. Objects
+    /// on that device keep their persisted device component, so mount renumbering does not replace
+    /// the complete storage identity graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BackendError`] when the root cannot be resolved or its persisted identity cannot
+    /// be safely matched to the current directory.
+    pub async fn new_with_root_id(
+        root: impl AsRef<Path>,
+        persisted_root_id: StorageObjectId,
+    ) -> Result<Self, BackendError> {
+        Self::open(root.as_ref(), Some(persisted_root_id)).await
+    }
+
+    async fn open(
+        root: &Path,
+        persisted_root_id: Option<StorageObjectId>,
+    ) -> Result<Self, BackendError> {
         let root = fs::canonicalize(root).await.map_err(map_io_error)?;
         let metadata = fs::metadata(&root).await.map_err(map_io_error)?;
         if !metadata.is_dir() {
@@ -112,9 +138,22 @@ impl FilesystemBackend {
                 message: "filesystem root must be a directory".to_owned(),
             });
         }
-        let (root_identity, _) = filesystem_identity(&root, &metadata);
-        let root_id =
-            StorageObjectId::new("filesystem", format!("{root_identity}/{root_identity}"))?;
+        let (current_identity, _) = filesystem_identity(&root, &metadata);
+        let (root_id, root_identity) = match persisted_root_id {
+            Some(root_id) => {
+                let identity = persisted_root_identity(&root_id, &current_identity)?;
+                (root_id, identity)
+            }
+            None => (
+                StorageObjectId::new(
+                    "filesystem",
+                    format!("{current_identity}/{current_identity}"),
+                )?,
+                current_identity.clone(),
+            ),
+        };
+        #[cfg(unix)]
+        let device_alias = unix_device_alias(&metadata, &root_identity)?;
         let mut paths = HashMap::new();
         paths.insert(root_id.clone(), root.clone());
         #[cfg(unix)]
@@ -136,6 +175,8 @@ impl FilesystemBackend {
             root_directory,
             root_id,
             root_identity,
+            #[cfg(unix)]
+            device_alias,
             paths: RwLock::new(paths),
         })
     }
@@ -302,7 +343,7 @@ impl FilesystemBackend {
         path: &Path,
         metadata: &Metadata,
     ) -> Result<StorageObject, BackendError> {
-        let (identity, quality) = filesystem_identity(path, metadata);
+        let (identity, quality) = self.object_identity(path, metadata);
         let id = StorageObjectId::new("filesystem", format!("{}/{identity}", self.root_identity))?;
         let name = path
             .file_name()
@@ -319,6 +360,21 @@ impl FilesystemBackend {
         Ok(object
             .with_remote_revision(filesystem_revision(metadata, &identity)?)?
             .with_remote_modified_at(DateTime::<Utc>::from(modified)))
+    }
+
+    fn object_identity(&self, path: &Path, metadata: &Metadata) -> (String, IdentityQuality) {
+        #[cfg(unix)]
+        if let Some((current_device, persisted_device)) = self.device_alias {
+            use std::os::unix::fs::MetadataExt;
+
+            if metadata.dev() == current_device {
+                return (
+                    format!("{persisted_device:x}-{:x}", metadata.ino()),
+                    IdentityQuality::StableFileId,
+                );
+            }
+        }
+        filesystem_identity(path, metadata)
     }
 
     #[cfg(unix)]
@@ -571,6 +627,64 @@ fn filesystem_revision(metadata: &Metadata, identity: &str) -> Result<String, Ba
         elapsed.as_secs(),
         elapsed.subsec_nanos()
     ))
+}
+
+#[cfg(unix)]
+fn persisted_root_identity(
+    root_id: &StorageObjectId,
+    _current_identity: &str,
+) -> Result<String, BackendError> {
+    if root_id.provider() != "filesystem" {
+        return Err(persisted_root_mismatch());
+    }
+    let Some((namespace, object)) = root_id.provider_object_id().split_once('/') else {
+        return Err(persisted_root_mismatch());
+    };
+    if namespace.is_empty() || namespace != object || object.contains('/') {
+        return Err(persisted_root_mismatch());
+    }
+    Ok(namespace.to_owned())
+}
+
+#[cfg(not(unix))]
+fn persisted_root_identity(
+    root_id: &StorageObjectId,
+    current_identity: &str,
+) -> Result<String, BackendError> {
+    let current_root_id = StorageObjectId::new(
+        "filesystem",
+        format!("{current_identity}/{current_identity}"),
+    )?;
+    if root_id != &current_root_id {
+        return Err(persisted_root_mismatch());
+    }
+    Ok(current_identity.to_owned())
+}
+
+#[cfg(unix)]
+fn unix_device_alias(
+    metadata: &Metadata,
+    persisted_identity: &str,
+) -> Result<Option<(u64, u64)>, BackendError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some((device, inode)) = persisted_identity.split_once('-') else {
+        return Err(persisted_root_mismatch());
+    };
+    let persisted_device =
+        u64::from_str_radix(device, 16).map_err(|_| persisted_root_mismatch())?;
+    let persisted_inode = u64::from_str_radix(inode, 16).map_err(|_| persisted_root_mismatch())?;
+    if persisted_inode != metadata.ino() {
+        return Err(persisted_root_mismatch());
+    }
+    Ok((persisted_device != metadata.dev()).then_some((metadata.dev(), persisted_device)))
+}
+
+fn persisted_root_mismatch() -> BackendError {
+    BackendError::InvalidValue {
+        message: "persisted filesystem root identity does not match the configured directory"
+            .to_owned(),
+    }
 }
 
 #[cfg(unix)]

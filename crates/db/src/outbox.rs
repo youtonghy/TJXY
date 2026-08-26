@@ -11,6 +11,8 @@ use uuid::Uuid;
 const STATE_PENDING: &str = "Pending";
 const STATE_PROCESSING: &str = "Processing";
 const STATE_PROCESSED: &str = "Processed";
+const STATE_DEAD_LETTER: &str = "DeadLetter";
+const MAX_FAILURE_ATTEMPTS: i32 = 10;
 const MAX_LEASE_OWNER_CHARS: usize = 128;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +99,12 @@ pub enum OutboxFailureReason {
     ProjectionConflict,
     InvalidPayload,
     DatabaseUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboxFailureDisposition {
+    Deferred,
+    DeadLettered,
 }
 
 impl OutboxFailureReason {
@@ -274,7 +282,7 @@ where
         claimed: &ClaimedOutboxEvent,
         backoff: Duration,
         reason: OutboxFailureReason,
-    ) -> Result<(), OutboxRepositoryError> {
+    ) -> Result<OutboxFailureDisposition, OutboxRepositoryError> {
         if backoff < Duration::zero() {
             return Err(OutboxRepositoryError::InvalidBackoff);
         }
@@ -441,15 +449,57 @@ async fn fail_in_transaction(
     now: DateTime<Utc>,
     available_at: DateTime<Utc>,
     reason: OutboxFailureReason,
-) -> Result<(), OutboxRepositoryError> {
+) -> Result<OutboxFailureDisposition, OutboxRepositoryError> {
     let backend = transaction.get_database_backend();
+    let next_attempt = claimed.attempt_count.saturating_add(1);
+    if next_attempt >= MAX_FAILURE_ATTEMPTS {
+        let statement = Query::update()
+            .table(Alias::new("storage_change_outbox"))
+            .value(Alias::new("state"), STATE_DEAD_LETTER)
+            .value(Alias::new("attempt_count"), next_attempt)
+            .value(Alias::new("last_error"), reason.as_str())
+            .value(Alias::new("dead_lettered_at"), now)
+            .value(Alias::new("lease_owner"), Option::<String>::None)
+            .value(
+                Alias::new("lease_expires_at"),
+                Option::<DateTime<Utc>>::None,
+            )
+            .and_where(Expr::col(Alias::new("id")).eq(claimed.id))
+            .and_where(Expr::col(Alias::new("state")).eq(STATE_PROCESSING))
+            .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
+            .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now))
+            .to_owned();
+        if transaction
+            .execute(backend.build(&statement))
+            .await?
+            .rows_affected()
+            != 1
+        {
+            return Err(OutboxRepositoryError::LostLease);
+        }
+        transaction
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("storage_roots"))
+                        .value(Alias::new("outbox_degraded_at"), now)
+                        .value(
+                            Alias::new("outbox_degraded_revision"),
+                            claimed.sync_revision,
+                        )
+                        .value(Alias::new("outbox_degraded_reason"), reason.as_str())
+                        .and_where(
+                            Expr::col(Alias::new("id")).eq(claimed.storage_root_id.as_uuid()),
+                        ),
+                ),
+            )
+            .await?;
+        return Ok(OutboxFailureDisposition::DeadLettered);
+    }
     let statement = Query::update()
         .table(Alias::new("storage_change_outbox"))
         .value(Alias::new("state"), STATE_PENDING)
-        .value(
-            Alias::new("attempt_count"),
-            Expr::col(Alias::new("attempt_count")).add(1),
-        )
+        .value(Alias::new("attempt_count"), next_attempt)
         .value(Alias::new("available_at"), available_at)
         .value(Alias::new("last_error"), reason.as_str())
         .value(Alias::new("lease_owner"), Option::<String>::None)
@@ -470,7 +520,7 @@ async fn fail_in_transaction(
     {
         return Err(OutboxRepositoryError::LostLease);
     }
-    Ok(())
+    Ok(OutboxFailureDisposition::Deferred)
 }
 
 async fn advance_contiguous_watermark(

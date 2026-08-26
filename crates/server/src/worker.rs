@@ -21,9 +21,10 @@ use tjxy_credentials::{CredentialCipher, CredentialCipherError};
 use tjxy_db::{
     CatalogPublicationError, ClaimedImportJob, FullScanRepositoryError, ImportJobRepository,
     ImportRuntimeRepository, ImportRuntimeRepositoryError, ImportStagingRepositoryError,
-    MetadataPublicationError, MetadataWorkError, SeriesExpandRepositoryError,
-    SourceIndexRepositoryError, StorageSyncRepositoryError, WorkJobRepository,
-    WorkJobRepositoryError, WorkRetentionRepository, WorkRetentionRun, WorkTaskKind,
+    MetadataPublicationError, MetadataWorkError, QueueMaintenanceRepository, QueueMaintenanceRun,
+    SeriesExpandRepositoryError, SourceIndexRepositoryError, StorageSyncRepositoryError,
+    WorkJobRepository, WorkJobRepositoryError, WorkRetentionRepository, WorkRetentionRun,
+    WorkTaskKind,
 };
 use tjxy_import::{EmbyApiCredentials, EmbyApiImporter, EmbyImportError};
 use tjxy_storage::{BackendError, StorageBackend};
@@ -246,6 +247,30 @@ pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
     });
 }
 
+pub(crate) fn spawn_queue_maintenance_worker(database: DatabaseConnection) {
+    tokio::spawn(async move {
+        let repository = QueueMaintenanceRepository::new(&database);
+        loop {
+            let delay = match repository.run_once(Duration::days(7)).await {
+                Ok(QueueMaintenanceRun::StorageOutbox { deleted }) => {
+                    tracing::debug!(deleted, "Cleaned storage outbox rows");
+                    StdDuration::from_millis(50)
+                }
+                Ok(QueueMaintenanceRun::LegacyCacheOutbox { deleted }) => {
+                    tracing::debug!(deleted, "Cleaned legacy cache outbox rows");
+                    StdDuration::from_millis(50)
+                }
+                Ok(QueueMaintenanceRun::Idle) => StdDuration::from_secs(60),
+                Err(error) => {
+                    tracing::error!("Internal queue maintenance failed: {error}");
+                    StdDuration::from_secs(1)
+                }
+            };
+            tokio::time::sleep(delay).await;
+        }
+    });
+}
+
 pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retention: StdDuration) {
     tokio::spawn(async move {
         let owner = format!("work-retention-{}", Uuid::new_v4());
@@ -259,7 +284,8 @@ pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retentio
                 Ok(
                     WorkRetentionRun::Deleted { .. }
                     | WorkRetentionRun::CompactedPublication { .. }
-                    | WorkRetentionRun::Deferred { .. },
+                    | WorkRetentionRun::Deferred { .. }
+                    | WorkRetentionRun::EnrolledLegacy { .. },
                 ) => StdDuration::ZERO,
                 Ok(WorkRetentionRun::Idle) => StdDuration::from_secs(60),
                 Err(error) => {

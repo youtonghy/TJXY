@@ -8,8 +8,8 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::{StorageObjectRecordId, StorageRootId};
 use tjxy_db::{
-    ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureReason, OutboxRepository,
-    OutboxRepositoryError,
+    ClaimedOutboxEvent, OutboxClock, OutboxCompletion, OutboxFailureDisposition,
+    OutboxFailureReason, OutboxRepository, OutboxRepositoryError,
 };
 use tjxy_test_support::test_database;
 use uuid::Uuid;
@@ -379,6 +379,95 @@ async fn failure_requeues_with_backoff_and_incremented_attempt() {
         .unwrap()
         .unwrap();
     assert_eq!(retried.attempt_count(), 1);
+}
+
+#[tokio::test]
+async fn tenth_failure_dead_letters_event_and_marks_root_degraded() {
+    let database = database().await;
+    let root_id = seed_root(&database, 1).await;
+    let event_id = seed_event(&database, root_id, 1).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_change_outbox"))
+                    .value(Alias::new("attempt_count"), 9_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(event_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap();
+    let (repository, _clock) = repository(&database, now);
+    let claimed = repository
+        .claim_next(root_id, "last-attempt", Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .fail(
+                &claimed,
+                Duration::seconds(10),
+                OutboxFailureReason::InvalidPayload,
+            )
+            .await
+            .unwrap(),
+        OutboxFailureDisposition::DeadLettered
+    );
+
+    let event = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("state"),
+                        Alias::new("attempt_count"),
+                        Alias::new("dead_lettered_at"),
+                    ])
+                    .from(Alias::new("storage_change_outbox"))
+                    .and_where(Expr::col(Alias::new("id")).eq(event_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.try_get::<String>("", "state").unwrap(), "DeadLetter");
+    assert_eq!(event.try_get::<i32>("", "attempt_count").unwrap(), 10);
+    assert!(
+        event
+            .try_get::<Option<chrono::DateTime<Utc>>>("", "dead_lettered_at")
+            .unwrap()
+            .is_some()
+    );
+    let root = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("outbox_degraded_revision"),
+                        Alias::new("outbox_degraded_reason"),
+                    ])
+                    .from(Alias::new("storage_roots"))
+                    .and_where(Expr::col(Alias::new("id")).eq(root_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        root.try_get::<Option<i64>>("", "outbox_degraded_revision")
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        root.try_get::<Option<String>>("", "outbox_degraded_reason")
+            .unwrap()
+            .as_deref(),
+        Some("InvalidPayload")
+    );
 }
 
 #[tokio::test]

@@ -23,7 +23,7 @@ use tjxy_metadata::{
     MetadataError, MetadataProvider, MusicBrainzProvider, ReloadableMetadataProvider,
     TheAudioDbProvider, TmdbProvider,
 };
-use tjxy_storage::StorageBackend;
+use tjxy_storage::{StorageBackend, StorageObjectId};
 use tjxy_storage_filesystem::FilesystemBackend;
 use tjxy_storage_google_drive::{
     GoogleDriveBackend, GoogleDriveScope, GoogleOAuthClient, GoogleOAuthCredentials,
@@ -72,7 +72,7 @@ pub struct StartupOptions {
     assets_dir: PathBuf,
     assets_dir_source: &'static str,
     lazy_wait_timeout: StdDuration,
-    filesystem_backends: Vec<(Uuid, PathBuf)>,
+    filesystem_backends: Vec<FilesystemBackendConfiguration>,
     filesystem_realtime_enabled: bool,
     storage_backends: Vec<ConfiguredStorageBackend>,
     credential_cipher: Option<Arc<CredentialCipher>>,
@@ -101,6 +101,12 @@ struct ConfiguredStorageBackend {
     account_id: Uuid,
     provider_drive_id: String,
     backend: Arc<dyn StorageBackend>,
+}
+
+struct FilesystemBackendConfiguration {
+    account_id: Uuid,
+    root: PathBuf,
+    persisted_provider_object_id: Option<String>,
 }
 
 struct PreparedFilesystemBackend {
@@ -204,7 +210,7 @@ impl StartupOptions {
                     .map(|provider| Arc::new(provider) as Arc<dyn MetadataProvider>)
             }),
             media_refresh_interval: None,
-            work_history_retention: Some(StdDuration::from_secs(30 * 24 * 60 * 60)),
+            work_history_retention: Some(StdDuration::from_secs(7 * 24 * 60 * 60)),
             ai_admission: AiAdmissionConfig::default(),
             logging_runtime: None,
         }
@@ -256,7 +262,12 @@ impl StartupOptions {
 
     #[must_use]
     pub fn with_filesystem_backend(mut self, account_id: Uuid, root: impl Into<PathBuf>) -> Self {
-        self.filesystem_backends.push((account_id, root.into()));
+        self.filesystem_backends
+            .push(FilesystemBackendConfiguration {
+                account_id,
+                root: root.into(),
+                persisted_provider_object_id: None,
+            });
         self
     }
 
@@ -546,12 +557,13 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     {
         if filesystem_backends
             .iter()
-            .all(|(account_id, _)| *account_id != configured.account_id())
+            .all(|backend| backend.account_id != configured.account_id())
         {
-            filesystem_backends.push((
-                configured.account_id(),
-                PathBuf::from(configured.root_path()),
-            ));
+            filesystem_backends.push(FilesystemBackendConfiguration {
+                account_id: configured.account_id(),
+                root: PathBuf::from(configured.root_path()),
+                persisted_provider_object_id: Some(configured.provider_object_id().to_owned()),
+            });
         }
     }
     let google_bindings = StorageAccountRepository::new(&database)
@@ -665,6 +677,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         Arc::clone(&realtime_events),
     );
     worker::spawn_storage_change_reconciler(database.clone());
+    worker::spawn_queue_maintenance_worker(database.clone());
     if let Some(retention) = options.work_history_retention {
         worker::spawn_work_retention_worker(database.clone(), retention);
     }
@@ -958,13 +971,25 @@ async fn load_google_backends(
 }
 
 async fn prepare_filesystem_backends(
-    configured: Vec<(Uuid, PathBuf)>,
+    configured: Vec<FilesystemBackendConfiguration>,
     realtime_enabled: bool,
 ) -> (Vec<PreparedFilesystemBackend>, Vec<Uuid>) {
     let mut prepared = Vec::with_capacity(configured.len());
     let mut unavailable = Vec::new();
-    for (account_id, root) in configured {
-        match FilesystemBackend::new(&root).await {
+    for configuration in configured {
+        let account_id = configuration.account_id;
+        let backend = match configuration.persisted_provider_object_id {
+            Some(provider_object_id) => {
+                match StorageObjectId::new("filesystem", provider_object_id) {
+                    Ok(root_id) => {
+                        FilesystemBackend::new_with_root_id(&configuration.root, root_id).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            None => FilesystemBackend::new(&configuration.root).await,
+        };
+        match backend {
             Ok(backend) => prepared.push(PreparedFilesystemBackend {
                 account_id,
                 backend: Arc::new(backend),
@@ -1077,14 +1102,15 @@ fn validate_storage_backends(
 }
 
 fn validate_backend_accounts(
-    filesystem_backends: &[(Uuid, PathBuf)],
+    filesystem_backends: &[FilesystemBackendConfiguration],
     storage_backends: &[ConfiguredStorageBackend],
 ) -> Result<(), InitializationError> {
     let mut accounts = HashSet::with_capacity(filesystem_backends.len() + storage_backends.len());
-    for (account_id, _) in filesystem_backends {
-        if !accounts.insert(*account_id) {
+    for backend in filesystem_backends {
+        if !accounts.insert(backend.account_id) {
             return Err(InitializationError::InvalidStorageBackend(format!(
-                "duplicate storage backend account {account_id}"
+                "duplicate storage backend account {}",
+                backend.account_id
             )));
         }
     }
@@ -1236,8 +1262,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ApiKeyValidationError, InitializationError, api_key_validation_error, load_google_backends,
-        load_onedrive_backends, prepare_filesystem_backends,
+        ApiKeyValidationError, FilesystemBackendConfiguration, InitializationError,
+        api_key_validation_error, load_google_backends, load_onedrive_backends,
+        prepare_filesystem_backends,
     };
 
     #[test]
@@ -1273,8 +1300,16 @@ mod tests {
 
         let result = prepare_filesystem_backends(
             vec![
-                (Uuid::new_v4(), valid.path().to_owned()),
-                (Uuid::new_v4(), missing),
+                FilesystemBackendConfiguration {
+                    account_id: Uuid::new_v4(),
+                    root: valid.path().to_owned(),
+                    persisted_provider_object_id: None,
+                },
+                FilesystemBackendConfiguration {
+                    account_id: Uuid::new_v4(),
+                    root: missing,
+                    persisted_provider_object_id: None,
+                },
             ],
             false,
         )
@@ -1282,6 +1317,37 @@ mod tests {
 
         assert_eq!(result.0.len(), 1);
         assert_eq!(result.1.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn filesystem_backend_accepts_persisted_namespace_after_device_drift() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = TempDir::new().unwrap();
+        let metadata = std::fs::metadata(root.path()).unwrap();
+        let persisted_device = metadata.dev() ^ 1;
+        let persisted_identity = format!("{persisted_device:x}-{:x}", metadata.ino());
+        let provider_object_id = format!("{persisted_identity}/{persisted_identity}");
+        let account_id = Uuid::new_v4();
+
+        let result = prepare_filesystem_backends(
+            vec![FilesystemBackendConfiguration {
+                account_id,
+                root: root.path().to_owned(),
+                persisted_provider_object_id: Some(provider_object_id.clone()),
+            }],
+            false,
+        )
+        .await;
+
+        assert!(result.1.is_empty());
+        assert_eq!(result.0.len(), 1);
+        assert_eq!(result.0[0].account_id, account_id);
+        assert_eq!(
+            result.0[0].backend.root_id().provider_object_id(),
+            provider_object_id
+        );
     }
 
     #[tokio::test]

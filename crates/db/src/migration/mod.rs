@@ -69,6 +69,7 @@ mod m20260823_000068_expand_local_metadata_access_mode;
 mod m20260823_000069_passkeys;
 mod m20260825_000070_restore_media_browser_roots;
 mod m20260825_000071_bounded_internal_queues;
+mod m20260826_000072_internal_queue_maintenance;
 
 use std::collections::HashSet;
 
@@ -317,6 +318,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260823_000069_passkeys::Migration),
             Box::new(m20260825_000070_restore_media_browser_roots::Migration),
             Box::new(m20260825_000071_bounded_internal_queues::Migration),
+            Box::new(m20260826_000072_internal_queue_maintenance::Migration),
         ]
     }
 }

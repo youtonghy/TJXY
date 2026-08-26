@@ -334,6 +334,10 @@ async fn filesystem_root_binding_is_restartable_and_last_detach_disables_without
     assert_eq!(configs.len(), 1);
     assert_eq!(configs[0].account_id(), created.account_id());
     assert_eq!(configs[0].root_path(), "/srv/media");
+    assert_eq!(
+        configs[0].provider_object_id(),
+        "filesystem-root-id/filesystem-root-id"
+    );
     let job = WorkJobRepository::new(&database)
         .get(created.initial_sync_job_id())
         .await

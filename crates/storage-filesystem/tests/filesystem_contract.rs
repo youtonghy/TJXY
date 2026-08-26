@@ -2,7 +2,7 @@ use std::{fs, time::Duration};
 
 use futures_util::{StreamExt, TryStreamExt};
 use tempfile::tempdir;
-use tjxy_storage::{ByteRange, IdentityQuality, StorageBackend};
+use tjxy_storage::{ByteRange, IdentityQuality, StorageBackend, StorageObjectId};
 use tjxy_storage_filesystem::FilesystemBackend;
 
 #[tokio::test]
@@ -147,6 +147,84 @@ async fn stable_identity_recovers_its_path_after_backend_restart() {
         .unwrap();
     let bytes = stream.try_collect::<Vec<_>>().await.unwrap().concat();
     assert_eq!(bytes, b"restart-safe");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persisted_root_namespace_survives_device_number_drift() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("movie.mkv"), b"stable-device-alias").unwrap();
+    let metadata = fs::metadata(root.path()).unwrap();
+    let persisted_device = metadata.dev() ^ 1;
+    let persisted_identity = format!("{persisted_device:x}-{:x}", metadata.ino());
+    let persisted_root_id = StorageObjectId::new(
+        "filesystem",
+        format!("{persisted_identity}/{persisted_identity}"),
+    )
+    .unwrap();
+    let backend = FilesystemBackend::new_with_root_id(root.path(), persisted_root_id.clone())
+        .await
+        .unwrap();
+    let page = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+    let stable_id = page.objects[0].id().clone();
+    assert_eq!(backend.root_id(), &persisted_root_id);
+    assert!(
+        stable_id
+            .provider_object_id()
+            .starts_with(&format!("{persisted_identity}/{persisted_device:x}-"))
+    );
+    drop(backend);
+
+    let restarted = FilesystemBackend::new_with_root_id(root.path(), persisted_root_id)
+        .await
+        .unwrap();
+    let bytes = restarted
+        .open_range(&stable_id, ByteRange::new(0, 19).unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .concat();
+    assert_eq!(bytes, b"stable-device-alias");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persisted_root_namespace_rejects_inode_changes() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempdir().unwrap();
+    let metadata = fs::metadata(root.path()).unwrap();
+    let wrong_identity = format!("{:x}-{:x}", metadata.dev(), metadata.ino() ^ 1);
+    let wrong_root_id =
+        StorageObjectId::new("filesystem", format!("{wrong_identity}/{wrong_identity}")).unwrap();
+
+    assert!(matches!(
+        FilesystemBackend::new_with_root_id(root.path(), wrong_root_id).await,
+        Err(tjxy_storage::BackendError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        FilesystemBackend::new_with_root_id(
+            root.path(),
+            StorageObjectId::new("filesystem", "malformed-root").unwrap(),
+        )
+        .await,
+        Err(tjxy_storage::BackendError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        FilesystemBackend::new_with_root_id(
+            root.path(),
+            StorageObjectId::new("other-provider", "root/root").unwrap(),
+        )
+        .await,
+        Err(tjxy_storage::BackendError::InvalidValue { .. })
+    ));
 }
 
 #[cfg(unix)]

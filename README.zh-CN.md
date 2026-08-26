@@ -28,7 +28,8 @@ TJXY 将影视或音乐条目与实际提供文件内容的存储位置分离。
 
 - **统一媒体目录**：将媒体条目与物理文件、副本、字幕和存储位置分开建模。
 - **本地与云端存储**：支持受根目录限制的本地文件、Google Drive、共享云端
-  硬盘和 OneDrive Personal，云端凭据不会暴露给浏览器。
+  硬盘和 OneDrive Personal，云端凭据不会暴露给浏览器。在 Unix 上，同一本地
+  根目录的 inode 可验证时，设备号变化不会在重启后替换已有存储身份。
 - **元数据处理**：从文件名、本地 NFO 和图片发现电影、剧集、单集及音乐，
   并可选择使用 TMDb、MusicBrainz 和 TheAudioDB 补充信息。
 - **直接播放**：生成会话级播放地址、按范围传输媒体、选择字幕和文件来源，
@@ -203,10 +204,11 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
 保存在当前平台的配置目录中；可以通过 `TJXY_CONFIG_FILE` 指定明确路径。
 
-当前版本完成的工作任务默认保留 30 天。可将
+当前版本完成的工作任务默认保留 7 天。可将
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
-`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停前向保留。该策略不会登记或
-删除升级前已经终结的任务，也不会缩小现有数据库文件。
+`TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 会分批登记旧版本
+遗留的终态任务；历史已处理 outbox 也会由后台分批清理。storage 事件进入
+dead-letter 后保留 7 天。删除记录不会立即缩小现有数据库文件。
 
 ### Jellyfin 客户端播放兼容性
 
