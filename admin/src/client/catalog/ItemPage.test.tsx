@@ -241,7 +241,7 @@ it('shows filtered same-type recommendations after cast and crew', async () => {
   renderItem('series-1');
 
   const recommendations = await screen.findByRole('region', { name: 'Recommended for you' });
-  const carousel = within(recommendations).getByRole('region', { name: 'Recommended titles' });
+  const carousel = await within(recommendations).findByRole('region', { name: 'Recommended titles' });
   expect(carousel).toHaveAttribute('aria-roledescription', 'carousel');
   expect(within(carousel).getAllByRole('group')).toHaveLength(4);
   expect(await within(carousel).findByRole('button', { name: 'Previous slide' })).toBeInTheDocument();
