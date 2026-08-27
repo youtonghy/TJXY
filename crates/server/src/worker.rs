@@ -140,7 +140,7 @@ async fn run_filesystem_event_worker(
         match monitor.next_batch().await {
             Ok(batch) => match backend.inventory_scopes_for(&batch).await {
                 Ok(scopes) => {
-                    if let Err(error) = tjxy_db::StorageSyncRepository::new(&database)
+                    match tjxy_db::StorageSyncRepository::new(&database)
                         .enqueue_event_scopes(
                             account_id,
                             "local",
@@ -149,8 +149,24 @@ async fn run_filesystem_event_worker(
                         )
                         .await
                     {
-                        tracing::error!("Filesystem event scopes could not be enqueued: {error}");
-                        tokio::time::sleep(StdDuration::from_secs(1)).await;
+                        Ok(submissions) => {
+                            let created = submissions
+                                .iter()
+                                .filter(|submission| submission.created())
+                                .count();
+                            tracing::debug!(
+                                resolved_scopes = scopes.len(),
+                                created,
+                                joined = submissions.len().saturating_sub(created),
+                                "Filesystem event scopes enqueued or joined"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                "Filesystem event scopes could not be enqueued: {error}"
+                            );
+                            tokio::time::sleep(StdDuration::from_secs(1)).await;
+                        }
                     }
                 }
                 Err(error) => {
@@ -281,12 +297,23 @@ pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retentio
                 .run_once(&owner, retention, Duration::seconds(30))
                 .await
             {
-                Ok(
-                    WorkRetentionRun::Deleted { .. }
-                    | WorkRetentionRun::CompactedPublication { .. }
-                    | WorkRetentionRun::Deferred { .. }
-                    | WorkRetentionRun::EnrolledLegacy { .. },
-                ) => StdDuration::ZERO,
+                Ok(WorkRetentionRun::Processed {
+                    deleted,
+                    compacted,
+                    deferred,
+                }) => {
+                    tracing::debug!(
+                        deleted,
+                        compacted,
+                        deferred,
+                        "Processed work history retention batch"
+                    );
+                    StdDuration::ZERO
+                }
+                Ok(WorkRetentionRun::EnrolledLegacy { count }) => {
+                    tracing::debug!(count, "Enrolled legacy work history for retention");
+                    StdDuration::ZERO
+                }
                 Ok(WorkRetentionRun::Idle) => StdDuration::from_secs(60),
                 Err(error) => {
                     tracing::error!("Work history retention failed: {error}");

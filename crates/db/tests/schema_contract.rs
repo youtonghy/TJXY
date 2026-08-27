@@ -32,6 +32,55 @@ async fn older_database_is_upgraded_by_the_shared_schema_entrypoint() {
 }
 
 #[tokio::test]
+async fn work_claim_index_only_covers_active_jobs_where_supported() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+
+    if database.get_database_backend() == DbBackend::MySql {
+        assert!(
+            schema
+                .has_index("work_jobs", "ix_work_jobs_claim")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !schema
+                .has_index("work_jobs", "ix_work_jobs_claim_active")
+                .await
+                .unwrap()
+        );
+        return;
+    }
+
+    assert!(
+        schema
+            .has_index("work_jobs", "ix_work_jobs_claim_active")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !schema
+            .has_index("work_jobs", "ix_work_jobs_claim")
+            .await
+            .unwrap()
+    );
+    let definition = index_definition(&database, "ix_work_jobs_claim_active").await;
+    assert!(
+        definition.contains("where"),
+        "missing active predicate: {definition}"
+    );
+    assert!(
+        definition.contains("pending"),
+        "missing pending state: {definition}"
+    );
+    assert!(
+        definition.contains("running"),
+        "missing running state: {definition}"
+    );
+}
+
+#[tokio::test]
 async fn site_theme_settings_are_added_by_their_migration() {
     let database = test_database().await.unwrap();
     Migrator::up(&database, Some(SITE_THEME_SETTINGS_MIGRATION_POSITION - 1))
@@ -815,6 +864,32 @@ async fn unique_definitions(database: &sea_orm::DatabaseConnection, table: &str)
         .filter_map(|row| row.try_get::<Option<String>>("", "sql").unwrap())
         .collect::<Vec<_>>()
         .join(" ")
+        .to_lowercase()
+}
+
+async fn index_definition(database: &sea_orm::DatabaseConnection, index: &str) -> String {
+    let statement = match database.get_database_backend() {
+        DbBackend::Sqlite => Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?".to_owned(),
+            [index.into()],
+        ),
+        DbBackend::Postgres => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT indexdef AS sql FROM pg_indexes \
+             WHERE schemaname = current_schema() AND indexname = $1"
+                .to_owned(),
+            [index.into()],
+        ),
+        DbBackend::MySql => unreachable!("MySQL does not support partial indexes"),
+    };
+    database
+        .query_one(statement)
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "sql")
+        .unwrap()
         .to_lowercase()
 }
 

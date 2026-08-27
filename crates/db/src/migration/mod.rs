@@ -70,10 +70,11 @@ mod m20260823_000069_passkeys;
 mod m20260825_000070_restore_media_browser_roots;
 mod m20260825_000071_bounded_internal_queues;
 mod m20260826_000072_internal_queue_maintenance;
+mod m20260827_000073_active_work_claim_index;
 
 use std::collections::HashSet;
 
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{DatabaseConnection, DbBackend, DbErr};
 use sea_orm_migration::{MigratorTrait, prelude::*};
 use thiserror::Error;
 use uuid::Uuid;
@@ -236,6 +237,15 @@ async fn validate_current_schema(
     {
         missing.push("index uq_ai_messages_conversation_sequence".to_owned());
     }
+    let claim_index = if database.get_database_backend() == DbBackend::MySql {
+        "ix_work_jobs_claim"
+    } else {
+        "ix_work_jobs_claim_active"
+    };
+    if !missing_tables.contains("work_jobs") && !manager.has_index("work_jobs", claim_index).await?
+    {
+        missing.push(format!("index {claim_index}"));
+    }
     if missing.is_empty() {
         Ok(())
     } else {
@@ -319,6 +329,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000070_restore_media_browser_roots::Migration),
             Box::new(m20260825_000071_bounded_internal_queues::Migration),
             Box::new(m20260826_000072_internal_queue_maintenance::Migration),
+            Box::new(m20260827_000073_active_work_claim_index::Migration),
         ]
     }
 }

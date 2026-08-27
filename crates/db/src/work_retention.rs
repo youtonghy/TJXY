@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait,
@@ -8,8 +10,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_LEASE_OWNER_CHARS: usize = 128;
+const RETENTION_BATCH_SIZE: u64 = 100;
+const LEGACY_ENROLL_LIMIT: u64 = 1_000;
+const LEGACY_ENROLL_INSERT_BATCH_SIZE: usize = 200;
 const TERMINAL_STATES: [&str; 2] = ["Completed", "Failed"];
 const ACTIVE_STATES: [&str; 2] = ["Pending", "Running"];
+const DEFERRED_REASON: &str = "dependency active";
 
 pub struct WorkRetentionRepository<'connection> {
     database: &'connection DatabaseConnection,
@@ -21,7 +27,7 @@ impl<'connection> WorkRetentionRepository<'connection> {
         Self { database }
     }
 
-    /// Processes at most one task whose forward retention period has elapsed.
+    /// Processes one bounded batch whose forward retention period has elapsed.
     ///
     /// # Errors
     ///
@@ -41,7 +47,8 @@ impl<'connection> WorkRetentionRepository<'connection> {
             .checked_add_signed(lease_duration)
             .ok_or(WorkRetentionError::TimestampOverflow)?;
         let transaction = self.database.begin().await?;
-        let claim = claim_next(&transaction, lease_owner, now, cutoff, lease_expires_at).await;
+        let claim =
+            claim_next_batch(&transaction, lease_owner, now, cutoff, lease_expires_at).await;
         let claimed = finish(transaction, claim).await?;
         let Some(claimed) = claimed else {
             let transaction = self.database.begin().await?;
@@ -54,7 +61,7 @@ impl<'connection> WorkRetentionRepository<'connection> {
         };
 
         let transaction = self.database.begin().await?;
-        let result = process_claim(&transaction, &claimed, now).await;
+        let result = process_batch(&transaction, &claimed, now).await;
         finish(transaction, result).await
     }
 }
@@ -62,10 +69,26 @@ impl<'connection> WorkRetentionRepository<'connection> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkRetentionRun {
     Idle,
-    EnrolledLegacy { count: u64 },
-    Deleted { job_id: Uuid },
-    CompactedPublication { job_id: Uuid },
-    Deferred { job_id: Uuid },
+    EnrolledLegacy {
+        count: u64,
+    },
+    Processed {
+        deleted: u64,
+        compacted: u64,
+        deferred: u64,
+    },
+}
+
+struct RetentionClaimBatch {
+    job_ids: Vec<Uuid>,
+    lease_token: String,
+}
+
+struct RetentionClassification {
+    compacted: Vec<Uuid>,
+    deferred: Vec<Uuid>,
+    deleted: Vec<Uuid>,
+    missing: Vec<Uuid>,
 }
 
 async fn enroll_legacy(
@@ -73,7 +96,48 @@ async fn enroll_legacy(
     now: DateTime<Utc>,
     cutoff: DateTime<Utc>,
 ) -> Result<u64, WorkRetentionError> {
-    const ENROLL_LIMIT: u64 = 1_000;
+    let backend = transaction.get_database_backend();
+    let entries = legacy_entries(transaction, now, cutoff).await?;
+    let conflict = if backend == sea_orm::DbBackend::MySql {
+        sea_orm::sea_query::OnConflict::new()
+            .update_column(Alias::new("job_id"))
+            .to_owned()
+    } else {
+        sea_orm::sea_query::OnConflict::new()
+            .do_nothing()
+            .to_owned()
+    };
+    let mut enrolled = 0_u64;
+    for entries in entries.chunks(LEGACY_ENROLL_INSERT_BATCH_SIZE) {
+        let mut insert = Query::insert();
+        insert
+            .into_table(Alias::new("work_job_retention_queue"))
+            .columns([
+                Alias::new("job_id"),
+                Alias::new("terminal_at"),
+                Alias::new("attempt_count"),
+            ])
+            .on_conflict(conflict.clone());
+        for (job_id, terminal_at) in entries {
+            insert.values_panic([
+                job_id.to_owned().into(),
+                terminal_at.to_owned().into(),
+                0_i32.into(),
+            ]);
+        }
+        enrolled += transaction
+            .execute(backend.build(&insert))
+            .await?
+            .rows_affected();
+    }
+    Ok(enrolled)
+}
+
+async fn legacy_entries(
+    transaction: &DatabaseTransaction,
+    now: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<(Uuid, DateTime<Utc>)>, WorkRetentionError> {
     let backend = transaction.get_database_backend();
     let job = Alias::new("legacy_job");
     let queue = Alias::new("legacy_queue");
@@ -129,49 +193,22 @@ async fn enroll_legacy(
                     .and_where(Expr::col((publication, Alias::new("job_id"))).is_null())
                     .order_by((job.clone(), Alias::new("completed_at")), Order::Asc)
                     .order_by((job, Alias::new("id")), Order::Asc)
-                    .limit(ENROLL_LIMIT),
+                    .limit(LEGACY_ENROLL_LIMIT),
             ),
         )
         .await?;
-    let mut enrolled = 0_u64;
-    for row in rows {
-        let job_id: Uuid = row.try_get("", "id")?;
-        let terminal_at = row
-            .try_get::<Option<DateTime<Utc>>>("", "completed_at")?
-            .or(row.try_get::<Option<DateTime<Utc>>>("", "created_at")?)
-            .unwrap_or(now);
-        let conflict = if backend == sea_orm::DbBackend::MySql {
-            sea_orm::sea_query::OnConflict::new()
-                .update_column(Alias::new("job_id"))
-                .to_owned()
-        } else {
-            sea_orm::sea_query::OnConflict::new()
-                .do_nothing()
-                .to_owned()
-        };
-        enrolled += transaction
-            .execute(
-                backend.build(
-                    Query::insert()
-                        .into_table(Alias::new("work_job_retention_queue"))
-                        .columns([
-                            Alias::new("job_id"),
-                            Alias::new("terminal_at"),
-                            Alias::new("attempt_count"),
-                        ])
-                        .values_panic([job_id.into(), terminal_at.into(), 0_i32.into()])
-                        .on_conflict(conflict),
-                ),
-            )
-            .await?
-            .rows_affected();
-    }
-    Ok(enrolled)
-}
-
-struct RetentionClaim {
-    job_id: Uuid,
-    lease_token: String,
+    let entries = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<Uuid>("", "id")?,
+                row.try_get::<Option<DateTime<Utc>>>("", "completed_at")?
+                    .or(row.try_get::<Option<DateTime<Utc>>>("", "created_at")?)
+                    .unwrap_or(now),
+            ))
+        })
+        .collect::<Result<Vec<_>, DbErr>>()?;
+    Ok(entries)
 }
 
 fn validate(
@@ -194,17 +231,17 @@ fn validate(
     Ok(())
 }
 
-async fn claim_next(
+async fn claim_next_batch(
     transaction: &DatabaseTransaction,
     lease_owner: &str,
     now: DateTime<Utc>,
     cutoff: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
-) -> Result<Option<RetentionClaim>, WorkRetentionError> {
+) -> Result<Option<RetentionClaimBatch>, WorkRetentionError> {
     let backend = transaction.get_database_backend();
     let condition = claimable(now);
-    let Some(row) = transaction
-        .query_one(
+    let rows = transaction
+        .query_all(
             backend.build(
                 Query::select()
                     .column(Alias::new("job_id"))
@@ -212,33 +249,45 @@ async fn claim_next(
                     .and_where(Expr::col(Alias::new("terminal_at")).lte(cutoff))
                     .cond_where(condition.clone())
                     .order_by(Alias::new("terminal_at"), Order::Asc)
-                    .limit(1),
+                    .order_by(Alias::new("job_id"), Order::Asc)
+                    .limit(RETENTION_BATCH_SIZE),
             ),
         )
-        .await?
-    else {
+        .await?;
+    if rows.is_empty() {
         return Ok(None);
-    };
-    let job_id: Uuid = row.try_get("", "job_id")?;
+    }
     let lease_token = format!("{lease_owner}:{}", Uuid::new_v4());
+    let candidate_ids = rows
+        .iter()
+        .map(|row| row.try_get("", "job_id"))
+        .collect::<Result<Vec<Uuid>, DbErr>>()?;
     let update = Query::update()
         .table(Alias::new("work_job_retention_queue"))
         .value(Alias::new("lease_owner"), &lease_token)
         .value(Alias::new("lease_expires_at"), lease_expires_at)
-        .and_where(Expr::col(Alias::new("job_id")).eq(job_id))
+        .and_where(Expr::col(Alias::new("job_id")).is_in(candidate_ids.iter().copied()))
         .and_where(Expr::col(Alias::new("terminal_at")).lte(cutoff))
         .cond_where(condition)
         .to_owned();
-    if transaction
-        .execute(backend.build(&update))
+    transaction.execute(backend.build(&update)).await?;
+    let job_ids = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("job_id"))
+                    .from(Alias::new("work_job_retention_queue"))
+                    .and_where(Expr::col(Alias::new("job_id")).is_in(candidate_ids))
+                    .and_where(Expr::col(Alias::new("lease_owner")).eq(&lease_token))
+                    .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
+            ),
+        )
         .await?
-        .rows_affected()
-        != 1
-    {
-        return Ok(None);
-    }
-    Ok(Some(RetentionClaim {
-        job_id,
+        .iter()
+        .map(|row| row.try_get("", "job_id"))
+        .collect::<Result<Vec<Uuid>, DbErr>>()?;
+    Ok((!job_ids.is_empty()).then_some(RetentionClaimBatch {
+        job_ids: sorted_ids(job_ids),
         lease_token,
     }))
 }
@@ -257,162 +306,186 @@ fn claimable(now: DateTime<Utc>) -> Cond {
         )
 }
 
-async fn process_claim(
+async fn process_batch(
     transaction: &DatabaseTransaction,
-    claimed: &RetentionClaim,
+    claimed: &RetentionClaimBatch,
     now: DateTime<Utc>,
 ) -> Result<WorkRetentionRun, WorkRetentionError> {
-    ensure_live_claim(transaction, claimed, now).await?;
-    let backend = transaction.get_database_backend();
-    let Some(job) = transaction
-        .query_one(
-            backend.build(
-                Query::select()
-                    .column(Alias::new("state"))
-                    .from(Alias::new("work_jobs"))
-                    .and_where(Expr::col(Alias::new("id")).eq(claimed.job_id)),
-            ),
-        )
-        .await?
-    else {
-        delete_queue_claim(transaction, claimed, now).await?;
-        return Ok(WorkRetentionRun::Deleted {
-            job_id: claimed.job_id,
-        });
-    };
-    let state: String = job.try_get("", "state")?;
-    if !TERMINAL_STATES.contains(&state.as_str())
-        || has_active_dependency(transaction, claimed.job_id).await?
-        || has_recovery_cursor(transaction, claimed.job_id).await?
-        || has_active_full_scan_parent(transaction, claimed.job_id).await?
-    {
-        defer_claim(transaction, claimed, now).await?;
-        return Ok(WorkRetentionRun::Deferred {
-            job_id: claimed.job_id,
-        });
+    ensure_live_claims(transaction, claimed, now).await?;
+    let classification = classify_claims(transaction, claimed).await?;
+    let cleanup_ids = sorted_ids(
+        classification
+            .deleted
+            .iter()
+            .chain(&classification.compacted)
+            .copied()
+            .collect(),
+    );
+    if !classification.deferred.is_empty() {
+        defer_claims(transaction, claimed, &classification.deferred, now).await?;
     }
-
-    transaction
-        .execute(
-            backend.build(
-                Query::update()
-                    .table(Alias::new("work_jobs"))
-                    .value(Alias::new("required_sync_job_id"), Option::<Uuid>::None)
-                    .and_where(Expr::col(Alias::new("required_sync_job_id")).eq(claimed.job_id))
-                    .and_where(Expr::col(Alias::new("state")).is_in(TERMINAL_STATES)),
-            ),
-        )
-        .await?;
-    for table in ["work_staging_rows", "storage_sync_pages", "work_results"] {
-        transaction
-            .execute(
-                backend.build(
-                    Query::delete()
-                        .from_table(Alias::new(table))
-                        .and_where(Expr::col(Alias::new("job_id")).eq(claimed.job_id)),
-                ),
-            )
-            .await?;
+    if !cleanup_ids.is_empty() {
+        clear_terminal_dependencies(transaction, &cleanup_ids).await?;
+        delete_child_rows(transaction, &cleanup_ids).await?;
     }
-
-    if has_catalog_publication(transaction, claimed.job_id).await? {
-        delete_queue_claim(transaction, claimed, now).await?;
-        return Ok(WorkRetentionRun::CompactedPublication {
-            job_id: claimed.job_id,
-        });
+    if !classification.deleted.is_empty() {
+        delete_jobs(transaction, &classification.deleted).await?;
     }
-    let deleted = transaction
-        .execute(
-            backend.build(
-                Query::delete()
-                    .from_table(Alias::new("work_jobs"))
-                    .and_where(Expr::col(Alias::new("id")).eq(claimed.job_id))
-                    .and_where(Expr::col(Alias::new("state")).is_in(TERMINAL_STATES)),
-            ),
-        )
-        .await?
-        .rows_affected();
-    if deleted != 1 {
-        return Err(WorkRetentionError::LostLease);
+    let queue_ids = sorted_ids(
+        classification
+            .compacted
+            .iter()
+            .chain(&classification.missing)
+            .copied()
+            .collect(),
+    );
+    if !queue_ids.is_empty() {
+        delete_queue_claims(transaction, claimed, &queue_ids, now).await?;
     }
-    Ok(WorkRetentionRun::Deleted {
-        job_id: claimed.job_id,
+    Ok(WorkRetentionRun::Processed {
+        deleted: u64::try_from(classification.deleted.len() + classification.missing.len())
+            .expect("retention batch size fits u64"),
+        compacted: u64::try_from(classification.compacted.len())
+            .expect("retention batch size fits u64"),
+        deferred: u64::try_from(classification.deferred.len())
+            .expect("retention batch size fits u64"),
     })
 }
 
-async fn ensure_live_claim(
+async fn ensure_live_claims(
     transaction: &DatabaseTransaction,
-    claimed: &RetentionClaim,
+    claimed: &RetentionClaimBatch,
     now: DateTime<Utc>,
 ) -> Result<(), WorkRetentionError> {
     let backend = transaction.get_database_backend();
-    let live = Query::select()
-        .expr(Expr::val(1_i32))
-        .from(Alias::new("work_job_retention_queue"))
-        .and_where(Expr::col(Alias::new("job_id")).eq(claimed.job_id))
-        .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
-        .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now))
-        .limit(1)
-        .to_owned();
-    if transaction.query_one(backend.build(&live)).await?.is_none() {
+    let rows = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("job_id"))
+                    .from(Alias::new("work_job_retention_queue"))
+                    .and_where(
+                        Expr::col(Alias::new("job_id")).is_in(claimed.job_ids.iter().copied()),
+                    )
+                    .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
+                    .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
+            ),
+        )
+        .await?;
+    if rows.len() != claimed.job_ids.len() {
         return Err(WorkRetentionError::LostLease);
     }
     Ok(())
 }
 
-async fn has_active_dependency(
+async fn classify_claims(
     transaction: &DatabaseTransaction,
-    job_id: Uuid,
-) -> Result<bool, DbErr> {
-    exists(
+    claimed: &RetentionClaimBatch,
+) -> Result<RetentionClassification, WorkRetentionError> {
+    let backend = transaction.get_database_backend();
+    let rows = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("id"), Alias::new("state")])
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("id")).is_in(claimed.job_ids.iter().copied())),
+            ),
+        )
+        .await?;
+    let mut states = HashMap::with_capacity(rows.len());
+    for row in rows {
+        states.insert(
+            row.try_get::<Uuid>("", "id")?,
+            row.try_get::<String>("", "state")?,
+        );
+    }
+    let existing_ids = states.keys().copied().collect::<Vec<_>>();
+    let mut protected_ids = active_dependency_ids(transaction, &existing_ids).await?;
+    protected_ids.extend(recovery_cursor_ids(transaction, &existing_ids).await?);
+    protected_ids.extend(active_full_scan_child_ids(transaction, &existing_ids).await?);
+    let publication_ids = catalog_publication_ids(transaction, &existing_ids).await?;
+    let mut compacted_ids = Vec::new();
+    let mut deferred_ids = Vec::new();
+    let mut deleted_ids = Vec::new();
+    let mut missing_ids = Vec::new();
+    for job_id in &claimed.job_ids {
+        let Some(state) = states.get(job_id) else {
+            missing_ids.push(*job_id);
+            continue;
+        };
+        if !TERMINAL_STATES.contains(&state.as_str()) || protected_ids.contains(job_id) {
+            deferred_ids.push(*job_id);
+        } else if publication_ids.contains(job_id) {
+            compacted_ids.push(*job_id);
+        } else {
+            deleted_ids.push(*job_id);
+        }
+    }
+    Ok(RetentionClassification {
+        compacted: sorted_ids(compacted_ids),
+        deferred: sorted_ids(deferred_ids),
+        deleted: sorted_ids(deleted_ids),
+        missing: sorted_ids(missing_ids),
+    })
+}
+
+async fn active_dependency_ids(
+    transaction: &DatabaseTransaction,
+    job_ids: &[Uuid],
+) -> Result<HashSet<Uuid>, DbErr> {
+    selected_ids(
         transaction,
         Query::select()
-            .expr(Expr::val(1_i32))
+            .column(Alias::new("required_sync_job_id"))
             .from(Alias::new("work_jobs"))
-            .and_where(Expr::col(Alias::new("required_sync_job_id")).eq(job_id))
+            .and_where(Expr::col(Alias::new("required_sync_job_id")).is_in(job_ids.iter().copied()))
             .and_where(Expr::col(Alias::new("state")).is_in(ACTIVE_STATES))
-            .limit(1)
             .to_owned(),
+        "required_sync_job_id",
     )
     .await
 }
 
-async fn has_recovery_cursor(
+async fn recovery_cursor_ids(
     transaction: &DatabaseTransaction,
-    job_id: Uuid,
-) -> Result<bool, DbErr> {
-    exists(
+    job_ids: &[Uuid],
+) -> Result<HashSet<Uuid>, DbErr> {
+    selected_ids(
         transaction,
         Query::select()
-            .expr(Expr::val(1_i32))
+            .column(Alias::new("recovery_job_id"))
             .from(Alias::new("storage_sync_cursors"))
-            .and_where(Expr::col(Alias::new("recovery_job_id")).eq(job_id))
-            .limit(1)
+            .and_where(Expr::col(Alias::new("recovery_job_id")).is_in(job_ids.iter().copied()))
             .to_owned(),
+        "recovery_job_id",
     )
     .await
 }
 
-async fn has_catalog_publication(
+async fn catalog_publication_ids(
     transaction: &DatabaseTransaction,
-    job_id: Uuid,
-) -> Result<bool, DbErr> {
-    exists(
+    job_ids: &[Uuid],
+) -> Result<HashSet<Uuid>, DbErr> {
+    selected_ids(
         transaction,
         Query::select()
-            .expr(Expr::val(1_i32))
+            .column(Alias::new("job_id"))
             .from(Alias::new("catalog_publications"))
-            .and_where(Expr::col(Alias::new("job_id")).eq(job_id))
-            .limit(1)
+            .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied()))
             .to_owned(),
+        "job_id",
     )
     .await
 }
 
-async fn has_active_full_scan_parent(
+async fn active_full_scan_child_ids(
     transaction: &DatabaseTransaction,
-    job_id: Uuid,
-) -> Result<bool, DbErr> {
+    job_ids: &[Uuid],
+) -> Result<HashSet<Uuid>, DbErr> {
+    if job_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
     let staging = Alias::new("retention_active_staging");
     let parent = Alias::new("retention_active_parent");
     let query = Query::select()
@@ -431,81 +504,46 @@ async fn has_active_full_scan_parent(
                 .is_in(["FullMediaScan", "FullLibraryRootScan"]),
         )
         .to_owned();
+    let requested = job_ids.iter().copied().collect::<HashSet<_>>();
     let backend = transaction.get_database_backend();
+    let mut protected = HashSet::new();
     for row in transaction.query_all(backend.build(&query)).await? {
         let payload: Value = row.try_get("", "payload")?;
-        if payload
+        if let Some(job_id) = payload
             .get("job_id")
             .and_then(Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
-            == Some(job_id)
+            .filter(|job_id| requested.contains(job_id))
         {
-            return Ok(true);
+            protected.insert(job_id);
         }
     }
-    Ok(false)
+    Ok(protected)
 }
 
-async fn exists(
+async fn selected_ids(
     transaction: &DatabaseTransaction,
     query: sea_orm::sea_query::SelectStatement,
-) -> Result<bool, DbErr> {
+    column: &str,
+) -> Result<HashSet<Uuid>, DbErr> {
     let backend = transaction.get_database_backend();
-    Ok(transaction
-        .query_one(backend.build(&query))
+    transaction
+        .query_all(backend.build(&query))
         .await?
-        .is_some())
+        .iter()
+        .map(|row| row.try_get("", column))
+        .collect()
 }
 
-async fn defer_claim(
+async fn defer_claims(
     transaction: &DatabaseTransaction,
-    claimed: &RetentionClaim,
+    claimed: &RetentionClaimBatch,
+    job_ids: &[Uuid],
     now: DateTime<Utc>,
 ) -> Result<(), WorkRetentionError> {
     let available_at = now
         .checked_add_signed(Duration::hours(1))
         .ok_or(WorkRetentionError::TimestampOverflow)?;
-    update_queue_claim(
-        transaction,
-        claimed,
-        now,
-        Some(available_at),
-        "dependency active",
-    )
-    .await
-}
-
-async fn delete_queue_claim(
-    transaction: &DatabaseTransaction,
-    claimed: &RetentionClaim,
-    now: DateTime<Utc>,
-) -> Result<(), WorkRetentionError> {
-    let backend = transaction.get_database_backend();
-    let deleted = transaction
-        .execute(
-            backend.build(
-                Query::delete()
-                    .from_table(Alias::new("work_job_retention_queue"))
-                    .and_where(Expr::col(Alias::new("job_id")).eq(claimed.job_id))
-                    .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
-                    .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
-            ),
-        )
-        .await?
-        .rows_affected();
-    if deleted != 1 {
-        return Err(WorkRetentionError::LostLease);
-    }
-    Ok(())
-}
-
-async fn update_queue_claim(
-    transaction: &DatabaseTransaction,
-    claimed: &RetentionClaim,
-    now: DateTime<Utc>,
-    available_at: Option<DateTime<Utc>>,
-    last_error: &str,
-) -> Result<(), WorkRetentionError> {
     let backend = transaction.get_database_backend();
     let updated = transaction
         .execute(
@@ -518,18 +556,109 @@ async fn update_queue_claim(
                         Option::<DateTime<Utc>>::None,
                     )
                     .value(Alias::new("available_at"), available_at)
-                    .value(Alias::new("last_error"), last_error)
-                    .and_where(Expr::col(Alias::new("job_id")).eq(claimed.job_id))
+                    .value(Alias::new("last_error"), DEFERRED_REASON)
+                    .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied()))
                     .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
                     .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
             ),
         )
         .await?
         .rows_affected();
-    if updated != 1 {
-        return Err(WorkRetentionError::LostLease);
+    ensure_affected(updated, job_ids.len())
+}
+
+async fn clear_terminal_dependencies(
+    transaction: &DatabaseTransaction,
+    job_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    transaction
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("work_jobs"))
+                    .value(Alias::new("required_sync_job_id"), Option::<Uuid>::None)
+                    .and_where(
+                        Expr::col(Alias::new("required_sync_job_id"))
+                            .is_in(job_ids.iter().copied()),
+                    )
+                    .and_where(Expr::col(Alias::new("state")).is_in(TERMINAL_STATES)),
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn delete_child_rows(
+    transaction: &DatabaseTransaction,
+    job_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    for table in ["work_staging_rows", "storage_sync_pages", "work_results"] {
+        transaction
+            .execute(
+                backend.build(
+                    Query::delete()
+                        .from_table(Alias::new(table))
+                        .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied())),
+                ),
+            )
+            .await?;
     }
     Ok(())
+}
+
+async fn delete_jobs(
+    transaction: &DatabaseTransaction,
+    job_ids: &[Uuid],
+) -> Result<(), WorkRetentionError> {
+    let backend = transaction.get_database_backend();
+    let deleted = transaction
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("id")).is_in(job_ids.iter().copied()))
+                    .and_where(Expr::col(Alias::new("state")).is_in(TERMINAL_STATES)),
+            ),
+        )
+        .await?
+        .rows_affected();
+    ensure_affected(deleted, job_ids.len())
+}
+
+async fn delete_queue_claims(
+    transaction: &DatabaseTransaction,
+    claimed: &RetentionClaimBatch,
+    job_ids: &[Uuid],
+    now: DateTime<Utc>,
+) -> Result<(), WorkRetentionError> {
+    let backend = transaction.get_database_backend();
+    let deleted = transaction
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("work_job_retention_queue"))
+                    .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied()))
+                    .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
+                    .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
+            ),
+        )
+        .await?
+        .rows_affected();
+    ensure_affected(deleted, job_ids.len())
+}
+
+fn ensure_affected(actual: u64, expected: usize) -> Result<(), WorkRetentionError> {
+    (actual == u64::try_from(expected).expect("retention batch size fits u64"))
+        .then_some(())
+        .ok_or(WorkRetentionError::LostLease)
+}
+
+fn sorted_ids(mut job_ids: Vec<Uuid>) -> Vec<Uuid> {
+    job_ids.sort_unstable();
+    job_ids.dedup();
+    job_ids
 }
 
 async fn finish<T>(

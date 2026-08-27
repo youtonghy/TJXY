@@ -211,15 +211,22 @@ impl FilesystemBackend {
         let (sender, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = Arc::clone(&overflowed);
-        let mut watcher = notify::recommended_watcher(move |event| {
-            if matches!(
-                sender.try_send(event),
-                Err(mpsc::error::TrySendError::Full(_))
-            ) {
-                callback_overflowed.store(true, Ordering::Release);
-            }
-        })
-        .map_err(map_notify_error)?;
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if event
+                    .as_ref()
+                    .is_ok_and(|event| !event_requires_inventory(event))
+                {
+                    return;
+                }
+                if matches!(
+                    sender.try_send(event),
+                    Err(mpsc::error::TrySendError::Full(_))
+                ) {
+                    callback_overflowed.store(true, Ordering::Release);
+                }
+            })
+            .map_err(map_notify_error)?;
         watch_recursively(&mut watcher, &self.root)?;
         Ok(FilesystemEventMonitor {
             _watcher: Some(watcher),
@@ -614,6 +621,10 @@ fn event_overflow_error() -> BackendError {
     }
 }
 
+fn event_requires_inventory(event: &notify::Event) -> bool {
+    event.need_rescan() || !matches!(event.kind, notify::EventKind::Access(_))
+}
+
 fn filesystem_revision(metadata: &Metadata, identity: &str) -> Result<String, BackendError> {
     let modified = metadata.modified().map_err(map_io_error)?;
     let elapsed = modified
@@ -713,10 +724,30 @@ mod tests {
         time::Duration,
     };
 
-    use notify::{Event, EventKind};
+    use notify::{
+        Event, EventKind,
+        event::{AccessKind, CreateKind, ModifyKind, RemoveKind},
+    };
     use tokio::sync::mpsc;
 
-    use super::FilesystemEventMonitor;
+    use super::{FilesystemEventMonitor, event_requires_inventory};
+
+    #[test]
+    fn inventory_events_exclude_non_mutating_access() {
+        assert!(!event_requires_inventory(&Event::new(EventKind::Access(
+            AccessKind::Any,
+        ))));
+        assert!(event_requires_inventory(&Event::new(EventKind::Any)));
+        assert!(event_requires_inventory(&Event::new(EventKind::Create(
+            CreateKind::Any,
+        ))));
+        assert!(event_requires_inventory(&Event::new(EventKind::Modify(
+            ModifyKind::Any,
+        ))));
+        assert!(event_requires_inventory(&Event::new(EventKind::Remove(
+            RemoveKind::Any,
+        ))));
+    }
 
     #[tokio::test]
     async fn event_monitor_coalesces_and_deduplicates_one_quiet_window() {

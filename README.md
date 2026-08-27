@@ -222,10 +222,17 @@ use an explicit location.
 Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention
-worker also enrolls terminal work left by earlier versions in bounded batches.
-Legacy processed outbox rows are removed in bounded background batches; failed
-storage events are kept for seven days after they become dead letters. Deleting
-rows does not immediately shrink existing database files.
+worker enrolls terminal work left by earlier versions in batches of up to 1,000,
+then clears at most 100 jobs per short transaction. PostgreSQL and SQLite keep
+the work-claim index limited to pending and running jobs; PostgreSQL builds its
+replacement index concurrently. Legacy processed outbox rows are removed in
+bounded background batches; failed storage events are kept for seven days after
+they become dead letters.
+
+Deleting rows does not immediately shrink existing database files. After a large
+history cleanup, run `VACUUM (ANALYZE)` during normal operations. Reclaiming file
+system space requires a separately planned maintenance window for `VACUUM FULL` or
+an online PostgreSQL reorganization tool such as pg_repack.
 
 ### Jellyfin Media Player
 

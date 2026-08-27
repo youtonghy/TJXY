@@ -34,7 +34,7 @@ async fn newly_terminal_job_is_scheduled_and_removed_after_retention() {
     let terminal_at = Utc::now() - Duration::days(31);
     let jobs =
         WorkJobRepository::with_clock(&database, ManualClock(Arc::new(Mutex::new(terminal_at))));
-    let submitted = jobs
+    let _submitted = jobs
         .enqueue_or_join(
             &WorkJobSpec::new(
                 WorkTaskKind::ProbeMedia,
@@ -76,8 +76,10 @@ async fn newly_terminal_job_is_scheduled_and_removed_after_retention() {
 
     assert_eq!(
         run,
-        WorkRetentionRun::Deleted {
-            job_id: submitted.job().id().as_uuid()
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            compacted: 0,
+            deferred: 0,
         }
     );
     assert_eq!(table_count(&database, "work_jobs", "id").await, 0);
@@ -142,12 +144,160 @@ async fn active_dependency_defers_retention() {
 
     assert_eq!(
         run,
-        WorkRetentionRun::Deferred {
-            job_id: sync.job().id().as_uuid()
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            compacted: 0,
+            deferred: 1,
         }
     );
     assert_eq!(table_count(&database, "work_jobs", "id").await, 2);
     assert_eq!(table_count(&database, "work_results", "id").await, 1);
+}
+
+#[tokio::test]
+async fn retention_deletes_multiple_terminal_jobs_in_one_batch() {
+    let database = database().await;
+    let terminal_at = Utc::now() - Duration::days(31);
+    let jobs =
+        WorkJobRepository::with_clock(&database, ManualClock(Arc::new(Mutex::new(terminal_at))));
+    for number in 0..3 {
+        let submitted = jobs
+            .enqueue_or_join(
+                &WorkJobSpec::new(
+                    WorkTaskKind::ProbeMedia,
+                    WorkScope::CatalogItem(CatalogItemId::new()),
+                    number,
+                    100,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let claimed = jobs
+            .claim_next(
+                &[WorkTaskKind::ProbeMedia],
+                "retention-batch-contract",
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id(), submitted.job().id());
+        jobs.fail_terminal(&claimed, "batch fixture").await.unwrap();
+    }
+
+    assert_eq!(
+        WorkRetentionRepository::new(&database)
+            .run_once(
+                "retention-worker",
+                Duration::days(30),
+                Duration::seconds(30),
+            )
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 3,
+            compacted: 0,
+            deferred: 0,
+        }
+    );
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 0);
+    assert_eq!(table_count(&database, "work_results", "id").await, 0);
+    assert_eq!(
+        table_count(&database, "work_job_retention_queue", "job_id").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn retention_mixes_deleted_and_deferred_jobs_in_one_batch() {
+    let database = database().await;
+    let terminal_at = Utc::now() - Duration::days(31);
+    let jobs =
+        WorkJobRepository::with_clock(&database, ManualClock(Arc::new(Mutex::new(terminal_at))));
+    let sync = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ScopedStorageSync,
+                WorkScope::StorageObject(StorageObjectRecordId::new()),
+                1,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ExpandItem,
+            WorkScope::CatalogItem(CatalogItemId::new()),
+            1,
+            100,
+        )
+        .unwrap()
+        .with_pending_required_sync(sync.job().id()),
+    )
+    .await
+    .unwrap();
+    let sync_claim = jobs
+        .claim_next(
+            &[WorkTaskKind::ScopedStorageSync],
+            "retention-mixed-sync",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    jobs.fail_terminal(&sync_claim, "mixed fixture")
+        .await
+        .unwrap();
+    let probe = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ProbeMedia,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let probe_claim = jobs
+        .claim_next(
+            &[WorkTaskKind::ProbeMedia],
+            "retention-mixed-probe",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(probe_claim.id(), probe.job().id());
+    jobs.fail_terminal(&probe_claim, "mixed fixture")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        WorkRetentionRepository::new(&database)
+            .run_once(
+                "retention-worker",
+                Duration::days(30),
+                Duration::seconds(30),
+            )
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            compacted: 0,
+            deferred: 1,
+        }
+    );
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 2);
+    assert_eq!(table_count(&database, "work_results", "id").await, 1);
+    assert_eq!(
+        table_count(&database, "work_job_retention_queue", "job_id").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -213,8 +363,10 @@ async fn legacy_terminal_job_is_enrolled_then_deleted() {
             )
             .await
             .unwrap(),
-        WorkRetentionRun::Deleted {
-            job_id: submitted.job().id().as_uuid()
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            compacted: 0,
+            deferred: 0,
         }
     );
     assert_eq!(table_count(&database, "work_jobs", "id").await, 0);
@@ -329,8 +481,10 @@ async fn published_job_is_compacted_once_without_legacy_reenrollment() {
             )
             .await
             .unwrap(),
-        WorkRetentionRun::CompactedPublication {
-            job_id: submitted.job().id().as_uuid()
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            compacted: 1,
+            deferred: 0,
         }
     );
     assert_eq!(table_count(&database, "work_results", "id").await, 0);
