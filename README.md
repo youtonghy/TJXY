@@ -224,10 +224,11 @@ Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention
 worker enrolls terminal work left by earlier versions in batches of up to 1,000,
 then clears at most 100 jobs per short transaction. PostgreSQL and SQLite keep
-the work-claim index limited to pending and running jobs; PostgreSQL builds its
-replacement index concurrently. Legacy processed outbox rows are removed in
-bounded background batches; failed storage events are kept for seven days after
-they become dead letters.
+the work-claim index limited to pending and running jobs. PostgreSQL replaces
+this index in the migration transaction, so the first startup after upgrading
+can take longer on a large work history. Legacy processed outbox rows are removed
+in bounded background batches; failed storage events are kept for seven days
+after they become dead letters.
 
 Deleting rows does not immediately shrink existing database files. After a large
 history cleanup, run `VACUUM (ANALYZE)` during normal operations. Reclaiming file

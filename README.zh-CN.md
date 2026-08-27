@@ -208,8 +208,8 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 每次最多登记 1,000 条旧版本
 遗留的终态任务，并以每事务最多 100 条的短批次清理。PostgreSQL 和 SQLite 的任务领取索引只保留
-Pending/Running 任务；PostgreSQL 会并发创建替代索引。历史已处理 outbox 也会由后台分批清理。
-storage 事件进入 dead-letter 后保留 7 天。
+Pending/Running 任务。PostgreSQL 会在迁移事务内替换索引，因此任务历史较大时，升级后的首次启动
+可能需要更长时间。历史已处理 outbox 也会由后台分批清理；storage 事件进入 dead-letter 后保留 7 天。
 
 删除记录不会立即缩小现有数据库文件。大规模清理后可在正常运行期间执行
 `VACUUM (ANALYZE)`；若需要将空间归还给文件系统，应单独安排维护窗口执行 `VACUUM FULL`，
