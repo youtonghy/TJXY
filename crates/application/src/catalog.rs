@@ -979,6 +979,7 @@ impl CatalogQueryService {
         };
         let publications = CatalogPublicationRepository::new(&self.database);
         let mut sources = publications.active_sources(item_id).await?;
+        tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback source resolution started");
         if sources.is_empty()
             && let Some(target) = query.lazy_work_target(principal, item_id).await?
             && matches!(
@@ -989,6 +990,7 @@ impl CatalogQueryService {
             self.enqueue_and_wait(target, item_id, WorkTaskKind::IndexMediaSources)
                 .await?;
             sources = publications.active_sources(item_id).await?;
+            tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback source index completed");
         }
         let jobs = WorkJobRepository::new(&self.database);
         let deadline = Instant::now() + self.lazy_wait_timeout;
@@ -1008,6 +1010,14 @@ impl CatalogQueryService {
                         200,
                     )?)
                     .await?;
+                tracing::debug!(
+                    item_id = %item_id,
+                    media_source_id = %source.id().as_uuid(),
+                    job_id = %submission.job().id().as_uuid(),
+                    probe_revision = source.probe_revision(),
+                    created = submission.created(),
+                    "playback probe enqueued or joined"
+                );
                 probe_jobs.push(submission.job().id());
             }
         }
@@ -1017,6 +1027,7 @@ impl CatalogQueryService {
         if !sources.is_empty() {
             sources = publications.active_sources(item_id).await?;
         }
+        tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback sources refreshed after probes");
         let last_used = PlaystateRepository::new(&self.database)
             .last_presentation_key(principal, item_id)
             .await?;
@@ -1250,14 +1261,29 @@ impl CatalogQueryService {
         job_id: WorkJobId,
         deadline: Instant,
     ) -> Result<(), CatalogServiceError> {
+        let mut final_state = None;
+        let mut timed_out = false;
         while Instant::now() < deadline {
             match jobs.get(job_id).await?.map(|job| job.state()) {
-                Some(WorkJobState::Completed | WorkJobState::Failed) | None => break,
+                Some(state @ (WorkJobState::Completed | WorkJobState::Failed)) => {
+                    final_state = Some(state);
+                    break;
+                }
+                None => break,
                 Some(WorkJobState::Pending | WorkJobState::Running) => {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             }
         }
+        if final_state.is_none() && Instant::now() >= deadline {
+            timed_out = true;
+        }
+        tracing::debug!(
+            job_id = %job_id.as_uuid(),
+            final_state = ?final_state,
+            timed_out,
+            "playback probe wait finished"
+        );
         Ok(())
     }
 }

@@ -1315,11 +1315,24 @@ async fn handle_outcome(
             WorkJobRepositoryError::LostLease,
         ))) => {}
         Err(ProbeServiceError::InspectionFailed(error)) => {
-            tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "media probe inspection failed");
+            tracing::error!(
+                job_id = %claimed.id().as_uuid(),
+                media_source_id = %claimed.job().scope().id(),
+                attempt = claimed.attempt_count(),
+                error = %error,
+                "media probe inspection failed"
+            );
         }
         Err(error) => {
             let message = error.to_string();
             let message = truncate_error(&message);
+            tracing::debug!(
+                job_id = %claimed.id().as_uuid(),
+                media_source_id = %claimed.job().scope().id(),
+                attempt = claimed.attempt_count(),
+                error = %error,
+                "media probe deferred or failed; retry scheduled"
+            );
             if let Err(retry_error) = jobs.retry(claimed, Duration::seconds(5), &message).await {
                 tracing::error!("Probe worker could not schedule a retry: {retry_error}");
             }
