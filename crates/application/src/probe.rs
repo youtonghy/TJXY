@@ -22,8 +22,13 @@ use crate::{
 };
 
 const RANGE_BUDGET: u64 = 1024 * 1024;
-const RETRY_RANGE_BUDGET: u64 = 4 * 1024 * 1024;
-const SEQUENTIAL_FALLBACK_MAX: u64 = 16 * 1024 * 1024;
+const ADAPTIVE_RANGE_BUDGETS: &[u64] = &[
+    4 * 1024 * 1024,
+    16 * 1024 * 1024,
+    64 * 1024 * 1024,
+    128 * 1024 * 1024,
+];
+const SEQUENTIAL_FALLBACK_MAX: u64 = 128 * 1024 * 1024;
 
 pub struct ProbeInput {
     size: u64,
@@ -784,43 +789,58 @@ impl ProbeService {
             &candidate,
         )
         .await?;
-        let result = match self.inspector.inspect(input) {
+        let mut result = self.inspector.inspect(input);
+        if matches!(
+            &result,
             Err(ProbeServiceError::Inspection(message))
-                if message.contains("Probe byte budget gap") && probe_size > RANGE_BUDGET * 2 =>
-            {
+                if message.contains("Probe byte budget gap")
+        ) {
+            for &range_budget in ADAPTIVE_RANGE_BUDGETS {
+                if probe_size <= range_budget * 2 {
+                    break;
+                }
                 let retry_input = read_probe_input_with_budget(
                     &self.database,
                     probe_backend.as_ref(),
                     probe_record_id,
                     &probe_object_id,
                     probe_size,
-                    RETRY_RANGE_BUDGET,
+                    range_budget,
                     &repository,
                     claimed,
                     &candidate,
                 )
                 .await?;
-                match self.inspector.inspect(retry_input) {
+                result = self.inspector.inspect(retry_input);
+                if !matches!(
+                    &result,
                     Err(ProbeServiceError::Inspection(message))
                         if message.contains("Probe byte budget gap")
-                            && probe_size <= SEQUENTIAL_FALLBACK_MAX =>
-                    {
-                        let full_input = read_exact_probe_input(
-                            &self.database,
-                            probe_backend.as_ref(),
-                            probe_record_id,
-                            &probe_object_id,
-                            probe_size,
-                            &repository,
-                            claimed,
-                            &candidate,
-                        )
-                        .await?;
-                        self.inspector.inspect(full_input)
-                    }
-                    result => result,
+                ) {
+                    break;
                 }
             }
+            if matches!(
+                &result,
+                Err(ProbeServiceError::Inspection(message))
+                    if message.contains("Probe byte budget gap")
+            ) && probe_size <= SEQUENTIAL_FALLBACK_MAX
+            {
+                let full_input = read_exact_probe_input(
+                    &self.database,
+                    probe_backend.as_ref(),
+                    probe_record_id,
+                    &probe_object_id,
+                    probe_size,
+                    &repository,
+                    claimed,
+                    &candidate,
+                )
+                .await?;
+                result = self.inspector.inspect(full_input);
+            }
+        }
+        let result = match result {
             Ok(result) => Ok(result),
             Err(ProbeServiceError::Inspection(message)) => {
                 repository
