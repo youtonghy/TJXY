@@ -330,6 +330,14 @@ impl MetadataResolveService {
     ) -> Result<MetadataResolveReport, MetadataResolveError> {
         let repository = MetadataWorkRepository::new(&self.database);
         let snapshot = repository.snapshot(claimed).await?;
+        tracing::debug!(
+            catalog_item_id = %claimed.job().scope().id(),
+            storage_root_id = %snapshot.storage_root_id().as_uuid(),
+            stage = "nfo_selection",
+            nfo = snapshot.sidecar().map_or("none", |file| file.name()),
+            image_count = snapshot.images().len(),
+            "metadata inventory snapshot selected"
+        );
         let access_mode = claimed
             .job()
             .local_metadata_access_mode()

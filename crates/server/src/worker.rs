@@ -523,8 +523,6 @@ fn discover_error_is_terminal(error: &DiscoverTitlesServiceError) -> bool {
         error,
         DiscoverTitlesServiceError::Repository(
             tjxy_db::DiscoverTitlesError::InvalidClaim
-                | tjxy_db::DiscoverTitlesError::StaleRoot
-                | tjxy_db::DiscoverTitlesError::AlreadyCurrent
                 | tjxy_db::DiscoverTitlesError::TitleLimit
                 | tjxy_db::DiscoverTitlesError::UnsupportedCollection
                 | tjxy_db::DiscoverTitlesError::InvalidTitle

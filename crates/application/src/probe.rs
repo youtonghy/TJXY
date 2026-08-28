@@ -22,6 +22,8 @@ use crate::{
 };
 
 const RANGE_BUDGET: u64 = 1024 * 1024;
+const RETRY_RANGE_BUDGET: u64 = 4 * 1024 * 1024;
+const SEQUENTIAL_FALLBACK_MAX: u64 = 16 * 1024 * 1024;
 
 pub struct ProbeInput {
     size: u64,
@@ -659,6 +661,16 @@ impl ProbeService {
             .candidate(claimed)
             .await?
             .ok_or(ProbeServiceError::CandidateUnavailable)?;
+        tracing::debug!(
+            storage_object_id = %candidate.storage_object_id().as_uuid(),
+            catalog_item_id = %candidate.item_id().as_uuid(),
+            provider = candidate.provider(),
+            locator_kind = candidate.locator_kind(),
+            size = candidate.size(),
+            revision = candidate.location_revision(),
+            stage = "candidate",
+            "media probe candidate selected"
+        );
         let backend = self
             .backends
             .backend(candidate.storage_account_id())
@@ -714,6 +726,12 @@ impl ProbeService {
                     return Err(ProbeServiceError::InspectionFailed(message));
                 }
             };
+            tracing::debug!(
+                storage_object_id = %candidate.storage_object_id().as_uuid(),
+                stage = "strm_target_resolved",
+                target_hash = %format!("{:x}", Sha256::digest(target.as_bytes())),
+                "STRM target resolved with redacted reference"
+            );
             let allowed_accounts = CatalogPublicationRepository::new(&self.database)
                 .playback_storage_accounts(candidate.item_id())
                 .await?;
@@ -767,6 +785,52 @@ impl ProbeService {
         )
         .await?;
         let result = match self.inspector.inspect(input) {
+            Err(ProbeServiceError::Inspection(message))
+                if message.contains("Probe byte budget gap") && probe_size > RANGE_BUDGET * 2 =>
+            {
+                let retry_input = read_probe_input_with_budget(
+                    &self.database,
+                    probe_backend.as_ref(),
+                    probe_record_id,
+                    &probe_object_id,
+                    probe_size,
+                    RETRY_RANGE_BUDGET,
+                    &repository,
+                    claimed,
+                    &candidate,
+                )
+                .await?;
+                match self.inspector.inspect(retry_input) {
+                    Err(ProbeServiceError::Inspection(message))
+                        if message.contains("Probe byte budget gap")
+                            && probe_size <= SEQUENTIAL_FALLBACK_MAX =>
+                    {
+                        let full_input = read_exact_probe_input(
+                            &self.database,
+                            probe_backend.as_ref(),
+                            probe_record_id,
+                            &probe_object_id,
+                            probe_size,
+                            &repository,
+                            claimed,
+                            &candidate,
+                        )
+                        .await?;
+                        self.inspector.inspect(full_input)
+                    }
+                    result => result,
+                }
+            }
+            Ok(result) => Ok(result),
+            Err(ProbeServiceError::Inspection(message)) => {
+                repository
+                    .commit_failure(claimed, &candidate, &message)
+                    .await?;
+                return Err(ProbeServiceError::InspectionFailed(message));
+            }
+            Err(error) => return Err(error),
+        };
+        let result = match result {
             Ok(result) => result,
             Err(ProbeServiceError::Inspection(message)) => {
                 repository
@@ -860,7 +924,33 @@ async fn read_probe_input(
     claimed: &ClaimedWorkJob,
     candidate: &ProbeCandidate,
 ) -> Result<ProbeInput, ProbeServiceError> {
-    let segments = if size <= RANGE_BUDGET * 2 {
+    read_probe_input_with_budget(
+        database,
+        backend,
+        record_id,
+        object_id,
+        size,
+        RANGE_BUDGET,
+        repository,
+        claimed,
+        candidate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_probe_input_with_budget(
+    database: &sea_orm::DatabaseConnection,
+    backend: &dyn StorageBackend,
+    record_id: Option<tjxy_common::StorageObjectRecordId>,
+    object_id: &StorageObjectId,
+    size: u64,
+    range_budget: u64,
+    repository: &ProbeRepository<'_>,
+    claimed: &ClaimedWorkJob,
+    candidate: &ProbeCandidate,
+) -> Result<ProbeInput, ProbeServiceError> {
+    let segments = if size <= range_budget * 2 {
         vec![ProbeSegment {
             start: 0,
             bytes: read_exact_range(
@@ -878,7 +968,7 @@ async fn read_probe_input(
                     record_id,
                     object_id,
                     0,
-                    RANGE_BUDGET,
+                    range_budget,
                     repository,
                     claimed,
                     candidate,
@@ -886,13 +976,13 @@ async fn read_probe_input(
                 .await?,
             },
             ProbeSegment {
-                start: size - RANGE_BUDGET,
+                start: size - range_budget,
                 bytes: read_exact_range(
                     database,
                     backend,
                     record_id,
                     object_id,
-                    size - RANGE_BUDGET,
+                    size - range_budget,
                     size,
                     repository,
                     claimed,
@@ -903,6 +993,29 @@ async fn read_probe_input(
         ]
     };
     Ok(ProbeInput { size, segments })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_exact_probe_input(
+    database: &sea_orm::DatabaseConnection,
+    backend: &dyn StorageBackend,
+    record_id: Option<tjxy_common::StorageObjectRecordId>,
+    object_id: &StorageObjectId,
+    size: u64,
+    repository: &ProbeRepository<'_>,
+    claimed: &ClaimedWorkJob,
+    candidate: &ProbeCandidate,
+) -> Result<ProbeInput, ProbeServiceError> {
+    Ok(ProbeInput {
+        size,
+        segments: vec![ProbeSegment {
+            start: 0,
+            bytes: read_exact_range(
+                database, backend, record_id, object_id, 0, size, repository, claimed, candidate,
+            )
+            .await?,
+        }],
+    })
 }
 
 #[allow(clippy::too_many_arguments)] // Range reads repeat the same claim, candidate, and object authorization fence.

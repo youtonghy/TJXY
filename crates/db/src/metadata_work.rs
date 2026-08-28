@@ -256,15 +256,16 @@ impl<'connection> MetadataWorkRepository<'connection> {
                     )),
             )
             .await?;
-        if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
-            return Err(MetadataWorkError::TooManySidecars);
-        }
         let mut candidates = rows
             .iter()
             .map(sidecar_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(stem) = &flat_file_stem {
             candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
+        }
+        candidates.retain(|candidate| candidate.size != 0);
+        if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
+            return Err(MetadataWorkError::TooManySidecars);
         }
         let video_names = if kind == MetadataItemKind::Episode {
             crate::source_publication::effective_video_storage_names(
@@ -923,13 +924,19 @@ async fn revalidate_metadata_snapshot(
                 )),
         )
         .await?;
-    if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
-        return Err(MetadataWorkError::TooManySidecars);
-    }
     let mut candidates = rows
         .iter()
         .map(sidecar_from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    if scope.is_file()
+        && let Some(stem) = storage_object_stem(transaction, scope.storage_object_id()).await?
+    {
+        candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, &stem));
+    }
+    candidates.retain(|candidate| candidate.size != 0);
+    if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
+        return Err(MetadataWorkError::TooManySidecars);
+    }
     let video_names = if snapshot.lookup.kind() == MetadataItemKind::Episode {
         crate::source_publication::effective_video_storage_names(
             transaction,
