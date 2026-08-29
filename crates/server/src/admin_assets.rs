@@ -49,6 +49,7 @@ pub(super) fn router_with_jellyfin_web(
             "/setup/{*path}",
             get(|| async { Redirect::temporary("/app/") }),
         )
+        .route_service("/login", get_service(ServeFile::new(index_path.clone())))
         .route_service("/app/", get_service(ServeFile::new(index_path.clone())))
         .route_service("/admin/", get_service(ServeFile::new(index_path)))
         .nest_service("/assets", ServeDir::new(dist_dir.join("assets")))
@@ -70,7 +71,7 @@ pub(super) fn router_with_jellyfin_web(
         );
     let router = if let Some(web_dist_dir) = jellyfin_web_dist_dir {
         router
-            .route("/", get(|| async { Redirect::permanent("/web/") }))
+            .route("/", get(|| async { Redirect::permanent("/app/") }))
             .nest_service(
                 "/web",
                 ServeDir::new(web_dist_dir).append_index_html_on_directories(true),
@@ -88,6 +89,7 @@ pub(super) fn setup_router(dist_dir: &Path) -> Result<Router, AdminAssetsError> 
         .route("/", get(|| async { Redirect::temporary("/setup/") }))
         .route("/setup", get(|| async { Redirect::temporary("/setup/") }))
         .route("/app", get(|| async { Redirect::temporary("/setup/") }))
+        .route("/login", get(|| async { Redirect::temporary("/setup/") }))
         .route("/app/", get(|| async { Redirect::temporary("/setup/") }))
         .route(
             "/app/{*path}",

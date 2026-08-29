@@ -248,7 +248,7 @@ async fn setup_status_issues_csrf_and_mutations_require_it() {
     assert_eq!(body["Port"], 8096);
     assert_eq!(
         body["DestinationUrl"],
-        "https://media.example.test/app/login?redirect=%2Fadmin"
+        "https://media.example.test/login?redirect=%2Fadmin"
     );
 
     let invalid_network_payload = json!({

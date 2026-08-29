@@ -9,7 +9,7 @@ export function AdminLoginRedirect() {
   return (
     <Navigate
       replace
-      to={`/app/login?redirect=${encodeURIComponent(destination)}`}
+      to={`/login?redirect=${encodeURIComponent(destination)}`}
     />
   );
 }

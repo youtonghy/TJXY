@@ -132,7 +132,7 @@ export function AuthenticationErrorPage() {
     >
       <Link
         className="inline-flex min-h-9 items-center gap-2 text-sm font-medium text-accent hover:underline"
-        to="/app/login?redirect=%2Fadmin"
+        to="/login?redirect=%2Fadmin"
       >
         Go to sign in
       </Link>

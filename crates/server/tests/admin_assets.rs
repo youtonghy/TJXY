@@ -107,7 +107,7 @@ async fn serves_real_files_and_scoped_html_fallbacks() {
     let root = request(&app, Method::GET, "/").await;
     assert_eq!(root.status(), StatusCode::PERMANENT_REDIRECT);
     assert_eq!(root.headers()[header::LOCATION], "/app/");
-    for path in ["/app/", "/app/items/item-1"] {
+    for path in ["/login", "/app/", "/app/items/item-1"] {
         let response = request(&app, Method::GET, path).await;
         assert_eq!(response.status(), StatusCode::OK, "path {path}");
         assert!(
@@ -136,7 +136,7 @@ async fn operator_supplied_jellyfin_web_owns_only_root_and_web_routes() {
 
     let root = request(&app, Method::GET, "/").await;
     assert_eq!(root.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(root.headers()[header::LOCATION], "/web/");
+    assert_eq!(root.headers()[header::LOCATION], "/app/");
     let web = request(&app, Method::GET, "/web/").await;
     assert_eq!(web.status(), StatusCode::OK);
     assert!(body_text(web).await.contains("Jellyfin Web"));

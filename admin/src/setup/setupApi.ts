@@ -258,7 +258,7 @@ function validDestination(value: unknown): value is string {
     return (url.protocol === 'http:' || url.protocol === 'https:')
       && url.username === ''
       && url.password === ''
-      && url.pathname === '/app/login'
+      && url.pathname === '/login'
       && url.search === '?redirect=%2Fadmin'
       && url.hash === '';
   } catch {

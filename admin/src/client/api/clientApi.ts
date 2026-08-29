@@ -39,7 +39,7 @@ export async function clientFetch(path: string, options: RequestInit = {}): Prom
   try {
     const baseUrl = getApiBaseUrl();
     if (!baseUrl) throw new ClientApiError(0, 'validation');
-    response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, headers });
+    response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, credentials: 'include', headers });
   }
   catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; if (error instanceof ClientApiError) throw error; throw new ClientApiError(0, 'network'); }
   if (response.status === 401 && token) {

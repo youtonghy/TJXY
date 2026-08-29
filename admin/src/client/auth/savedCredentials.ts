@@ -9,20 +9,12 @@ export interface SavedCredentials {
 
 export function loadSavedCredentials(): SavedCredentials {
   if (typeof window === 'undefined') return { username: '', remember: false };
-  // Remove passwords saved by older clients. Passwords must stay in the browser's
-  // transient form state and the authenticated session only.
+  // Remove credentials saved by older clients. Remember-login persists only the
+  // server-issued HttpOnly session cookie.
+  window.localStorage.removeItem(USERNAME_KEY);
   window.localStorage.removeItem(PASSWORD_KEY);
   const remember = window.localStorage.getItem(REMEMBER_KEY) === '1';
-  return {
-    remember,
-    username: remember ? window.localStorage.getItem(USERNAME_KEY) ?? '' : '',
-  };
-}
-
-export function saveCredentials(username: string): void {
-  window.localStorage.setItem(REMEMBER_KEY, '1');
-  window.localStorage.setItem(USERNAME_KEY, username);
-  window.localStorage.removeItem(PASSWORD_KEY);
+  return { remember, username: '' };
 }
 
 export function clearSavedCredentials(): void {
@@ -31,7 +23,11 @@ export function clearSavedCredentials(): void {
   window.localStorage.removeItem(PASSWORD_KEY);
 }
 
-export function persistCredentialsPreference(remember: boolean, username: string): void {
-  if (remember) saveCredentials(username);
+export function persistRememberPreference(remember: boolean): void {
+  if (remember) {
+    window.localStorage.setItem(REMEMBER_KEY, '1');
+    window.localStorage.removeItem(USERNAME_KEY);
+    window.localStorage.removeItem(PASSWORD_KEY);
+  }
   else clearSavedCredentials();
 }

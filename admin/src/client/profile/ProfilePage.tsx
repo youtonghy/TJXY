@@ -118,7 +118,7 @@ export function ProfilePage() {
                     setServer(origin);
                     setServerOk(true);
                     await signOut();
-                    void navigate('/app/login', { replace: true });
+                    void navigate('/login', { replace: true });
                   })
                   .catch(() => {
                     setServerError(tr('Could not reach that server.', '无法连接到该服务器。'));
@@ -143,7 +143,7 @@ export function ProfilePage() {
             await revokePersonalSession(session.Id);
             if (session.IsCurrent) {
               await signOut();
-              void navigate('/app/login', { replace: true });
+              void navigate('/login', { replace: true });
               return;
             }
             setSessions((current) => current.filter((item) => item.Id !== session.Id));
@@ -185,7 +185,7 @@ export function ProfilePage() {
         </div>
         <ViewingTimeline events={insights?.Timeline ?? []} />
       </section>
-      {editing ? <ProfileDialog profile={profile} onClose={() => { setEditing(false); }} onSaved={setProfile} onSessionInvalidated={async () => { await signOut(); void navigate('/app/login?redirect=%2Fapp%2Fprofile', { replace: true }); }} /> : null}
+      {editing ? <ProfileDialog profile={profile} onClose={() => { setEditing(false); }} onSaved={setProfile} onSessionInvalidated={async () => { await signOut(); void navigate('/login?redirect=%2Fapp%2Fprofile', { replace: true }); }} /> : null}
     </div>
   );
 }

@@ -137,6 +137,55 @@ async fn canonical_login_returns_a_durable_session_and_me_resolves_it() {
 }
 
 #[tokio::test]
+async fn remember_me_issues_a_sliding_cookie_session() {
+    let app = app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header(header::AUTHORIZATION, IDENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": "alice", "Pw": "correct horse", "RememberMe": true})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_owned();
+    assert!(cookie.starts_with("tjxy_session="));
+    assert!(cookie.contains("Max-Age=604800"));
+    assert!(cookie.contains("HttpOnly"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/Users/Me")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("Max-Age=604800"))
+    );
+}
+
+#[tokio::test]
 async fn externally_verified_authentication_rejects_a_disabled_user() {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();

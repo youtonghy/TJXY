@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -78,7 +78,19 @@ pub(crate) async fn logout(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match service.logout(&principal).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                format!(
+                    "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+                    auth::SESSION_COOKIE
+                )
+                .parse()
+                .expect("valid cookie header"),
+            );
+            response
+        }
         Err(AuthError::SessionRequired) => StatusCode::FORBIDDEN.into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }

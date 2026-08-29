@@ -27,4 +27,4 @@ function ClientRouteLoading() { const tr = useTranslate(); return <div className
 
 function ClientShellLayout() { return <ClientShell><Outlet /></ClientShell>; }
 
-function ClientRouteGuard() { const { user, isLoading } = useClientAuth(); const location = useLocation(); const tr = useTranslate(); if (isLoading) return <div className="flex min-h-screen items-center justify-center"><Spinner aria-label={tr('Loading account', '正在加载账户')} /></div>; if (!user) return <Navigate replace state={{ from: location.pathname + location.search }} to={`/app/login?redirect=${encodeURIComponent(safeClientDestination(location.pathname + location.search))}`} />; return <Outlet />; }
+function ClientRouteGuard() { const { user, isLoading } = useClientAuth(); const location = useLocation(); const tr = useTranslate(); if (isLoading) return <div className="flex min-h-screen items-center justify-center"><Spinner aria-label={tr('Loading account', '正在加载账户')} /></div>; if (!user) return <Navigate replace state={{ from: location.pathname + location.search }} to={`/login?redirect=${encodeURIComponent(safeClientDestination(location.pathname + location.search))}`} />; return <Outlet />; }

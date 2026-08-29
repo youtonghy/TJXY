@@ -57,6 +57,7 @@ use axum::{
     Json, Router,
     extract::{ConnectInfo, RawQuery, Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
@@ -882,7 +883,54 @@ pub fn build_router(state: AppState) -> Router {
         .route("/Sessions/Capabilities", post(browse::legacy_capabilities))
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
+        .layer(middleware::from_fn(refresh_session_cookie))
         .with_state(state)
+}
+
+async fn refresh_session_cookie(request: Request, next: Next) -> Response {
+    let cookie_value = request
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value.split(';').map(str::trim).find_map(|part| {
+                part.strip_prefix(&format!("{}=", auth::SESSION_COOKIE))
+                    .map(str::to_owned)
+            })
+        });
+    let has_cookie = cookie_value.is_some();
+    let is_logout = request
+        .uri()
+        .path()
+        .eq_ignore_ascii_case("/Sessions/Logout");
+    let mut response = next.run(request).await;
+    let response_sets_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .is_some();
+    if has_cookie && !is_logout && !response_sets_cookie {
+        let cookie = if response.status() == StatusCode::UNAUTHORIZED {
+            format!(
+                "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+                auth::SESSION_COOKIE
+            )
+        } else if response.status().is_success() {
+            format!(
+                "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+                auth::SESSION_COOKIE,
+                cookie_value.expect("cookie presence checked"),
+                auth::SESSION_COOKIE_MAX_AGE
+            )
+        } else {
+            return response;
+        };
+        if let Ok(value) = cookie.parse() {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 fn playlist_routes() -> Router<AppState> {

@@ -9,6 +9,8 @@ pub struct AuthenticateUserByName {
     pub username: String,
     #[serde(rename = "Pw", default, deserialize_with = "null_as_default")]
     pub password: String,
+    #[serde(rename = "RememberMe", default)]
+    pub remember_me: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]

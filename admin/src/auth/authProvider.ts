@@ -5,7 +5,10 @@ import type { TjxyUser } from '../api/types';
 import { clearSession, getAccessToken } from './session';
 
 export const authProvider: AuthProvider = {
-  async login() {
+  async login(params) {
+    if (typeof params === 'object' && params !== null && 'username' in params) {
+      throw new ApiError(401, 'authentication', 'Your session is not valid.');
+    }
     await requireAdministrator();
   },
 
@@ -61,10 +64,9 @@ class AccessDeniedAuthError extends Error {
 }
 
 async function requireAdministrator(): Promise<TjxyUser> {
-  if (getAccessToken() === null) {
-    throw new ApiError(401, 'authentication', 'Your session is not valid.');
-  }
-  const user = await apiRequest<unknown>('/Users/Me');
+  const user = getAccessToken() === null
+    ? await apiRequest<unknown>('/Users/Me', { auth: 'none' })
+    : await apiRequest<unknown>('/Users/Me');
   if (!isUser(user)) {
     throw new ApiError(200, 'invalid-response', 'The server returned an invalid response.');
   }

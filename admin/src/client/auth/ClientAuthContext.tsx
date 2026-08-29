@@ -1,19 +1,18 @@
-/* eslint-disable react-hooks/set-state-in-effect, react-refresh/only-export-components */
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CLIENT_AUTH_INVALIDATED_EVENT, ClientApiError, clientRequest } from '../api/clientApi';
-import { clearClientToken, getClientToken, setClientToken } from './clientSession';
+import { clearClientToken, setClientToken } from './clientSession';
 import type { QrAuthentication } from './qrLoginApi';
 import { authenticateWithPasskey } from './passkeyApi';
 
 export interface ClientUser { Id: string; Name: string; Policy?: { IsDisabled?: boolean; IsAdministrator?: boolean }; }
-interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string) => Promise<void>; signInWithPasskey: (username?: string) => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
+interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string, rememberMe?: boolean) => Promise<void>; signInWithPasskey: (username?: string) => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
 const ClientAuthContext = createContext<ClientAuthValue | null>(null);
 
 export function ClientAuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<ClientUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   useEffect(() => {
-    if (!getClientToken()) { setIsLoading(false); return; }
     void clientRequest<ClientUser>('/Users/Me').then(setUser).catch(() => { clearClientToken(); setUser(null); }).finally(() => { setIsLoading(false); });
   }, []);
   useEffect(() => {
@@ -46,8 +45,8 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ClientAuthValue>(() => ({
     user,
     isLoading,
-    async signIn(username, password) {
-      const auth = await clientRequest<{ AccessToken?: string }>('/Users/AuthenticateByName', { method: 'POST', body: JSON.stringify({ Username: username, Pw: password }) });
+    async signIn(username, password, rememberMe = false) {
+      const auth = await clientRequest<{ AccessToken?: string }>('/Users/AuthenticateByName', { method: 'POST', body: JSON.stringify({ Username: username, Pw: password, RememberMe: rememberMe }) });
       if (!auth.AccessToken) throw new ClientApiError(200, 'invalid-response');
       setClientToken(auth.AccessToken);
       try {

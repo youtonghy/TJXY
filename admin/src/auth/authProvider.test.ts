@@ -33,6 +33,8 @@ function user(overrides: Partial<TjxyUser> = {}): TjxyUser {
 
 beforeEach(() => {
   requestMock.mockReset();
+  sessionStorage.clear();
+  localStorage.clear();
 });
 
 it('reuses the shared client session for administrator verification', async () => {
@@ -61,12 +63,20 @@ it('validates a persisted session through current-user on reload', async () => {
   expect(requestMock).toHaveBeenCalledWith('/Users/Me');
 });
 
-it('rejects checkAuth without a token before making a request', async () => {
+it('checks the remember-login cookie when session storage has no token', async () => {
+  requestMock.mockRejectedValueOnce(new ApiError(401, 'authentication', 'Invalid.'));
   await expect(authProvider.checkAuth({})).rejects.toMatchObject({
     status: 401,
     category: 'authentication',
   });
-  expect(requestMock).not.toHaveBeenCalled();
+  expect(requestMock).toHaveBeenCalledWith('/Users/Me', { auth: 'none' });
+});
+
+it('allows administrator verification through the remember-login cookie', async () => {
+  requestMock.mockResolvedValueOnce(user());
+
+  await expect(authProvider.checkAuth({})).resolves.toBeUndefined();
+  expect(requestMock).toHaveBeenCalledWith('/Users/Me', { auth: 'none' });
 });
 
 it('rejects a signed-in non-administrator without clearing the shared session', async () => {

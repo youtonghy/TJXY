@@ -798,7 +798,7 @@ impl NetworkConfiguration {
                 &self.listen_host
             };
             format!("http://{host}:{}", self.port)
-        }) + "/app/login?redirect=%2Fadmin"
+        }) + "/login?redirect=%2Fadmin"
     }
 
     /// Resolves the configured listener.

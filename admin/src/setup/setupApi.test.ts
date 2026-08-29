@@ -73,7 +73,7 @@ it('rejects database metadata for a different backend than the tested draft', as
 });
 
 it('submits secrets only in the final request body', async () => {
-  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin' });
+  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/login?redirect=%2Fadmin' });
   const draft = {
     siteTitle: 'Cinema', siteSubtitle: 'Private screenings', locale: 'zh-CN' as const,
     logoUrl: '/brand/tjxy-mark.webp', iconUrl: '/brand/favicon.svg',
@@ -81,7 +81,7 @@ it('submits secrets only in the final request body', async () => {
     network: { listenHost: '127.0.0.1', port: 8096, publicUrl: null },
     administratorUsername: 'admin', administratorPassword: 'correct horse',
   };
-  await expect(completeSetup(csrf, draft)).resolves.toBe('http://127.0.0.1:8096/app/login?redirect=%2Fadmin');
+  await expect(completeSetup(csrf, draft)).resolves.toBe('http://127.0.0.1:8096/login?redirect=%2Fadmin');
   expect(requestMock).toHaveBeenCalledWith('/Setup/Complete', expect.objectContaining({
     auth: 'none', method: 'POST', headers: { 'X-TJXY-Setup-CSRF': csrf },
   }));
@@ -89,7 +89,7 @@ it('submits secrets only in the final request body', async () => {
 });
 
 it('submits a null database when the server manages PostgreSQL', async () => {
-  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin' });
+  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/login?redirect=%2Fadmin' });
   await completeSetup(csrf, {
     siteTitle: 'Cinema', siteSubtitle: '', locale: 'en-US',
     logoUrl: '/brand/tjxy-mark.webp', iconUrl: '/brand/favicon.svg', database: null,
@@ -101,10 +101,10 @@ it('submits a null database when the server manages PostgreSQL', async () => {
 });
 
 it('submits recovery credentials only to the csrf-protected recovery endpoint', async () => {
-  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin' });
+  requestMock.mockResolvedValueOnce({ DestinationUrl: 'http://127.0.0.1:8096/login?redirect=%2Fadmin' });
 
   await expect(recoverSetup(csrf, 'setup-admin', 'correct horse'))
-    .resolves.toBe('http://127.0.0.1:8096/app/login?redirect=%2Fadmin');
+    .resolves.toBe('http://127.0.0.1:8096/login?redirect=%2Fadmin');
   expect(requestMock).toHaveBeenCalledWith('/Setup/Recover', {
     auth: 'none',
     method: 'POST',
@@ -118,7 +118,7 @@ it('strictly validates the normalized network preflight response', async () => {
     ListenHost: '127.0.0.1',
     Port: 8096,
     PublicUrl: 'https://media.example.test',
-    DestinationUrl: 'https://media.example.test/app/login?redirect=%2Fadmin',
+    DestinationUrl: 'https://media.example.test/login?redirect=%2Fadmin',
   });
 
   await expect(validateSetupNetwork(csrf, {
@@ -127,7 +127,7 @@ it('strictly validates the normalized network preflight response', async () => {
     listenHost: '127.0.0.1',
     port: 8096,
     publicUrl: 'https://media.example.test',
-    destinationUrl: 'https://media.example.test/app/login?redirect=%2Fadmin',
+    destinationUrl: 'https://media.example.test/login?redirect=%2Fadmin',
   });
   expect(requestMock).toHaveBeenCalledWith('/Setup/Network/Validate', expect.objectContaining({
     method: 'POST',

@@ -72,6 +72,7 @@ export async function apiRequest<T = undefined>(
     if (!origin) throw apiError(0, 'network');
     response = await desktopAwareFetch(resolveApiUrl(path, origin), {
       ...requestOptions,
+      credentials: 'include',
       headers,
     });
   } catch (error) {

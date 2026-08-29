@@ -10,7 +10,7 @@ import { useActiveClientTheme } from '../themes/ThemeRuntime';
 import { useClientAuth } from './ClientAuthContext';
 import { safeClientDestination } from './clientDestination';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
-import { loadSavedCredentials, persistCredentialsPreference } from './savedCredentials';
+import { loadSavedCredentials, persistRememberPreference } from './savedCredentials';
 import { ServerAddressField } from '../ui/ServerAddressField';
 import { QrLoginPanel } from './QrLoginPanel';
 
@@ -63,8 +63,8 @@ export function ClientLoginPage() {
     setPasskeyFailed(false);
     try {
       if (isDesktopShell()) await connectServer();
-      await signIn(username, password);
-      persistCredentialsPreference(remember, username);
+      await signIn(username, password, remember);
+      persistRememberPreference(remember);
       navigate(destination, { replace: true });
     } catch {
       setFailed(true);
@@ -148,7 +148,7 @@ export function ClientLoginPage() {
         <Checkbox isSelected={remember} onChange={setRemember}>
           <Checkbox.Content>
             <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
-            {tr('Remember username', '保存用户名')}
+            {tr('Remember login', '记住登录状态')}
           </Checkbox.Content>
         </Checkbox>
         <Button fullWidth isDisabled={pending || serverPending} type="submit">{pending ? tr('Signing in…', '登录中…') : tr('Sign in', '登录')}</Button>

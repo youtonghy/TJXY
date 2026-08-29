@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+pub(crate) const SESSION_COOKIE: &str = "tjxy_session";
+pub(crate) const SESSION_COOKIE_MAX_AGE: i64 = 7 * 24 * 60 * 60;
+
 pub(crate) async fn authenticate_by_name(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -57,13 +60,38 @@ pub(crate) async fn authenticate_by_name(
         issued.client().client_version(),
         state.identity.id,
     );
-    Json(AuthenticationResult::new(
+    let result = Json(AuthenticationResult::new(
         user,
         session,
         issued.access_token().expose_secret(),
         state.identity.id,
-    ))
-    .into_response()
+    ));
+    if payload.remember_me {
+        let mut response = result.into_response();
+        if let Ok(value) = format!(
+            "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+            SESSION_COOKIE,
+            issued.access_token().expose_secret(),
+            SESSION_COOKIE_MAX_AGE
+        )
+        .parse()
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+        response
+    } else {
+        let mut response = result.into_response();
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            format!(
+                "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+                SESSION_COOKIE
+            )
+            .parse()
+            .expect("valid cookie header"),
+        );
+        response
+    }
 }
 
 pub(crate) async fn current_user(
@@ -565,6 +593,18 @@ fn access_token(
         }
         if let Some(token) = token {
             return valid_token(&token);
+        }
+    }
+    if let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(token) = cookie
+            .split(';')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix(&format!("{}=", SESSION_COOKIE)))
+        {
+            return valid_token(token);
         }
     }
     Err(HttpAuthError::Unauthorized)

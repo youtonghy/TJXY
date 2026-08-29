@@ -21,7 +21,7 @@ it('navigates eight screens while retaining four data steps', () => {
       mysql: { ...state.databaseDrafts.mysql, Password: 'mysql-secret' },
     },
   };
-  state = setupReducer(state, { type: 'completed', destinationUrl: 'http://127.0.0.1:8096/app/login?redirect=%2Fadmin' });
+  state = setupReducer(state, { type: 'completed', destinationUrl: 'http://127.0.0.1:8096/login?redirect=%2Fadmin' });
   expect(state.screen).toBe('complete');
   expect(state.databaseDrafts.postgresql.Password).toBe('');
   expect(state.databaseDrafts.mysql.Password).toBe('');

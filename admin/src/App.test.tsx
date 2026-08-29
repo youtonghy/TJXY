@@ -129,14 +129,14 @@ it('restores an anonymous deep link including search after login', async () => {
   renderRoute('/admin/tasks?view=recent', false);
 
   expect(await screen.findByRole('heading', { name: 'Welcome back' }, { timeout: 10_000 })).toBeVisible();
-  expect(`${window.location.pathname}${window.location.search}`).toBe('/app/login?redirect=%2Fadmin%2Ftasks%3Fview%3Drecent');
+  expect(`${window.location.pathname}${window.location.search}`).toBe('/login?redirect=%2Fadmin%2Ftasks%3Fview%3Drecent');
 });
 
 it('redirects the legacy administrator login URL to the shared login', async () => {
   renderRoute('/admin/login', false);
 
   expect(await screen.findByRole('heading', { name: 'Welcome back' }, { timeout: 10_000 })).toBeVisible();
-  expect(window.location.pathname).toBe('/app/login');
+  expect(window.location.pathname).toBe('/login');
   expect(window.location.search).toBe('?redirect=%2Fadmin');
 });
 

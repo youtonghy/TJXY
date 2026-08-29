@@ -7,6 +7,9 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-route
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
 import { AdminLoginRedirect } from './auth/AdminLoginRedirect';
+import { ClientAuthProvider } from './client/auth/ClientAuthContext';
+import { ClientLoginPage } from './client/auth/ClientLoginPage';
+import { ClientThemeRuntime } from './client/themes/ThemeRuntime';
 import { AdminLayout } from './layout/AdminLayout';
 import { SystemLocaleProvider } from './settings/SystemLocaleProvider';
 import {
@@ -91,6 +94,9 @@ function ApplicationRoutes() {
   }
   return (
       <Routes>
+        <Route element={<ClientThemeRuntime><ClientAuthProvider><ClientLoginPage /></ClientAuthProvider></ClientThemeRuntime>} path="/login" />
+        <Route element={<Navigate replace to="/login" />} path="/app/login" />
+        <Route element={<AdminLoginRedirect />} path="/admin/login" />
         <Route element={<ClientApp />} path="/app/*" />
         <Route
           path="/admin/*"
