@@ -14,7 +14,7 @@ import { KPI } from '@heroui-pro/react/kpi';
 import { KPIGroup } from '@heroui-pro/react/kpi-group';
 import { PieChart } from '@heroui-pro/react/pie-chart';
 import { Timeline } from '@heroui-pro/react/timeline';
-import { CheckCircle2, Clock3, Film, Pencil, Play, Tags, Trash2, Tv } from 'lucide-react';
+import { CheckCircle2, Clock3, Film, MonitorSmartphone, Pencil, Play, QrCode, Tags, Trash2, Tv } from 'lucide-react';
 import { useEffect, useState, type SyntheticEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -92,7 +92,34 @@ export function ProfilePage() {
             <h1 className="mt-1 text-3xl font-semibold">{profile.Username}</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{profile.Bio || tr('Add a short introduction about yourself.', '添加一段简短的自我介绍。')}</p>
           </div>
-          <div className="flex flex-wrap gap-2"><Button onPress={() => { void navigate('/app/profile/authorize'); }} variant="secondary">{tr('Authorize device', '授权设备')}</Button><Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button></div>
+          <div className="flex flex-wrap gap-2">
+            <SessionManagement
+              loading={sessionsLoading}
+              sessions={sessions}
+              busy={sessionBusy}
+              error={sessionError}
+              onRevoke={async (session) => {
+                if (sessionBusy !== null) return;
+                setSessionBusy(session.Id);
+                setSessionError(undefined);
+                try {
+                  await revokePersonalSession(session.Id);
+                  if (session.IsCurrent) {
+                    await signOut();
+                    void navigate('/login', { replace: true });
+                    return;
+                  }
+                  setSessions((current) => current.filter((item) => item.Id !== session.Id));
+                } catch (reason) {
+                  setSessionError(reason instanceof Error ? reason.message : tr('Unable to revoke this session.', '无法注销此会话。'));
+                } finally {
+                  setSessionBusy(null);
+                }
+              }}
+            />
+            <Button onPress={() => { void navigate('/app/profile/authorize'); }} variant="secondary"><QrCode aria-hidden="true" className="size-4" />{tr('Authorize device', '授权设备')}</Button>
+            <Button onPress={() => { setEditing(true); }} variant="secondary"><Pencil className="size-4" />{tr('Edit profile', '编辑个人资料')}</Button>
+          </div>
         </Card.Content>
       </Card>
 
@@ -129,31 +156,6 @@ export function ProfilePage() {
           </Card.Content>
         </Card>
       )}
-
-      <SessionManagement
-        loading={sessionsLoading}
-        sessions={sessions}
-        busy={sessionBusy}
-        error={sessionError}
-        onRevoke={async (session) => {
-          if (sessionBusy !== null) return;
-          setSessionBusy(session.Id);
-          setSessionError(undefined);
-          try {
-            await revokePersonalSession(session.Id);
-            if (session.IsCurrent) {
-              await signOut();
-              void navigate('/login', { replace: true });
-              return;
-            }
-            setSessions((current) => current.filter((item) => item.Id !== session.Id));
-          } catch (reason) {
-            setSessionError(reason instanceof Error ? reason.message : tr('Unable to revoke this session.', '无法注销此会话。'));
-          } finally {
-            setSessionBusy(null);
-          }
-        }}
-      />
 
       <section className="space-y-5" aria-labelledby="statistics-heading">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -208,27 +210,12 @@ function SessionManagement({
   const sortedSessions = [...sessions].sort(
     (left, right) => Date.parse(right.LastActivityDate) - Date.parse(left.LastActivityDate),
   );
-  const recentSessions = sortedSessions.slice(0, 4);
   return (
     <>
-      <Card>
-        <Card.Header>
-          <Card.Title>{tr('Signed-in devices', '已登录设备')}</Card.Title>
-          <Card.Description>{tr('Your four most recently active sessions.', '最近活跃的四个会话。')}</Card.Description>
-        </Card.Header>
-        <Card.Content className="space-y-4">
-          {loading ? <div aria-label={tr('Loading signed-in devices', '正在加载已登录设备')} className="h-24 animate-pulse rounded-xl bg-default" role="status" /> : sessions.length === 0 ? (
-            <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
-          ) : (
-            <>
-              <SessionList sessions={recentSessions} />
-              <Button onPress={() => { setIsOpen(true); }} variant="secondary">
-                {tr(`Manage all ${String(sessions.length)} devices`, `管理全部 ${String(sessions.length)} 台设备`)}
-              </Button>
-            </>
-          )}
-        </Card.Content>
-      </Card>
+      <Button onPress={() => { setIsOpen(true); }} variant="secondary">
+        <MonitorSmartphone aria-hidden="true" className="size-4" />
+        {tr('Signed-in devices', '登录设备')}
+      </Button>
 
       <Modal isOpen={isOpen} onOpenChange={(open) => { if (!open && busy === null) setIsOpen(false); }}>
         <Modal.Backdrop isDismissable={busy === null} isKeyboardDismissDisabled={busy !== null}>
@@ -237,13 +224,19 @@ function SessionManagement({
               <Modal.CloseTrigger aria-label={tr('Close device manager', '关闭设备管理')} isDisabled={busy !== null} />
               <Modal.Header>
                 <Modal.Heading>{tr('Manage signed-in devices', '管理已登录设备')}</Modal.Heading>
-                <p className="text-sm text-muted">{tr(`${String(sessions.length)} active sessions`, `${String(sessions.length)} 个活跃会话`)}</p>
+                <p className="text-sm text-muted">
+                  {loading
+                    ? tr('Loading active sessions…', '正在加载活跃会话…')
+                    : tr(`${String(sessions.length)} active sessions`, `${String(sessions.length)} 个活跃会话`)}
+                </p>
               </Modal.Header>
               <Modal.Body className="min-h-0">
                 {error ? <p className="mb-3 text-sm text-danger" role="alert">{error}</p> : null}
-                {sessions.length === 0
-                  ? <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
-                  : <SessionList busy={busy} onRevoke={onRevoke} sessions={sortedSessions} showActions />}
+                {loading
+                  ? <div aria-label={tr('Loading signed-in devices', '正在加载已登录设备')} className="h-28 animate-pulse rounded-lg bg-default" role="status" />
+                  : sessions.length === 0
+                    ? <p className="py-6 text-sm text-muted">{tr('No active sessions.', '暂无活跃会话。')}</p>
+                    : <SessionList busy={busy} onRevoke={onRevoke} sessions={sortedSessions} showActions />}
               </Modal.Body>
               <Modal.Footer>
                 <Button isDisabled={busy !== null} onPress={() => { setIsOpen(false); }} variant="tertiary">{tr('Done', '完成')}</Button>

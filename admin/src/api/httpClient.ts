@@ -24,7 +24,7 @@ export class ApiError extends Error {
   }
 }
 
-export type RequestAuth = 'none' | 'identity' | 'token';
+export type RequestAuth = 'none' | 'identity' | 'session' | 'token';
 
 export interface ApiRequestOptions extends RequestInit {
   auth?: RequestAuth;
@@ -51,7 +51,7 @@ export async function apiRequest<T = undefined>(
   options: ApiRequestOptions = {},
 ): Promise<T> {
   validatePath(path);
-  const { auth = 'token', headers: suppliedHeaders, ...requestOptions } = options;
+  const { auth = 'session', headers: suppliedHeaders, ...requestOptions } = options;
   const headers = new Headers(suppliedHeaders);
   if (
     requestOptions.body !== undefined
@@ -62,6 +62,8 @@ export async function apiRequest<T = undefined>(
   }
   if (auth === 'identity') {
     headers.set('Authorization', mediaBrowserIdentityHeader());
+  } else if (auth === 'session' && getAccessToken() !== null) {
+    headers.set('Authorization', mediaBrowserTokenHeader());
   } else if (auth === 'token') {
     headers.set('Authorization', mediaBrowserTokenHeader());
   }

@@ -37,6 +37,9 @@ it('uses HeroUI tabs, URL state, and mounts only the active workflow', async () 
   const devices = screen.getByRole('tab', { name: 'Devices' });
   const apiKeys = screen.getByRole('tab', { name: 'API Keys' });
   expect(devices).toHaveAttribute('aria-selected', 'true');
+  expect(devices.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
+  expect(apiKeys.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
+  expect(devices.closest('.tabs')).not.toHaveClass('tabs--secondary');
   expect(screen.getByText('Device records')).toBeVisible();
   expect(screen.queryByText('API key records')).not.toBeInTheDocument();
 

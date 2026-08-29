@@ -2,7 +2,7 @@
 import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
 import { Rating } from '@heroui-pro/react/rating';
 import { Carousel } from '@heroui-pro/react/carousel';
-import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, LoaderCircle, Play, RefreshCw } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, LoaderCircle, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
@@ -10,6 +10,7 @@ import { useTranslate } from '../../settings/i18n';
 import { listRecentTaskJobs } from '../../tasks/taskApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getChildren, getItem, getLibraries, getSimilarItems, toggleFavorite, togglePlayed, type Library, type MediaItem } from '../api/catalogApi';
+import { ExternalPlayButton } from '../playback/ExternalPlayButton';
 import { MediaImage } from '../ui/MediaImage';
 import { MediaTile } from '../ui/MediaTile';
 
@@ -242,10 +243,13 @@ export function ItemPage() {
 
           <div className="mt-7 flex flex-wrap gap-3">
             {hasPlayableAction && (
-              <Button onPress={() => navigate(`/app/play/${id}`)}>
-                <Play className="size-4" />
-                {tr('Play', '播放')}
-              </Button>
+              <ExternalPlayButton
+                isExternalPlaybackDisabled={item.HasMediaSources === false}
+                itemId={id}
+                itemTitle={item.Name}
+                key={id}
+                onPlay={() => navigate(`/app/play/${id}`)}
+              />
             )}
             <Button
               variant="secondary"

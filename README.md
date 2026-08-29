@@ -38,8 +38,9 @@ archives remain available for maintainers.
   names and local NFO/artwork, with optional TMDb, MusicBrainz, and TheAudioDB
   enrichment.
 - **Direct playback:** prepare session-scoped playback URLs, stream bounded byte
-  ranges, select subtitles and sources, and retain play state, favorites, and
-  viewing progress.
+  ranges, select subtitles and sources, copy temporary direct links, or open
+  supported third-party players while retaining in-app play state, favorites,
+  and viewing progress.
 - **Web applications:** use the responsive `/app/` media client and `/admin/`
   administration console from the same server.
 - **Library operations:** create libraries, bind storage roots, choose scan

@@ -13,12 +13,17 @@ const api = vi.hoisted(() => ({
 }));
 const auth = vi.hoisted(() => ({ isAdministrator: true }));
 const tasks = vi.hoisted(() => ({ listRecentTaskJobs: vi.fn() }));
+const playback = vi.hoisted(() => ({
+  getPlaybackInfo: vi.fn(),
+  issuePlaybackTicket: vi.fn(),
+}));
 
 vi.mock('../api/catalogApi', () => api);
 vi.mock('../auth/ClientAuthContext', () => ({
   useClientAuth: () => ({ user: { Id: 'user-1', Name: 'Viewer', Policy: { IsAdministrator: auth.isAdministrator } } }),
 }));
 vi.mock('../../tasks/taskApi', () => tasks);
+vi.mock('../api/playbackApi', () => playback);
 vi.mock('../ui/MediaImage', () => ({
   MediaImage: ({ alt }: { alt: string }) => <div aria-label={alt} role="img" />,
 }));
@@ -73,6 +78,18 @@ beforeEach(() => {
         { Id: 'episode-2', Name: 'Please Remain Calm', Type: 'Episode', IndexNumber: 2, Overview: 'Second episode.', ImageTags: { Primary: 'still-2' } },
         { Id: 'episode-1', Name: '1:23:45', Type: 'Episode', IndexNumber: 1, Overview: 'First episode.', ImageTags: { Primary: 'still-1' } },
       ]));
+  playback.getPlaybackInfo.mockReset();
+  playback.getPlaybackInfo.mockResolvedValue({
+    PlaySessionId: 'session-1',
+    MediaSources: [{ Id: 'source-1', DirectStreamUrl: '/Videos/movie-1', SupportsDirectPlay: true }],
+  });
+  playback.issuePlaybackTicket.mockReset();
+  playback.issuePlaybackTicket.mockResolvedValue({
+    Id: 'ticket-1',
+    Ticket: 'ticket-value',
+    ExpiresAt: '2099-01-01T00:00:00Z',
+    StreamUrl: '/Videos/movie-1/stream?PlaybackTicket=ticket-value',
+  });
 });
 
 afterEach(() => {
@@ -323,6 +340,35 @@ it('warns when a directly playable movie has no media source', async () => {
   expect(screen.getByText('Add a media file to this title before starting playback.')).toBeVisible();
 });
 
+it('keeps the primary split-button action on the built-in player', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Playable Movie', Type: 'Movie', IsFolder: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  const user = userEvent.setup();
+  renderItem('movie-1');
+
+  await user.click(await screen.findByRole('button', { name: 'Play' }));
+
+  expect(await screen.findByText('Built-in player destination')).toBeVisible();
+  expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
+});
+
+it('prepares and copies a temporary playback link from the split-button menu', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Playable Movie', Type: 'Movie', IsFolder: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+  renderItem('movie-1');
+
+  await user.click(await screen.findByRole('button', { name: 'More playback options' }));
+  await user.click(await screen.findByRole('menuitem', { name: 'Copy temporary playback link' }));
+
+  expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1');
+  expect(playback.issuePlaybackTicket).toHaveBeenCalledWith('movie-1', 'source-1', 'session-1');
+  expect(writeText).toHaveBeenCalledWith(
+    'http://localhost:3000/Videos/movie-1/stream?PlaybackTicket=ticket-value',
+  );
+});
+
 it('uses square primary artwork for an audio item', async () => {
   api.getItem.mockResolvedValueOnce({ Id: 'track-1', Name: 'First Light', Type: 'Audio', IsFolder: false });
   api.getChildren.mockResolvedValueOnce([]);
@@ -337,6 +383,7 @@ function renderItem(id: string) {
     <MemoryRouter initialEntries={[`/app/items/${id}`]}>
       <Routes>
         <Route element={<ItemPage />} path="/app/items/:id" />
+        <Route element={<div>Built-in player destination</div>} path="/app/play/:id" />
       </Routes>
     </MemoryRouter>,
   );

@@ -116,20 +116,20 @@ it('lists and deletes Passkeys when passwordless login is enabled', async () => 
   expect(api.updateProfile).not.toHaveBeenCalled();
 });
 
-it('shows only the four latest sessions and manages every session in a dialog', async () => {
+it('keeps sessions out of the page and manages every session from the profile action dialog', async () => {
   api.listPersonalSessions.mockResolvedValueOnce([...sessions].reverse());
   const user = userEvent.setup();
   render(<MemoryRouter><ProfilePage /></MemoryRouter>);
 
   await screen.findByRole('heading', { name: 'Admin' });
-  const summary = screen.getByRole('list', { name: 'Signed-in devices' });
-  expect(summary).toHaveTextContent('Browser 6');
-  expect(summary).toHaveTextContent('Browser 3');
-  expect(summary).not.toHaveTextContent('Browser 2');
-  expect(summary).not.toHaveTextContent('Browser 1');
+  expect(screen.queryByRole('list', { name: 'Signed-in devices' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Browser 6')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('button', { name: 'Manage all 6 devices' }));
+  const profileActions = screen.getByRole('button', { name: 'Signed-in devices' }).parentElement;
+  expect(profileActions?.children[0]).toBe(screen.getByRole('button', { name: 'Signed-in devices' }));
+  expect(profileActions?.children[1]).toBe(screen.getByRole('button', { name: 'Authorize device' }));
+  await user.click(screen.getByRole('button', { name: 'Signed-in devices' }));
 
   const dialog = await screen.findByRole('dialog', { name: 'Manage signed-in devices' });
   expect(dialog).toHaveTextContent('Browser 6');
@@ -144,7 +144,7 @@ it('revokes an older session from the device manager and removes it from the lis
   const user = userEvent.setup();
   render(<MemoryRouter><ProfilePage /></MemoryRouter>);
   await screen.findByRole('heading', { name: 'Admin' });
-  await user.click(screen.getByRole('button', { name: 'Manage all 6 devices' }));
+  await user.click(screen.getByRole('button', { name: 'Signed-in devices' }));
 
   const firstRevoke = screen.getAllByRole('button', { name: 'Revoke' }).at(0);
   if (!firstRevoke) throw new Error('Expected at least one revocable session.');

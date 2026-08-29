@@ -1,4 +1,5 @@
 import { Tabs } from '@heroui/react';
+import { KeyRound, MonitorSmartphone } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 
 import { PageHeader } from '../ui/PageHeader';
@@ -29,25 +30,26 @@ export function AccessPage() {
       />
 
       <Tabs
-        className="overflow-hidden rounded-lg border border-border bg-surface"
+        className="gap-5"
         aria-label={tr('Access management', '访问控制管理')}
         onSelectionChange={selectTab}
         selectedKey={tab}
-        variant="secondary"
       >
-        <Tabs.ListContainer className="border-b border-border px-2 pt-2">
-          <Tabs.List className="w-full sm:w-auto">
-            <Tabs.Tab id="devices">
+        <Tabs.ListContainer className="w-full sm:w-fit">
+          <Tabs.List className="grid w-full grid-cols-2 sm:min-w-80">
+            <Tabs.Tab className="h-10 gap-2 whitespace-nowrap px-4" id="devices">
+              <MonitorSmartphone aria-hidden="true" className="size-4" />
               {tr('Devices', '设备')}
               <Tabs.Indicator />
             </Tabs.Tab>
-            <Tabs.Tab id="api-keys">
+            <Tabs.Tab className="h-10 gap-2 whitespace-nowrap px-4" id="api-keys">
+              <KeyRound aria-hidden="true" className="size-4" />
               {tr('API Keys', 'API 密钥')}
               <Tabs.Indicator />
             </Tabs.Tab>
           </Tabs.List>
         </Tabs.ListContainer>
-        <Tabs.Panel className="p-4 sm:p-6" id={tab} key={tab}>
+        <Tabs.Panel className="mt-0 p-0" id={tab} key={tab}>
           {tab === 'devices' ? <DevicesPanel /> : <ApiKeysPanel />}
         </Tabs.Panel>
       </Tabs>

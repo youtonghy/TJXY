@@ -52,6 +52,28 @@ it('sends the session token in a canonical header', async () => {
   expect(headers.has('Content-Type')).toBe(false);
 });
 
+it('uses the HttpOnly session cookie when no browser token is available', async () => {
+  fetchMock.mockResolvedValue(new Response(JSON.stringify({ Id: 'u1' }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }));
+
+  await apiRequest('/Users/Me');
+
+  const [, init] = fetchMock.mock.calls[0] ?? [];
+  const headers = new Headers(init?.headers);
+  expect(headers.has('Authorization')).toBe(false);
+  expect(init?.credentials).toBe('include');
+});
+
+it('still requires a browser token for explicitly token-authenticated requests', async () => {
+  await expect(apiRequest('/Users/Me', { auth: 'token' })).rejects.toMatchObject({
+    status: 401,
+    category: 'authentication',
+  });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
 it.each([204, 205])('returns undefined for an empty %s response', async (status) => {
   sessionStorage.setItem('tjxy.web.token', 'token');
   fetchMock.mockResolvedValue(new Response(null, { status }));
