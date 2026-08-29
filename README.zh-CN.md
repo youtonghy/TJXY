@@ -226,10 +226,15 @@ PlaybackInfo 接受可选或空的 POST body，并忽略 Jellyfin 服务端模�
 转码查询参数作为兼容提示接受，但仍返回原始字节和真实 MIME。仅使用 PlaybackTicket
 的请求仍必须携带票据绑定的明确媒体来源。
 
-TJXY 浏览器客户端只声明浏览器稳定支持的 Direct Play 容器，因此不声明 MKV；
-Jellyfin Media Player 的原生 MPV 路径可以播放服务端返回的兼容 MKV 来源。客户端
-请求转码时会回退到同一原文件交付；TJXY 不提供 HLS manifest，也不会承诺原本不支持
-对应容器或编解码器的客户端能够解码这些字节。
+播放状态接口接受缺失或 `null` 的 `PositionTicks`，并将 `MediaSourceId=ItemId`
+解释为默认媒体来源。`Playing`、`Progress` 或 `Stopped` 实际更新观看记录后，服务端
+会向当前用户发布 `UserDataChanged`；重复事件保持幂等，不会产生额外 revision 或通知。
+
+TJXY 浏览器客户端只声明浏览器稳定支持的 Direct Play 容器，因此不声明 MKV；桌面
+客户端会使用本地 FFmpeg 将浏览器不能直接解码的文件转换为完整的 VOD HLS 清单，
+并保留有限时长与可拖动进度。移动端只选择设备原生可播放的来源。TJXY 仍不提供
+服务端 HLS manifest、直播源或通用转码服务，也不会承诺客户端能够解码不支持的容器
+或编解码器。
 
 ## Linux 发行包
 

@@ -19,9 +19,11 @@ import {
 } from '../api/playbackApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../api/apiBase';
-import { browserSources, isBrowserPlayableSource, nativeSources, selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
+import { browserSources, nativeSources, selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
 import { useTranslate } from '../../settings/i18n';
 import { attachHlsSource, isHlsSource } from './hlsPlayback';
+import { DesktopPlayerSurface } from './DesktopPlayerSurface';
+import { WebPlayerSurface } from './WebPlayerSurface';
 
 type LoadState = 'loading' | 'ready' | 'no-source' | 'unsupported' | 'error';
 interface SubtitleTrack {
@@ -41,7 +43,6 @@ export function PlayerPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const resumeTicksRef = useRef(0);
   const positionTicksRef = useRef(0);
-  const playbackOffsetTicksRef = useRef(0);
   const lastProgressTicksRef = useRef(0);
   const autoplayAttemptedRef = useRef(false);
   const startedRef = useRef(false);
@@ -53,6 +54,7 @@ export function PlayerPage() {
   const [ticket, setTicket] = useState<PlaybackTicket>();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [selectedSubtitle, setSelectedSubtitle] = useState('off');
+  const [desktopStartTicks, setDesktopStartTicks] = useState(0);
   const [state, setState] = useState<LoadState>('loading');
   const [playbackError, setPlaybackError] = useState<string>();
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
@@ -102,6 +104,7 @@ export function PlayerPage() {
         if (!active) return;
         setItem(nextItem);
         resumeTicksRef.current = nextItem.UserData?.PlaybackPositionTicks ?? 0;
+        setDesktopStartTicks(resumeTicksRef.current);
         positionTicksRef.current = resumeTicksRef.current;
         if (nextItem.HasMediaSources === false) {
           setState('no-source');
@@ -213,46 +216,21 @@ export function PlayerPage() {
     }
   }, [selectedSubtitle, subtitleTracks]);
 
-  const [embedSrc, setEmbedSrc] = useState<string>();
   const desktop = isDesktopShell();
-
-  useEffect(() => {
-    if (!desktop || !ticket || !selectedSource) {
-      setEmbedSrc(undefined);
-      return;
-    }
-    let cancelled = false;
-    const streamUrl = ticket.StreamUrl.startsWith('http')
-      ? ticket.StreamUrl
-      : resolveApiUrl(ticket.StreamUrl, getApiBaseUrl());
-    if (isBrowserPlayableSource(selectedSource)) {
-      playbackOffsetTicksRef.current = 0;
-      setEmbedSrc(streamUrl);
-      return;
-    }
-    playbackOffsetTicksRef.current = resumeTicksRef.current;
-    setEmbedSrc(undefined);
-    void import('./desktopPlayer')
-      .then(({ startDesktopStream }) => startDesktopStream(
-        streamUrl,
-        getApiBaseUrl(),
-        resumeTicksRef.current / TICKS_PER_SECOND,
-      ))
-      .then((src) => {
-        if (!cancelled) setEmbedSrc(src);
-        else void import('./desktopPlayer').then(({ stopDesktopStream }) => stopDesktopStream()).catch(() => undefined);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setPlaybackError(error instanceof Error ? error.message : 'Playback proxy failed.');
-      });
-    return () => {
-      cancelled = true;
-      void import('./desktopPlayer').then(({ stopDesktopStream }) => stopDesktopStream()).catch(() => undefined);
+  const desktopRequest = useMemo(() => {
+    if (!desktop || !ticket) return undefined;
+    return {
+      loadId: ticket.Id,
+      url: ticket.StreamUrl.startsWith('http')
+        ? ticket.StreamUrl
+        : resolveApiUrl(ticket.StreamUrl, getApiBaseUrl()),
+      serverOrigin: getApiBaseUrl(),
+      startPositionTicks: desktopStartTicks,
+      autoplay: true,
     };
-  }, [desktop, selectedSource, ticket]);
-
-  const playerSrc = desktop ? embedSrc : ticket?.StreamUrl;
-  const usesHlsAdapter = isHlsSource(playerSrc);
+  }, [desktop, desktopStartTicks, ticket]);
+  const playerSrc = desktop ? undefined : ticket?.StreamUrl;
+  const usesHlsAdapter = !desktop && isHlsSource(playerSrc);
 
   useEffect(() => {
     autoplayAttemptedRef.current = false;
@@ -313,7 +291,7 @@ export function PlayerPage() {
   }
 
   const playbackState = (
-    ticks = playbackOffsetTicksRef.current + currentPositionTicks(videoRef.current)
+    ticks = desktop ? positionTicksRef.current : currentPositionTicks(videoRef.current)
   ): PlaybackStatePayload => {
     positionTicksRef.current = ticks;
     return {
@@ -323,12 +301,11 @@ export function PlayerPage() {
       positionTicks: ticks,
     };
   };
-  const currentPlaybackTicks = () => (
-    playbackOffsetTicksRef.current + currentPositionTicks(videoRef.current)
-  );
+  const currentPlaybackTicks = () => desktop ? positionTicksRef.current : currentPositionTicks(videoRef.current);
   const selectSource = (sourceId: string) => {
     if (sourceId === selectedSource.Id) return;
     resumeTicksRef.current = currentPlaybackTicks();
+    setDesktopStartTicks(resumeTicksRef.current);
     if (startedRef.current) void stopPlayback(playbackState(resumeTicksRef.current));
     startedRef.current = false;
     lastProgressTicksRef.current = resumeTicksRef.current;
@@ -358,14 +335,38 @@ export function PlayerPage() {
       </div>
 
       <div className="overflow-hidden rounded-lg bg-black shadow-sm">
-        {desktop && !embedSrc ? (
-          <Skeleton className="aspect-video w-full rounded-lg" />
+        {desktop && desktopRequest ? (
+          <DesktopPlayerSurface
+            onEnded={(positionTicks) => {
+              positionTicksRef.current = positionTicks;
+              startedRef.current = false;
+              void stopPlayback(playbackState(positionTicks));
+              if (user) void togglePlayed(user.Id, id, true);
+              setItem({ ...item, UserData: { ...item.UserData, Played: true, PlaybackPositionTicks: 0 } });
+            }}
+            onError={(message) => { setPlaybackError(message); }}
+            onPhase={(snapshot, previousPhase) => {
+              positionTicksRef.current = snapshot.positionTicks;
+              const playing = snapshot.phase === 'playing' || snapshot.phase === 'buffering';
+              const wasPlaying = previousPhase === 'playing' || previousPhase === 'buffering';
+              if (playing && !wasPlaying && !startedRef.current) {
+                startedRef.current = true;
+                lastProgressTicksRef.current = snapshot.positionTicks;
+                void startPlayback(playbackState(snapshot.positionTicks));
+              } else if (snapshot.phase === 'paused' && wasPlaying && startedRef.current) {
+                void reportPlaybackProgress(playbackState(snapshot.positionTicks));
+              }
+              if (startedRef.current
+                && snapshot.positionTicks - lastProgressTicksRef.current >= PROGRESS_INTERVAL_TICKS) {
+                lastProgressTicksRef.current = snapshot.positionTicks;
+                void reportPlaybackProgress(playbackState(snapshot.positionTicks));
+              }
+            }}
+            request={desktopRequest}
+            title={item.Name}
+          />
         ) : (
-        <video
-          aria-label={tr(`Playing ${item.Name}`, `正在播放 ${item.Name}`)}
-          autoPlay
-          className="aspect-video w-full"
-          controls
+        <WebPlayerSurface
           onCanPlay={() => {
             const video = videoRef.current;
             if (!video || autoplayAttemptedRef.current || !video.paused) return;
@@ -384,7 +385,7 @@ export function PlayerPage() {
           }}
           onLoadedMetadata={() => {
             const video = videoRef.current;
-            if (video && playbackOffsetTicksRef.current === 0 && resumeTicksRef.current > 0) {
+            if (video && resumeTicksRef.current > 0) {
               video.currentTime = resumeTicksRef.current / TICKS_PER_SECOND;
             }
           }}
@@ -407,11 +408,9 @@ export function PlayerPage() {
               void reportPlaybackProgress(playbackState(positionTicks));
             }
           }}
-          playsInline
-          ref={videoRef}
+          videoRef={videoRef}
           src={usesHlsAdapter ? undefined : playerSrc}
-        >
-          {subtitleTracks.map((track) => (
+          subtitles={subtitleTracks.map((track) => (
             <track
               default={track.key === selectedSubtitle}
               key={track.key}
@@ -421,7 +420,8 @@ export function PlayerPage() {
               srcLang={track.stream.Language ?? 'und'}
             />
           ))}
-        </video>
+          title={tr(`Playing ${item.Name}`, `正在播放 ${item.Name}`)}
+        />
         )}
       </div>
 

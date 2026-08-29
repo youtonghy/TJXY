@@ -6,10 +6,10 @@ it('keeps MKV sources for native desktop playback', () => {
   expect(selectBrowserSource([mkv])).toBeNull();
 });
 
-it('prefers a browser-playable source on desktop when both MKV and MP4 exist', () => {
+it('keeps native server priority when both MKV and MP4 exist', () => {
   const mkv = { Id: 'mkv', Container: 'mkv', SupportsDirectPlay: true, DirectStreamUrl: '/Videos/item/stream' };
   const mp4 = { Id: 'mp4', Container: 'mp4', SupportsDirectPlay: true, DirectStreamUrl: '/Videos/item/stream' };
-  expect(selectNativeSource([mkv, mp4])?.Id).toBe('mp4');
+  expect(selectNativeSource([mkv, mp4])?.Id).toBe('mkv');
 });
 
 it('keeps server source priority and rejects an MKV-only source list', () => {

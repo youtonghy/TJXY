@@ -21,6 +21,7 @@ export interface PlaybackSource {
   Bitrate?: number;
   RunTimeTicks?: number;
   IsDefault?: boolean;
+  IsLive?: boolean;
   SupportsDirectPlay?: boolean;
   DirectStreamUrl?: string;
   MediaStreams?: PlaybackStream[];

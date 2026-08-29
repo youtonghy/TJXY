@@ -9,6 +9,7 @@
       "Bitrate": 8000000,
       "RunTimeTicks": 72000000000,
       "IsDefault": true,
+      "IsLive": false,
       "IsRemote": false,
       "SupportsTranscoding": false,
       "SupportsDirectStream": true,

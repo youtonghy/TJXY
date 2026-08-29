@@ -12,6 +12,10 @@ fn playback_state_identity_fields_follow_the_optional_jellyfin_contract() {
     assert_eq!(telemetry_only.play_session_id, None);
     assert_eq!(telemetry_only.position_ticks, 0);
 
+    let null_position: PlaybackStateRequest =
+        serde_json::from_value(json!({ "PositionTicks": null })).expect("nullable position");
+    assert_eq!(null_position.position_ticks, 0);
+
     let empty_identity: PlaybackStateRequest = serde_json::from_value(json!({
         "ItemId": null,
         "MediaSourceId": "",

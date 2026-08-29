@@ -10,10 +10,18 @@ pub struct PlaybackStateRequest {
     pub media_source_id: Option<Uuid>,
     #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub play_session_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub position_ticks: i64,
     #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 fn empty_uuid_as_none<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>

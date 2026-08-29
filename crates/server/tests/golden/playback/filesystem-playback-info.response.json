@@ -4,6 +4,7 @@
       "Container": "mp4",
       "DirectStreamUrl": "/Videos/{{item_id}}/stream?static=true&mediaSourceId={{source_id}}",
       "Id": "{{source_id}}",
+      "IsLive": false,
       "IsRemote": false,
       "MediaStreams": [
         {

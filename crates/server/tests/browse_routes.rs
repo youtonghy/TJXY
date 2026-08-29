@@ -2621,6 +2621,92 @@ async fn user_data_commit_notifies_the_authenticated_users_socket() {
 }
 
 #[tokio::test]
+async fn playback_commits_notify_the_authenticated_users_socket() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let play_session = Uuid::new_v4();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.router).await.unwrap();
+    });
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/socket?api_key={token}"))
+            .await
+            .unwrap();
+    let client = reqwest::Client::new();
+    let event = |position_ticks| {
+        json!({
+            "ItemId": item,
+            "MediaSourceId": presentation,
+            "PlaySessionId": play_session,
+            "PositionTicks": position_ticks
+        })
+    };
+
+    for (path, position_ticks, expected_revision) in [
+        ("/Sessions/Playing", 100_i64, 1_i64),
+        ("/Sessions/Playing/Progress", 200_i64, 2_i64),
+        ("/Sessions/Playing/Stopped", 300_i64, 3_i64),
+    ] {
+        let response = client
+            .post(format!("http://{address}{path}"))
+            .header(
+                header::AUTHORIZATION,
+                format!(r#"MediaBrowser Token="{token}""#),
+            )
+            .json(&event(position_ticks))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+            .await
+            .expect("playback commit must notify the active socket")
+            .expect("socket must remain open")
+            .expect("socket message must be valid");
+        let tokio_tungstenite::tungstenite::Message::Text(payload) = message else {
+            panic!("expected a text event");
+        };
+        let event: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(event["MessageType"], "UserDataChanged");
+        assert_eq!(event["Data"]["UserRevision"], expected_revision);
+    }
+
+    let response = client
+        .post(format!("http://{address}/Sessions/Playing/Stopped"))
+        .header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        )
+        .json(&event(300))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    let duplicate_event =
+        tokio::time::timeout(std::time::Duration::from_millis(250), socket.next()).await;
+    server.abort();
+    assert!(
+        duplicate_event.is_err(),
+        "an idempotent playback event must not emit a duplicate notification"
+    );
+}
+
+#[tokio::test]
 async fn user_data_commit_does_not_notify_another_users_socket() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Library", true).await;
@@ -8380,4 +8466,47 @@ async fn playstate_accepts_optional_jellyfin_identity_fields_and_derives_missing
     let data = repository.get(user, second_item).await.unwrap().unwrap();
     assert_eq!(data.play_count, 1);
     assert_eq!(data.playback_position_ticks, 300);
+
+    let default_source_item = seed_item(&app.database, library, "Interstellar", "Movie").await;
+    seed_playable_source(
+        &app.database,
+        default_source_item,
+        Uuid::new_v4(),
+        &format!("default-source-{}", Uuid::new_v4()),
+        10,
+        &format!("subtitle-{}", Uuid::new_v4()),
+    )
+    .await;
+    let default_source_session = Uuid::new_v4();
+    for (path, position) in [
+        ("/Sessions/Playing", 400_i64),
+        ("/Sessions/Playing/Progress", 500_i64),
+        ("/Sessions/Playing/Stopped", 600_i64),
+    ] {
+        assert_eq!(
+            post(
+                &app.router,
+                path,
+                &token,
+                json!({
+                    "ItemId": default_source_item,
+                    "MediaSourceId": default_source_item,
+                    "PlaySessionId": default_source_session,
+                    "PositionTicks": position
+                })
+                .to_string(),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT,
+            "{path} treats the Jellyfin item id as the default media source alias"
+        );
+    }
+    let data = repository
+        .get(user, default_source_item)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(data.play_count, 1);
+    assert_eq!(data.playback_position_ticks, 600);
 }

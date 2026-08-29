@@ -268,6 +268,11 @@ ticket-bound media source. Transcoding-shaped query parameters on these
 progressive endpoints are accepted as compatibility hints but still return the
 original bytes and actual MIME type.
 
+Playback state reports accept a missing or null `PositionTicks` and interpret
+`MediaSourceId=ItemId` as the default media source. When `Playing`, `Progress`,
+or `Stopped` changes watch data, the server publishes `UserDataChanged` to that
+user; replayed events remain idempotent and do not emit another revision.
+
 The TJXY browser client intentionally limits direct playback to containers that
 the browser can handle reliably and therefore does not advertise MKV. Jellyfin
 Media Player's native MPV path can play compatible MKV sources returned by the

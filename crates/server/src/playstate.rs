@@ -113,7 +113,10 @@ async fn apply(
         // Jellyfin's playback DTO permits session-only telemetry without an item identity.
         return StatusCode::NO_CONTENT.into_response();
     };
-    let presentation_key = if let Some(source_id) = request.media_source_id {
+    let requested_source = request
+        .media_source_id
+        .filter(|source_id| *source_id != item_id.as_uuid());
+    let presentation_key = if let Some(source_id) = requested_source {
         PresentationKey::from_uuid(source_id)
     } else {
         let Some(catalog) = state.catalog.as_ref() else {
@@ -153,7 +156,14 @@ async fn apply(
         )
         .await
     {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Some(commit)) => {
+            if let Some(user_data) = commit.user_data() {
+                state
+                    .realtime_events()
+                    .publish_user_data_changed(principal.user().id(), user_data.user_revision);
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(None) => error(StatusCode::NOT_FOUND, "item was not found"),
         Err(error_value) => service_error(&error_value),
     }

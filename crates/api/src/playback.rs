@@ -89,6 +89,7 @@ pub struct MediaSourceInfo {
     run_time_ticks: Option<i64>,
     #[serde(skip_serializing_if = "is_false")]
     is_default: bool,
+    is_live: bool,
     is_remote: bool,
     supports_transcoding: bool,
     supports_direct_stream: bool,
@@ -154,6 +155,7 @@ impl MediaSourceInfo {
             bitrate: None,
             run_time_ticks: None,
             is_default: false,
+            is_live: false,
             is_remote: false,
             supports_transcoding: false,
             // Jellyfin reports a compatible original-file response as both
