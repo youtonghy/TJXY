@@ -36,5 +36,6 @@ it('shows popular recommendations before a search is entered', async () => {
     'href',
     '/app/items/popular-1',
   );
+  expect(screen.queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
   expect(api.getPopular).toHaveBeenCalledWith(12);
 });

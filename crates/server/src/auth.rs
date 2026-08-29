@@ -83,12 +83,9 @@ pub(crate) async fn authenticate_by_name(
         let mut response = result.into_response();
         response.headers_mut().append(
             header::SET_COOKIE,
-            format!(
-                "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
-                SESSION_COOKIE
-            )
-            .parse()
-            .expect("valid cookie header"),
+            format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+                .parse()
+                .expect("valid cookie header"),
         );
         response
     }
@@ -598,14 +595,12 @@ fn access_token(
     if let Some(cookie) = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
-    {
-        if let Some(token) = cookie
+        && let Some(token) = cookie
             .split(';')
             .map(str::trim)
-            .find_map(|part| part.strip_prefix(&format!("{}=", SESSION_COOKIE)))
-        {
-            return valid_token(token);
-        }
+            .find_map(|part| part.strip_prefix(&format!("{SESSION_COOKIE}=")))
+    {
+        return valid_token(token);
     }
     Err(HttpAuthError::Unauthorized)
 }

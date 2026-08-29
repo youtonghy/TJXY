@@ -48,7 +48,7 @@ export function SearchPage() {
       ) : query ? (
         <p className="py-12 text-center text-muted">{tr('No results for', '没有找到')} “{query}”。</p>
       ) : (
-        <MediaRow items={popular} limitToTwoRows moreTo="/app/rankings" title={tr('Popular recommendations', '热门推荐')} />
+        <MediaRow items={popular} limitToTwoRows title={tr('Popular recommendations', '热门推荐')} />
       )}
     </div>
   );
