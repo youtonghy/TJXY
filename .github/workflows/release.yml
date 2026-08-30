@@ -20,7 +20,7 @@ concurrency:
 
 env:
   RUST_VERSION: 1.88.0
-  RELEASE_INPUT: ${{ github.event_name == 'push' && 'beta268292011' || inputs.version }}
+  RELEASE_INPUT: ${{ github.event_name == 'push' && format('beta{0}', github.run_id) || inputs.version }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
 
 jobs:

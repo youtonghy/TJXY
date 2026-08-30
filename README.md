@@ -358,8 +358,8 @@ instead of pulling GHCR, omit `--image` and `TJXY_IMAGE`:
 For a manual release, open **Actions > Release > Run workflow** and enter a
 version such as `0.0.1` or `v0.0.1`. CI builds the current `main` branch and
 creates the tag, GitHub Release, portable archives, and container image. An
-existing tag is not required. Pushing a matching `vX.Y.Z` tag remains supported
-and keeps the stricter Cargo workspace version check.
+existing tag is not required. Every push to `main` also creates a new GitHub
+pre-release with a unique `beta<run-id>` version.
 
 ## Development
 
