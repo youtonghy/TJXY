@@ -589,10 +589,29 @@ where
         password: &str,
         client: ClientIdentity,
     ) -> Result<IssuedAuthentication, AuthError> {
+        self.authenticate_with_lifetime(username, password, client, self.session_lifetime)
+            .await
+    }
+
+    /// Verifies credentials and issues a session using an explicit lifetime.
+    ///
+    /// This is used to keep the browser's remember-me policy separate from the
+    /// default lifetime applied to ordinary sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when credentials are invalid or session issuance fails.
+    pub async fn authenticate_with_lifetime(
+        &self,
+        username: &str,
+        password: &str,
+        client: ClientIdentity,
+        session_lifetime: Option<Duration>,
+    ) -> Result<IssuedAuthentication, AuthError> {
         let credential = self.verified_credential(username, password).await?;
 
         let now = self.clock.now();
-        let expires_at = match self.session_lifetime {
+        let expires_at = match session_lifetime {
             Some(lifetime) => Some(
                 now.checked_add_signed(lifetime)
                     .ok_or(AuthError::TimestampOverflow)?,

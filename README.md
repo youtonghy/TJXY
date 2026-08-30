@@ -48,6 +48,19 @@ archives remain available for maintainers.
   policies, run durable scan tasks, inspect progress, and retry failed work.
 - **Users and access:** Argon2id passwords, server-side sessions, QR sign-in,
   device/session revocation, API keys, and administrator-managed users.
+
+Authentication sessions issued by the server expire after 30 days by default;
+the explicit “remember me” option uses a 180-day server-side lifetime. Logout,
+credential changes, and administrator revocation continue to invalidate sessions
+immediately.
+
+During first-run setup, forwarded proxy headers are rejected unless
+`TJXY_SETUP_TRUST_PROXY=true` is explicitly configured. Keep `/Setup/*` on a
+loopback-only path whenever possible.
+
+Legacy query-string API-key authentication can be controlled with
+`TJXY_LEGACY_QUERY_TOKEN=true|false`; header-based legacy authentication remains
+controlled separately by `TJXY_LEGACY_AUTH`.
 - **Optional AI assistant:** connect an OpenAI-compatible provider for media
   discovery grounded in the authenticated user's visible catalog and history.
 - **Multiple databases:** use SQLite, PostgreSQL, or MySQL; PostgreSQL can be
@@ -369,6 +382,12 @@ cargo fmt --all -- --check
 Database tests use SQLite by default. Set `TJXY_TEST_DATABASE_URL` to a
 disposable PostgreSQL or MySQL instance when running cross-database contracts.
 Each test creates an isolated database or schema.
+
+Managed setup PostgreSQL connections require TLS by default. Set
+`TJXY_SETUP_POSTGRES_TLS` to `disable`, `prefer`, or `require` when the managed
+database is supplied through environment variables. The bundled Compose stack
+uses `disable` only for PostgreSQL traffic confined to its private Docker
+network; externally reachable databases should keep the default `require`.
 
 ## Documentation
 

@@ -20,6 +20,7 @@ use axum::{
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
@@ -35,6 +36,8 @@ const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 const SESSION_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const MUTATION_WINDOW: Duration = Duration::from_secs(60);
 const MAX_MUTATIONS_PER_WINDOW: usize = 60;
+const MAX_CONCURRENT_PROBES: usize = 4;
+const MAX_PROGRESS_SUBSCRIBERS: usize = 16;
 
 #[derive(Clone)]
 struct SetupHttpState {
@@ -43,6 +46,8 @@ struct SetupHttpState {
     sessions: Arc<Mutex<VecDeque<SetupSession>>>,
     branding_asset_dir: Arc<PathBuf>,
     managed_database: Option<DatabaseDraft>,
+    probe_slots: Arc<Semaphore>,
+    progress_slots: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -96,10 +101,19 @@ pub fn build_setup_router_with_options(
             sessions: Arc::new(Mutex::new(VecDeque::new())),
             branding_asset_dir: Arc::new(branding_asset_dir.into()),
             managed_database,
+            probe_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES)),
+            progress_slots: Arc::new(Semaphore::new(MAX_PROGRESS_SUBSCRIBERS)),
         })
 }
 
 async fn add_no_store(request: Request, next: Next) -> Response {
+    let forwarded = request.headers().contains_key("forwarded")
+        || request.headers().contains_key("x-forwarded-for")
+        || request.headers().contains_key("x-forwarded-proto")
+        || request.headers().contains_key("x-real-ip");
+    if forwarded && std::env::var("TJXY_SETUP_TRUST_PROXY").as_deref() != Ok("true") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let mut response = next.run(request).await;
     no_store(response.headers_mut());
     response
@@ -188,10 +202,14 @@ async fn progress(
     if session.installation_id != query.installation_id {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let Ok(progress_permit) = state.progress_slots.clone().try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     let mut progress = state.coordinator.subscribe_progress();
     let installation_id = query.installation_id;
     let latest = state.coordinator.latest_progress(installation_id);
     let stream = async_stream::stream! {
+        let _progress_permit: OwnedSemaphorePermit = progress_permit;
         let mut last_stage = None;
         if let Some(update) = latest {
             let event = Event::default().event("stage").json_data(update)
@@ -322,6 +340,9 @@ async fn status(
     if !is_private_source(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let Ok(_probe_permit) = state.probe_slots.try_acquire() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     let setup_status = match state.coordinator.status() {
         Ok(status) => status,
         Err(error) => return setup_error(error.code()),
@@ -372,7 +393,7 @@ async fn status(
     .into_response();
     no_store(response.headers_mut());
     let cookie = format!(
-        "{SESSION_COOKIE}={}; Path=/Setup; HttpOnly; SameSite=Strict",
+        "{SESSION_COOKIE}={}; Path=/Setup; HttpOnly; Secure; SameSite=Strict",
         session.id
     );
     if let Ok(value) = HeaderValue::from_str(&cookie) {
@@ -411,6 +432,9 @@ async fn test_database(
     if !is_private_source(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let Ok(_probe_permit) = state.probe_slots.try_acquire() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     let session = match valid_csrf(&state, &headers) {
         Ok(session) => session,
         Err(status) => return status.into_response(),

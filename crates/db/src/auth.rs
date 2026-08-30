@@ -283,6 +283,50 @@ impl<'connection> AuthRepository<'connection> {
         Self { database }
     }
 
+    /// Deletes a bounded batch of historical sessions older than `cutoff`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the cleanup query fails.
+    pub async fn prune_old_sessions(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<u64, AuthRepositoryError> {
+        let select = Query::select()
+            .column(Alias::new("id"))
+            .from(Alias::new("auth_sessions"))
+            .and_where(Expr::col(Alias::new("created_at")).lt(cutoff))
+            .and_where(
+                Expr::col(Alias::new("revoked_at"))
+                    .is_not_null()
+                    .or(Expr::col(Alias::new("expires_at")).lt(cutoff)),
+            )
+            .order_by(Alias::new("created_at"), sea_orm::Order::Asc)
+            .limit(limit)
+            .to_owned();
+        let backend = self.database.get_database_backend();
+        let ids = self
+            .database
+            .query_all(backend.build(&select))
+            .await?
+            .into_iter()
+            .map(|row| row.try_get::<Uuid>("", "id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let delete = Query::delete()
+            .from_table(Alias::new("auth_sessions"))
+            .and_where(Expr::col(Alias::new("id")).is_in(ids))
+            .to_owned();
+        Ok(self
+            .database
+            .execute(backend.build(&delete))
+            .await?
+            .rows_affected())
+    }
+
     /// Creates a local user whose password is already encoded as an Argon2 PHC string.
     ///
     /// # Errors

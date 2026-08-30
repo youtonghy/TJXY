@@ -83,7 +83,7 @@ pub(crate) async fn logout(
             response.headers_mut().append(
                 header::SET_COOKIE,
                 format!(
-                    "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+                    "{}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
                     auth::SESSION_COOKIE
                 )
                 .parse()

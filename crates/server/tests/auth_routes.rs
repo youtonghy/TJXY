@@ -162,7 +162,7 @@ async fn remember_me_issues_a_sliding_cookie_session() {
         .unwrap()
         .to_owned();
     assert!(cookie.starts_with("tjxy_session="));
-    assert!(cookie.contains("Max-Age=604800"));
+    assert!(cookie.contains("Max-Age=15552000"));
     assert!(cookie.contains("HttpOnly"));
 
     let response = app
@@ -181,7 +181,7 @@ async fn remember_me_issues_a_sliding_cookie_session() {
             .headers()
             .get(header::SET_COOKIE)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("Max-Age=604800"))
+            .is_some_and(|value| value.contains("Max-Age=2592000"))
     );
 }
 

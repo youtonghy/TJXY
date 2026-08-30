@@ -31,6 +31,8 @@ enum StartupError {
     InvalidSetupBindAddress(#[source] std::net::AddrParseError),
     #[error("TJXY_SETUP_POSTGRES_PORT must be an integer from 1 through 65535")]
     InvalidSetupPostgresPort,
+    #[error("TJXY_SETUP_POSTGRES_TLS must be disable, prefer, or require")]
+    InvalidSetupPostgresTls,
     #[error(
         "TJXY_SETUP_POSTGRES_HOST, TJXY_SETUP_POSTGRES_PORT, TJXY_SETUP_POSTGRES_DATABASE, TJXY_SETUP_POSTGRES_USERNAME, and TJXY_SETUP_POSTGRES_PASSWORD must be set together"
     )]
@@ -285,6 +287,12 @@ async fn serve_application(
             .map_err(|_| StartupError::InvalidLegacyAuth)?;
         startup = startup.with_legacy_auth_enabled(enabled);
     }
+    if let Ok(value) = env::var("TJXY_LEGACY_QUERY_TOKEN") {
+        let enabled = value
+            .parse::<bool>()
+            .map_err(|_| StartupError::InvalidLegacyAuth)?;
+        startup = startup.with_legacy_query_token_enabled(enabled);
+    }
     match (
         env::var("TJXY_BOOTSTRAP_ADMIN_USERNAME").ok(),
         env::var("TJXY_BOOTSTRAP_ADMIN_PASSWORD").ok(),
@@ -414,14 +422,27 @@ fn managed_setup_database() -> Result<Option<DatabaseDraft>, StartupError> {
         .ok()
         .filter(|port| *port > 0)
         .ok_or(StartupError::InvalidSetupPostgresPort)?;
+    let tls = setup_postgres_tls(env::var)?;
     Ok(Some(DatabaseDraft::PostgreSql {
         host,
         port,
         database,
         username,
         password: SecretString::new(password),
-        tls: DatabaseTlsMode::Disable,
+        tls,
     }))
+}
+
+fn setup_postgres_tls(
+    lookup: impl FnOnce(&'static str) -> Result<String, env::VarError>,
+) -> Result<DatabaseTlsMode, StartupError> {
+    match lookup("TJXY_SETUP_POSTGRES_TLS") {
+        Ok(value) if value.eq_ignore_ascii_case("disable") => Ok(DatabaseTlsMode::Disable),
+        Ok(value) if value.eq_ignore_ascii_case("prefer") => Ok(DatabaseTlsMode::Prefer),
+        Ok(value) if value.eq_ignore_ascii_case("require") => Ok(DatabaseTlsMode::Require),
+        Err(env::VarError::NotPresent) => Ok(DatabaseTlsMode::Require),
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => Err(StartupError::InvalidSetupPostgresTls),
+    }
 }
 
 fn google_oauth_configuration() -> Result<Option<GoogleDriveOAuthConfiguration>, StartupError> {
@@ -547,8 +568,9 @@ mod tests {
 
     use super::{
         admin_dist_dir, ai_admission_config, jellyfin_web_dist_dir, media_refresh_interval,
-        parse_credential_keyring,
+        parse_credential_keyring, setup_postgres_tls,
     };
+    use tjxy_server::DatabaseTlsMode;
 
     #[test]
     fn ai_admission_configuration_defaults_and_accepts_overrides() {
@@ -648,6 +670,25 @@ mod tests {
         assert_eq!(media_refresh_interval(|| Ok("0".to_owned())).unwrap(), None);
         assert!(media_refresh_interval(|| Ok("invalid".to_owned())).is_err());
         assert!(media_refresh_interval(|| Ok("2592001".to_owned())).is_err());
+    }
+
+    #[test]
+    fn setup_postgres_tls_is_secure_by_default_and_accepts_explicit_modes() {
+        assert_eq!(
+            setup_postgres_tls(|_| Err(VarError::NotPresent)).unwrap(),
+            DatabaseTlsMode::Require
+        );
+        for (value, expected) in [
+            ("disable", DatabaseTlsMode::Disable),
+            ("PREFER", DatabaseTlsMode::Prefer),
+            ("Require", DatabaseTlsMode::Require),
+        ] {
+            assert_eq!(
+                setup_postgres_tls(|_| Ok(value.to_owned())).unwrap(),
+                expected
+            );
+        }
+        assert!(setup_postgres_tls(|_| Ok("invalid".to_owned())).is_err());
     }
 
     #[test]

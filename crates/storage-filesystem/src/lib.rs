@@ -28,6 +28,8 @@ use tokio::{
 
 const RANGE_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_RECOVERY_ENTRIES: usize = 1_000_000;
+const MAX_DIRECTORY_ENTRIES: usize = 10_000;
+const MAX_INDEXED_PATHS: usize = 100_000;
 const EVENT_CHANNEL_CAPACITY: usize = 4_096;
 const FSEVENT_WATCH_RETRIES: usize = 5;
 const FSEVENT_WATCH_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
@@ -466,6 +468,11 @@ impl StorageBackend for FilesystemBackend {
         let mut objects = Vec::new();
         let mut indexed_paths = Vec::new();
         while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
+            if objects.len() >= MAX_DIRECTORY_ENTRIES {
+                return Err(BackendError::unsupported_capability(
+                    "filesystem directory exceeds the 10000-entry limit",
+                ));
+            }
             let file_type = entry.file_type().await.map_err(map_io_error)?;
             if file_type.is_symlink() {
                 continue;
@@ -480,7 +487,11 @@ impl StorageBackend for FilesystemBackend {
             objects.push(object);
         }
         objects.sort_by(|left, right| left.name().cmp(right.name()));
-        self.paths.write().await.extend(indexed_paths);
+        let mut paths = self.paths.write().await;
+        if paths.len().saturating_add(indexed_paths.len()) > MAX_INDEXED_PATHS {
+            paths.clear();
+        }
+        paths.extend(indexed_paths);
         Ok(ObjectPage::complete(objects))
     }
 

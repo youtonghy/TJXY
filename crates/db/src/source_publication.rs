@@ -3190,6 +3190,7 @@ async fn playback_location(
         .order_by(Alias::new("availability_rank"), Order::Asc)
         .order_by(Alias::new("location_priority"), Order::Desc)
         .order_by(Alias::new("storage_root_id"), Order::Asc)
+        .limit(64)
         .to_owned();
     let backend = database.get_database_backend();
     let mut seen_candidates = HashSet::new();
@@ -3442,6 +3443,7 @@ async fn subtitle_location(
                 ),
         )
         .order_by((root_relation, Alias::new("storage_root_id")), Order::Asc)
+        .limit(64)
         .to_owned();
     let backend = database.get_database_backend();
     let mut seen_candidates = HashSet::new();

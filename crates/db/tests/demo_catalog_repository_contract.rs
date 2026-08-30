@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection,
+    ConnectionTrait, DatabaseConnection, DbBackend,
     sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
@@ -350,14 +350,7 @@ async fn demo_publication_accepts_a_complete_hundred_series_image_set_with_a_bou
 #[tokio::test]
 async fn demo_publication_rolls_back_the_complete_projection_when_an_association_fails() {
     let database = database().await;
-    database
-        .execute_unprepared(
-            "CREATE TRIGGER reject_demo_credit \
-             BEFORE INSERT ON item_people \
-             BEGIN SELECT RAISE(ABORT, 'forced association failure'); END",
-        )
-        .await
-        .unwrap();
+    install_reject_demo_credit_trigger(&database).await;
     let client = TmdbCatalogClient::with_transport("en-US", fixture_transport()).unwrap();
     let publication = DemoCatalogPublication::new(
         vec![client.movie(329_865).await.unwrap()],
@@ -376,4 +369,48 @@ async fn demo_publication_rolls_back_the_complete_projection_when_an_association
     assert_eq!(count(&database, "provider_ids").await, 0);
     assert_eq!(count(&database, "metadata_snapshots").await, 0);
     assert_eq!(generation(&database).await, initial_generation);
+}
+
+async fn install_reject_demo_credit_trigger(database: &DatabaseConnection) {
+    match database.get_database_backend() {
+        DbBackend::Sqlite => {
+            database
+                .execute_unprepared(
+                    "CREATE TRIGGER reject_demo_credit \
+                     BEFORE INSERT ON item_people \
+                     BEGIN SELECT RAISE(ABORT, 'forced association failure'); END",
+                )
+                .await
+                .unwrap();
+        }
+        DbBackend::Postgres => {
+            database
+                .execute_unprepared(
+                    "CREATE FUNCTION reject_demo_credit_function() RETURNS trigger \
+                     LANGUAGE plpgsql AS $$ BEGIN \
+                     RAISE EXCEPTION 'forced association failure'; \
+                     END; $$",
+                )
+                .await
+                .unwrap();
+            database
+                .execute_unprepared(
+                    "CREATE TRIGGER reject_demo_credit \
+                     BEFORE INSERT ON item_people FOR EACH ROW \
+                     EXECUTE FUNCTION reject_demo_credit_function()",
+                )
+                .await
+                .unwrap();
+        }
+        DbBackend::MySql => {
+            database
+                .execute_unprepared(
+                    "CREATE TRIGGER reject_demo_credit \
+                     BEFORE INSERT ON item_people FOR EACH ROW \
+                     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced association failure'",
+                )
+                .await
+                .unwrap();
+        }
+    }
 }

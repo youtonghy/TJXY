@@ -190,6 +190,7 @@ pub struct AppState {
     realtime_events: Arc<socket::RealtimeEvents>,
     qr_login: qr::QrLoginStore,
     legacy_auth_enabled: bool,
+    legacy_query_token_enabled: bool,
 }
 
 impl AppState {
@@ -229,6 +230,7 @@ impl AppState {
             realtime_events: Arc::new(socket::RealtimeEvents::new()),
             qr_login: qr::QrLoginStore::default(),
             legacy_auth_enabled: true,
+            legacy_query_token_enabled: true,
         }
     }
 
@@ -499,6 +501,12 @@ impl AppState {
     #[must_use]
     pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
         self.legacy_auth_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_legacy_query_token_enabled(mut self, enabled: bool) -> Self {
+        self.legacy_query_token_enabled = enabled;
         self
     }
 
@@ -911,12 +919,12 @@ async fn refresh_session_cookie(request: Request, next: Next) -> Response {
     if has_cookie && !is_logout && !response_sets_cookie {
         let cookie = if response.status() == StatusCode::UNAUTHORIZED {
             format!(
-                "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+                "{}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
                 auth::SESSION_COOKIE
             )
         } else if response.status().is_success() {
             format!(
-                "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+                "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
                 auth::SESSION_COOKIE,
                 cookie_value.expect("cookie presence checked"),
                 auth::SESSION_COOKIE_MAX_AGE

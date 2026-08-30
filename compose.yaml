@@ -40,6 +40,7 @@ services:
       TJXY_SETUP_POSTGRES_DATABASE: ${TJXY_POSTGRES_DB:-tjxy}
       TJXY_SETUP_POSTGRES_USERNAME: ${TJXY_POSTGRES_USER:-tjxy}
       TJXY_SETUP_POSTGRES_PASSWORD: ${TJXY_POSTGRES_PASSWORD:?run ./tjxy-setup to initialize PostgreSQL}
+      TJXY_SETUP_POSTGRES_TLS: disable
     volumes:
       - "${TJXY_CONFIG_DIR:-./.tjxy/config}:/config"
       - "${TJXY_DATA_DIR:-./.tjxy/data}:/data"

@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::{AppState, auth};
 
 const QR_TTL_SECONDS: i64 = 180;
+const MAX_ACTIVE_CHALLENGES: usize = 1024;
 const QUICK_CONNECT_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const QUICK_CONNECT_CODE_LENGTH: usize = 6;
 
@@ -436,6 +437,9 @@ fn insert_challenge(
     let expires_at = Utc::now() + Duration::seconds(QR_TTL_SECONDS);
     let mut challenges = state.qr_login.0.lock().ok()?;
     challenges.retain(|_, value| value.expires_at > Utc::now() && !value.consumed);
+    if challenges.len() >= MAX_ACTIVE_CHALLENGES {
+        return None;
+    }
     let quick_connect_code = loop {
         let candidate = quick_connect_code();
         if challenges

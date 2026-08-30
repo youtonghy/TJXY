@@ -320,6 +320,11 @@ cargo fmt --all -- --check
 `TJXY_TEST_DATABASE_URL` 指向专用的 PostgreSQL 或 MySQL 测试实例。每个测试
 都会创建独立的数据库或 schema。
 
+通过环境变量提供安装阶段的 PostgreSQL 时，连接默认要求 TLS。可将
+`TJXY_SETUP_POSTGRES_TLS` 显式设为 `disable`、`prefer` 或 `require`。内置
+Compose 仅对限制在私有 Docker 网络内的 PostgreSQL 流量使用 `disable`；可从
+外部访问的数据库应保留默认的 `require`。
+
 ## 文档
 
 - [API 兼容性矩阵](docs/api-parity.md)

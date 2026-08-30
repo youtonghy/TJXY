@@ -204,7 +204,6 @@ async fn find_principal_on(
     creator_user_id: UserId,
 ) -> Result<Option<AuthenticatedPrincipal>, ApiKeyRepositoryError> {
     lock_lookup_user(transaction, creator_user_id).await?;
-    lock_lookup_key(transaction, digest).await?;
     let query = principal_query(digest);
     let backend = transaction.get_database_backend();
     let Some(row) = transaction.query_one(backend.build(&query)).await? else {
@@ -227,24 +226,6 @@ async fn lock_lookup_user(
             Expr::col(Alias::new("auth_revision")),
         )
         .and_where(Expr::col(Alias::new("id")).eq(creator_user_id.as_uuid()))
-        .to_owned();
-    transaction
-        .execute(transaction.get_database_backend().build(&update))
-        .await?;
-    Ok(())
-}
-
-async fn lock_lookup_key(
-    transaction: &DatabaseTransaction,
-    digest: &[u8; 32],
-) -> Result<(), ApiKeyRepositoryError> {
-    let update = Query::update()
-        .table(Alias::new("api_keys"))
-        .value(
-            Alias::new("last_used_at"),
-            Expr::col(Alias::new("last_used_at")),
-        )
-        .and_where(Expr::col(Alias::new("token_digest")).eq(digest.to_vec()))
         .to_owned();
     transaction
         .execute(transaction.get_database_backend().build(&update))

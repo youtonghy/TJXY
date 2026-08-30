@@ -68,6 +68,7 @@ pub struct StartupOptions {
     identity: ServerIdentity,
     bootstrap_admin: Option<BootstrapAdmin>,
     legacy_auth_enabled: bool,
+    legacy_query_token_enabled: bool,
     session_lifetime: Option<Duration>,
     max_concurrent_password_hashes: usize,
     assets_dir: PathBuf,
@@ -181,7 +182,8 @@ impl StartupOptions {
             identity,
             bootstrap_admin: None,
             legacy_auth_enabled: true,
-            session_lifetime: None,
+            legacy_query_token_enabled: true,
+            session_lifetime: Some(Duration::days(30)),
             max_concurrent_password_hashes: 2,
             assets_dir: PathBuf::from("./data/assets"),
             assets_dir_source: "Default",
@@ -227,6 +229,12 @@ impl StartupOptions {
     #[must_use]
     pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
         self.legacy_auth_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_legacy_query_token_enabled(mut self, enabled: bool) -> Self {
+        self.legacy_query_token_enabled = enabled;
         self
     }
 
@@ -682,6 +690,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     );
     worker::spawn_storage_change_reconciler(database.clone());
     worker::spawn_queue_maintenance_worker(database.clone());
+    worker::spawn_auth_session_retention_worker(database.clone());
     if let Some(retention) = options.work_history_retention {
         worker::spawn_work_retention_worker(database.clone(), retention);
     }
@@ -777,6 +786,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_storage_runtime(storage_runtime)
     .with_realtime_events(realtime_events)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
+    .with_legacy_query_token_enabled(options.legacy_query_token_enabled)
     .with_ready(true);
     if let Some(browser) = filesystem_browser {
         state = state.with_filesystem_browser(browser);

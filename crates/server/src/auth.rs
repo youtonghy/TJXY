@@ -1,4 +1,8 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Mutex, OnceLock},
+    time::{Duration as StdDuration, Instant},
+};
 
 use axum::{
     Json,
@@ -21,7 +25,11 @@ use uuid::Uuid;
 use crate::AppState;
 
 pub(crate) const SESSION_COOKIE: &str = "tjxy_session";
-pub(crate) const SESSION_COOKIE_MAX_AGE: i64 = 7 * 24 * 60 * 60;
+pub(crate) const SESSION_COOKIE_MAX_AGE: i64 = 30 * 24 * 60 * 60;
+pub(crate) const REMEMBER_ME_MAX_AGE: i64 = 180 * 24 * 60 * 60;
+const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
+const MAX_LOGIN_FAILURES: usize = 10;
+static LOGIN_FAILURES: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> = OnceLock::new();
 
 pub(crate) async fn authenticate_by_name(
     State(state): State<AppState>,
@@ -42,13 +50,26 @@ pub(crate) async fn authenticate_by_name(
     let Some(auth) = state.auth.as_ref() else {
         return HttpAuthError::Unavailable.into_response();
     };
+    let lifetime = if payload.remember_me {
+        Some(chrono::Duration::days(180))
+    } else {
+        Some(chrono::Duration::days(30))
+    };
+    let login_key = format!("{}:{}", payload.username, client.device_id());
+    if login_is_limited(&login_key) {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "60")]).into_response();
+    }
     let issued = match auth
-        .authenticate(&payload.username, &payload.password, client)
+        .authenticate_with_lifetime(&payload.username, &payload.password, client, lifetime)
         .await
     {
         Ok(issued) => issued,
-        Err(error) => return HttpAuthError::from(error).into_response(),
+        Err(error) => {
+            record_login_failure(&login_key);
+            return HttpAuthError::from(error).into_response();
+        }
     };
+    clear_login_failures(&login_key);
     let user = user_dto(issued.user(), state.identity.id);
     let session = SessionInfoDto::active(
         issued.session_id(),
@@ -69,10 +90,10 @@ pub(crate) async fn authenticate_by_name(
     if payload.remember_me {
         let mut response = result.into_response();
         if let Ok(value) = format!(
-            "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+            "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
             SESSION_COOKIE,
             issued.access_token().expose_secret(),
-            SESSION_COOKIE_MAX_AGE
+            REMEMBER_ME_MAX_AGE
         )
         .parse()
         {
@@ -83,11 +104,40 @@ pub(crate) async fn authenticate_by_name(
         let mut response = result.into_response();
         response.headers_mut().append(
             header::SET_COOKIE,
-            format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
                 .parse()
                 .expect("valid cookie header"),
         );
         response
+    }
+}
+
+fn login_is_limited(key: &str) -> bool {
+    let now = Instant::now();
+    let store = LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut failures) = store.lock() else {
+        return true;
+    };
+    let attempts = failures.entry(key.to_owned()).or_default();
+    attempts.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
+    attempts.len() >= MAX_LOGIN_FAILURES
+}
+
+fn record_login_failure(key: &str) {
+    let store = LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut failures) = store.lock() {
+        failures
+            .entry(key.to_owned())
+            .or_default()
+            .push_back(Instant::now());
+    }
+}
+
+fn clear_login_failures(key: &str) {
+    if let Some(store) = LOGIN_FAILURES.get()
+        && let Ok(mut failures) = store.lock()
+    {
+        failures.remove(key);
     }
 }
 
@@ -435,8 +485,13 @@ pub(crate) async fn authenticated_principal(
     headers: &HeaderMap,
     query: Option<&str>,
 ) -> Result<AuthenticatedPrincipal, Response> {
-    let token = access_token(headers, query, state.legacy_auth_enabled)
-        .map_err(IntoResponse::into_response)?;
+    let token = access_token(
+        headers,
+        query,
+        state.legacy_auth_enabled,
+        state.legacy_query_token_enabled,
+    )
+    .map_err(IntoResponse::into_response)?;
     let auth = state
         .auth
         .as_ref()
@@ -561,6 +616,7 @@ fn access_token(
     headers: &HeaderMap,
     query: Option<&str>,
     legacy_enabled: bool,
+    query_token_enabled: bool,
 ) -> Result<String, HttpAuthError> {
     if let Some(value) = headers.get(header::AUTHORIZATION) {
         let parameters = parse_authorization(
@@ -579,7 +635,7 @@ fn access_token(
             }
         }
     }
-    if let Some(query) = query {
+    if query_token_enabled && let Some(query) = query {
         let mut token = None;
         for (name, value) in parse_query_pairs(query)? {
             if (name == "ApiKey" || legacy_enabled && name == "api_key")

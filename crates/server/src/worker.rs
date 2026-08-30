@@ -39,6 +39,26 @@ const IMPORT_LEASE_DURATION: Duration = Duration::minutes(5);
 const FILESYSTEM_EVENT_PRIORITY: i32 = 90;
 const FILESYSTEM_EVENT_QUIET_WINDOW: StdDuration = StdDuration::from_millis(500);
 const HOME_CACHE_WARM_USER_LIMIT: u64 = 128;
+const SESSION_RETENTION: Duration = Duration::days(180);
+
+pub(crate) fn spawn_auth_session_retention_worker(database: DatabaseConnection) {
+    tokio::spawn(async move {
+        let mut schedule = tokio::time::interval(StdDuration::from_secs(24 * 60 * 60));
+        schedule.tick().await;
+        loop {
+            schedule.tick().await;
+            let cutoff = chrono::Utc::now() - SESSION_RETENTION;
+            match tjxy_db::AuthRepository::new(&database)
+                .prune_old_sessions(cutoff, 500)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => tracing::info!(deleted, "Pruned old auth sessions"),
+                Ok(_) => {}
+                Err(error) => tracing::error!("Auth session retention failed: {error}"),
+            }
+        }
+    });
+}
 
 fn job_span(claimed: &tjxy_db::ClaimedWorkJob) -> tracing::Span {
     let job = claimed.job();

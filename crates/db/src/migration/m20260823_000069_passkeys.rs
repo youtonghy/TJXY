@@ -81,6 +81,16 @@ impl MigrationTrait for Migration {
                     )
                     .to_owned(),
             )
+            .await?;
+
+        manager
+            .create_index(
+                sea_orm_migration::prelude::Index::create()
+                    .name("idx_passkey_challenges_expires_at")
+                    .table(Alias::new("passkey_challenges"))
+                    .col(Alias::new("expires_at"))
+                    .to_owned(),
+            )
             .await
     }
 
