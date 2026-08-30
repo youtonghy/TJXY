@@ -12,6 +12,7 @@ use tjxy_application::{
     UserDataService,
 };
 use tjxy_cache::{CacheRuntime, CacheStartupError, RedisCacheConfig};
+use tjxy_common::StorageRootId;
 use tjxy_credentials::{CredentialCipher, CredentialCipherError};
 use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
@@ -105,6 +106,7 @@ struct ConfiguredStorageBackend {
 
 struct FilesystemBackendConfiguration {
     account_id: Uuid,
+    storage_root_id: Option<StorageRootId>,
     root: PathBuf,
     persisted_provider_object_id: Option<String>,
 }
@@ -265,6 +267,7 @@ impl StartupOptions {
         self.filesystem_backends
             .push(FilesystemBackendConfiguration {
                 account_id,
+                storage_root_id: None,
                 root: root.into(),
                 persisted_provider_object_id: None,
             });
@@ -561,6 +564,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         {
             filesystem_backends.push(FilesystemBackendConfiguration {
                 account_id: configured.account_id(),
+                storage_root_id: Some(configured.root_id()),
                 root: PathBuf::from(configured.root_path()),
                 persisted_provider_object_id: Some(configured.provider_object_id().to_owned()),
             });
@@ -626,7 +630,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let image_fetcher = Arc::new(ReqwestMetadataImageFetcher::new()?);
     let assets =
         Arc::new(AssetReadService::new(database.clone(), options.assets_dir.clone()).await?);
-    let (filesystem_backends, unavailable_filesystem_accounts) =
+    let (filesystem_backends, unavailable_filesystem_accounts, relinked_filesystem_roots) =
         prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled).await;
     if !unavailable_filesystem_accounts.is_empty() {
         tracing::error!(
@@ -688,6 +692,19 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let media = Arc::new(media);
     let playstate = Arc::new(PlaystateService::new(database.clone()));
     let tasks = Arc::new(TaskService::new(database.clone()));
+    for root_id in relinked_filesystem_roots {
+        match tasks.validate_storage(root_id).await {
+            Ok(submission) => tracing::info!(
+                storage_root_id = %root_id.as_uuid(),
+                job_id = %submission.job().id().as_uuid(),
+                "Scheduled recursive validation after automatic filesystem relink"
+            ),
+            Err(error) => tracing::error!(
+                storage_root_id = %root_id.as_uuid(),
+                "Could not schedule recursive validation after automatic filesystem relink: {error}"
+            ),
+        }
+    }
     if let Some(interval) = options.media_refresh_interval {
         worker::spawn_media_refresh_scheduler(Arc::clone(&tasks), interval);
     }
@@ -973,9 +990,14 @@ async fn load_google_backends(
 async fn prepare_filesystem_backends(
     configured: Vec<FilesystemBackendConfiguration>,
     realtime_enabled: bool,
-) -> (Vec<PreparedFilesystemBackend>, Vec<Uuid>) {
+) -> (
+    Vec<PreparedFilesystemBackend>,
+    Vec<Uuid>,
+    Vec<StorageRootId>,
+) {
     let mut prepared = Vec::with_capacity(configured.len());
     let mut unavailable = Vec::new();
+    let mut relinked = Vec::new();
     for configuration in configured {
         let account_id = configuration.account_id;
         let backend = match configuration.persisted_provider_object_id {
@@ -990,11 +1012,23 @@ async fn prepare_filesystem_backends(
             None => FilesystemBackend::new(&configuration.root).await,
         };
         match backend {
-            Ok(backend) => prepared.push(PreparedFilesystemBackend {
-                account_id,
-                backend: Arc::new(backend),
-                realtime_enabled,
-            }),
+            Ok(backend) => {
+                if backend.root_identity_changed() {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        root = %configuration.root.display(),
+                        "Filesystem storage root identity changed; automatically relinking the configured path"
+                    );
+                    if let Some(root_id) = configuration.storage_root_id {
+                        relinked.push(root_id);
+                    }
+                }
+                prepared.push(PreparedFilesystemBackend {
+                    account_id,
+                    backend: Arc::new(backend),
+                    realtime_enabled,
+                });
+            }
             Err(error) => {
                 unavailable.push(account_id);
                 tracing::error!(
@@ -1004,7 +1038,7 @@ async fn prepare_filesystem_backends(
             }
         }
     }
-    (prepared, unavailable)
+    (prepared, unavailable, relinked)
 }
 
 fn backend_error_category(error: &tjxy_storage::BackendError) -> &'static str {
@@ -1255,6 +1289,7 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
     use tempfile::TempDir;
     use tjxy_application::AuthError;
+    use tjxy_common::StorageRootId;
     use tjxy_credentials::{CredentialCipher, CredentialCipherError, CredentialKey};
     use tjxy_db::{ApiKeyRepositoryError, CredentialRefreshState, StorageCredentialRepository};
     use tjxy_storage_google_drive::GoogleOAuthCredentials;
@@ -1302,11 +1337,13 @@ mod tests {
             vec![
                 FilesystemBackendConfiguration {
                     account_id: Uuid::new_v4(),
+                    storage_root_id: None,
                     root: valid.path().to_owned(),
                     persisted_provider_object_id: None,
                 },
                 FilesystemBackendConfiguration {
                     account_id: Uuid::new_v4(),
+                    storage_root_id: None,
                     root: missing,
                     persisted_provider_object_id: None,
                 },
@@ -1334,6 +1371,7 @@ mod tests {
         let result = prepare_filesystem_backends(
             vec![FilesystemBackendConfiguration {
                 account_id,
+                storage_root_id: None,
                 root: root.path().to_owned(),
                 persisted_provider_object_id: Some(provider_object_id.clone()),
             }],
@@ -1344,6 +1382,40 @@ mod tests {
         assert!(result.1.is_empty());
         assert_eq!(result.0.len(), 1);
         assert_eq!(result.0[0].account_id, account_id);
+        assert_eq!(
+            result.0[0].backend.root_id().provider_object_id(),
+            provider_object_id
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn filesystem_backend_accepts_persisted_namespace_after_inode_drift() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = TempDir::new().unwrap();
+        let metadata = std::fs::metadata(root.path()).unwrap();
+        let persisted_identity = format!("{:x}-{:x}", metadata.dev(), metadata.ino() ^ 1);
+        let provider_object_id = format!("{persisted_identity}/{persisted_identity}");
+        let account_id = Uuid::new_v4();
+        let storage_root_id = StorageRootId::new();
+
+        let result = prepare_filesystem_backends(
+            vec![FilesystemBackendConfiguration {
+                account_id,
+                storage_root_id: Some(storage_root_id),
+                root: root.path().to_owned(),
+                persisted_provider_object_id: Some(provider_object_id.clone()),
+            }],
+            false,
+        )
+        .await;
+
+        assert!(result.1.is_empty());
+        assert_eq!(result.2, vec![storage_root_id]);
+        assert_eq!(result.0.len(), 1);
+        assert_eq!(result.0[0].account_id, account_id);
+        assert!(result.0[0].backend.root_identity_changed());
         assert_eq!(
             result.0[0].backend.root_id().provider_object_id(),
             provider_object_id

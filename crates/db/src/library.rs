@@ -99,6 +99,7 @@ impl CreatedFilesystemLibrary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilesystemRootConfiguration {
     account_id: Uuid,
+    root_id: StorageRootId,
     root_path: String,
     provider_object_id: String,
 }
@@ -107,6 +108,11 @@ impl FilesystemRootConfiguration {
     #[must_use]
     pub const fn account_id(&self) -> Uuid {
         self.account_id
+    }
+
+    #[must_use]
+    pub const fn root_id(&self) -> StorageRootId {
+        self.root_id
     }
 
     #[must_use]
@@ -533,6 +539,10 @@ impl<'connection> LibraryRepository<'connection> {
                 Alias::new("root_path"),
             )
             .expr_as(
+                Expr::col((root.clone(), Alias::new("id"))),
+                Alias::new("storage_root_id"),
+            )
+            .expr_as(
                 Expr::col((object.clone(), Alias::new("provider_object_id"))),
                 Alias::new("provider_object_id"),
             )
@@ -588,6 +598,7 @@ impl<'connection> LibraryRepository<'connection> {
                 }
                 Ok(FilesystemRootConfiguration {
                     account_id: row.try_get("", "storage_account_id")?,
+                    root_id: StorageRootId::from_uuid(row.try_get("", "storage_root_id")?),
                     root_path: row.try_get("", "root_path")?,
                     provider_object_id,
                 })

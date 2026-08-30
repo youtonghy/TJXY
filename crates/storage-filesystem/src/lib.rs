@@ -94,6 +94,7 @@ pub struct FilesystemBackend {
     root_directory: std::fs::File,
     root_id: StorageObjectId,
     root_identity: String,
+    root_identity_changed: bool,
     #[cfg(unix)]
     device_alias: Option<(u64, u64)>,
     paths: RwLock<HashMap<StorageObjectId, PathBuf>>,
@@ -112,9 +113,10 @@ impl FilesystemBackend {
 
     /// Opens a canonical directory using its persisted root identity namespace.
     ///
-    /// On Unix, a changed device number is accepted only when the root inode is unchanged. Objects
-    /// on that device keep their persisted device component, so mount renumbering does not replace
-    /// the complete storage identity graph.
+    /// The configured path is authoritative. On Unix, device and inode changes are accepted while
+    /// the persisted root namespace is retained. Objects on a renumbered device keep their
+    /// persisted device component, so remounting does not replace the complete storage identity
+    /// graph.
     ///
     /// # Errors
     ///
@@ -152,6 +154,7 @@ impl FilesystemBackend {
                 current_identity.clone(),
             ),
         };
+        let root_identity_changed = root_identity != current_identity;
         #[cfg(unix)]
         let device_alias = unix_device_alias(&metadata, &root_identity)?;
         let mut paths = HashMap::new();
@@ -175,6 +178,7 @@ impl FilesystemBackend {
             root_directory,
             root_id,
             root_identity,
+            root_identity_changed,
             #[cfg(unix)]
             device_alias,
             paths: RwLock::new(paths),
@@ -189,6 +193,11 @@ impl FilesystemBackend {
     #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root
+    }
+
+    #[must_use]
+    pub const fn root_identity_changed(&self) -> bool {
+        self.root_identity_changed
     }
 
     /// Starts a recursive native event monitor rooted at this backend.
@@ -684,10 +693,7 @@ fn unix_device_alias(
     };
     let persisted_device =
         u64::from_str_radix(device, 16).map_err(|_| persisted_root_mismatch())?;
-    let persisted_inode = u64::from_str_radix(inode, 16).map_err(|_| persisted_root_mismatch())?;
-    if persisted_inode != metadata.ino() {
-        return Err(persisted_root_mismatch());
-    }
+    u64::from_str_radix(inode, 16).map_err(|_| persisted_root_mismatch())?;
     Ok((persisted_device != metadata.dev()).then_some((metadata.dev(), persisted_device)))
 }
 

@@ -196,7 +196,7 @@ async fn persisted_root_namespace_survives_device_number_drift() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn persisted_root_namespace_rejects_inode_changes() {
+async fn persisted_root_namespace_survives_inode_changes_at_the_configured_path() {
     use std::os::unix::fs::MetadataExt;
 
     let root = tempdir().unwrap();
@@ -205,10 +205,11 @@ async fn persisted_root_namespace_rejects_inode_changes() {
     let wrong_root_id =
         StorageObjectId::new("filesystem", format!("{wrong_identity}/{wrong_identity}")).unwrap();
 
-    assert!(matches!(
-        FilesystemBackend::new_with_root_id(root.path(), wrong_root_id).await,
-        Err(tjxy_storage::BackendError::InvalidValue { .. })
-    ));
+    let backend = FilesystemBackend::new_with_root_id(root.path(), wrong_root_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(backend.root_id(), &wrong_root_id);
+    assert!(backend.root_identity_changed());
     assert!(matches!(
         FilesystemBackend::new_with_root_id(
             root.path(),

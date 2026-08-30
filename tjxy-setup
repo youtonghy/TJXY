@@ -7,6 +7,7 @@ COMMAND=start
 RUNTIME=
 DATABASE_MODE=
 MEDIA_DIR=
+MEDIA_DIR_SET=false
 CONFIG_DIR=
 DATA_DIR=
 PORT=8096
@@ -65,7 +66,7 @@ while [ "$#" -gt 0 ]; do
         --database)
             require_value "$@"; DATABASE_MODE=$2; shift 2 ;;
         --media)
-            require_value "$@"; MEDIA_DIR=$2; shift 2 ;;
+            require_value "$@"; MEDIA_DIR=$2; MEDIA_DIR_SET=true; shift 2 ;;
         --media-mode)
             require_value "$@"; MEDIA_MODE=$2; shift 2 ;;
         --config-dir)
@@ -351,6 +352,9 @@ case "$MEDIA_MODE" in rw|ro) ;; *) fail "--media-mode must be rw or ro" ;; esac
 valid_port "$PORT" || fail "--port must be an integer from 1 through 65535"
 valid_port "$POSTGRES_PORT" || fail "--postgres-port must be an integer from 1 through 65535"
 
+if [ "$MEDIA_DIR_SET" = false ]; then
+    MEDIA_DIR=$(state_value media-path)
+fi
 MEDIA_DIR=${MEDIA_DIR:-"$ROOT_DIR/media"}
 CONFIG_DIR=${CONFIG_DIR:-"$STATE_DIR/config"}
 DATA_DIR=${DATA_DIR:-"$STATE_DIR/data"}

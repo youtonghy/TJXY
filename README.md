@@ -32,8 +32,9 @@ archives remain available for maintainers.
   files, alternate copies, subtitles, and storage locations.
 - **Local and cloud storage:** browse root-confined local files, Google Drive,
   Shared Drives, and OneDrive Personal without exposing provider credentials to
-  the browser. On Unix, a verified device-number change for the same local root
-  inode preserves existing storage identities across restarts.
+  the browser. The configured local path remains authoritative across remounts;
+  Unix device and inode changes are treated as remount signals while the stored
+  root namespace remains stable.
 - **Metadata pipeline:** discover movies, series, episodes, and music from file
   names and local NFO/artwork, with optional TMDb, MusicBrainz, and TheAudioDB
   enrichment.
@@ -110,6 +111,8 @@ The launcher stores configuration under `.tjxy/config` and application data
 under `.tjxy/data` unless other paths are supplied. On Linux, run it as the
 account that should own those directories. Open
 `http://127.0.0.1:8096/setup/` after startup and create the first administrator.
+After the first run, omitting `--media` reuses the path saved in
+`.tjxy/media-path`; pass `--media` explicitly only when changing the mapping.
 
 Managed PostgreSQL credentials are generated locally in
 `.tjxy/postgres-password`, are never printed, and are not sent to the browser.
