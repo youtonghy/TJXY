@@ -29,7 +29,10 @@ const ADAPTIVE_RANGE_BUDGETS: &[u64] = &[
     128 * 1024 * 1024,
 ];
 const SEQUENTIAL_FALLBACK_MAX: u64 = 128 * 1024 * 1024;
+const GAP_RETRY_RANGE: u64 = 8 * 1024 * 1024;
+const MAX_GAP_RETRIES: usize = 16;
 
+#[derive(Clone)]
 pub struct ProbeInput {
     size: u64,
     segments: Vec<ProbeSegment>,
@@ -50,6 +53,7 @@ impl ProbeInput {
     }
 }
 
+#[derive(Clone)]
 struct ProbeSegment {
     start: u64,
     bytes: Vec<u8>,
@@ -766,6 +770,12 @@ impl ProbeService {
                     .await?;
                 return Err(ProbeServiceError::InspectionFailed(message));
             };
+            tracing::debug!(
+                storage_object_id = %candidate.storage_object_id().as_uuid(),
+                stage = "strm_target_metadata",
+                target_size,
+                "STRM target metadata resolved"
+            );
             probe_size = target_size;
             probe_location_revision = strm_probe_revision(
                 &candidate,
@@ -789,7 +799,43 @@ impl ProbeService {
             &candidate,
         )
         .await?;
-        let mut result = self.inspector.inspect(input);
+        let mut probe_input = input;
+        let mut result = self.inspector.inspect(probe_input.clone());
+        let mut gap_retries = 0;
+        while let Err(ProbeServiceError::Inspection(message)) = &result {
+            let Some(gap_offset) = probe_gap_offset(message) else {
+                break;
+            };
+            if gap_retries >= MAX_GAP_RETRIES || gap_offset >= probe_size {
+                break;
+            }
+            let start = gap_offset.saturating_sub(GAP_RETRY_RANGE / 2);
+            let end = probe_size.min(start.saturating_add(GAP_RETRY_RANGE));
+            let bytes = read_exact_range(
+                &self.database,
+                probe_backend.as_ref(),
+                probe_record_id,
+                &probe_object_id,
+                start,
+                end,
+                &repository,
+                claimed,
+                &candidate,
+            )
+            .await?;
+            probe_input.segments.push(ProbeSegment { start, bytes });
+            probe_input.segments.sort_by_key(|segment| segment.start);
+            gap_retries += 1;
+            tracing::debug!(
+                size = probe_size,
+                gap_offset,
+                start,
+                end,
+                retry = gap_retries,
+                "media probe filled sparse read gap"
+            );
+            result = self.inspector.inspect(probe_input.clone());
+        }
         if matches!(
             &result,
             Err(ProbeServiceError::Inspection(message))
@@ -799,7 +845,7 @@ impl ProbeService {
                 if probe_size <= range_budget * 2 {
                     break;
                 }
-                let retry_input = read_probe_input_with_budget(
+                let mut retry_input = read_probe_input_with_budget(
                     &self.database,
                     probe_backend.as_ref(),
                     probe_record_id,
@@ -811,6 +857,11 @@ impl ProbeService {
                     &candidate,
                 )
                 .await?;
+                retry_input
+                    .segments
+                    .extend(probe_input.segments.iter().cloned());
+                retry_input.segments.sort_by_key(|segment| segment.start);
+                probe_input = retry_input.clone();
                 result = self.inspector.inspect(retry_input);
                 if !matches!(
                     &result,
@@ -1104,6 +1155,13 @@ fn probe_storage_read_error(error: StorageReadError) -> ProbeServiceError {
     }
 }
 
+fn probe_gap_offset(message: &str) -> Option<u64> {
+    message
+        .strip_prefix("Probe byte budget gap at offset ")?
+        .parse()
+        .ok()
+}
+
 fn validate_object_snapshot(
     candidate: &ProbeCandidate,
     object: &StorageObject,
@@ -1170,7 +1228,12 @@ impl Read for SparseProbeReader {
                 self.position >= segment.start
                     && self.position < segment.start + segment.bytes.len() as u64
             })
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Probe byte budget gap"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("Probe byte budget gap at offset {}", self.position),
+                )
+            })?;
         let offset = usize::try_from(self.position - segment.start)
             .map_err(|_| io::Error::other("Probe offset overflow"))?;
         let available = &segment.bytes[offset..];
@@ -1227,9 +1290,21 @@ mod tests {
         reader.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"xyz");
         reader.seek(SeekFrom::Start(4)).unwrap();
+        let error = reader.read(&mut bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(error.to_string(), "Probe byte budget gap at offset 4");
+    }
+
+    #[test]
+    fn parses_sparse_probe_gap_offsets() {
         assert_eq!(
-            reader.read(&mut bytes).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
+            probe_gap_offset("Probe byte budget gap at offset 42"),
+            Some(42)
+        );
+        assert_eq!(probe_gap_offset("Probe byte budget gap"), None);
+        assert_eq!(
+            probe_gap_offset("Probe byte budget gap at offset nope"),
+            None
         );
     }
 
