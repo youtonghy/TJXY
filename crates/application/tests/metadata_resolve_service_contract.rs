@@ -835,6 +835,19 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
 
     assert!(report.used_nfo());
     assert!(service.nfo(fixture.item).await.unwrap().is_none());
+    // Direct images must remain readable even when the library's metadata
+    // source is automatic; only the image import toggle controls shadowing.
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "automatic_scrape"),
+            ),
+        )
+        .await
+        .unwrap();
     let image = service
         .image(fixture.item, tjxy_common::ImageType::Primary, 0)
         .await

@@ -117,17 +117,13 @@ impl<'connection> DirectMetadataRepository<'connection> {
                 Expr::col((import_membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()),
             )
             .and_where(Expr::col((import_library.clone(), Alias::new("is_enabled"))).eq(true))
+            // Whether a direct resource is shadowed is determined by the
+            // resource-specific import mode.  A library may still use an
+            // automatic metadata source while local images remain direct-read
+            // (for example, `import_metadata_only`).
             .and_where(
-                sea_orm::sea_query::Condition::any()
-                    .add(
-                        Expr::col((import_library.clone(), Alias::new("metadata_source_mode")))
-                            .eq("automatic_scrape"),
-                    )
-                    .add(
-                        Expr::col((import_library, Alias::new("local_metadata_access_mode")))
-                            .is_in(imported_access_modes),
-                    )
-                    .into(),
+                Expr::col((import_library, Alias::new("local_metadata_access_mode")))
+                    .is_in(imported_access_modes),
             )
             .limit(1)
             .to_owned();
