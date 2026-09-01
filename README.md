@@ -359,7 +359,8 @@ For a manual release, open **Actions > Release > Run workflow** and enter a
 version such as `0.0.1` or `v0.0.1`. CI builds the current `main` branch and
 creates the tag, GitHub Release, portable archives, and container image. An
 existing tag is not required. Every push to `main` also creates a new GitHub
-pre-release with a unique `beta<run-id>` version.
+pre-release with a `betaYYMMDDHHmm` version based on Taipei time, such as
+`beta2608292011` for 2026-08-29 20:11.
 
 ## Development
 

@@ -20,7 +20,7 @@ concurrency:
 
 env:
   RUST_VERSION: 1.88.0
-  RELEASE_INPUT: ${{ github.event_name == 'push' && format('beta{0}', github.run_id) || inputs.version }}
+  RELEASE_INPUT: ${{ inputs.version }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
 
 jobs:
@@ -38,9 +38,13 @@ jobs:
       - name: Resolve release version
         id: release
         run: |
-          version="${RELEASE_INPUT#v}"
-          if ! printf '%s\n' "$version" | grep -Eq '(^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$)|(^beta[0-9]+$)'; then
-            echo 'Version must be semantic or a beta build identifier, for example 0.2.0 or beta268292011.' >&2
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version="$(TZ=Asia/Taipei date '+beta%y%m%d%H%M')"
+          else
+            version="${RELEASE_INPUT#v}"
+          fi
+          if ! printf '%s\n' "$version" | grep -Eq '(^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$)|(^beta[0-9]{10}$)'; then
+            echo 'Version must be semantic or a beta build identifier, for example 0.2.0 or beta2608292011.' >&2
             exit 1
           fi
           tag="v$version"
