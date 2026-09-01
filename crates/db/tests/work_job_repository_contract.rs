@@ -36,6 +36,96 @@ impl WorkJobClock for ManualClock {
     }
 }
 
+#[tokio::test]
+async fn stale_root_discovery_is_retired_before_workers_start() {
+    let database = database().await;
+    let backend = database.get_database_backend();
+    let account_id = Uuid::new_v4();
+    let root_id = StorageRootId::new();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_accounts"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("provider"),
+                        Alias::new("display_name"),
+                        Alias::new("account_identity"),
+                        Alias::new("credential_ref"),
+                        Alias::new("status"),
+                    ])
+                    .values_panic([
+                        account_id.into(),
+                        "filesystem".into(),
+                        "Filesystem".into(),
+                        Uuid::new_v4().to_string().into(),
+                        "filesystem-test".into(),
+                        "Active".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_root_id"),
+                        Alias::new("sync_revision"),
+                        Alias::new("reconciled_sync_revision"),
+                    ])
+                    .values_panic([
+                        root_id.as_uuid().into(),
+                        account_id.into(),
+                        "root/root".into(),
+                        2_i64.into(),
+                        2_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&database);
+    let submission = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::DiscoverTitles,
+                WorkScope::StorageRoot(root_id),
+                1,
+                50,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(jobs.retire_stale_discoveries().await.unwrap(), 1);
+    let row = database
+        .query_one(
+            backend.build(
+                &Query::select()
+                    .columns([Alias::new("state"), Alias::new("last_error")])
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("id")).eq(submission.job().id().as_uuid()))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "Failed");
+    assert!(
+        row.try_get::<String>("", "last_error")
+            .unwrap()
+            .contains("superseded")
+    );
+}
+
 async fn database() -> DatabaseConnection {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();

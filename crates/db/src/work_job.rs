@@ -826,6 +826,17 @@ where
         finish(transaction, result).await
     }
 
+    /// Terminates active title-discovery jobs whose immutable root revision is obsolete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkJobRepositoryError`] when stale jobs cannot be selected or terminated.
+    pub async fn retire_stale_discoveries(&self) -> Result<u64, WorkJobRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = retire_stale_discoveries(&transaction, self.now()).await;
+        finish(transaction, result).await
+    }
+
     /// Atomically skips already-published lazy work or enqueues/joins its natural key.
     ///
     /// The item revision row is locked before the active publication check, closing
@@ -1187,16 +1198,28 @@ where
                 }
             }
             let submission = enqueue_or_join(&transaction, spec, self.now()).await?;
-            if let (WorkTaskKind::DiscoverTitles, WorkScope::LibraryRootBinding(binding_id)) =
-                (spec.task_kind(), spec.scope())
-            {
-                crate::discover::stage_discovery_binding(
-                    &transaction,
-                    submission.job().id(),
-                    binding_id,
-                    claimed.job().expected_revision(),
-                )
-                .await?;
+            if spec.task_kind() == WorkTaskKind::DiscoverTitles {
+                match spec.scope() {
+                    WorkScope::LibraryRootBinding(binding_id) => {
+                        crate::discover::stage_discovery_binding(
+                            &transaction,
+                            submission.job().id(),
+                            binding_id,
+                            claimed.job().expected_revision(),
+                        )
+                        .await?;
+                    }
+                    WorkScope::StorageRoot(root_id) => {
+                        crate::discover::stage_discovery_root(
+                            &transaction,
+                            submission.job().id(),
+                            root_id,
+                            spec.expected_revision(),
+                        )
+                        .await?;
+                    }
+                    _ => return Err(WorkJobRepositoryError::InvalidChildReference),
+                }
             }
             let row = WorkStagingRow {
                 payload: serde_json::json!({
@@ -1625,6 +1648,102 @@ async fn cancel_active_task(
         }
     }
     Ok(cancelled)
+}
+
+async fn retire_stale_discoveries(
+    transaction: &DatabaseTransaction,
+    now: DateTime<Utc>,
+) -> Result<u64, WorkJobRepositoryError> {
+    let job = Alias::new("stale_discovery_job");
+    let root = Alias::new("stale_discovery_root");
+    let affinity_query = Query::select()
+        .column((job.clone(), Alias::new("id")))
+        .from_as(Alias::new("work_jobs"), job.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_roots"),
+            root.clone(),
+            Cond::any()
+                .add(
+                    Expr::col((root.clone(), Alias::new("id")))
+                        .equals((job.clone(), Alias::new("storage_root_affinity"))),
+                )
+                .add(
+                    Cond::all()
+                        .add(Expr::col((job.clone(), Alias::new("scope_type"))).eq("StorageRoot"))
+                        .add(
+                            Expr::col((root.clone(), Alias::new("id")))
+                                .equals((job.clone(), Alias::new("scope_id"))),
+                        ),
+                ),
+        )
+        .and_where(Expr::col((job.clone(), Alias::new("task_kind"))).eq("DiscoverTitles"))
+        .and_where(
+            Expr::col((job.clone(), Alias::new("state"))).is_in([STATE_PENDING, STATE_RUNNING]),
+        )
+        .and_where(
+            Expr::col((job.clone(), Alias::new("expected_revision")))
+                .ne(Expr::col((root, Alias::new("reconciled_sync_revision")))),
+        )
+        .limit(500)
+        .to_owned();
+    let binding_job = Alias::new("stale_binding_discovery_job");
+    let binding = Alias::new("stale_discovery_binding");
+    let binding_root = Alias::new("stale_binding_discovery_root");
+    let binding_query = Query::select()
+        .column((binding_job.clone(), Alias::new("id")))
+        .from_as(Alias::new("work_jobs"), binding_job.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            binding.clone(),
+            Expr::col((binding.clone(), Alias::new("id")))
+                .equals((binding_job.clone(), Alias::new("scope_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_roots"),
+            binding_root.clone(),
+            Expr::col((binding_root.clone(), Alias::new("id")))
+                .equals((binding, Alias::new("storage_root_id"))),
+        )
+        .and_where(Expr::col((binding_job.clone(), Alias::new("task_kind"))).eq("DiscoverTitles"))
+        .and_where(
+            Expr::col((binding_job.clone(), Alias::new("scope_type"))).eq("LibraryRootBinding"),
+        )
+        .and_where(
+            Expr::col((binding_job.clone(), Alias::new("state")))
+                .is_in([STATE_PENDING, STATE_RUNNING]),
+        )
+        .and_where(
+            Expr::col((binding_job, Alias::new("expected_revision"))).ne(Expr::col((
+                binding_root,
+                Alias::new("reconciled_sync_revision"),
+            ))),
+        )
+        .limit(500)
+        .to_owned();
+    let backend = transaction.get_database_backend();
+    let mut ids = HashSet::new();
+    for query in [affinity_query, binding_query] {
+        for row in transaction.query_all(backend.build(&query)).await? {
+            ids.insert(WorkJobId::from_uuid(row.try_get("", "id")?));
+        }
+    }
+    let mut retired = 0_u64;
+    for id in ids {
+        if cancel_job(
+            transaction,
+            id,
+            "title discovery revision was superseded before execution",
+            now,
+        )
+        .await?
+        {
+            retired += 1;
+        }
+    }
+    Ok(retired)
 }
 
 async fn cancel_job(

@@ -15,6 +15,7 @@ mod dashboard_admin;
 mod device;
 mod display_preferences;
 mod filesystem_admin;
+mod filesystem_read;
 mod image;
 mod import_admin;
 mod installation_config;

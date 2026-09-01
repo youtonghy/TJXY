@@ -1,7 +1,7 @@
 //! Local filesystem implementation of the provider-neutral storage contract.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fs::Metadata,
     io::SeekFrom,
     path::{Path, PathBuf},
@@ -18,18 +18,19 @@ use chrono::{DateTime, Utc};
 use notify::{ErrorKind as NotifyErrorKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, IdentityQuality, ObjectPage,
-    PageToken, StorageBackend, StorageCapabilities, StorageObject, StorageObjectId,
+    ObjectType, PageToken, StorageBackend, StorageCapabilities, StorageObject, StorageObjectId,
 };
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncSeekExt},
-    sync::{RwLock, mpsc},
+    sync::{RwLock, Semaphore, mpsc},
 };
 
 const RANGE_CHUNK_SIZE: usize = 64 * 1024;
-const MAX_RECOVERY_ENTRIES: usize = 1_000_000;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 const MAX_INDEXED_PATHS: usize = 100_000;
+const MAX_BLOCKING_OPENS: usize = 16;
+const FILESYSTEM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_CHANNEL_CAPACITY: usize = 4_096;
 const FSEVENT_WATCH_RETRIES: usize = 5;
 const FSEVENT_WATCH_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
@@ -96,10 +97,12 @@ pub struct FilesystemBackend {
     root_directory: std::fs::File,
     root_id: StorageObjectId,
     root_identity: String,
+    physical_root_identity: String,
     root_identity_changed: bool,
     #[cfg(unix)]
     device_alias: Option<(u64, u64)>,
     paths: RwLock<HashMap<StorageObjectId, PathBuf>>,
+    open_permits: Arc<Semaphore>,
 }
 
 impl FilesystemBackend {
@@ -180,10 +183,12 @@ impl FilesystemBackend {
             root_directory,
             root_id,
             root_identity,
+            physical_root_identity: current_identity,
             root_identity_changed,
             #[cfg(unix)]
             device_alias,
             paths: RwLock::new(paths),
+            open_permits: Arc::new(Semaphore::new(MAX_BLOCKING_OPENS)),
         })
     }
 
@@ -200,6 +205,75 @@ impl FilesystemBackend {
     #[must_use]
     pub const fn root_identity_changed(&self) -> bool {
         self.root_identity_changed
+    }
+
+    #[must_use]
+    pub fn physical_root_identity(&self) -> &str {
+        &self.physical_root_identity
+    }
+
+    /// Reads a known object through a persisted root-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the path is unsafe, unavailable, or no longer identifies the
+    /// requested object.
+    pub async fn get_object_at(
+        &self,
+        id: &StorageObjectId,
+        relative_path: &Path,
+    ) -> Result<StorageObject, BackendError> {
+        let path = self.path_from_relative(relative_path)?;
+        self.get_object_from_path(id, &path).await
+    }
+
+    /// Lists a known directory through a persisted root-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the path is unsafe, unavailable, or no longer identifies the
+    /// requested directory.
+    pub async fn list_children_at(
+        &self,
+        parent: &StorageObjectId,
+        relative_path: &Path,
+        page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        let path = self.path_from_relative(relative_path)?;
+        self.list_children_from_path(parent, path, page).await
+    }
+
+    /// Opens a known object range through a persisted root-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the path is unsafe, unavailable, stale, or outside the range.
+    pub async fn open_range_at(
+        &self,
+        id: &StorageObjectId,
+        relative_path: &Path,
+        range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        let path = self.path_from_relative(relative_path)?;
+        self.open_range_from_path(id, &path, range).await
+    }
+
+    /// Resolves a local descriptor reference from a persisted descriptor path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when either path is unsafe or unavailable.
+    pub async fn resolve_local_reference_at(
+        &self,
+        descriptor: &StorageObjectId,
+        descriptor_relative_path: &Path,
+        reference: &str,
+    ) -> Result<StorageObject, BackendError> {
+        let descriptor_path = self.path_from_relative(descriptor_relative_path)?;
+        self.ensure_path_identity(descriptor, &descriptor_path)
+            .await?;
+        self.resolve_reference_from_path(&descriptor_path, reference)
+            .await
     }
 
     /// Starts a recursive native event monitor rooted at this backend.
@@ -305,55 +379,137 @@ impl FilesystemBackend {
         if let Some(path) = self.paths.read().await.get(id).cloned() {
             return Ok(path);
         }
-        self.recover_path(id).await
+        Err(BackendError::BackendNotReady {
+            message: "filesystem path is not indexed; storage validation is required".to_owned(),
+        })
     }
 
-    async fn recover_path(&self, target: &StorageObjectId) -> Result<PathBuf, BackendError> {
-        if target.provider() != "filesystem"
-            || !target
-                .provider_object_id()
-                .starts_with(&format!("{}/", self.root_identity))
+    fn path_from_relative(&self, relative_path: &Path) -> Result<PathBuf, BackendError> {
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
-            return Err(BackendError::NotFound);
+            return Err(BackendError::InvalidValue {
+                message: "filesystem relative path contains an unsafe component".to_owned(),
+            });
         }
-        let mut directories = VecDeque::from([self.root.clone()]);
-        let mut recovered = Vec::new();
-        let mut visited = 0_usize;
-        while let Some(parent) = directories.pop_front() {
-            let mut directory = fs::read_dir(parent).await.map_err(map_io_error)?;
-            while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
-                visited = visited
-                    .checked_add(1)
-                    .ok_or_else(|| BackendError::InvalidValue {
-                        message: "filesystem recovery entry count overflowed".to_owned(),
-                    })?;
-                if visited > MAX_RECOVERY_ENTRIES {
-                    return Err(BackendError::TemporarilyUnavailable {
-                        message: "filesystem recovery exceeded its bounded entry count".to_owned(),
-                    });
-                }
-                let file_type = entry.file_type().await.map_err(map_io_error)?;
-                if file_type.is_symlink() {
-                    continue;
-                }
-                let canonical = fs::canonicalize(entry.path()).await.map_err(map_io_error)?;
-                if !canonical.starts_with(&self.root) {
-                    continue;
-                }
-                let metadata = entry.metadata().await.map_err(map_io_error)?;
-                let object = self.object_from_metadata(&canonical, &metadata)?;
-                recovered.push((object.id().clone(), canonical.clone()));
-                if object.id() == target {
-                    self.paths.write().await.extend(recovered);
-                    return Ok(canonical);
-                }
-                if metadata.is_dir() {
-                    directories.push_back(canonical);
-                }
+        Ok(self.root.join(relative_path))
+    }
+
+    async fn ensure_path_identity(
+        &self,
+        id: &StorageObjectId,
+        path: &Path,
+    ) -> Result<StorageObject, BackendError> {
+        if id == &self.root_id && path == self.root {
+            let metadata = fs::metadata(path).await.map_err(map_io_error)?;
+            return self.root_object_from_metadata(&metadata);
+        }
+        let file = self.open_media_file(path).await?;
+        let metadata = file.metadata().await.map_err(map_io_error)?;
+        let object = self.object_from_metadata(path, &metadata)?;
+        if object.id() != id {
+            return Err(BackendError::TemporarilyUnavailable {
+                message: "filesystem path index no longer matches the requested object".to_owned(),
+            });
+        }
+        Ok(object)
+    }
+
+    async fn get_object_from_path(
+        &self,
+        id: &StorageObjectId,
+        path: &Path,
+    ) -> Result<StorageObject, BackendError> {
+        self.ensure_path_identity(id, path).await
+    }
+
+    async fn list_children_from_path(
+        &self,
+        parent: &StorageObjectId,
+        parent_path: PathBuf,
+        page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        if page.is_some() {
+            return Err(BackendError::unsupported_capability(
+                "filesystem pagination",
+            ));
+        }
+        if parent != &self.root_id || parent_path != self.root {
+            let object = self.ensure_path_identity(parent, &parent_path).await?;
+            if object.object_type() != ObjectType::Directory {
+                return Err(BackendError::InvalidValue {
+                    message: "filesystem child listing target is not a directory".to_owned(),
+                });
             }
         }
-        self.paths.write().await.extend(recovered);
-        Err(BackendError::NotFound)
+        let mut directory = fs::read_dir(parent_path).await.map_err(map_io_error)?;
+        let mut objects = Vec::new();
+        let mut indexed_paths = Vec::new();
+        while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
+            if objects.len() >= MAX_DIRECTORY_ENTRIES {
+                return Err(BackendError::unsupported_capability(
+                    "filesystem directory exceeds the 10000-entry limit",
+                ));
+            }
+            let file_type = entry.file_type().await.map_err(map_io_error)?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let canonical = fs::canonicalize(entry.path()).await.map_err(map_io_error)?;
+            if !canonical.starts_with(&self.root) {
+                continue;
+            }
+            let metadata = entry.metadata().await.map_err(map_io_error)?;
+            let object = self.object_from_metadata(&canonical, &metadata)?;
+            indexed_paths.push((object.id().clone(), canonical));
+            objects.push(object);
+        }
+        objects.sort_by(|left, right| left.name().cmp(right.name()));
+        let mut paths = self.paths.write().await;
+        if paths.len().saturating_add(indexed_paths.len()) > MAX_INDEXED_PATHS {
+            paths.retain(|id, _| id == &self.root_id);
+        }
+        paths.extend(indexed_paths);
+        Ok(ObjectPage::complete(objects))
+    }
+
+    async fn open_range_from_path(
+        &self,
+        id: &StorageObjectId,
+        path: &Path,
+        range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        let mut file = self.open_media_file(path).await?;
+        let metadata = file.metadata().await.map_err(map_io_error)?;
+        let object = self.object_from_metadata(path, &metadata)?;
+        if object.id() != id {
+            return Err(BackendError::TemporarilyUnavailable {
+                message: "filesystem path index no longer matches the requested object".to_owned(),
+            });
+        }
+        if range.end_exclusive() > metadata.len() {
+            return Err(BackendError::RangeNotSatisfiable {
+                size: metadata.len(),
+            });
+        }
+        file.seek(SeekFrom::Start(range.start()))
+            .await
+            .map_err(map_io_error)?;
+        let stream = async_stream::try_stream! {
+            let mut remaining = range.end_exclusive() - range.start();
+            while remaining > 0 {
+                let chunk_len = usize::try_from(remaining)
+                    .unwrap_or(RANGE_CHUNK_SIZE)
+                    .min(RANGE_CHUNK_SIZE);
+                let mut buffer = vec![0; chunk_len];
+                file.read_exact(&mut buffer).await.map_err(map_io_error)?;
+                remaining -= chunk_len as u64;
+                yield Bytes::from(buffer);
+            }
+        };
+        Ok(Box::pin(stream))
     }
 
     fn object_from_metadata(
@@ -380,6 +536,25 @@ impl FilesystemBackend {
             .with_remote_modified_at(DateTime::<Utc>::from(modified)))
     }
 
+    fn root_object_from_metadata(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<StorageObject, BackendError> {
+        let name = self
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("/");
+        let modified = metadata.modified().map_err(map_io_error)?;
+        Ok(StorageObject::directory_with_identity(
+            self.root_id.clone(),
+            name,
+            IdentityQuality::StableFileId,
+        )
+        .with_remote_revision(filesystem_revision(metadata, &self.physical_root_identity)?)?
+        .with_remote_modified_at(DateTime::<Utc>::from(modified)))
+    }
+
     fn object_identity(&self, path: &Path, metadata: &Metadata) -> (String, IdentityQuality) {
         #[cfg(unix)]
         if let Some((current_device, persisted_device)) = self.device_alias {
@@ -402,8 +577,26 @@ impl FilesystemBackend {
             .map_err(|_| BackendError::NotFound)?
             .to_owned();
         let root = self.root_directory.try_clone().map_err(map_io_error)?;
-        let file = tokio::task::spawn_blocking(move || open_relative_no_symlinks(&root, &relative))
+        let permit = tokio::time::timeout(
+            FILESYSTEM_OPEN_TIMEOUT,
+            Arc::clone(&self.open_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| BackendError::TemporarilyUnavailable {
+            message: "filesystem open concurrency limit timed out".to_owned(),
+        })?
+        .map_err(|_| BackendError::TemporarilyUnavailable {
+            message: "filesystem open concurrency limiter closed".to_owned(),
+        })?;
+        let operation = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            open_relative_no_symlinks(&root, &relative)
+        });
+        let file = tokio::time::timeout(FILESYSTEM_OPEN_TIMEOUT, operation)
             .await
+            .map_err(|_| BackendError::TemporarilyUnavailable {
+                message: "filesystem open timed out".to_owned(),
+            })?
             .map_err(|_| BackendError::TemporarilyUnavailable {
                 message: "filesystem open task failed".to_owned(),
             })?
@@ -448,9 +641,7 @@ fn is_transient_fsevent_start_error(error: &notify::Error) -> bool {
 impl StorageBackend for FilesystemBackend {
     async fn get_object(&self, id: &StorageObjectId) -> Result<StorageObject, BackendError> {
         let path = self.path_for(id).await?;
-        let file = self.open_media_file(&path).await?;
-        let metadata = file.metadata().await.map_err(map_io_error)?;
-        self.object_from_metadata(&path, &metadata)
+        self.get_object_from_path(id, &path).await
     }
 
     async fn list_children(
@@ -458,41 +649,9 @@ impl StorageBackend for FilesystemBackend {
         parent: &StorageObjectId,
         page: Option<PageToken>,
     ) -> Result<ObjectPage, BackendError> {
-        if page.is_some() {
-            return Err(BackendError::unsupported_capability(
-                "filesystem pagination",
-            ));
-        }
         let parent_path = self.path_for(parent).await?;
-        let mut directory = fs::read_dir(parent_path).await.map_err(map_io_error)?;
-        let mut objects = Vec::new();
-        let mut indexed_paths = Vec::new();
-        while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
-            if objects.len() >= MAX_DIRECTORY_ENTRIES {
-                return Err(BackendError::unsupported_capability(
-                    "filesystem directory exceeds the 10000-entry limit",
-                ));
-            }
-            let file_type = entry.file_type().await.map_err(map_io_error)?;
-            if file_type.is_symlink() {
-                continue;
-            }
-            let canonical = fs::canonicalize(entry.path()).await.map_err(map_io_error)?;
-            if !canonical.starts_with(&self.root) {
-                continue;
-            }
-            let metadata = entry.metadata().await.map_err(map_io_error)?;
-            let object = self.object_from_metadata(&canonical, &metadata)?;
-            indexed_paths.push((object.id().clone(), canonical));
-            objects.push(object);
-        }
-        objects.sort_by(|left, right| left.name().cmp(right.name()));
-        let mut paths = self.paths.write().await;
-        if paths.len().saturating_add(indexed_paths.len()) > MAX_INDEXED_PATHS {
-            paths.clear();
-        }
-        paths.extend(indexed_paths);
-        Ok(ObjectPage::complete(objects))
+        self.list_children_from_path(parent, parent_path, page)
+            .await
     }
 
     async fn list_changes(&self, _cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
@@ -505,34 +664,34 @@ impl StorageBackend for FilesystemBackend {
         range: ByteRange,
     ) -> Result<ByteStream, BackendError> {
         let path = self.path_for(id).await?;
-        let mut file = self.open_media_file(&path).await?;
-        let metadata = file.metadata().await.map_err(map_io_error)?;
-        if range.end_exclusive() > metadata.len() {
-            return Err(BackendError::RangeNotSatisfiable {
-                size: metadata.len(),
-            });
-        }
-        file.seek(SeekFrom::Start(range.start()))
-            .await
-            .map_err(map_io_error)?;
-        let stream = async_stream::try_stream! {
-            let mut remaining = range.end_exclusive() - range.start();
-            while remaining > 0 {
-                let chunk_len = usize::try_from(remaining)
-                    .unwrap_or(RANGE_CHUNK_SIZE)
-                    .min(RANGE_CHUNK_SIZE);
-                let mut buffer = vec![0; chunk_len];
-                file.read_exact(&mut buffer).await.map_err(map_io_error)?;
-                remaining -= chunk_len as u64;
-                yield Bytes::from(buffer);
-            }
-        };
-        Ok(Box::pin(stream))
+        self.open_range_from_path(id, &path, range).await
     }
 
     async fn resolve_local_reference(
         &self,
         descriptor: &StorageObjectId,
+        reference: &str,
+    ) -> Result<StorageObject, BackendError> {
+        let descriptor_path = if Path::new(reference).is_absolute() {
+            self.root.clone()
+        } else {
+            self.path_for(descriptor).await?
+        };
+        self.resolve_reference_from_path(&descriptor_path, reference)
+            .await
+    }
+
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::new()
+            .with_file_events(true)
+            .with_range_reads(true)
+    }
+}
+
+impl FilesystemBackend {
+    async fn resolve_reference_from_path(
+        &self,
+        descriptor_path: &Path,
         reference: &str,
     ) -> Result<StorageObject, BackendError> {
         let reference = Path::new(reference);
@@ -552,7 +711,6 @@ impl StorageBackend for FilesystemBackend {
                 .map(|relative| self.root.join(relative))
                 .map_err(|_| BackendError::NotFound)?
         } else {
-            let descriptor_path = self.path_for(descriptor).await?;
             descriptor_path
                 .parent()
                 .ok_or_else(|| BackendError::InvalidValue {
@@ -570,12 +728,6 @@ impl StorageBackend for FilesystemBackend {
         let object = self.object_from_metadata(&path, &metadata)?;
         self.paths.write().await.insert(object.id().clone(), path);
         Ok(object)
-    }
-
-    fn capabilities(&self) -> StorageCapabilities {
-        StorageCapabilities::new()
-            .with_file_events(true)
-            .with_range_reads(true)
     }
 }
 

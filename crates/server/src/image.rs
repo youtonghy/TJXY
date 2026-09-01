@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -82,11 +82,10 @@ async fn original(
                 Ok(Some(image)) => direct_image_response(image, headers, head_only),
                 Ok(None) => error(StatusCode::NOT_FOUND, "image was not found"),
                 Err(
-                    DirectMetadataReadError::Query(_) | DirectMetadataReadError::BackendUnavailable,
-                ) => error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "image service is unavailable",
-                ),
+                    DirectMetadataReadError::Query(_)
+                    | DirectMetadataReadError::BackendUnavailable
+                    | DirectMetadataReadError::TemporarilyUnavailable,
+                ) => unavailable("image service is unavailable"),
                 Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "image data is invalid"),
             };
         }
@@ -260,4 +259,25 @@ fn etag_matches(headers: &HeaderMap, current: &str) -> bool {
 
 fn error(status: StatusCode, message: &'static str) -> Response {
     (status, message).into_response()
+}
+
+fn unavailable(message: &'static str) -> Response {
+    let mut response = error(StatusCode::SERVICE_UNAVAILABLE, message);
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{StatusCode, header};
+
+    #[test]
+    fn unavailable_images_include_a_retry_hint() {
+        let response = super::unavailable("unavailable");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+    }
 }

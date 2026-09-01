@@ -1364,6 +1364,7 @@ fn binding_response(result: &Result<CreatedStorageBinding, StorageAdminError>) -
         ) => StatusCode::BAD_REQUEST.into_response(),
         Err(StorageAdminError::Backend(
             BackendError::TemporarilyUnavailable { .. }
+            | BackendError::BackendNotReady { .. }
             | BackendError::RateLimited { .. }
             | BackendError::ChangeCursorInvalid,
         )) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -1394,6 +1395,7 @@ fn oauth_response(error: &StorageAdminError) -> Response {
         }
         StorageAdminError::Backend(
             BackendError::TemporarilyUnavailable { .. }
+            | BackendError::BackendNotReady { .. }
             | BackendError::RateLimited { .. }
             | BackendError::ChangeCursorInvalid,
         ) => StatusCode::SERVICE_UNAVAILABLE.into_response(),

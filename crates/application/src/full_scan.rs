@@ -231,7 +231,7 @@ impl FullScanService {
             let spec = if root.needs_discovery() {
                 Some(WorkJobSpec::new(
                     WorkTaskKind::DiscoverTitles,
-                    WorkScope::LibraryRootBinding(root.binding_id()),
+                    WorkScope::StorageRoot(root.root_id()),
                     root.reconciled_revision(),
                     claimed.job().priority(),
                 )?)
@@ -241,7 +241,7 @@ impl FullScanService {
             if let Some(spec) = spec {
                 let natural_key = format!(
                     "DiscoverTitles:{}:{}",
-                    root.binding_id(),
+                    root.root_id(),
                     root.reconciled_revision()
                 );
                 scheduled += self

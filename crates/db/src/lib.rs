@@ -18,6 +18,8 @@ mod device;
 mod direct_metadata;
 mod discover;
 mod display_preferences;
+mod filesystem_index;
+mod filesystem_path;
 mod full_scan;
 mod hybrid_candidate;
 mod import;
@@ -110,6 +112,8 @@ pub use discover::{
     DiscoverTitlesError, DiscoverTitlesRepository, DiscoverTitlesSnapshot, DiscoveredTitle,
 };
 pub use display_preferences::{DisplayPreferencesRepository, DisplayPreferencesRepositoryError};
+pub use filesystem_index::{FilesystemIndexRepository, FilesystemIndexState};
+pub use filesystem_path::{FilesystemObjectPath, FilesystemPathRepository};
 pub use full_scan::{FullScanPolicy, FullScanRepository, FullScanRepositoryError, FullScanRoot};
 pub use hybrid_candidate::{
     HybridCandidateError, HybridCandidateMutation, HybridCandidatePage, HybridCandidateRecord,

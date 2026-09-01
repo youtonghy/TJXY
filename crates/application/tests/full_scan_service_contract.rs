@@ -922,10 +922,7 @@ async fn manual_root_full_scan_uses_fixed_full_policy_and_is_not_a_scheduled_sca
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        discovery.job().scope(),
-        WorkScope::LibraryRootBinding(binding_id)
-    );
+    assert_eq!(discovery.job().scope(), WorkScope::StorageRoot(root));
     let discovery_repository = DiscoverTitlesRepository::new(&database);
     let snapshot = discovery_repository.snapshot(&discovery).await.unwrap();
     assert_eq!(snapshot.title_count(), 0);
@@ -950,7 +947,7 @@ async fn manual_root_full_scan_uses_fixed_full_policy_and_is_not_a_scheduled_sca
         .unwrap()
         .try_get::<i64>("", "discovered_sync_revision")
         .unwrap();
-    assert_eq!(sibling_watermark, 0);
+    assert_eq!(sibling_watermark, 2);
     jobs.retry(&resumed, Duration::zero(), "waiting for discovery")
         .await
         .unwrap();

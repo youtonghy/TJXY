@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 
 use chrono::Duration;
-use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
@@ -639,7 +639,12 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let assets =
         Arc::new(AssetReadService::new(database.clone(), options.assets_dir.clone()).await?);
     let (filesystem_backends, unavailable_filesystem_accounts, relinked_filesystem_roots) =
-        prepare_filesystem_backends(filesystem_backends, options.filesystem_realtime_enabled).await;
+        prepare_filesystem_backends(
+            &database,
+            filesystem_backends,
+            options.filesystem_realtime_enabled,
+        )
+        .await;
     if !unavailable_filesystem_accounts.is_empty() {
         tracing::error!(
             "{} filesystem storage account(s) remain offline until their roots are restored and TJXY is restarted",
@@ -691,6 +696,20 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     worker::spawn_storage_change_reconciler(database.clone());
     worker::spawn_queue_maintenance_worker(database.clone());
     worker::spawn_auth_session_retention_worker(database.clone());
+    match tjxy_db::WorkJobRepository::new(&database)
+        .retire_stale_discoveries()
+        .await
+    {
+        Ok(retired) if retired > 0 => tracing::warn!(
+            retired,
+            "Retired stale title-discovery jobs before starting workers"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "Could not retire stale title-discovery jobs before starting workers"
+        ),
+    }
     if let Some(retention) = options.work_history_retention {
         worker::spawn_work_retention_worker(database.clone(), retention);
     }
@@ -998,6 +1017,7 @@ async fn load_google_backends(
 }
 
 async fn prepare_filesystem_backends(
+    database: &DatabaseConnection,
     configured: Vec<FilesystemBackendConfiguration>,
     realtime_enabled: bool,
 ) -> (
@@ -1023,11 +1043,34 @@ async fn prepare_filesystem_backends(
         };
         match backend {
             Ok(backend) => {
-                if backend.root_identity_changed() {
+                let rebuild_required = if configuration.storage_root_id.is_some() {
+                    match tjxy_db::FilesystemIndexRepository::new(database)
+                        .prepare_mount(
+                            account_id,
+                            backend.physical_root_identity(),
+                            backend.root_identity_changed(),
+                        )
+                        .await
+                    {
+                        Ok(rebuild_required) => rebuild_required,
+                        Err(error) => {
+                            unavailable.push(account_id);
+                            tracing::error!(
+                                storage_account_id = %account_id,
+                                error = %error,
+                                "Filesystem path index state could not be prepared"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    false
+                };
+                if rebuild_required {
                     tracing::warn!(
                         account_id = %account_id,
-                        root = %configuration.root.display(),
-                        "Filesystem storage root identity changed; automatically relinking the configured path"
+                        physical_root_identity = backend.physical_root_identity(),
+                        "Filesystem storage root identity changed; path index is rebuilding"
                     );
                     if let Some(root_id) = configuration.storage_root_id {
                         relinked.push(root_id);
@@ -1340,10 +1383,12 @@ mod tests {
 
     #[tokio::test]
     async fn filesystem_backends_keep_valid_roots_and_report_unavailable_accounts() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
         let valid = TempDir::new().unwrap();
         let missing = PathBuf::from(format!("/definitely/missing/tjxy-{}", Uuid::new_v4()));
 
         let result = prepare_filesystem_backends(
+            &database,
             vec![
                 FilesystemBackendConfiguration {
                     account_id: Uuid::new_v4(),
@@ -1377,8 +1422,10 @@ mod tests {
         let persisted_identity = format!("{persisted_device:x}-{:x}", metadata.ino());
         let provider_object_id = format!("{persisted_identity}/{persisted_identity}");
         let account_id = Uuid::new_v4();
+        let database = Database::connect("sqlite::memory:").await.unwrap();
 
         let result = prepare_filesystem_backends(
+            &database,
             vec![FilesystemBackendConfiguration {
                 account_id,
                 storage_root_id: None,
@@ -1409,8 +1456,51 @@ mod tests {
         let provider_object_id = format!("{persisted_identity}/{persisted_identity}");
         let account_id = Uuid::new_v4();
         let storage_root_id = StorageRootId::new();
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        tjxy_db::Migrator::up(&database, None).await.unwrap();
+        let backend = database.get_database_backend();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("storage_accounts"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("provider"),
+                            Alias::new("display_name"),
+                            Alias::new("account_identity"),
+                            Alias::new("credential_ref"),
+                            Alias::new("status"),
+                        ])
+                        .values_panic([
+                            account_id.into(),
+                            "filesystem".into(),
+                            "Filesystem".into(),
+                            Uuid::new_v4().to_string().into(),
+                            "filesystem-test".into(),
+                            "Active".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("filesystem_storage_configs"))
+                        .columns([Alias::new("storage_account_id"), Alias::new("root_path")])
+                        .values_panic([
+                            account_id.into(),
+                            root.path().to_string_lossy().into_owned().into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
 
         let result = prepare_filesystem_backends(
+            &database,
             vec![FilesystemBackendConfiguration {
                 account_id,
                 storage_root_id: Some(storage_root_id),

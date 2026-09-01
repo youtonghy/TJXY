@@ -24,7 +24,7 @@ use tjxy_db::{
     MetadataPublicationError, MetadataWorkError, QueueMaintenanceRepository, QueueMaintenanceRun,
     SeriesExpandRepositoryError, SourceIndexRepositoryError, StorageSyncRepositoryError,
     WorkJobRepository, WorkJobRepositoryError, WorkRetentionRepository, WorkRetentionRun,
-    WorkTaskKind,
+    WorkScope, WorkTaskKind,
 };
 use tjxy_import::{EmbyApiCredentials, EmbyApiImporter, EmbyImportError};
 use tjxy_storage::{BackendError, StorageBackend};
@@ -157,6 +157,10 @@ async fn run_filesystem_event_worker(
         }
     };
     loop {
+        if !filesystem_events_allowed(&database, account_id).await {
+            tokio::time::sleep(StdDuration::from_secs(1)).await;
+            continue;
+        }
         match monitor.next_batch().await {
             Ok(batch) => match backend.inventory_scopes_for(&batch).await {
                 Ok(scopes) => {
@@ -212,6 +216,24 @@ async fn run_filesystem_event_worker(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn filesystem_events_allowed(database: &DatabaseConnection, account_id: Uuid) -> bool {
+    match tjxy_db::FilesystemIndexRepository::new(database)
+        .state(account_id)
+        .await
+    {
+        Ok(tjxy_db::FilesystemIndexState::Ready) => true,
+        Ok(_) => false,
+        Err(error) => {
+            tracing::error!(
+                storage_account_id = %account_id,
+                error = %error,
+                "Filesystem path index state could not be read for event processing"
+            );
+            false
         }
     }
 }
@@ -517,7 +539,12 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                             tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "title discovery failed terminally");
                             jobs.fail_terminal(&claimed, &message).await
                         } else {
-                            jobs.retry(&claimed, Duration::seconds(5), &message).await
+                            jobs.retry(
+                                &claimed,
+                                discover_retry_delay(claimed.attempt_count()),
+                                &message,
+                            )
+                            .await
                         };
                         if let Err(update_error) = result
                             && !matches!(update_error, WorkJobRepositoryError::LostLease)
@@ -550,8 +577,14 @@ fn discover_error_is_terminal(error: &DiscoverTitlesServiceError) -> bool {
                 | tjxy_db::DiscoverTitlesError::MissingLibraryScope
                 | tjxy_db::DiscoverTitlesError::InvalidLibraryScope
                 | tjxy_db::DiscoverTitlesError::StaleLibraryPolicy
+                | tjxy_db::DiscoverTitlesError::StaleRoot
+                | tjxy_db::DiscoverTitlesError::AlreadyCurrent
         )
     )
+}
+
+fn discover_retry_delay(attempt_count: i32) -> Duration {
+    storage_backoff(attempt_count)
 }
 
 pub(crate) fn spawn_storage_worker<Backend>(
@@ -709,16 +742,22 @@ async fn handle_full_scan_outcome(
         tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "full scan failed terminally");
         jobs.fail_terminal(claimed, &message).await
     } else {
-        let delay = if matches!(error, FullScanError::ChildrenPending { .. }) {
-            Duration::milliseconds(200)
-        } else {
-            Duration::seconds(5)
-        };
+        let delay = full_scan_retry_delay(&error, claimed.attempt_count());
         jobs.retry(claimed, delay, &message).await
     };
     if let Err(update_error) = result {
         tracing::error!("Full scan worker could not persist failure outcome: {update_error}");
     }
+}
+
+fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration {
+    if matches!(error, FullScanError::ChildrenPending { .. }) {
+        let exponent = u32::try_from(attempt_count.saturating_sub(1))
+            .unwrap_or_default()
+            .min(4);
+        return Duration::seconds((2_i64 * (1_i64 << exponent)).min(5));
+    }
+    storage_backoff(attempt_count)
 }
 
 fn full_scan_error_is_terminal(error: &FullScanError) -> bool {
@@ -984,10 +1023,20 @@ async fn run_storage_worker<Backend>(
             Ok(Some(claimed)) => {
                 let execution = execute_logged(&claimed, async {
                     if claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot {
+                        let started = Instant::now();
                         validation
                             .run_claimed(&claimed, account_id)
                             .await
-                            .map(|_| ())
+                            .map(|report| {
+                                tracing::info!(
+                                    storage_account_id = %account_id,
+                                    directories_scanned = report.directory_count(),
+                                    objects_scanned = report.object_count(),
+                                    sync_revision = report.sync_revision(),
+                                    elapsed_ms = started.elapsed().as_millis(),
+                                    "Filesystem root validation completed"
+                                );
+                            })
                             .map_err(StorageWorkerError::Validation)
                     } else {
                         scoped
@@ -1010,7 +1059,7 @@ async fn run_storage_worker<Backend>(
                         }
                     }
                 };
-                handle_storage_outcome(&scoped, &jobs, &claimed, outcome).await;
+                handle_storage_outcome(&database, &scoped, &jobs, &claimed, outcome).await;
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
@@ -1022,6 +1071,7 @@ async fn run_storage_worker<Backend>(
 }
 
 async fn handle_storage_outcome<Backend>(
+    database: &DatabaseConnection,
     service: &ScopedInventoryService<Backend>,
     jobs: &WorkJobRepository<'_>,
     claimed: &tjxy_db::ClaimedWorkJob,
@@ -1062,7 +1112,8 @@ async fn handle_storage_outcome<Backend>(
         }
         StorageWorkerError::Validation(error) => {
             let message = truncate_error(&error.to_string());
-            let result = if validation_error_is_terminal(&error) {
+            let terminal = validation_error_is_terminal(&error);
+            let result = if terminal {
                 tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage validation failed terminally");
                 jobs.fail_terminal(claimed, &message).await
             } else {
@@ -1076,6 +1127,17 @@ async fn handle_storage_outcome<Backend>(
             if let Err(update_error) = result {
                 tracing::error!(
                     "Storage validation worker could not persist outcome: {update_error}"
+                );
+            } else if terminal
+                && let WorkScope::StorageRoot(root_id) = claimed.job().scope()
+                && let Err(state_error) = tjxy_db::FilesystemIndexRepository::new(database)
+                    .mark_failed(root_id, &message)
+                    .await
+            {
+                tracing::error!(
+                    storage_root_id = %root_id,
+                    error = %state_error,
+                    "Filesystem path index failure state could not be persisted"
                 );
             }
         }
@@ -1097,7 +1159,7 @@ fn storage_retry_delay(error: &ScopedInventoryError, attempt_count: i32) -> Dura
         error,
         ScopedInventoryError::Persistence(StorageSyncRepositoryError::RevisionConflict)
     ) {
-        return Duration::milliseconds(200);
+        return revision_conflict_retry_delay(attempt_count);
     }
     let backoff = storage_backoff(attempt_count);
     let retry_after = match error {
@@ -1114,7 +1176,7 @@ fn validation_retry_delay(error: &FullValidateStorageError, attempt_count: i32) 
         error,
         FullValidateStorageError::Persistence(StorageSyncRepositoryError::RevisionConflict)
     ) {
-        return Duration::milliseconds(200);
+        return revision_conflict_retry_delay(attempt_count);
     }
     let backoff = storage_backoff(attempt_count);
     let retry_after = match error {
@@ -1124,6 +1186,16 @@ fn validation_retry_delay(error: &FullValidateStorageError, attempt_count: i32) 
         _ => return backoff,
     };
     backoff.max(retry_after)
+}
+
+fn revision_conflict_retry_delay(attempt_count: i32) -> Duration {
+    if attempt_count <= 3 {
+        return Duration::milliseconds(200);
+    }
+    let exponent = u32::try_from(attempt_count.saturating_sub(4))
+        .unwrap_or_default()
+        .min(8);
+    Duration::seconds((1_i64 << exponent).min(300))
 }
 
 fn storage_backoff(attempt_count: i32) -> Duration {
@@ -1370,7 +1442,8 @@ mod tests {
     use tjxy_storage::BackendError;
 
     use super::{
-        full_scan_error_is_terminal, series_expand_error_is_terminal, storage_retry_delay,
+        discover_error_is_terminal, discover_retry_delay, full_scan_error_is_terminal,
+        full_scan_retry_delay, series_expand_error_is_terminal, storage_retry_delay,
         validation_error_is_terminal, validation_retry_delay,
     };
 
@@ -1386,6 +1459,31 @@ mod tests {
         assert!(!full_scan_error_is_terminal(
             &tjxy_application::FullScanError::ChildrenPending { scheduled: 1 }
         ));
+    }
+
+    #[test]
+    fn stale_discovery_is_terminal() {
+        assert!(discover_error_is_terminal(
+            &tjxy_application::DiscoverTitlesServiceError::Repository(
+                tjxy_db::DiscoverTitlesError::StaleRoot,
+            )
+        ));
+    }
+
+    #[test]
+    fn discovery_retries_use_capped_exponential_backoff() {
+        assert_eq!(discover_retry_delay(1).num_seconds(), 5);
+        assert_eq!(discover_retry_delay(4).num_seconds(), 40);
+        assert_eq!(discover_retry_delay(20).num_seconds(), 300);
+    }
+
+    #[test]
+    fn pending_full_scan_children_back_off_to_five_seconds() {
+        let error = tjxy_application::FullScanError::ChildrenPending { scheduled: 1 };
+
+        assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 5);
+        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 5);
     }
 
     #[test]
@@ -1418,12 +1516,14 @@ mod tests {
     }
 
     #[test]
-    fn local_root_revision_conflicts_retry_quickly() {
+    fn local_root_revision_conflicts_only_retry_quickly_at_first() {
         let error = ScopedInventoryError::Persistence(
             tjxy_db::StorageSyncRepositoryError::RevisionConflict,
         );
 
-        assert_eq!(storage_retry_delay(&error, 5).num_milliseconds(), 200);
+        assert_eq!(storage_retry_delay(&error, 3).num_milliseconds(), 200);
+        assert_eq!(storage_retry_delay(&error, 4).num_seconds(), 1);
+        assert_eq!(storage_retry_delay(&error, 20).num_seconds(), 256);
     }
 
     #[test]

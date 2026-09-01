@@ -187,6 +187,17 @@ files and the managed PostgreSQL volume. To update a published-image deployment,
 back up the database and host directories, then rerun the same command with the
 new version tag. The launcher pulls the image before recreating TJXY.
 
+Filesystem storage upgrades persist a root-scoped path-index state. When the mounted device or
+root inode changes, TJXY keeps the service healthy but returns `503 Service Unavailable` with
+`Retry-After: 5` for media under that root until one recursive validation and title publication
+complete. Do not restart the container repeatedly during this rebuild; progress logs include the
+root, scanned directory/object counts, revision, and elapsed time. Obsolete title-discovery work is
+retired before workers start, and request handling never performs a recursive filesystem search.
+
+This release adds a database migration. An older binary rejects a database containing an unknown
+migration, so rollback requires either a schema-compatible build or restoration of the pre-upgrade
+database backup together with the older image.
+
 Do not run `docker compose down --volumes` unless the managed PostgreSQL database
 is intentionally being deleted.
 

@@ -71,6 +71,7 @@ mod m20260825_000070_restore_media_browser_roots;
 mod m20260825_000071_bounded_internal_queues;
 mod m20260826_000072_internal_queue_maintenance;
 mod m20260827_000073_active_work_claim_index;
+mod m20260901_000074_filesystem_path_index_state;
 
 use std::collections::HashSet;
 
@@ -225,6 +226,17 @@ async fn validate_current_schema(
         ("ai_provider_settings", "daily_total_token_limit"),
         ("ai_provider_settings", "daily_user_token_limit"),
         ("system_settings", "passkey_enabled"),
+        ("filesystem_storage_configs", "path_index_state"),
+        (
+            "filesystem_storage_configs",
+            "verified_physical_root_identity",
+        ),
+        (
+            "filesystem_storage_configs",
+            "pending_physical_root_identity",
+        ),
+        ("filesystem_storage_configs", "path_index_revision"),
+        ("filesystem_storage_configs", "path_index_error"),
     ] {
         if !missing_tables.contains(table) && !manager.has_column(table, column).await? {
             missing.push(format!("column {table}.{column}"));
@@ -330,6 +342,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000071_bounded_internal_queues::Migration),
             Box::new(m20260826_000072_internal_queue_maintenance::Migration),
             Box::new(m20260827_000073_active_work_claim_index::Migration),
+            Box::new(m20260901_000074_filesystem_path_index_state::Migration),
         ]
     }
 }

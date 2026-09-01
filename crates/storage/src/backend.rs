@@ -24,6 +24,8 @@ pub enum BackendError {
     RangeNotSatisfiable { size: u64 },
     #[error("storage backend is temporarily unavailable: {message}")]
     TemporarilyUnavailable { message: String },
+    #[error("storage backend is not ready: {message}")]
+    BackendNotReady { message: String },
     #[error("storage backend rate limit was exceeded")]
     RateLimited { retry_after: Option<Duration> },
     #[error("storage change cursor is no longer valid")]

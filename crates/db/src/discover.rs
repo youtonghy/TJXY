@@ -34,7 +34,9 @@ pub async fn enqueue_after_root_sync(
 ) -> Result<(), WorkJobRepositoryError> {
     let libraries =
         eligible_library_scopes(transaction, root, revision, true, Some(parent)).await?;
-    if !libraries.is_empty() {
+    if libraries.is_empty() {
+        crate::filesystem_index::publish_ready_after_root_sync(transaction, root, revision).await?;
+    } else {
         let submission = crate::work_job::enqueue_in_transaction(
             transaction,
             &crate::WorkJobSpec::new(
@@ -344,6 +346,14 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 }
             }
             advance_discovery_watermarks(&transaction, claimed, snapshot).await?;
+            if matches!(snapshot.scope, WorkScope::StorageRoot(_)) {
+                crate::filesystem_index::publish_ready_after_root_sync(
+                    &transaction,
+                    snapshot.root_id,
+                    claimed.job().expected_revision(),
+                )
+                .await?;
+            }
             let generation = crate::catalog_publication::advance_generation(&transaction).await?;
             WorkJobRepository::new(self.database)
                 .complete_in_transaction(
@@ -668,6 +678,16 @@ async fn stage_discovery_libraries(
         transaction.execute(backend.build(&insert)).await?;
     }
     Ok(())
+}
+
+pub(crate) async fn stage_discovery_root(
+    transaction: &DatabaseTransaction,
+    job_id: tjxy_common::WorkJobId,
+    root_id: StorageRootId,
+    revision: i64,
+) -> Result<(), WorkJobRepositoryError> {
+    let libraries = eligible_library_scopes(transaction, root_id, revision, false, None).await?;
+    stage_discovery_libraries(transaction, job_id, &libraries).await
 }
 
 pub(crate) async fn stage_discovery_binding(

@@ -125,7 +125,7 @@ async fn native_event_monitor_observes_a_repeated_heartbeat() {
 }
 
 #[tokio::test]
-async fn stable_identity_recovers_its_path_after_backend_restart() {
+async fn restart_requires_a_persisted_path_instead_of_scanning_the_root() {
     let root = tempdir().unwrap();
     tokio::fs::create_dir(root.path().join("nested"))
         .await
@@ -141,8 +141,18 @@ async fn stable_identity_recovers_its_path_after_backend_restart() {
     drop(first);
 
     let restarted = FilesystemBackend::new(root.path()).await.unwrap();
+    assert!(matches!(
+        restarted
+            .open_range(&stable_id, ByteRange::new(0, 12).unwrap())
+            .await,
+        Err(tjxy_storage::BackendError::BackendNotReady { .. })
+    ));
     let stream = restarted
-        .open_range(&stable_id, ByteRange::new(0, 12).unwrap())
+        .open_range_at(
+            &stable_id,
+            std::path::Path::new("nested/movie.mkv"),
+            ByteRange::new(0, 12).unwrap(),
+        )
         .await
         .unwrap();
     let bytes = stream.try_collect::<Vec<_>>().await.unwrap().concat();
@@ -184,7 +194,11 @@ async fn persisted_root_namespace_survives_device_number_drift() {
         .await
         .unwrap();
     let bytes = restarted
-        .open_range(&stable_id, ByteRange::new(0, 19).unwrap())
+        .open_range_at(
+            &stable_id,
+            std::path::Path::new("movie.mkv"),
+            ByteRange::new(0, 19).unwrap(),
+        )
         .await
         .unwrap()
         .try_collect::<Vec<_>>()
@@ -192,6 +206,31 @@ async fn persisted_root_namespace_survives_device_number_drift() {
         .unwrap()
         .concat();
     assert_eq!(bytes, b"stable-device-alias");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn indexed_file_replacement_does_not_return_new_bytes_for_the_old_identity() {
+    let root = tempdir().unwrap();
+    let movie = root.path().join("movie.mkv");
+    let replacement = root.path().join("replacement.mkv");
+    fs::write(&movie, b"old-bytes").unwrap();
+    let backend = FilesystemBackend::new(root.path()).await.unwrap();
+    let page = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+    let stable_id = page.objects[0].id().clone();
+
+    fs::write(&replacement, b"new-bytes").unwrap();
+    fs::rename(replacement, movie).unwrap();
+
+    assert!(matches!(
+        backend
+            .open_range(&stable_id, ByteRange::new(0, 9).unwrap())
+            .await,
+        Err(tjxy_storage::BackendError::TemporarilyUnavailable { .. })
+    ));
 }
 
 #[cfg(unix)]

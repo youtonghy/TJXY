@@ -267,10 +267,7 @@ async fn serve(
         return response(StatusCode::UNAUTHORIZED, "authentication required");
     };
     let Some(media) = state.media.as_ref() else {
-        return response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "media backend is unavailable",
-        );
+        return unavailable("media backend is unavailable");
     };
     let resolved = match media
         .resolve(user_id, CatalogItemId::from_uuid(item_id), presentation)
@@ -279,12 +276,9 @@ async fn serve(
         Ok(Some(resolved)) => resolved,
         Ok(None) => return response(StatusCode::NOT_FOUND, "media source was not found"),
         Err(MediaReadError::BackendUnavailable) => {
-            return response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "media backend is unavailable",
-            );
+            return unavailable("media backend is unavailable");
         }
-        Err(_) => return response(StatusCode::SERVICE_UNAVAILABLE, "media is unavailable"),
+        Err(_) => return unavailable("media is unavailable"),
     };
     let size = resolved.size();
     let use_range = headers
@@ -344,7 +338,7 @@ async fn serve(
             )
         }
         Err(MediaReadError::RangeNotSatisfiable { size }) => unsatisfied(size),
-        Err(_) => response(StatusCode::SERVICE_UNAVAILABLE, "media is unavailable"),
+        Err(_) => unavailable("media is unavailable"),
     }
 }
 
@@ -472,4 +466,25 @@ fn unsatisfied(size: u64) -> Response {
 
 fn response(status: StatusCode, message: &'static str) -> Response {
     (status, message).into_response()
+}
+
+fn unavailable(message: &'static str) -> Response {
+    let mut response = response(StatusCode::SERVICE_UNAVAILABLE, message);
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{StatusCode, header};
+
+    #[test]
+    fn unavailable_media_include_a_retry_hint() {
+        let response = super::unavailable("unavailable");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+    }
 }

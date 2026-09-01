@@ -200,7 +200,16 @@ fn direct_etag(object: &DirectMetadataObjectRecord) -> String {
 
 #[allow(clippy::needless_pass_by_value)] // Error conversion consumes no large owned payload and keeps map_err ergonomic.
 fn map_storage_read(error: StorageReadError) -> DirectMetadataReadError {
-    DirectMetadataReadError::Storage(error.to_string())
+    match error {
+        StorageReadError::Backend(
+            BackendError::TemporarilyUnavailable { .. }
+            | BackendError::BackendNotReady { .. }
+            | BackendError::RateLimited { .. },
+        )
+        | StorageReadError::Availability(_)
+        | StorageReadError::Projection(_) => DirectMetadataReadError::TemporarilyUnavailable,
+        StorageReadError::Backend(error) => DirectMetadataReadError::Storage(error.to_string()),
+    }
 }
 
 #[derive(Debug, Error)]
@@ -209,6 +218,8 @@ pub enum DirectMetadataReadError {
     Query(#[from] sea_orm::DbErr),
     #[error("direct metadata backend is unavailable")]
     BackendUnavailable,
+    #[error("direct metadata storage is temporarily unavailable")]
+    TemporarilyUnavailable,
     #[error("direct metadata read failed: {0}")]
     Storage(String),
     #[error("direct NFO is invalid: {0}")]
@@ -221,4 +232,24 @@ pub enum DirectMetadataReadError {
     ObjectChanged,
     #[error("direct metadata backend failed: {0}")]
     Backend(#[from] BackendError),
+}
+
+#[cfg(test)]
+mod tests {
+    use tjxy_storage::BackendError;
+
+    use super::{DirectMetadataReadError, map_storage_read};
+    use crate::storage_read::StorageReadError;
+
+    #[test]
+    fn backend_not_ready_remains_a_typed_service_unavailable_error() {
+        let mapped = map_storage_read(StorageReadError::Backend(BackendError::BackendNotReady {
+            message: "rebuilding".to_owned(),
+        }));
+
+        assert!(matches!(
+            mapped,
+            DirectMetadataReadError::TemporarilyUnavailable
+        ));
+    }
 }

@@ -160,6 +160,7 @@ const fn failure_reason(error: &BackendError) -> Option<TemporaryAvailabilityRea
         BackendError::RateLimited { .. } => Some(TemporaryAvailabilityReason::BackendRateLimited),
         BackendError::UnsupportedCapability { .. }
         | BackendError::InvalidValue { .. }
+        | BackendError::BackendNotReady { .. }
         | BackendError::RangeNotSatisfiable { .. }
         | BackendError::ChangeCursorInvalid => None,
     }
@@ -173,4 +174,21 @@ pub(crate) enum StorageReadError {
     Availability(#[from] StorageSyncRepositoryError),
     #[error("storage availability projection failed: {0}")]
     Projection(#[from] StorageChangeProjectorError),
+}
+
+#[cfg(test)]
+mod tests {
+    use tjxy_storage::BackendError;
+
+    use super::failure_reason;
+
+    #[test]
+    fn backend_readiness_gate_does_not_mutate_object_availability() {
+        assert!(
+            failure_reason(&BackendError::BackendNotReady {
+                message: "rebuilding".to_owned(),
+            })
+            .is_none()
+        );
+    }
 }

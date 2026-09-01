@@ -11,7 +11,7 @@ use tjxy_storage_filesystem::FilesystemBackend;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::worker;
+use crate::{filesystem_read::IndexedFilesystemBackend, worker};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RuntimeStorageKey {
@@ -60,7 +60,11 @@ impl RuntimeStorageManager {
         if workers.contains_key(&key) {
             return Ok(false);
         }
-        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        let dyn_backend: Arc<dyn StorageBackend> = Arc::new(IndexedFilesystemBackend::new(
+            self.database.clone(),
+            account_id,
+            Arc::clone(&backend),
+        ));
         self.backends.register(account_id, "local", dyn_backend)?;
         let mut handles = vec![worker::spawn_storage_worker(
             self.database.clone(),

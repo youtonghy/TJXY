@@ -159,6 +159,15 @@ TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
 volume。升级发布镜像部署前，应先备份数据库和宿主机目录，再把原命令中的镜像
 版本改为新版本并重新执行；脚本会先拉取镜像，然后重建 TJXY。
 
+文件系统存储升级后会持久化 root 级路径索引状态。挂载设备号或根 inode 变化时，TJXY
+仍保持服务健康，但受影响 root 下的媒体会返回带 `Retry-After: 5` 的
+`503 Service Unavailable`，直到一次递归验证和标题发布完成。重建期间不要反复重启容器；
+进度日志会记录 root、已扫描目录/对象数、revision 和耗时。worker 启动前会终止旧 revision
+的标题发现任务，请求处理不会再递归扫描文件系统。
+
+本版本包含数据库 migration。旧二进制会拒绝包含未知 migration 的数据库，因此回滚必须
+使用识别新 schema 的兼容构建，或同时恢复升级前数据库备份与旧镜像。
+
 除非确定要永久删除自动管理的 PostgreSQL 数据，否则不要运行
 `docker compose down --volumes`。
 
