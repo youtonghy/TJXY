@@ -6,7 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 use tjxy_application::{AssetReadError, DirectMetadataReadError, OpenedAsset, OpenedDirectImage};
-use tjxy_common::{CatalogItemId, ImageType};
+use tjxy_common::{CatalogItemId, ImageType, LibraryId};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
@@ -57,28 +57,39 @@ async fn original(
     let Ok(image_type) = image_type.parse::<ImageType>() else {
         return error(StatusCode::BAD_REQUEST, "unsupported image type");
     };
-    if !valid_query(raw_query) {
+    let Some(query) = parse_query(raw_query) else {
         return error(StatusCode::BAD_REQUEST, "unsupported image query");
-    }
+    };
     let Some(assets) = state.assets.as_ref() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "asset service is unavailable",
         );
     };
-    let asset = match assets
-        .original(CatalogItemId::from_uuid(item_id), image_type, 0)
-        .await
-    {
+    let item_id = CatalogItemId::from_uuid(item_id);
+    let asset_result = match query.library_id {
+        Some(library_id) => {
+            assets
+                .original_in_library(item_id, image_type, 0, library_id)
+                .await
+        }
+        None => assets.original(item_id, image_type, 0).await,
+    };
+    let asset = match asset_result {
         Ok(Some(asset)) => asset,
         Ok(None) => {
             let Some(direct) = state.direct_metadata.as_ref() else {
                 return error(StatusCode::NOT_FOUND, "image was not found");
             };
-            return match direct
-                .image(CatalogItemId::from_uuid(item_id), image_type, 0)
-                .await
-            {
+            let direct_result = match query.library_id {
+                Some(library_id) => {
+                    direct
+                        .image_in_library(item_id, image_type, 0, library_id)
+                        .await
+                }
+                None => direct.image(item_id, image_type, 0).await,
+            };
+            return match direct_result {
                 Ok(Some(image)) => direct_image_response(image, headers, head_only),
                 Ok(None) => error(StatusCode::NOT_FOUND, "image was not found"),
                 Err(
@@ -133,9 +144,14 @@ fn direct_image_response(
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "invalid image metadata"))
 }
 
-fn valid_query(raw_query: Option<&str>) -> bool {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ImageQuery {
+    library_id: Option<LibraryId>,
+}
+
+fn parse_query(raw_query: Option<&str>) -> Option<ImageQuery> {
     let Ok(parameters) = auth::request_query(raw_query) else {
-        return false;
+        return None;
     };
     let mut normalized = std::collections::HashMap::with_capacity(parameters.len());
     for (mut name, value) in parameters {
@@ -145,13 +161,17 @@ fn valid_query(raw_query: Option<&str>) -> bool {
             first.make_ascii_lowercase();
         }
         if normalized.insert(name, value).is_some() {
-            return false;
+            return None;
         }
     }
     let mut parameters = normalized;
     parameters.remove("ApiKey");
     parameters.remove("api_key");
     parameters.remove("tag");
+    let library_id = match parameters.remove("libraryId") {
+        Some(value) => Some(LibraryId::from_uuid(value.parse::<Uuid>().ok()?)),
+        None => None,
+    };
     for name in [
         "maxWidth",
         "maxHeight",
@@ -167,21 +187,21 @@ fn valid_query(raw_query: Option<&str>) -> bool {
             .remove(name)
             .is_some_and(|value| value.parse::<u32>().map_or(true, |value| value > 1_000_000))
         {
-            return false;
+            return None;
         }
     }
     if parameters
         .remove("quality")
         .is_some_and(|value| value.parse::<u8>().map_or(true, |value| value > 100))
     {
-        return false;
+        return None;
     }
     if parameters.remove("percentPlayed").is_some_and(|value| {
         value.parse::<f64>().map_or(true, |value| {
             !value.is_finite() || !(0.0..=100.0).contains(&value)
         })
     }) {
-        return false;
+        return None;
     }
     if parameters.remove("format").is_some_and(|value| {
         !matches!(
@@ -189,16 +209,16 @@ fn valid_query(raw_query: Option<&str>) -> bool {
             "original" | "gif" | "jpg" | "jpeg" | "png" | "webp"
         )
     }) {
-        return false;
+        return None;
     }
     for name in ["backgroundColor", "foregroundLayer"] {
         if parameters.remove(name).is_some_and(|value| {
             value.is_empty() || value.len() > 128 || value.chars().any(char::is_control)
         }) {
-            return false;
+            return None;
         }
     }
-    parameters.is_empty()
+    parameters.is_empty().then_some(ImageQuery { library_id })
 }
 
 fn asset_response(asset: OpenedAsset, request_headers: &HeaderMap, head_only: bool) -> Response {

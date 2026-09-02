@@ -5,7 +5,7 @@ import { useTranslate } from '../../settings/i18n';
 import type { MediaItem } from '../api/catalogApi';
 import { MediaImage } from './MediaImage';
 
-export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
+export function MediaTile({ item, to, libraryId }: { item: MediaItem; to?: string; libraryId?: string }) {
   const tr = useTranslate();
   const tag = item.ImageTags?.Primary ?? item.PrimaryImageTag;
   const episodeCode = item.Type === 'Episode' && item.IndexNumber !== undefined ? `E${String(item.IndexNumber)}` : undefined;
@@ -13,9 +13,9 @@ export function MediaTile({ item, to }: { item: MediaItem; to?: string }) {
   const progress = watchedProgress(item);
   const artworkRatio = item.Type === 'Audio' ? 'aspect-square' : 'aspect-[2/3]';
   return (
-    <Link className="group block min-w-0" to={to ?? `/app/items/${item.Id}`}>
+    <Link className="group block min-w-0" to={to ?? `/app/items/${item.Id}${libraryId ? `?libraryId=${encodeURIComponent(libraryId)}` : ''}`}>
       <div className={`relative ${artworkRatio} overflow-hidden rounded-xl bg-default shadow-sm transition-transform group-hover:scale-[1.02]`}>
-        <MediaImage alt={tr(`Poster for ${item.Name}`, `${item.Name} 的海报`)} className="h-full w-full object-cover" itemId={item.Id} tag={tag} />
+        <MediaImage alt={tr(`Poster for ${item.Name}`, `${item.Name} 的海报`)} className="h-full w-full object-cover" itemId={item.Id} libraryId={libraryId} tag={tag} />
         <div className="absolute right-2 top-2 flex items-center gap-1.5">
           {item.UserData?.IsFavorite && (
             <span

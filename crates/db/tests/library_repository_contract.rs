@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use sea_orm::{
     ConnectionTrait,
-    sea_query::{Alias, Query},
+    sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
@@ -148,6 +148,64 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
             .all(|root| !root.location().contains("secret"))
     );
 
+    let item_id = Uuid::new_v4();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("metadata_revision"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item_id.into(),
+                        "Movie".into(),
+                        "Policy Fixture".into(),
+                        "policy fixture".into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "NotApplicable".into(),
+                        "Unknown".into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        7_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("catalog_item_id"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        library_id.as_uuid().into(),
+                        item_id.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
     let update = LibraryPolicyUpdate::new(
         "Full",
         "all_synced_objects",
@@ -163,6 +221,24 @@ async fn virtual_folders_aggregate_effective_policy_and_opaque_roots_in_stable_o
             .await
             .unwrap(),
         4
+    );
+    let revision: i64 = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("metadata_revision"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "metadata_revision")
+        .unwrap();
+    assert_eq!(
+        revision, 8,
+        "metadata policy changes must invalidate members"
     );
     let stale = LibraryRepository::new(&database)
         .update_policy(library_id, 3, &update)

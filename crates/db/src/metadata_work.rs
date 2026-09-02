@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr, TransactionTrait,
@@ -492,21 +495,22 @@ impl<'connection> MetadataWorkRepository<'connection> {
                 .await?;
                 asset_changed |= report.reference_changed();
             }
-            if direct_nfo || direct_images {
-                let library_modes =
-                    direct_library_modes(&transaction, item_id, scope.storage_root_id()).await?;
-                replace_direct_refs_filtered(
-                    &transaction,
-                    item_id,
+            let library_modes =
+                direct_library_modes(&transaction, item_id, scope.storage_root_id()).await?;
+            let direct_report = sync_direct_refs(
+                &transaction,
+                item_id,
+                snapshot,
+                desired_direct_refs(
                     &library_modes,
                     snapshot,
                     input_revision,
                     direct_nfo,
                     direct_images,
-                )
-                .await?;
-            }
-            let changed = metadata_changed || asset_changed || direct_nfo || direct_images;
+                )?,
+            )
+            .await?;
+            let changed = metadata_changed || asset_changed || direct_report.changed;
             WorkJobRepository::new(self.database).complete_in_transaction(
                 &transaction,
                 claimed,
@@ -523,12 +527,12 @@ impl<'connection> MetadataWorkRepository<'connection> {
                     warnings,
                 ),
             ).await?;
-            if (direct_nfo || direct_images) && !metadata_changed && !asset_changed {
+            if direct_report.changed && !metadata_changed && !asset_changed {
                 crate::advance_catalog_generation(&transaction).await?;
             }
             Ok(MetadataWorkCommitReport {
                 changed,
-                asset_changed,
+                asset_changed: asset_changed || direct_report.image_changed,
             })
         }
         .await;
@@ -580,14 +584,13 @@ impl<'connection> MetadataWorkRepository<'connection> {
             }
             revalidate_metadata_snapshot(&transaction, item_id, scope, input_revision, snapshot)
                 .await?;
-            let library_ids =
-                direct_library_ids(&transaction, item_id, scope.storage_root_id()).await?;
-            replace_direct_refs(
+            let library_modes =
+                direct_library_modes(&transaction, item_id, scope.storage_root_id()).await?;
+            let direct_report = sync_direct_refs(
                 &transaction,
                 item_id,
-                &library_ids,
                 snapshot,
-                input_revision,
+                desired_direct_refs(&library_modes, snapshot, input_revision, true, true)?,
             )
             .await?;
             advance_metadata_watermark(
@@ -603,19 +606,20 @@ impl<'connection> MetadataWorkRepository<'connection> {
                     claimed,
                     WorkJobResult::success(
                         json!({
-                            "changed": true,
+                            "changed": direct_report.changed,
                             "direct": true,
-                            "references": library_ids.len()
-                                * (usize::from(snapshot.sidecar.is_some()) + snapshot.images.len())
+                            "references": direct_report.reference_count
                         }),
                         Vec::new(),
                     ),
                 )
                 .await?;
-            crate::advance_catalog_generation(&transaction).await?;
+            if direct_report.changed {
+                crate::advance_catalog_generation(&transaction).await?;
+            }
             Ok(MetadataWorkCommitReport {
-                changed: true,
-                asset_changed: !snapshot.images.is_empty(),
+                changed: direct_report.changed,
+                asset_changed: direct_report.image_changed,
             })
         }
         .await;
@@ -630,51 +634,6 @@ impl<'connection> MetadataWorkRepository<'connection> {
             }
         }
     }
-}
-
-async fn direct_library_ids(
-    connection: &impl ConnectionTrait,
-    item_id: CatalogItemId,
-    root_id: StorageRootId,
-) -> Result<Vec<Uuid>, DbErr> {
-    let membership = Alias::new("direct_membership");
-    let library = Alias::new("direct_library");
-    let binding = Alias::new("direct_binding");
-    let query = Query::select()
-        .distinct()
-        .expr_as(
-            Expr::col((library.clone(), Alias::new("id"))),
-            Alias::new("library_id"),
-        )
-        .from_as(Alias::new("library_catalog_items"), membership.clone())
-        .join_as(
-            JoinType::InnerJoin,
-            Alias::new("libraries"),
-            library.clone(),
-            Expr::col((library.clone(), Alias::new("id")))
-                .equals((membership.clone(), Alias::new("library_id"))),
-        )
-        .join_as(
-            JoinType::InnerJoin,
-            Alias::new("library_storage_roots"),
-            binding.clone(),
-            Expr::col((binding.clone(), Alias::new("library_id")))
-                .equals((library.clone(), Alias::new("id"))),
-        )
-        .and_where(Expr::col((membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
-        .and_where(Expr::col((binding, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
-        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
-        .and_where(
-            Expr::col((library.clone(), Alias::new("metadata_source_mode"))).eq("local_only"),
-        )
-        .and_where(Expr::col((library, Alias::new("local_metadata_access_mode"))).eq("direct"))
-        .to_owned();
-    connection
-        .query_all(connection.get_database_backend().build(&query))
-        .await?
-        .into_iter()
-        .map(|row| row.try_get("", "library_id"))
-        .collect()
 }
 
 async fn direct_library_modes(
@@ -722,24 +681,34 @@ async fn direct_library_modes(
         .collect()
 }
 
-async fn replace_direct_refs_filtered(
-    transaction: &sea_orm::DatabaseTransaction,
-    item_id: CatalogItemId,
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DirectRefKey {
+    library_id: Uuid,
+    resource_kind: String,
+    priority: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectRefValue {
+    storage_object_id: StorageObjectRecordId,
+    input_revision: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DirectRefSyncReport {
+    changed: bool,
+    image_changed: bool,
+    reference_count: usize,
+}
+
+fn desired_direct_refs(
     library_modes: &[(Uuid, String)],
     snapshot: &MetadataWorkSnapshot,
     input_revision: i64,
     direct_nfo: bool,
     direct_images: bool,
-) -> Result<(), DbErr> {
-    let backend = transaction.get_database_backend();
-    let delete = Query::delete()
-        .from_table(Alias::new("direct_metadata_refs"))
-        .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()))
-        .and_where(
-            Expr::col(Alias::new("storage_root_id")).eq(snapshot.storage_root_id().as_uuid()),
-        )
-        .to_owned();
-    transaction.execute(backend.build(&delete)).await?;
+) -> Result<BTreeMap<DirectRefKey, DirectRefValue>, DbErr> {
+    let mut desired = BTreeMap::new();
     for (library_id, mode) in library_modes {
         let mode = mode
             .parse::<tjxy_domain::LocalMetadataAccessMode>()
@@ -770,48 +739,43 @@ async fn replace_direct_refs_filtered(
             }
         }
         for (file, kind, priority) in resources {
-            let insert = Query::insert()
-                .into_table(Alias::new("direct_metadata_refs"))
-                .columns([
-                    Alias::new("id"),
-                    Alias::new("library_id"),
-                    Alias::new("catalog_item_id"),
-                    Alias::new("storage_root_id"),
-                    Alias::new("storage_object_id"),
-                    Alias::new("resource_kind"),
-                    Alias::new("priority"),
-                    Alias::new("input_revision"),
-                ])
-                .values_panic([
-                    Uuid::new_v4().into(),
-                    (*library_id).into(),
-                    item_id.as_uuid().into(),
-                    snapshot.storage_root_id().as_uuid().into(),
-                    file.record_id().as_uuid().into(),
-                    kind.into(),
-                    priority.into(),
-                    input_revision.into(),
-                ])
-                .to_owned();
-            transaction.execute(backend.build(&insert)).await?;
+            desired.insert(
+                DirectRefKey {
+                    library_id: *library_id,
+                    resource_kind: kind.to_owned(),
+                    priority,
+                },
+                DirectRefValue {
+                    storage_object_id: file.record_id(),
+                    input_revision,
+                },
+            );
         }
     }
-    Ok(())
+    Ok(desired)
 }
 
-async fn replace_direct_refs(
+#[allow(clippy::too_many_lines)] // The diff is applied as one audited delete/update/insert transaction.
+async fn sync_direct_refs(
     transaction: &sea_orm::DatabaseTransaction,
     item_id: CatalogItemId,
-    library_ids: &[Uuid],
     snapshot: &MetadataWorkSnapshot,
-    input_revision: i64,
-) -> Result<(), DbErr> {
+    mut desired: BTreeMap<DirectRefKey, DirectRefValue>,
+) -> Result<DirectRefSyncReport, DbErr> {
     let backend = transaction.get_database_backend();
-    transaction
-        .execute(
+    let rows = transaction
+        .query_all(
             backend.build(
-                Query::delete()
-                    .from_table(Alias::new("direct_metadata_refs"))
+                Query::select()
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("resource_kind"),
+                        Alias::new("priority"),
+                        Alias::new("input_revision"),
+                    ])
+                    .from(Alias::new("direct_metadata_refs"))
                     .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()))
                     .and_where(
                         Expr::col(Alias::new("storage_root_id"))
@@ -820,58 +784,91 @@ async fn replace_direct_refs(
             ),
         )
         .await?;
-    for library_id in library_ids {
-        let mut primary_priority = 0_i32;
-        let mut backdrop_priority = 0_i32;
-        let image_resources = snapshot.images.iter().map(|image| {
-            let (kind, priority) = if image.image_type() == ImageType::Primary {
-                let value = primary_priority;
-                primary_priority = primary_priority.saturating_add(1);
-                ("Primary", value)
-            } else {
-                let value = backdrop_priority;
-                backdrop_priority = backdrop_priority.saturating_add(1);
-                ("Backdrop", value)
-            };
-            (image.file(), kind, priority)
-        });
-        let resources = snapshot
-            .sidecar
-            .iter()
-            .map(|file| (file, "Nfo", 0_i32))
-            .chain(image_resources);
-        for (file, kind, priority) in resources {
-            transaction
-                .execute(
-                    backend.build(
-                        Query::insert()
-                            .into_table(Alias::new("direct_metadata_refs"))
-                            .columns([
-                                Alias::new("id"),
-                                Alias::new("library_id"),
-                                Alias::new("catalog_item_id"),
-                                Alias::new("storage_root_id"),
-                                Alias::new("storage_object_id"),
-                                Alias::new("resource_kind"),
-                                Alias::new("priority"),
-                                Alias::new("input_revision"),
-                            ])
-                            .values_panic([
-                                Uuid::new_v4().into(),
-                                (*library_id).into(),
-                                item_id.as_uuid().into(),
-                                snapshot.storage_root_id().as_uuid().into(),
-                                file.record_id().as_uuid().into(),
-                                kind.into(),
-                                priority.into(),
-                                input_revision.into(),
-                            ]),
-                    ),
-                )
-                .await?;
+    let mut report = DirectRefSyncReport {
+        reference_count: desired.len(),
+        ..DirectRefSyncReport::default()
+    };
+    for row in rows {
+        let id: Uuid = row.try_get("", "id")?;
+        let key = DirectRefKey {
+            library_id: row.try_get("", "library_id")?,
+            resource_kind: row.try_get("", "resource_kind")?,
+            priority: row.try_get("", "priority")?,
+        };
+        let current = DirectRefValue {
+            storage_object_id: StorageObjectRecordId::from_uuid(
+                row.try_get("", "storage_object_id")?,
+            ),
+            input_revision: row.try_get("", "input_revision")?,
+        };
+        match desired.remove(&key) {
+            Some(value) if value == current => {}
+            Some(value) => {
+                transaction
+                    .execute(
+                        backend.build(
+                            Query::update()
+                                .table(Alias::new("direct_metadata_refs"))
+                                .value(
+                                    Alias::new("storage_object_id"),
+                                    value.storage_object_id.as_uuid(),
+                                )
+                                .value(Alias::new("input_revision"), value.input_revision)
+                                .and_where(Expr::col(Alias::new("id")).eq(id)),
+                        ),
+                    )
+                    .await?;
+                report.changed = true;
+                report.image_changed |= key.resource_kind != "Nfo";
+            }
+            None => {
+                transaction
+                    .execute(
+                        backend.build(
+                            Query::delete()
+                                .from_table(Alias::new("direct_metadata_refs"))
+                                .and_where(Expr::col(Alias::new("id")).eq(id)),
+                        ),
+                    )
+                    .await?;
+                report.changed = true;
+                report.image_changed |= key.resource_kind != "Nfo";
+            }
         }
     }
-    Ok(())
+    for (key, value) in desired {
+        transaction
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("direct_metadata_refs"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("library_id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("resource_kind"),
+                            Alias::new("priority"),
+                            Alias::new("input_revision"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            key.library_id.into(),
+                            item_id.as_uuid().into(),
+                            snapshot.storage_root_id().as_uuid().into(),
+                            value.storage_object_id.as_uuid().into(),
+                            key.resource_kind.clone().into(),
+                            key.priority.into(),
+                            value.input_revision.into(),
+                        ]),
+                ),
+            )
+            .await?;
+        report.changed = true;
+        report.image_changed |= key.resource_kind != "Nfo";
+    }
+    Ok(report)
 }
 
 async fn storage_object_stem(
@@ -1057,6 +1054,30 @@ async fn fence_metadata_requirement(
     {
         return Err(MetadataWorkError::RequirementUpgraded);
     }
+    let source_mode = claimed
+        .job()
+        .metadata_source_mode()
+        .ok_or(MetadataWorkError::InvalidClaim)?;
+    let access_mode = claimed
+        .job()
+        .local_metadata_access_mode()
+        .ok_or(MetadataWorkError::InvalidClaim)?;
+    let policy_fence = Query::update()
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("metadata_source_mode"), source_mode.as_str())
+        .and_where(Expr::col(Alias::new("id")).eq(claimed.id().as_uuid()))
+        .and_where(Expr::col(Alias::new("state")).eq("Running"))
+        .and_where(Expr::col(Alias::new("metadata_source_mode")).eq(source_mode.as_str()))
+        .and_where(Expr::col(Alias::new("local_metadata_access_mode")).eq(access_mode.as_str()))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&policy_fence))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(MetadataWorkError::PolicyChanged);
+    }
     Ok(requirement)
 }
 
@@ -1100,6 +1121,8 @@ pub enum MetadataWorkError {
     InvalidStoredMetadata,
     #[error("metadata requirement was upgraded while the job was running")]
     RequirementUpgraded,
+    #[error("metadata source or local access policy changed while the job was running")]
+    PolicyChanged,
     #[error("metadata work database operation failed: {0}")]
     Database(#[from] DbErr),
     #[error("metadata publication failed: {0}")]

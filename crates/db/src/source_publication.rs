@@ -907,7 +907,40 @@ impl CatalogPublicationRepository<'_> {
         &self,
         owner: CatalogItemId,
     ) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
-        active_sources(self.database, owner).await
+        projected_sources(self.database, owner, true).await
+    }
+
+    /// Returns the last active projection after filtering every source through
+    /// the current storage-path authorization rules.
+    ///
+    /// This read is intentionally allowed to outlive an item's source revision
+    /// while a replacement publication is being built. It never preserves a
+    /// location whose library, root, account, or reconciled path is no longer
+    /// authorized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError`] for database or stored-value corruption.
+    pub async fn playable_sources(
+        &self,
+        owner: CatalogItemId,
+    ) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
+        let mut sources = projected_sources(self.database, owner, false).await?;
+        let mut playable = Vec::with_capacity(sources.len());
+        for mut source in sources.drain(..) {
+            let Some(location) =
+                playback_location(self.database, owner, source.presentation_key()).await?
+            else {
+                continue;
+            };
+            source
+                .locations
+                .retain(|candidate| candidate.storage_object_id() == location.storage_object_id());
+            if !source.locations.is_empty() {
+                playable.push(source);
+            }
+        }
+        Ok(playable)
     }
 
     /// Persists the administrator playback policy for one stable source identity.
@@ -2595,9 +2628,10 @@ async fn storage_availability_map(
 }
 
 #[allow(clippy::too_many_lines)] // The source projection query and its attached associations are one read model.
-async fn active_sources(
+async fn projected_sources(
     database: &sea_orm::DatabaseConnection,
     owner: CatalogItemId,
+    require_current_revision: bool,
 ) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
     let backend = database.get_database_backend();
     let Some(publication_id) = effective_source_publication(database, owner).await? else {
@@ -2679,6 +2713,7 @@ async fn active_sources(
         .and_where(Expr::exists(effective_source_publication_current(
             owner,
             publication_id,
+            require_current_revision,
         )))
         .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"))
         .order_by((source, Alias::new("presentation_key")), Order::Asc)
@@ -2697,7 +2732,9 @@ async fn active_sources(
     attach_locations(database, owner, publication_id, &indexes, &mut sources).await?;
     attach_streams(database, owner, publication_id, &indexes, &mut sources).await?;
     attach_subtitles(database, owner, publication_id, &indexes, &mut sources).await?;
-    if !effective_publication_exists(database, owner, publication_id).await? {
+    if !effective_publication_exists(database, owner, publication_id, require_current_revision)
+        .await?
+    {
         return Ok(Vec::new());
     }
     Ok(sources)
@@ -2707,6 +2744,7 @@ async fn effective_publication_exists(
     connection: &impl ConnectionTrait,
     owner: CatalogItemId,
     publication_id: Uuid,
+    require_current_revision: bool,
 ) -> Result<bool, CatalogPublicationError> {
     let query = Query::select()
         .expr(Expr::val(1_i32))
@@ -2717,6 +2755,7 @@ async fn effective_publication_exists(
         .and_where(Expr::exists(effective_source_publication_current(
             owner,
             publication_id,
+            require_current_revision,
         )))
         .to_owned();
     let backend = connection.get_database_backend();
@@ -2730,7 +2769,11 @@ async fn effective_publication_exists(
 fn effective_source_publication_current(
     owner: CatalogItemId,
     publication_id: Uuid,
+    required: bool,
 ) -> sea_orm::sea_query::SelectStatement {
+    if !required {
+        return Query::select().expr(Expr::val(1_i32)).to_owned();
+    }
     let item = Alias::new("current_effective_source_item");
     let publication = Alias::new("current_effective_source_publication");
     let projection = Alias::new("current_effective_source_projection");
@@ -2970,8 +3013,8 @@ pub(crate) async fn active_presentation_exists(
 }
 
 #[allow(clippy::too_many_lines)] // One set-based query keeps authorization and active location selection atomic.
-async fn playback_location(
-    database: &sea_orm::DatabaseConnection,
+pub(crate) async fn playback_location(
+    database: &impl ConnectionTrait,
     owner: CatalogItemId,
     presentation_key: PresentationKey,
 ) -> Result<Option<PlaybackLocation>, CatalogPublicationError> {

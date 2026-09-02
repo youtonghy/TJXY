@@ -835,6 +835,84 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
 
     assert!(report.used_nfo());
     assert!(service.nfo(fixture.item).await.unwrap().is_none());
+    let direct_ref_ids = fixture
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("direct_metadata_refs"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(fixture.item.as_uuid()))
+                    .order_by(Alias::new("id"), sea_orm::sea_query::Order::Asc),
+            ),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<Uuid>("", "id").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(direct_ref_ids.len(), 1);
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 2_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            2,
+            20,
+        )
+        .unwrap()
+        .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+        .unwrap()
+        .with_local_metadata_access_mode(LocalMetadataAccessMode::ImportMetadataOnly)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed_again = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata-only-import-worker",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    MetadataResolveService::new(fixture.database.clone())
+        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
+        .with_provider(Arc::new(ForbiddenRemoteProvider))
+        .execute(&claimed_again)
+        .await
+        .unwrap();
+    let repeated_ref_ids = fixture
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("direct_metadata_refs"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(fixture.item.as_uuid()))
+                    .order_by(Alias::new("id"), sea_orm::sea_query::Order::Asc),
+            ),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<Uuid>("", "id").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_ref_ids, direct_ref_ids);
     // Direct images must remain readable even when the library's metadata
     // source is automatic; only the image import toggle controls shadowing.
     fixture

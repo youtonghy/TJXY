@@ -2,7 +2,7 @@
 import { Alert, Button, Label, ListBox, Select, Skeleton } from '@heroui/react';
 import { ArrowLeft, Captions, CircleAlert, Film, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { getItem, togglePlayed, type MediaItem } from '../api/catalogApi';
 import {
   getPlaybackInfo,
@@ -38,6 +38,8 @@ const PROGRESS_INTERVAL_TICKS = 15 * TICKS_PER_SECOND;
 export function PlayerPage() {
   const tr = useTranslate();
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const libraryId = searchParams.get('libraryId') ?? undefined;
   const navigate = useNavigate();
   const { user } = useClientAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -327,7 +329,7 @@ export function PlayerPage() {
               startedRef.current = false;
               void stopPlayback(playbackState(positionTicks));
             }
-            void navigate(`/app/items/${id}`);
+            void navigate(`/app/items/${id}${libraryId ? `?libraryId=${encodeURIComponent(libraryId)}` : ''}`);
           }}
         >
           {tr('Exit', '退出播放')}
@@ -556,10 +558,12 @@ function languageLabel(language: string | undefined, tr: (english: string, chine
 
 function BackLink({ id }: { id: string }) {
   const tr = useTranslate();
+  const [searchParams] = useSearchParams();
+  const libraryId = searchParams.get('libraryId');
   return (
     <Link
       className="inline-flex items-center gap-2 text-sm text-muted hover:text-foreground"
-      to={`/app/items/${id}`}
+      to={`/app/items/${id}${libraryId ? `?libraryId=${encodeURIComponent(libraryId)}` : ''}`}
     >
       <ArrowLeft className="size-4" />
       {tr('Back to details', '返回详细信息')}

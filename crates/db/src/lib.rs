@@ -167,7 +167,7 @@ pub use outbox::{
 };
 pub use passkey::{PasskeyChallenge, PasskeyCredential, PasskeyRepository, PasskeyRepositoryError};
 pub use playback_ticket::{
-    PlaybackTicketDraft, PlaybackTicketGrant, PlaybackTicketRepository,
+    IssuedPlaybackTicketRecord, PlaybackTicketDraft, PlaybackTicketGrant, PlaybackTicketRepository,
     PlaybackTicketRepositoryError,
 };
 pub use playstate::{PlaybackSessionCommit, PlaystateRepository, PlaystateRepositoryError};

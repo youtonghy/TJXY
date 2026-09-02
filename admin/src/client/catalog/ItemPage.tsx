@@ -4,7 +4,7 @@ import { Rating } from '@heroui-pro/react/rating';
 import { Carousel } from '@heroui-pro/react/carousel';
 import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, LoaderCircle, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 import { useTranslate } from '../../settings/i18n';
 import { listRecentTaskJobs } from '../../tasks/taskApi';
@@ -31,6 +31,8 @@ type MetadataRefreshState = 'idle' | 'no-match' | 'exhausted';
 
 export function ItemPage() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const libraryId = searchParams.get('libraryId') ?? undefined;
   const navigate = useNavigate();
   const { user } = useClientAuth();
   const isAdministrator = user?.Policy?.IsAdministrator === true;
@@ -221,6 +223,7 @@ export function ItemPage() {
             alt={tr(`Poster for ${item.Name}`, `${item.Name} 的海报`)}
             className="h-full w-full object-cover"
             itemId={id}
+            libraryId={libraryId}
             tag={item.ImageTags?.Primary}
           />
         </div>
@@ -248,7 +251,7 @@ export function ItemPage() {
                 itemId={id}
                 itemTitle={item.Name}
                 key={id}
-                onPlay={() => navigate(`/app/play/${id}`)}
+                onPlay={() => navigate(`/app/play/${id}${libraryId ? `?libraryId=${encodeURIComponent(libraryId)}` : ''}`)}
               />
             )}
             <Button

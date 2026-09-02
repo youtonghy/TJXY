@@ -461,10 +461,43 @@ impl AssetReadService {
         image_type: ImageType,
         priority: u32,
     ) -> Result<Option<OpenedAsset>, AssetReadError> {
-        let Some(asset) = CatalogQueryRepository::new(&self.database)
-            .image(item_id, image_type, priority)
-            .await?
-        else {
+        self.original_with_library(item_id, image_type, priority, None)
+            .await
+    }
+
+    /// Opens an imported image only when the selected library imports images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssetReadError`] for query failures or stored-file integrity violations.
+    pub async fn original_in_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: u32,
+        library_id: tjxy_common::LibraryId,
+    ) -> Result<Option<OpenedAsset>, AssetReadError> {
+        self.original_with_library(item_id, image_type, priority, Some(library_id))
+            .await
+    }
+
+    async fn original_with_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: u32,
+        library_id: Option<tjxy_common::LibraryId>,
+    ) -> Result<Option<OpenedAsset>, AssetReadError> {
+        let repository = CatalogQueryRepository::new(&self.database);
+        let asset = match library_id {
+            Some(library_id) => {
+                repository
+                    .image_in_library(item_id, image_type, priority, library_id)
+                    .await?
+            }
+            None => repository.image(item_id, image_type, priority).await?,
+        };
+        let Some(asset) = asset else {
             return Ok(None);
         };
         validate_metadata(asset.sha256(), asset.mime_type())?;

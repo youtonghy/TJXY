@@ -37,6 +37,7 @@ pub struct IssuedPlaybackTicket {
     id: Uuid,
     secret: SecretPlaybackTicket,
     expires_at: DateTime<Utc>,
+    is_audio: bool,
 }
 
 impl IssuedPlaybackTicket {
@@ -53,6 +54,11 @@ impl IssuedPlaybackTicket {
     #[must_use]
     pub const fn expires_at(&self) -> DateTime<Utc> {
         self.expires_at
+    }
+
+    #[must_use]
+    pub const fn is_audio(&self) -> bool {
+        self.is_audio
     }
 }
 
@@ -106,6 +112,48 @@ where
             id,
             secret,
             expires_at,
+            is_audio: false,
+        })
+    }
+
+    /// Issues a ticket only when the requested source has a currently
+    /// authorized playback path. Validation and insertion are atomic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketServiceError`] when the session or source is unavailable.
+    pub async fn issue_for_playback(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        item_id: CatalogItemId,
+        media_source_id: PresentationKey,
+        play_session_id: Uuid,
+    ) -> Result<IssuedPlaybackTicket, PlaybackTicketServiceError> {
+        let auth_session_id = principal
+            .session_id()
+            .ok_or(PlaybackTicketServiceError::SessionRequired)?;
+        let now = self.clock.now();
+        let secret = SecretPlaybackTicket(Zeroizing::new(generate_token()));
+        let id = Uuid::new_v4();
+        let issued = PlaybackTicketRepository::new(&self.database)
+            .issue_for_playback(PlaybackTicketDraft {
+                id,
+                auth_session_id,
+                user_id: principal.user().id(),
+                item_id,
+                media_source_id,
+                play_session_id,
+                token_digest: digest_token(secret.expose_secret()),
+                expires_at: now + MAX_TICKET_LIFETIME,
+                created_at: now,
+            })
+            .await
+            .map_err(map_repository_error)?;
+        Ok(IssuedPlaybackTicket {
+            id,
+            secret,
+            expires_at: issued.expires_at(),
+            is_audio: issued.is_audio(),
         })
     }
 
@@ -164,6 +212,9 @@ fn map_repository_error(error: PlaybackTicketRepositoryError) -> PlaybackTicketS
         PlaybackTicketRepositoryError::SessionRejected => {
             PlaybackTicketServiceError::SessionRequired
         }
+        PlaybackTicketRepositoryError::SourceUnavailable => {
+            PlaybackTicketServiceError::SourceUnavailable
+        }
         other => PlaybackTicketServiceError::Repository(other),
     }
 }
@@ -176,6 +227,8 @@ pub enum PlaybackTicketServiceError {
     InvalidTicket,
     #[error("playback ticket capacity reached")]
     Capacity,
+    #[error("playback source is no longer available")]
+    SourceUnavailable,
     #[error(transparent)]
     Repository(PlaybackTicketRepositoryError),
 }

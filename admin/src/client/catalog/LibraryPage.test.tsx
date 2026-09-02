@@ -6,7 +6,11 @@ import { LibraryPage } from './LibraryPage';
 
 const api = vi.hoisted(() => ({ getItems: vi.fn(), getLibraries: vi.fn(), getLibraryFilterFacets: vi.fn() }));
 vi.mock('../api/catalogApi', () => api);
-vi.mock('../ui/MediaTile', () => ({ MediaTile: ({ item }: { item: { Name: string } }) => <div>{item.Name}</div> }));
+vi.mock('../ui/MediaTile', () => ({
+  MediaTile: ({ item, libraryId }: { item: { Name: string }; libraryId?: string }) => (
+    <div data-library-id={libraryId}>{item.Name}</div>
+  ),
+}));
 
 beforeEach(() => {
   api.getLibraries.mockResolvedValue([{ Id: 'library-1', Name: 'Cinema' }]);
@@ -27,6 +31,7 @@ it('keeps CellSelect filters collapsed by default and sends expanded selections 
   );
 
   expect(await screen.findByText('Arrival')).toBeVisible();
+  expect(screen.getByText('Arrival')).toHaveAttribute('data-library-id', 'library-1');
   expect(screen.getByRole('heading', { name: 'Cinema' })).toBeVisible();
   expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();

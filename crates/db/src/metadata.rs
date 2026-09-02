@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Expr, JoinType, OnConflict, Order, Query},
+    sea_query::{Alias, Condition, Expr, JoinType, OnConflict, Order, Query},
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -15,6 +15,56 @@ pub(crate) const METADATA_PAYLOAD_VERSION: i32 = 1;
 
 const MAX_TITLE_CHARS: usize = 512;
 const MAX_OVERVIEW_CHARS: usize = 32 * 1024;
+
+pub(crate) async fn invalidate_metadata_for_owner(
+    transaction: &DatabaseTransaction,
+    owner_item_id: CatalogItemId,
+) -> Result<(), DbErr> {
+    let update = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("metadata_revision"),
+            Expr::col(Alias::new("metadata_revision")).add(1_i64),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::col(Alias::new("id")).eq(owner_item_id.as_uuid()))
+                .add(Expr::col(Alias::new("structure_owner_item_id")).eq(owner_item_id.as_uuid())),
+        )
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn invalidate_metadata_for_library(
+    transaction: &DatabaseTransaction,
+    library_id: tjxy_common::LibraryId,
+) -> Result<(), DbErr> {
+    let membership = Alias::new("metadata_invalidation_membership");
+    let member_items = Query::select()
+        .column((membership.clone(), Alias::new("catalog_item_id")))
+        .from_as(Alias::new("library_catalog_items"), membership.clone())
+        .and_where(Expr::col((membership, Alias::new("library_id"))).eq(library_id.as_uuid()))
+        .to_owned();
+    let update = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("metadata_revision"),
+            Expr::col(Alias::new("metadata_revision")).add(1_i64),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::col(Alias::new("id")).in_subquery(member_items.clone()))
+                .add(Expr::col(Alias::new("structure_owner_item_id")).in_subquery(member_items)),
+        )
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetadataPublicationReport {

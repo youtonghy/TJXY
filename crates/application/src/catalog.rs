@@ -17,10 +17,19 @@ use tjxy_db::{
     PlaystateRepository, PlaystateRepositoryError, SourcePlaybackPolicy, SourcePlaybackPolicyError,
     WorkJobRepository, WorkJobRepositoryError, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
 };
+use tjxy_domain::MetadataSourceMode;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 const MAX_HOME_LATEST_LIBRARIES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LazyWaitOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+    Missing,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PlaybackSource {
@@ -978,7 +987,7 @@ impl CatalogQueryService {
             None
         };
         let publications = CatalogPublicationRepository::new(&self.database);
-        let mut sources = publications.active_sources(item_id).await?;
+        let mut sources = publications.playable_sources(item_id).await?;
         tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback source resolution started");
         if sources.is_empty()
             && let Some(target) = query.lazy_work_target(principal, item_id).await?
@@ -989,7 +998,7 @@ impl CatalogQueryService {
         {
             self.enqueue_and_wait(target, item_id, WorkTaskKind::IndexMediaSources)
                 .await?;
-            sources = publications.active_sources(item_id).await?;
+            sources = publications.playable_sources(item_id).await?;
             tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback source index completed");
         }
         let jobs = WorkJobRepository::new(&self.database);
@@ -1022,10 +1031,10 @@ impl CatalogQueryService {
             }
         }
         for job_id in probe_jobs {
-            self.wait_for_job(&jobs, job_id, deadline).await?;
+            let _ = self.wait_for_job(&jobs, job_id, deadline).await?;
         }
         if !sources.is_empty() {
-            sources = publications.active_sources(item_id).await?;
+            sources = publications.playable_sources(item_id).await?;
         }
         tracing::debug!(item_id = %item_id, source_count = sources.len(), "playback sources refreshed after probes");
         let last_used = PlaystateRepository::new(&self.database)
@@ -1080,7 +1089,7 @@ impl CatalogQueryService {
             return Ok(None);
         };
         let sources = CatalogPublicationRepository::new(&self.database)
-            .active_sources(item_id)
+            .playable_sources(item_id)
             .await?;
         let last_used = PlaystateRepository::new(&self.database)
             .last_presentation_key(principal, item_id)
@@ -1159,7 +1168,11 @@ impl CatalogQueryService {
                         .with_storage_root_affinity(scope.storage_root_id())?,
                     )
                     .await?;
-                self.wait_for_job(&jobs, sync.job().id(), deadline).await?;
+                if self.wait_for_job(&jobs, sync.job().id(), deadline).await?
+                    != LazyWaitOutcome::Completed
+                {
+                    return Ok(());
+                }
                 let Some(sync_revision) = jobs.completed_sync_revision(sync.job().id()).await?
                 else {
                     return Ok(());
@@ -1180,8 +1193,10 @@ impl CatalogQueryService {
             created = submission.created(),
             "lazy media work enqueued or joined"
         );
-        self.wait_for_job(&jobs, submission.job().id(), deadline)
-            .await
+        let _ = self
+            .wait_for_job(&jobs, submission.job().id(), deadline)
+            .await?;
+        Ok(())
     }
 
     async fn retry_metadata_and_wait(
@@ -1217,7 +1232,11 @@ impl CatalogQueryService {
                     .with_storage_root_affinity(scope.storage_root_id())?,
                 )
                 .await?;
-            self.wait_for_job(&jobs, sync.job().id(), deadline).await?;
+            if self.wait_for_job(&jobs, sync.job().id(), deadline).await?
+                != LazyWaitOutcome::Completed
+            {
+                return Ok(());
+            }
             let Some(sync_revision) = jobs.completed_sync_revision(sync.job().id()).await? else {
                 return Ok(());
             };
@@ -1234,10 +1253,27 @@ impl CatalogQueryService {
             .with_metadata_source_mode(target.metadata_source_mode())?
             .with_local_metadata_access_mode(target.local_metadata_access_mode())?
             .with_storage_root_affinity(scope.storage_root_id())?;
-        let submission = if target.local_metadata_access_mode().imports_metadata() {
-            jobs.enqueue_metadata_retry_or_join(&spec).await?
+        let submission = if !target.needs_metadata_resolution(requirement)
+            && target.local_metadata_access_mode().imports_metadata()
+            && matches!(
+                target.metadata_source_mode(),
+                MetadataSourceMode::AutomaticScrape
+            ) {
+            jobs.enqueue_metadata_retry_or_join(&spec).await
         } else {
-            Some(jobs.enqueue_or_join(&spec).await?)
+            jobs.enqueue_or_join(&spec).await.map(Some)
+        };
+        let submission = match submission {
+            Ok(submission) => submission,
+            Err(WorkJobRepositoryError::IncompatibleActiveJob) => {
+                tracing::debug!(
+                    %item_id,
+                    expected_revision = target.metadata_revision(),
+                    "lazy metadata joined an active job with a different storage prerequisite"
+                );
+                None
+            }
+            Err(error) => return Err(error.into()),
         };
         let Some(submission) = submission else {
             return Ok(());
@@ -1251,8 +1287,10 @@ impl CatalogQueryService {
             created = submission.created(),
             "lazy metadata work enqueued or joined"
         );
-        self.wait_for_job(&jobs, submission.job().id(), deadline)
-            .await
+        let _ = self
+            .wait_for_job(&jobs, submission.job().id(), deadline)
+            .await?;
+        Ok(())
     }
 
     async fn wait_for_job(
@@ -1260,31 +1298,32 @@ impl CatalogQueryService {
         jobs: &WorkJobRepository<'_>,
         job_id: WorkJobId,
         deadline: Instant,
-    ) -> Result<(), CatalogServiceError> {
-        let mut final_state = None;
-        let mut timed_out = false;
-        while Instant::now() < deadline {
+    ) -> Result<LazyWaitOutcome, CatalogServiceError> {
+        let mut delay = Duration::from_millis(50);
+        let outcome = loop {
+            if Instant::now() >= deadline {
+                break LazyWaitOutcome::TimedOut;
+            }
             match jobs.get(job_id).await?.map(|job| job.state()) {
-                Some(state @ (WorkJobState::Completed | WorkJobState::Failed)) => {
-                    final_state = Some(state);
-                    break;
-                }
-                None => break,
+                Some(WorkJobState::Completed) => break LazyWaitOutcome::Completed,
+                Some(WorkJobState::Failed) => break LazyWaitOutcome::Failed,
+                None => break LazyWaitOutcome::Missing,
                 Some(WorkJobState::Pending | WorkJobState::Running) => {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break LazyWaitOutcome::TimedOut;
+                    }
+                    tokio::time::sleep(delay.min(remaining)).await;
+                    delay = delay.saturating_mul(2).min(Duration::from_millis(250));
                 }
             }
-        }
-        if final_state.is_none() && Instant::now() >= deadline {
-            timed_out = true;
-        }
+        };
         tracing::debug!(
             job_id = %job_id.as_uuid(),
-            final_state = ?final_state,
-            timed_out,
+            ?outcome,
             "playback probe wait finished"
         );
-        Ok(())
+        Ok(outcome)
     }
 }
 

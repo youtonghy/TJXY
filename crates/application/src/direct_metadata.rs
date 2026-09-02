@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tjxy_common::{CatalogItemId, ImageType};
+use tjxy_common::{CatalogItemId, ImageType, LibraryId};
 use tjxy_db::{DirectMetadataObjectRecord, DirectMetadataRepository};
 use tjxy_metadata::NfoDocument;
 use tjxy_storage::{BackendError, ByteRange, StorageObjectId};
@@ -67,15 +67,48 @@ impl DirectMetadataReadService {
         image_type: ImageType,
         priority: i32,
     ) -> Result<Option<OpenedDirectImage>, DirectMetadataReadError> {
+        self.image_with_library(item_id, image_type, priority, None)
+            .await
+    }
+
+    /// Opens a direct image scoped to one selected library.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image reference, backend, range, or format is invalid.
+    pub async fn image_in_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: i32,
+        library_id: LibraryId,
+    ) -> Result<Option<OpenedDirectImage>, DirectMetadataReadError> {
+        self.image_with_library(item_id, image_type, priority, Some(library_id))
+            .await
+    }
+
+    async fn image_with_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: i32,
+        library_id: Option<LibraryId>,
+    ) -> Result<Option<OpenedDirectImage>, DirectMetadataReadError> {
         let kind = match image_type {
             ImageType::Primary => "Primary",
             ImageType::Backdrop => "Backdrop",
             _ => return Ok(None),
         };
-        let Some(object) = DirectMetadataRepository::new(&self.database)
-            .object(item_id, kind, priority)
-            .await?
-        else {
+        let repository = DirectMetadataRepository::new(&self.database);
+        let object = match library_id {
+            Some(library_id) => {
+                repository
+                    .object_in_library(item_id, kind, priority, library_id)
+                    .await?
+            }
+            None => repository.object(item_id, kind, priority).await?,
+        };
+        let Some(object) = object else {
             return Ok(None);
         };
         let mime_type =

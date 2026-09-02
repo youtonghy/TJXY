@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use tjxy_api::{PlaybackTicketRequest, PlaybackTicketResponse};
-use tjxy_application::{CatalogServiceError, PlaybackTicketServiceError};
+use tjxy_application::PlaybackTicketServiceError;
 use tjxy_common::CatalogItemId;
 use uuid::Uuid;
 
@@ -21,27 +21,6 @@ pub(crate) async fn issue(
         Ok(principal) => principal,
         Err(response) => return response,
     };
-    let Some(catalog) = state.catalog.as_ref() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
-    };
-    let sources = match catalog
-        .playback_sources(
-            principal.user().id(),
-            None,
-            CatalogItemId::from_uuid(item_id),
-        )
-        .await
-    {
-        Ok(Some(sources)) => sources,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "catalog item was not found"),
-        Err(error) => return catalog_error(&error),
-    };
-    let Some(source) = sources
-        .iter()
-        .find(|source| source.presentation_key() == request.media_source_id)
-    else {
-        return error(StatusCode::NOT_FOUND, "media source was not found");
-    };
     let Some(service) = state.playback_tickets.as_ref() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -49,7 +28,7 @@ pub(crate) async fn issue(
         );
     };
     let ticket = match service
-        .issue(
+        .issue_for_playback(
             &principal,
             CatalogItemId::from_uuid(item_id),
             request.media_source_id,
@@ -60,7 +39,7 @@ pub(crate) async fn issue(
         Ok(ticket) => ticket,
         Err(error) => return service_error(&error),
     };
-    let route = if source.is_audio() { "Audio" } else { "Videos" };
+    let route = if ticket.is_audio() { "Audio" } else { "Videos" };
     let stream_url = format!(
         "/{route}/{item_id}/stream?static=true&mediaSourceId={}&PlaybackTicket={}",
         request.media_source_id,
@@ -105,15 +84,6 @@ pub(crate) async fn revoke(
     }
 }
 
-fn catalog_error(catalog_error: &CatalogServiceError) -> Response {
-    match catalog_error {
-        CatalogServiceError::ForbiddenUser => {
-            error(StatusCode::FORBIDDEN, "catalog access is not permitted")
-        }
-        _ => error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable"),
-    }
-}
-
 fn service_error(error_value: &PlaybackTicketServiceError) -> Response {
     match error_value {
         PlaybackTicketServiceError::SessionRequired | PlaybackTicketServiceError::InvalidTicket => {
@@ -122,6 +92,10 @@ fn service_error(error_value: &PlaybackTicketServiceError) -> Response {
         PlaybackTicketServiceError::Capacity => error(
             StatusCode::TOO_MANY_REQUESTS,
             "playback ticket capacity reached",
+        ),
+        PlaybackTicketServiceError::SourceUnavailable => error(
+            StatusCode::CONFLICT,
+            "media source changed; refresh playback information",
         ),
         PlaybackTicketServiceError::Repository(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,

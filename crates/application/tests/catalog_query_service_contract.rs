@@ -111,6 +111,7 @@ async fn seed_playback_cache_fixture(database: &DatabaseConnection) -> CatalogIt
     let item = CatalogItemId::new();
     let account = Uuid::new_v4();
     let object = Uuid::new_v4();
+    let root = Uuid::new_v4();
     let job = Uuid::new_v4();
     let publication = Uuid::new_v4();
     let source = Uuid::new_v4();
@@ -237,6 +238,71 @@ async fn seed_playback_cache_fixture(database: &DatabaseConnection) -> CatalogIt
         .execute(
             backend.build(
                 Query::insert()
+                    .into_table(Alias::new("storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_root_id"),
+                        Alias::new("sync_revision"),
+                        Alias::new("reconciled_sync_revision"),
+                    ])
+                    .values_panic([
+                        root.into(),
+                        account.into(),
+                        format!("root-{root}").into(),
+                        1_i64.into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_storage_roots"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("storage_root_id"),
+                    ])
+                    .values_panic([Uuid::new_v4().into(), library.into(), root.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_root_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        root.into(),
+                        object.into(),
+                        1_i64.into(),
+                        false.into(),
+                        0_i64.into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
                     .into_table(Alias::new("work_jobs"))
                     .columns([
                         Alias::new("id"),
@@ -247,6 +313,7 @@ async fn seed_playback_cache_fixture(database: &DatabaseConnection) -> CatalogIt
                         Alias::new("state"),
                         Alias::new("priority"),
                         Alias::new("attempt_count"),
+                        Alias::new("storage_root_affinity"),
                     ])
                     .values_panic([
                         job.into(),
@@ -257,6 +324,7 @@ async fn seed_playback_cache_fixture(database: &DatabaseConnection) -> CatalogIt
                         "Completed".into(),
                         100.into(),
                         1.into(),
+                        root.into(),
                     ]),
             ),
         )
@@ -1600,6 +1668,72 @@ async fn lazy_item_detail_retries_partial_automatic_metadata() {
             .try_get::<String>("", "metadata_source_mode")
             .unwrap(),
         "automatic_scrape"
+    );
+}
+
+#[tokio::test]
+async fn lazy_item_detail_enqueues_stale_local_metadata_import() {
+    let (service, database, item, user) = lazy_service("Movie", true).await;
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(
+                        Alias::new("local_metadata_access_mode"),
+                        "import_metadata_only",
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_revision"), 10_i64)
+                    .value(Alias::new("metadata_resolved_requirement"), 1_i32)
+                    .value(Alias::new("metadata_payload_version"), 1_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    service.item_detail(user, None, item).await.unwrap();
+
+    let rows = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([
+                        Alias::new("expected_revision"),
+                        Alias::new("metadata_source_mode"),
+                        Alias::new("local_metadata_access_mode"),
+                    ])
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ResolveMetadata")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].try_get::<i64>("", "expected_revision").unwrap(), 11);
+    assert_eq!(
+        rows[0]
+            .try_get::<String>("", "metadata_source_mode")
+            .unwrap(),
+        "local_only"
+    );
+    assert_eq!(
+        rows[0]
+            .try_get::<String>("", "local_metadata_access_mode")
+            .unwrap(),
+        "import_metadata_only"
     );
 }
 

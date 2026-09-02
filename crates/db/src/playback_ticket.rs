@@ -7,6 +7,8 @@ use thiserror::Error;
 use tjxy_common::{CatalogItemId, PresentationKey, UserId};
 use uuid::Uuid;
 
+use crate::CatalogPublicationError;
+
 const MAX_ACTIVE_TICKETS_PER_SESSION: i64 = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +22,24 @@ pub struct PlaybackTicketDraft {
     pub token_digest: [u8; 32],
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IssuedPlaybackTicketRecord {
+    expires_at: DateTime<Utc>,
+    is_audio: bool,
+}
+
+impl IssuedPlaybackTicketRecord {
+    #[must_use]
+    pub const fn expires_at(self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
+    #[must_use]
+    pub const fn is_audio(self) -> bool {
+        self.is_audio
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +95,10 @@ impl<'connection> PlaybackTicketRepository<'connection> {
         Self { database }
     }
 
-    /// Issues one bounded ticket and evicts excess tickets for the same session.
+    /// Persists one bounded ticket and evicts excess tickets for the same session.
+    ///
+    /// Playback request paths should use [`Self::issue_for_playback`] so source
+    /// authorization and ticket insertion share one transaction.
     ///
     /// # Errors
     ///
@@ -84,11 +107,56 @@ impl<'connection> PlaybackTicketRepository<'connection> {
         &self,
         draft: PlaybackTicketDraft,
     ) -> Result<DateTime<Utc>, PlaybackTicketRepositoryError> {
-        if draft.expires_at <= draft.created_at {
-            return Err(PlaybackTicketRepositoryError::InvalidDraft);
-        }
+        validate_draft(&draft)?;
         let transaction = self.database.begin().await?;
         let result = issue_on(&transaction, &draft).await;
+        finish(transaction, result).await
+    }
+
+    /// Issues one bounded ticket after validating the current playback path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlaybackTicketRepositoryError`] for invalid drafts or persistence failures.
+    pub async fn issue_for_playback(
+        &self,
+        draft: PlaybackTicketDraft,
+    ) -> Result<IssuedPlaybackTicketRecord, PlaybackTicketRepositoryError> {
+        validate_draft(&draft)?;
+        let transaction = self.database.begin().await?;
+        let result = async {
+            let item_lock = Query::update()
+                .table(Alias::new("catalog_items"))
+                .value(
+                    Alias::new("active_source_publication_id"),
+                    Expr::col(Alias::new("active_source_publication_id")),
+                )
+                .and_where(Expr::col(Alias::new("id")).eq(draft.item_id.as_uuid()))
+                .to_owned();
+            if transaction
+                .execute(transaction.get_database_backend().build(&item_lock))
+                .await?
+                .rows_affected()
+                != 1
+            {
+                return Err(PlaybackTicketRepositoryError::SourceUnavailable);
+            }
+            let Some(location) = crate::source_publication::playback_location(
+                &transaction,
+                draft.item_id,
+                draft.media_source_id,
+            )
+            .await?
+            else {
+                return Err(PlaybackTicketRepositoryError::SourceUnavailable);
+            };
+            let expires_at = issue_on(&transaction, &draft).await?;
+            Ok(IssuedPlaybackTicketRecord {
+                expires_at,
+                is_audio: location.is_audio(),
+            })
+        }
+        .await;
         finish(transaction, result).await
     }
 
@@ -206,6 +274,13 @@ impl<'connection> PlaybackTicketRepository<'connection> {
             .rows_affected()
             == 1)
     }
+}
+
+fn validate_draft(draft: &PlaybackTicketDraft) -> Result<(), PlaybackTicketRepositoryError> {
+    if draft.expires_at <= draft.created_at {
+        return Err(PlaybackTicketRepositoryError::InvalidDraft);
+    }
+    Ok(())
 }
 
 async fn issue_on(
@@ -337,10 +412,14 @@ pub enum PlaybackTicketRepositoryError {
     InvalidDraft,
     #[error("playback ticket login session was rejected")]
     SessionRejected,
+    #[error("playback source is no longer available")]
+    SourceUnavailable,
     #[error("playback ticket capacity reached")]
     CapacityReached,
     #[error("playback ticket count row is missing")]
     MissingCount,
     #[error(transparent)]
     Database(#[from] DbErr),
+    #[error(transparent)]
+    Publication(#[from] CatalogPublicationError),
 }

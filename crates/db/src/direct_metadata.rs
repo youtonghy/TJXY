@@ -2,7 +2,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr,
     sea_query::{Alias, Expr, JoinType, Order, Query},
 };
-use tjxy_common::{CatalogItemId, StorageObjectRecordId};
+use tjxy_common::{CatalogItemId, LibraryId, StorageObjectRecordId};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +89,34 @@ impl<'connection> DirectMetadataRepository<'connection> {
         resource_kind: &str,
         priority: i32,
     ) -> Result<Option<DirectMetadataObjectRecord>, DbErr> {
+        self.object_with_library(item_id, resource_kind, priority, None)
+            .await
+    }
+
+    /// Loads one direct resource scoped to a selected enabled library.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the authorization snapshot cannot be read.
+    pub async fn object_in_library(
+        &self,
+        item_id: CatalogItemId,
+        resource_kind: &str,
+        priority: i32,
+        library_id: LibraryId,
+    ) -> Result<Option<DirectMetadataObjectRecord>, DbErr> {
+        self.object_with_library(item_id, resource_kind, priority, Some(library_id))
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // Direct-reference selection and its library/root authorization stay in one query.
+    async fn object_with_library(
+        &self,
+        item_id: CatalogItemId,
+        resource_kind: &str,
+        priority: i32,
+        library_id: Option<LibraryId>,
+    ) -> Result<Option<DirectMetadataObjectRecord>, DbErr> {
         let imported_access_modes = match resource_kind {
             "Nfo" => ["import", "import_metadata_only"],
             "Primary" | "Backdrop" => ["import", "import_images_only"],
@@ -127,7 +155,8 @@ impl<'connection> DirectMetadataRepository<'connection> {
             )
             .limit(1)
             .to_owned();
-        let query = Query::select()
+        let mut query = Query::select();
+        query
             .columns([
                 (object.clone(), Alias::new("id")),
                 (object.clone(), Alias::new("storage_account_id")),
@@ -172,7 +201,6 @@ impl<'connection> DirectMetadataRepository<'connection> {
             .and_where(Expr::col((reference.clone(), Alias::new("priority"))).eq(priority))
             .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
             .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
-            .and_where(Expr::exists(imported).not())
             // Direct metadata is intentionally not imported into catalog_items.  Its
             // durable readiness is represented by the reference row and its input
             // revision, so a later catalog metadata revision must not hide a still
@@ -182,9 +210,68 @@ impl<'connection> DirectMetadataRepository<'connection> {
                 (reference.clone(), Alias::new("input_revision")),
                 Order::Desc,
             )
-            .order_by((reference, Alias::new("library_id")), Order::Asc)
-            .limit(1)
-            .to_owned();
+            .order_by((reference.clone(), Alias::new("library_id")), Order::Asc)
+            .limit(1);
+        if let Some(library_id) = library_id {
+            let authorized_membership = Alias::new("direct_selected_membership");
+            let authorized_library = Alias::new("direct_selected_library");
+            let authorized_binding = Alias::new("direct_selected_binding");
+            let direct_modes = match resource_kind {
+                "Nfo" => ["direct", "import_images_only"],
+                "Primary" | "Backdrop" => ["direct", "import_metadata_only"],
+                _ => return Ok(None),
+            };
+            let authorized = Query::select()
+                .expr(Expr::val(1_i32))
+                .from_as(
+                    Alias::new("library_catalog_items"),
+                    authorized_membership.clone(),
+                )
+                .join_as(
+                    JoinType::InnerJoin,
+                    Alias::new("libraries"),
+                    authorized_library.clone(),
+                    Expr::col((authorized_library.clone(), Alias::new("id")))
+                        .equals((authorized_membership.clone(), Alias::new("library_id"))),
+                )
+                .join_as(
+                    JoinType::InnerJoin,
+                    Alias::new("library_storage_roots"),
+                    authorized_binding.clone(),
+                    Expr::col((authorized_binding.clone(), Alias::new("library_id")))
+                        .equals((authorized_library.clone(), Alias::new("id"))),
+                )
+                .and_where(
+                    Expr::col((authorized_library.clone(), Alias::new("id")))
+                        .eq(library_id.as_uuid()),
+                )
+                .and_where(
+                    Expr::col((authorized_library.clone(), Alias::new("is_enabled"))).eq(true),
+                )
+                .and_where(
+                    Expr::col((authorized_library, Alias::new("local_metadata_access_mode")))
+                        .is_in(direct_modes),
+                )
+                .and_where(
+                    Expr::col((authorized_membership, Alias::new("catalog_item_id")))
+                        .eq(item_id.as_uuid()),
+                )
+                .and_where(
+                    Expr::col((authorized_binding, Alias::new("storage_root_id")))
+                        .equals((reference.clone(), Alias::new("storage_root_id"))),
+                )
+                .limit(1)
+                .to_owned();
+            query
+                .and_where(
+                    Expr::col((reference.clone(), Alias::new("library_id")))
+                        .eq(library_id.as_uuid()),
+                )
+                .and_where(Expr::exists(authorized));
+        } else {
+            query.and_where(Expr::exists(imported).not());
+        }
+        let query = query.clone();
         self.database
             .query_one(self.database.get_database_backend().build(&query))
             .await?

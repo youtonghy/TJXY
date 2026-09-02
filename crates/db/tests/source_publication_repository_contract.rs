@@ -1379,6 +1379,34 @@ async fn active_sources_hide_a_publication_behind_a_newer_source_revision() {
             .is_empty(),
         "a publication at revision 3 must not satisfy canonical source revision 4"
     );
+    let playable = CatalogPublicationRepository::new(&database)
+        .playable_sources(owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        playable.len(),
+        1,
+        "the last authorized publication should remain playable while revision 4 is built"
+    );
+    assert_eq!(playable[0].locations().len(), 1);
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("is_enabled"), false),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        CatalogPublicationRepository::new(&database)
+            .playable_sources(owner)
+            .await
+            .unwrap()
+            .is_empty(),
+        "last-known-good playback must fail closed when library access is revoked"
+    );
 }
 
 #[tokio::test]

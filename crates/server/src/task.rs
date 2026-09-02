@@ -418,7 +418,8 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
             | MetadataWorkError::Publication(_)
             | MetadataWorkError::Asset(_)
             | MetadataWorkError::Work(_)
-            | MetadataWorkError::RequirementUpgraded,
+            | MetadataWorkError::RequirementUpgraded
+            | MetadataWorkError::PolicyChanged,
         ) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }

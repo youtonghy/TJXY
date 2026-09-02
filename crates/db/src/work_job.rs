@@ -1788,7 +1788,7 @@ async fn reclaim_expired_leases(
     if backend == sea_orm::DbBackend::MySql {
         update.value(Alias::new("active_slot"), Option::<String>::None);
     }
-    let update = update.to_owned();
+    let update = update.clone();
     Ok(transaction
         .execute(backend.build(&update))
         .await?

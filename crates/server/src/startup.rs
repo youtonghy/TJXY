@@ -710,7 +710,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         .await
     {
         Ok(reclaimed) if reclaimed > 0 => {
-            tracing::warn!(reclaimed, "Requeued expired work leases during startup")
+            tracing::warn!(reclaimed, "Requeued expired work leases during startup");
         }
         Ok(_) => {}
         Err(error) => tracing::error!(

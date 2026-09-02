@@ -304,6 +304,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
     /// # Errors
     ///
     /// Returns [`DiscoverTitlesError`] for stale roots, identity conflicts, or SQL failures.
+    #[allow(clippy::too_many_lines)] // Membership invalidation and final metadata scheduling must share this transaction.
     pub async fn publish(
         &self,
         claimed: &ClaimedWorkJob,
@@ -323,24 +324,62 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
             storage_objects.extend(snapshot.titles.iter().map(|title| title.storage_object_id));
             ensure_discovery_storage_facts(&transaction, snapshot.root_id, &storage_objects)
                 .await?;
+            let mut metadata_jobs = HashMap::new();
             for title in &snapshot.titles {
                 let metadata_revision = upsert_title(&transaction, title).await?;
-                if title.metadata_requirement == Some(MetadataRequirement::Full) {
-                    let requirement = MetadataRequirement::Full;
+                let input_sync_revision = if title.children_indexed {
+                    title.children_revision
+                } else {
+                    claimed.job().expected_revision()
+                };
+                metadata_jobs
+                    .entry(title.item_id)
+                    .and_modify(
+                        |entry: &mut (
+                            i64,
+                            Option<MetadataRequirement>,
+                            MetadataSourceMode,
+                            LocalMetadataAccessMode,
+                            i64,
+                        )| {
+                            entry.0 = entry.0.max(metadata_revision);
+                            entry.1 = entry.1.max(title.metadata_requirement);
+                            if title.metadata_source_mode == MetadataSourceMode::AutomaticScrape {
+                                entry.2 = MetadataSourceMode::AutomaticScrape;
+                            }
+                            entry.3 = LocalMetadataAccessMode::from_imports(
+                                entry.3.imports_metadata()
+                                    || title.local_metadata_access_mode.imports_metadata(),
+                                entry.3.imports_images()
+                                    || title.local_metadata_access_mode.imports_images(),
+                            );
+                            entry.4 = entry.4.max(input_sync_revision);
+                        },
+                    )
+                    .or_insert((
+                        metadata_revision,
+                        title.metadata_requirement,
+                        title.metadata_source_mode,
+                        title.local_metadata_access_mode,
+                        input_sync_revision,
+                    ));
+            }
+            for (
+                item_id,
+                (metadata_revision, requirement, source_mode, access_mode, input_revision),
+            ) in metadata_jobs
+            {
+                if requirement == Some(MetadataRequirement::Full) {
                     let spec = crate::WorkJobSpec::new(
                         WorkTaskKind::ResolveMetadata,
-                        WorkScope::CatalogItem(title.item_id),
+                        WorkScope::CatalogItem(item_id),
                         metadata_revision,
                         claimed.job().priority(),
                     )?
-                    .with_metadata_requirement(requirement)?
-                    .with_metadata_source_mode(title.metadata_source_mode)?
-                    .with_local_metadata_access_mode(title.local_metadata_access_mode)?
-                    .with_input_sync_revision(if title.children_indexed {
-                        title.children_revision
-                    } else {
-                        claimed.job().expected_revision()
-                    })?;
+                    .with_metadata_requirement(MetadataRequirement::Full)?
+                    .with_metadata_source_mode(source_mode)?
+                    .with_local_metadata_access_mode(access_mode)?
+                    .with_input_sync_revision(input_revision)?;
                     crate::work_job::enqueue_in_transaction(&transaction, &spec, Utc::now())
                         .await?;
                 }
@@ -997,6 +1036,19 @@ async fn upsert_title(
         .to_owned();
     transaction.execute(backend.build(&insert)).await?;
     refresh_title_naming(transaction, title).await?;
+    let membership_exists = transaction
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr(Expr::val(1_i32))
+                    .from(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("library_id")).eq(title.library_id))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(title.item_id.as_uuid()))
+                    .limit(1),
+            ),
+        )
+        .await?
+        .is_some();
     let row = transaction
         .query_one(
             backend.build(
@@ -1032,6 +1084,9 @@ async fn upsert_title(
             ),
         )
         .await?;
+    if !membership_exists && title.metadata_requirement.is_some() {
+        crate::metadata::invalidate_metadata_for_owner(transaction, title.item_id).await?;
+    }
     transaction
         .execute(
             backend.build(
@@ -1058,6 +1113,17 @@ async fn upsert_title(
             ),
         )
         .await?;
+    let row = transaction
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("metadata_revision"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid())),
+            ),
+        )
+        .await?
+        .ok_or(DiscoverTitlesError::IdentityConflict)?;
     Ok(row.try_get("", "metadata_revision")?)
 }
 

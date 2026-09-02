@@ -5119,6 +5119,7 @@ async fn audio_stream_reuses_the_authenticated_original_byte_range_contract() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers stale-publication issuance, range streaming, scope, and revocation together.
 async fn playback_ticket_is_scoped_revocable_and_authorizes_range_streaming() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
@@ -5145,6 +5146,22 @@ async fn playback_ticket_is_scoped_revocable_and_authorizes_range_streaming() {
     let playback = playback.into_body().collect().await.unwrap().to_bytes();
     let playback: Value = serde_json::from_slice(&playback).unwrap();
     let play_session_id = playback["PlaySessionId"].as_str().unwrap();
+
+    app.database
+        .execute(
+            app.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(
+                        Alias::new("source_index_revision"),
+                        Expr::col(Alias::new("source_index_revision")).add(1_i64),
+                    )
+                    .value(Alias::new("source_state"), "NotIndexed")
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
 
     let issued = post(
         &app.router,
@@ -5312,7 +5329,11 @@ async fn cloud_multi_source_playback_is_complete_local_and_stable_across_reindex
         .send()
         .await
         .expect("read cloud Movie detail");
-    assert_eq!(detail.status(), StatusCode::OK);
+    if detail.status() != StatusCode::OK {
+        let status = detail.status();
+        let body = detail.text().await.expect("read failed cloud detail body");
+        panic!("cloud Movie detail returned {status}: {body}");
+    }
     assert_headers_do_not_leak(detail.headers(), &markers, "Movie detail header");
     let detail: Value = detail.json().await.expect("cloud Movie detail JSON");
     assert_eq!(detail["Id"], fixture.item.as_uuid().to_string());

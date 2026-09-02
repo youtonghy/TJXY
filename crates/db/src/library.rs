@@ -775,18 +775,18 @@ impl<'connection> LibraryRepository<'connection> {
         let next_version = expected_version
             .checked_add(1)
             .ok_or(LibraryRepositoryError::InvalidProfileVersion)?;
-        let (stored_source_mode, stored_access_mode, has_non_filesystem_root) =
-            self.metadata_mode_context(library_id).await?;
+        let transaction = self.database.begin().await?;
+        let context = metadata_mode_context(&transaction, library_id).await?;
         let effective_source_mode = update
             .metadata_source_mode
             .as_deref()
-            .unwrap_or(&stored_source_mode);
+            .unwrap_or(&context.source_mode);
         let effective_access_mode = update
             .local_metadata_access_mode
             .as_deref()
-            .unwrap_or(&stored_access_mode);
+            .unwrap_or(&context.access_mode);
         validate_metadata_modes(effective_source_mode, effective_access_mode)?;
-        if is_direct_mode(effective_access_mode) && has_non_filesystem_root {
+        if is_direct_mode(effective_access_mode) && context.has_non_filesystem_root {
             return Err(LibraryRepositoryError::DirectRequiresFilesystemRoot);
         }
         let mut statement = Query::update();
@@ -817,14 +817,23 @@ impl<'connection> LibraryRepository<'connection> {
             statement.value(Alias::new("local_metadata_access_mode"), mode);
         }
         let statement = statement.clone();
-        let backend = self.database.get_database_backend();
-        if self
-            .database
+        let backend = transaction.get_database_backend();
+        if transaction
             .execute(backend.build(&statement))
             .await?
             .rows_affected()
             == 1
         {
+            let metadata_inputs_changed = context.metadata_policy != update.metadata_policy
+                || context.source_mode != effective_source_mode
+                || context.access_mode != effective_access_mode
+                || context.is_enabled != update.is_enabled;
+            if metadata_inputs_changed
+                && (context.metadata_policy != "none" || update.metadata_policy != "none")
+            {
+                crate::metadata::invalidate_metadata_for_library(&transaction, library_id).await?;
+            }
+            transaction.commit().await?;
             return Ok(next_version);
         }
         let exists = Query::select()
@@ -833,8 +842,7 @@ impl<'connection> LibraryRepository<'connection> {
             .and_where(Expr::col(Alias::new("id")).eq(library_id.as_uuid()))
             .limit(1)
             .to_owned();
-        if self
-            .database
+        if transaction
             .query_one(backend.build(&exists))
             .await?
             .is_some()
@@ -844,68 +852,87 @@ impl<'connection> LibraryRepository<'connection> {
             Err(LibraryRepositoryError::NotFound)
         }
     }
+}
 
-    async fn metadata_mode_context(
-        &self,
-        library_id: LibraryId,
-    ) -> Result<(String, String, bool), LibraryRepositoryError> {
-        let library = Alias::new("mode_library");
-        let mapping = Alias::new("mode_mapping");
-        let root = Alias::new("mode_root");
-        let account = Alias::new("mode_account");
-        let backend = self.database.get_database_backend();
-        let rows = self
-            .database
-            .query_all(
-                backend.build(
-                    Query::select()
-                        .expr_as(
-                            Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
-                            Alias::new("metadata_source_mode"),
-                        )
-                        .expr_as(
-                            Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
-                            Alias::new("local_metadata_access_mode"),
-                        )
-                        .expr_as(
-                            Expr::col((account.clone(), Alias::new("provider"))),
-                            Alias::new("provider"),
-                        )
-                        .from_as(Alias::new("libraries"), library.clone())
-                        .join_as(
-                            JoinType::LeftJoin,
-                            Alias::new("library_storage_roots"),
-                            mapping.clone(),
-                            Expr::col((mapping.clone(), Alias::new("library_id")))
-                                .equals((library.clone(), Alias::new("id"))),
-                        )
-                        .join_as(
-                            JoinType::LeftJoin,
-                            Alias::new("storage_roots"),
-                            root.clone(),
-                            Expr::col((root.clone(), Alias::new("id")))
-                                .equals((mapping, Alias::new("storage_root_id"))),
-                        )
-                        .join_as(
-                            JoinType::LeftJoin,
-                            Alias::new("storage_accounts"),
-                            account.clone(),
-                            Expr::col((account.clone(), Alias::new("id")))
-                                .equals((root, Alias::new("storage_account_id"))),
-                        )
-                        .and_where(Expr::col((library, Alias::new("id"))).eq(library_id.as_uuid())),
-                ),
-            )
-            .await?;
-        let first = rows.first().ok_or(LibraryRepositoryError::NotFound)?;
-        let source = first.try_get("", "metadata_source_mode")?;
-        let access = first.try_get("", "local_metadata_access_mode")?;
-        let has_non_filesystem = rows.iter().try_fold(false, |found, row| {
-            let provider = row.try_get::<Option<String>>("", "provider")?;
-            Ok::<_, DbErr>(found || provider.is_some_and(|value| value != "filesystem"))
-        })?;
-        Ok((source, access, has_non_filesystem))
-    }
+struct MetadataModeContext {
+    metadata_policy: String,
+    source_mode: String,
+    access_mode: String,
+    is_enabled: bool,
+    has_non_filesystem_root: bool,
+}
+
+async fn metadata_mode_context(
+    connection: &impl ConnectionTrait,
+    library_id: LibraryId,
+) -> Result<MetadataModeContext, LibraryRepositoryError> {
+    let library = Alias::new("mode_library");
+    let mapping = Alias::new("mode_mapping");
+    let root = Alias::new("mode_root");
+    let account = Alias::new("mode_account");
+    let backend = connection.get_database_backend();
+    let rows = connection
+        .query_all(
+            backend.build(
+                Query::select()
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("metadata_policy"))),
+                        Alias::new("metadata_policy"),
+                    )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("metadata_source_mode"))),
+                        Alias::new("metadata_source_mode"),
+                    )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("local_metadata_access_mode"))),
+                        Alias::new("local_metadata_access_mode"),
+                    )
+                    .expr_as(
+                        Expr::col((library.clone(), Alias::new("is_enabled"))),
+                        Alias::new("is_enabled"),
+                    )
+                    .expr_as(
+                        Expr::col((account.clone(), Alias::new("provider"))),
+                        Alias::new("provider"),
+                    )
+                    .from_as(Alias::new("libraries"), library.clone())
+                    .join_as(
+                        JoinType::LeftJoin,
+                        Alias::new("library_storage_roots"),
+                        mapping.clone(),
+                        Expr::col((mapping.clone(), Alias::new("library_id")))
+                            .equals((library.clone(), Alias::new("id"))),
+                    )
+                    .join_as(
+                        JoinType::LeftJoin,
+                        Alias::new("storage_roots"),
+                        root.clone(),
+                        Expr::col((root.clone(), Alias::new("id")))
+                            .equals((mapping, Alias::new("storage_root_id"))),
+                    )
+                    .join_as(
+                        JoinType::LeftJoin,
+                        Alias::new("storage_accounts"),
+                        account.clone(),
+                        Expr::col((account.clone(), Alias::new("id")))
+                            .equals((root, Alias::new("storage_account_id"))),
+                    )
+                    .and_where(Expr::col((library, Alias::new("id"))).eq(library_id.as_uuid())),
+            ),
+        )
+        .await?;
+    let first = rows.first().ok_or(LibraryRepositoryError::NotFound)?;
+    let has_non_filesystem_root = rows.iter().try_fold(false, |found, row| {
+        let provider = row.try_get::<Option<String>>("", "provider")?;
+        Ok::<_, DbErr>(found || provider.is_some_and(|value| value != "filesystem"))
+    })?;
+    Ok(MetadataModeContext {
+        metadata_policy: first.try_get("", "metadata_policy")?,
+        source_mode: first.try_get("", "metadata_source_mode")?,
+        access_mode: first.try_get("", "local_metadata_access_mode")?,
+        is_enabled: first.try_get("", "is_enabled")?,
+        has_non_filesystem_root,
+    })
 }
 
 struct BoundFilesystemRoot {

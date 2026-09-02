@@ -145,7 +145,7 @@ export function LibraryPage() {
 
       {!page ? <LibrarySkeleton /> : page.Items.length ? (
         <>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-4 lg:grid-cols-6">{page.Items.map((item) => <MediaTile item={item} key={item.Id} />)}</div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-4 lg:grid-cols-6">{page.Items.map((item) => <MediaTile item={item} key={item.Id} libraryId={id} />)}</div>
           <div className="flex justify-center">
             <Pagination aria-label={tr('Library pagination', '媒体库分页')}>
               <Pagination.Content>

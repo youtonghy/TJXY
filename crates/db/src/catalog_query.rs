@@ -933,12 +933,13 @@ impl LazyCatalogWorkTarget {
     #[must_use]
     pub fn should_retry_metadata(self) -> bool {
         self.metadata_requirement.is_some_and(|requirement| {
-            if self.local_metadata_access_mode.imports_metadata() {
-                (self.metadata_is_partial || self.requires_metadata_payload_upgrade())
-                    && matches!(
-                        self.metadata_source_mode,
-                        MetadataSourceMode::AutomaticScrape
-                    )
+            if self.local_metadata_access_mode.imports_metadata()
+                && matches!(
+                    self.metadata_source_mode,
+                    MetadataSourceMode::AutomaticScrape
+                )
+            {
+                self.needs_metadata_resolution(requirement) || self.metadata_is_partial
             } else {
                 self.needs_metadata_resolution(requirement)
             }
@@ -1201,7 +1202,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
             )
             .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(id))
             .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
-            .and_where(Expr::col((item, Alias::new("classification_state"))).eq("Matched"))
+            .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
             .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
             .limit(1)
             .to_owned();
@@ -2485,6 +2486,34 @@ impl<'connection> CatalogQueryRepository<'connection> {
         image_type: ImageType,
         priority: u32,
     ) -> Result<Option<AssetRecord>, CatalogQueryError> {
+        self.image_with_library(item_id, image_type, priority, None)
+            .await
+    }
+
+    /// Resolves an imported image only when the selected enabled library imports images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn image_in_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: u32,
+        library_id: tjxy_common::LibraryId,
+    ) -> Result<Option<AssetRecord>, CatalogQueryError> {
+        self.image_with_library(item_id, image_type, priority, Some(library_id))
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // Imported image selection and library visibility form one read model.
+    async fn image_with_library(
+        &self,
+        item_id: CatalogItemId,
+        image_type: ImageType,
+        priority: u32,
+        library_id: Option<tjxy_common::LibraryId>,
+    ) -> Result<Option<AssetRecord>, CatalogQueryError> {
         let priority = i32::try_from(priority).map_err(|_| CatalogQueryError::InvalidPriority)?;
         let item = Alias::new("item");
         let asset = Alias::new("asset");
@@ -2519,7 +2548,7 @@ impl<'connection> CatalogQueryRepository<'connection> {
             )
             .and_where(Expr::col((item.clone(), Alias::new("id"))).eq(item_id.as_uuid()))
             .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
-            .and_where(Expr::col((item, Alias::new("classification_state"))).eq("Matched"))
+            .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
             .and_where(Expr::col((asset.clone(), Alias::new("image_type"))).eq(image_type.as_str()))
             .and_where(Expr::col((asset, Alias::new("priority"))).eq(priority))
             .cond_where(
@@ -2545,6 +2574,41 @@ impl<'connection> CatalogQueryRepository<'connection> {
             Expr::col((storage_root, Alias::new("canonical_path"))),
             Alias::new("storage_root_path"),
         );
+        if let Some(library_id) = library_id {
+            let membership = Alias::new("image_policy_membership");
+            let library = Alias::new("image_policy_library");
+            let imports_images = Query::select()
+                .expr(Expr::val(1_i32))
+                .from_as(Alias::new("library_catalog_items"), membership.clone())
+                .join_as(
+                    JoinType::InnerJoin,
+                    Alias::new("libraries"),
+                    library.clone(),
+                    Expr::col((library.clone(), Alias::new("id")))
+                        .equals((membership.clone(), Alias::new("library_id"))),
+                )
+                .and_where(Expr::col((library.clone(), Alias::new("id"))).eq(library_id.as_uuid()))
+                .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
+                .and_where(
+                    Expr::col((library, Alias::new("local_metadata_access_mode")))
+                        .is_in(["import", "import_images_only"]),
+                )
+                .and_where(
+                    Condition::any()
+                        .add(
+                            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                                .equals((item.clone(), Alias::new("id"))),
+                        )
+                        .add(
+                            Expr::col((membership, Alias::new("catalog_item_id")))
+                                .equals((item, Alias::new("structure_owner_item_id"))),
+                        )
+                        .into(),
+                )
+                .limit(1)
+                .to_owned();
+            query.and_where(Expr::exists(imports_images));
+        }
         let backend = self.database.get_database_backend();
         self.database
             .query_one(backend.build(&query))

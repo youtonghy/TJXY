@@ -49,9 +49,9 @@ beforeEach(() => {
   });
 });
 
-function renderPlayer() {
+function renderPlayer(initialEntry = '/app/play/movie-1') {
   return render(
-    <MemoryRouter initialEntries={['/app/play/movie-1']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route element={<PlayerPage />} path="/app/play/:id" />
       </Routes>
@@ -75,6 +75,20 @@ it('shows a neutral no-source state without requesting playback', async () => {
   expect(document.querySelector('video')).toBeNull();
   expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
   expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+});
+
+it('keeps library context on the back-to-details link', async () => {
+  catalog.getItem.mockResolvedValue({
+    Id: 'movie-1',
+    Name: 'Arrival',
+    Type: 'Movie',
+    HasMediaSources: false,
+  });
+
+  renderPlayer('/app/play/movie-1?libraryId=library-1');
+
+  expect(await screen.findByRole('link', { name: 'Back to details' }))
+    .toHaveAttribute('href', '/app/items/movie-1?libraryId=library-1');
 });
 
 it('switches sources, loads subtitles, and reports the playback lifecycle', async () => {

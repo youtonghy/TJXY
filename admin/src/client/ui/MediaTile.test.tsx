@@ -4,7 +4,9 @@ import type { MediaItem } from '../api/catalogApi';
 import { MediaTile } from './MediaTile';
 
 vi.mock('./MediaImage', () => ({
-  MediaImage: ({ alt }: { alt: string }) => <div aria-label={alt} role="img" />,
+  MediaImage: ({ alt, libraryId }: { alt: string; libraryId?: string }) => (
+    <div aria-label={alt} data-library-id={libraryId} role="img" />
+  ),
 }));
 
 it('shows a progress ring and favorite heart for a partially watched favorite', () => {
@@ -58,6 +60,22 @@ it('supports a context-specific destination without changing the default item li
     </MemoryRouter>,
   );
   expect(screen.getByRole('link', { name: /Example Movie/ })).toHaveAttribute('href', '/app/items/movie-1');
+});
+
+it('keeps the selected library on the poster request and default item link', () => {
+  render(
+    <MemoryRouter>
+      <MediaTile
+        item={{ Id: 'movie-1', Name: 'Example Movie', Type: 'Movie' }}
+        libraryId="library-1"
+      />
+    </MemoryRouter>,
+  );
+
+  expect(screen.getByRole('img', { name: 'Poster for Example Movie' }))
+    .toHaveAttribute('data-library-id', 'library-1');
+  expect(screen.getByRole('link', { name: /Example Movie/ }))
+    .toHaveAttribute('href', '/app/items/movie-1?libraryId=library-1');
 });
 
 it('uses square artwork for audio while preserving portrait movie posters', () => {
