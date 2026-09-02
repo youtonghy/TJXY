@@ -35,6 +35,8 @@ use uuid::Uuid;
 use crate::socket::RealtimeEvents;
 
 const LEASE_DURATION: Duration = Duration::minutes(5);
+const WORK_LEASE_RECOVERY_INTERVAL: StdDuration = StdDuration::from_secs(15);
+const LEASE_RENEW_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const IMPORT_LEASE_DURATION: Duration = Duration::minutes(5);
 const FILESYSTEM_EVENT_PRIORITY: i32 = 90;
 const FILESYSTEM_EVENT_QUIET_WINDOW: StdDuration = StdDuration::from_millis(500);
@@ -325,6 +327,25 @@ pub(crate) fn spawn_queue_maintenance_worker(database: DatabaseConnection) {
                 }
             };
             tokio::time::sleep(delay).await;
+        }
+    });
+}
+
+pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection) {
+    tokio::spawn(async move {
+        let repository = WorkJobRepository::new(&database);
+        let mut schedule = tokio::time::interval(WORK_LEASE_RECOVERY_INTERVAL);
+        schedule.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        schedule.tick().await;
+        loop {
+            schedule.tick().await;
+            match repository.reclaim_expired_leases().await {
+                Ok(reclaimed) if reclaimed > 0 => {
+                    tracing::warn!(reclaimed, "Requeued work jobs with expired leases");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!("Work lease recovery failed: {error}"),
+            }
         }
     });
 }
@@ -706,7 +727,12 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
                     tokio::select! {
                         result = &mut execution => break result,
                         _ = renewal.tick() => {
-                            if jobs.renew(&claimed, LEASE_DURATION).await.is_err() {
+                            let renewed = tokio::time::timeout(
+                                LEASE_RENEW_TIMEOUT,
+                                jobs.renew(&claimed, LEASE_DURATION),
+                            )
+                            .await;
+                            if !matches!(renewed, Ok(Ok(()))) {
                                 break Err(FullScanError::Work(
                                     WorkJobRepositoryError::LostLease,
                                 ));
@@ -754,8 +780,8 @@ fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration 
     if matches!(error, FullScanError::ChildrenPending { .. }) {
         let exponent = u32::try_from(attempt_count.saturating_sub(1))
             .unwrap_or_default()
-            .min(4);
-        return Duration::seconds((2_i64 * (1_i64 << exponent)).min(5));
+            .min(5);
+        return Duration::seconds((2_i64 * (1_i64 << exponent)).min(60));
     }
     storage_backoff(attempt_count)
 }
@@ -1053,7 +1079,12 @@ async fn run_storage_worker<Backend>(
                     tokio::select! {
                         result = &mut execution => break result,
                         _ = renewal.tick() => {
-                            if jobs.renew(&claimed, LEASE_DURATION).await.is_err() {
+                            let renewed = tokio::time::timeout(
+                                LEASE_RENEW_TIMEOUT,
+                                jobs.renew(&claimed, LEASE_DURATION),
+                            )
+                            .await;
+                            if !matches!(renewed, Ok(Ok(()))) {
                                 break Err(StorageWorkerError::LostLease);
                             }
                         }
@@ -1478,12 +1509,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_full_scan_children_back_off_to_five_seconds() {
+    fn pending_full_scan_children_back_off_to_one_minute() {
         let error = tjxy_application::FullScanError::ChildrenPending { scheduled: 1 };
 
         assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 5);
-        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 5);
+        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 16);
+        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 60);
     }
 
     #[test]

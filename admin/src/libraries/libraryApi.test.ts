@@ -48,6 +48,36 @@ it('creates a library from an absolute filesystem path and metadata source mode'
   );
 });
 
+it('creates a library from a direct filesystem path', async () => {
+  requestMock.mockResolvedValue(undefined);
+
+  await createLibrary({
+    name: 'Family Movies',
+    collectionType: 'movies',
+    enabled: true,
+    scanProfile: 'Lazy',
+    metadataSourceMode: 'automatic_scrape',
+    localMetadataAccessMode: 'import',
+    path: '/srv/media/Movies',
+  });
+
+  expect(requestMock).toHaveBeenCalledWith(
+    '/Library/VirtualFolders?name=Family+Movies&collectionType=movies&refreshLibrary=false',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        LibraryOptions: {
+          Enabled: true,
+          ScanProfile: 'Lazy',
+          MetadataSourceMode: 'automatic_scrape',
+          LocalMetadataAccessMode: 'import',
+        },
+        Path: '/srv/media/Movies',
+      }),
+    },
+  );
+});
+
 it('defaults a missing metadata source mode from an older server to automatic scrape', async () => {
   requestMock.mockResolvedValueOnce([{
     ItemId: 'library-1',

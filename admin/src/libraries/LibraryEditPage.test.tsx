@@ -254,16 +254,17 @@ it('sends all advanced policy values as one versioned update', async () => {
   });
 });
 
-it('attaches a folder selected through the server folder picker', async () => {
+it('attaches a folder entered as a direct server path', async () => {
   renderEdit();
   const user = userEvent.setup();
   await loadedNameInput();
 
   await user.click(screen.getByRole('button', { name: 'Add folder' }));
-  await user.click(screen.getByRole('button', { name: 'Choose media fixture' }));
+  await user.type(screen.getByRole('textbox', { name: 'Server path' }), '/srv/media/Movies');
+  await user.click(screen.getByRole('button', { name: 'Attach folder' }));
 
   await waitFor(() => {
-    expect(attachMock).toHaveBeenCalledWith(libraryId, { rootId: 'root-2', relativePath: 'Movies' });
+    expect(attachMock).toHaveBeenCalledWith(libraryId, '/srv/media/Movies');
   });
 });
 

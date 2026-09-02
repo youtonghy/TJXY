@@ -837,6 +837,20 @@ where
         finish(transaction, result).await
     }
 
+    /// Requeues running jobs whose lease has expired or was left incomplete.
+    ///
+    /// The transition is independent of task kind so a missing worker cannot strand an active
+    /// natural key. The previous worker remains fenced by its lease token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkJobRepositoryError`] for database failures.
+    pub async fn reclaim_expired_leases(&self) -> Result<u64, WorkJobRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = reclaim_expired_leases(&transaction, self.now()).await;
+        finish(transaction, result).await
+    }
+
     /// Atomically skips already-published lazy work or enqueues/joins its natural key.
     ///
     /// The item revision row is locked before the active publication check, closing
@@ -1746,6 +1760,41 @@ async fn retire_stale_discoveries(
     Ok(retired)
 }
 
+async fn reclaim_expired_leases(
+    transaction: &DatabaseTransaction,
+    now: DateTime<Utc>,
+) -> Result<u64, WorkJobRepositoryError> {
+    let backend = transaction.get_database_backend();
+    let mut update = Query::update();
+    update
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("state"), STATE_PENDING)
+        .value(Alias::new("available_at"), now)
+        .value(Alias::new("lease_owner"), Option::<String>::None)
+        .value(
+            Alias::new("lease_expires_at"),
+            Option::<DateTime<Utc>>::None,
+        )
+        .value(
+            Alias::new("last_error"),
+            "previous lease expired; work was requeued",
+        )
+        .and_where(Expr::col(Alias::new("state")).eq(STATE_RUNNING))
+        .cond_where(
+            Cond::any()
+                .add(Expr::col(Alias::new("lease_expires_at")).is_null())
+                .add(Expr::col(Alias::new("lease_expires_at")).lte(now)),
+        );
+    if backend == sea_orm::DbBackend::MySql {
+        update.value(Alias::new("active_slot"), Option::<String>::None);
+    }
+    let update = update.to_owned();
+    Ok(transaction
+        .execute(backend.build(&update))
+        .await?
+        .rows_affected())
+}
+
 async fn cancel_job(
     transaction: &DatabaseTransaction,
     job_id: WorkJobId,
@@ -1836,6 +1885,7 @@ async fn enqueue_or_join(
     now: DateTime<Utc>,
 ) -> Result<WorkJobSubmission, WorkJobRepositoryError> {
     let now = mysql_compatible_timestamp(transaction.get_database_backend(), now);
+    reclaim_expired_leases(transaction, now).await?;
     if let Some(dependency) = spec.required_sync_job_id {
         let backend = transaction.get_database_backend();
         let dependency = transaction
@@ -2060,6 +2110,7 @@ async fn claim_next(
     let backend = transaction.get_database_backend();
     let now = mysql_compatible_timestamp(backend, now);
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
+    reclaim_expired_leases(transaction, now).await?;
     fail_terminal_dependents(transaction, accepted_kinds, now).await?;
     for _ in 0..8 {
         let Some(row) = transaction
@@ -2924,7 +2975,11 @@ fn claimable_condition_for(table: &Alias, now: DateTime<Utc>) -> Cond {
         .add(
             Cond::all()
                 .add(Expr::col((table.clone(), Alias::new("state"))).eq(STATE_RUNNING))
-                .add(Expr::col((table.clone(), Alias::new("lease_expires_at"))).lte(now)),
+                .add(
+                    Cond::any()
+                        .add(Expr::col((table.clone(), Alias::new("lease_expires_at"))).is_null())
+                        .add(Expr::col((table.clone(), Alias::new("lease_expires_at"))).lte(now)),
+                ),
         )
 }
 

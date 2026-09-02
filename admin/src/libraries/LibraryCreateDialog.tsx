@@ -114,13 +114,18 @@ export function LibraryCreateDialog({
                 />
                 <TextField fullWidth isRequired name="mediaPath">
                   <Label>{tr('Media folder', '媒体文件夹')}</Label>
-                  <Input
-                    disabled={isPending}
-                    maxLength={4096}
-                    onChange={(event) => { setPath(event.currentTarget.value); }}
-                    placeholder="/mnt/media"
-                    value={path}
-                  />
+                  <div className="flex min-w-0 gap-2">
+                    <Input
+                      className="min-w-0 flex-1"
+                      disabled={isPending}
+                      maxLength={4096}
+                      onChange={(event) => {
+                        setPath(event.currentTarget.value);
+                      }}
+                      placeholder={tr('/mnt/media or choose a server folder', '/mnt/media 或选择服务器文件夹')}
+                      value={path}
+                    />
+                  </div>
                 </TextField>
                 <RadioGroup
                   isDisabled={isPending}

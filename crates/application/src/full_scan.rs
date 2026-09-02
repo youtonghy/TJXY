@@ -44,6 +44,9 @@ impl FullScanService {
         let jobs = WorkJobRepository::new(&self.database);
         let publications = CatalogPublicationRepository::new(&self.database);
         let principal = UserId::new();
+        // A staged child can outlive the worker that claimed it. Requeue expired children before
+        // interpreting their state so the parent never waits forever on a dead lease.
+        jobs.reclaim_expired_leases().await?;
         let mut scheduled = self
             .schedule_root_prerequisites(claimed, &jobs, &policy)
             .await?;

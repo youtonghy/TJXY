@@ -678,6 +678,112 @@ async fn expired_claim_is_fenced_after_another_worker_takes_over() {
 }
 
 #[tokio::test]
+async fn expired_leases_are_reclaimed_without_consuming_an_attempt() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 7, 18, 10, 15, 0).unwrap();
+    let (repository, clock) = repository(&database, now);
+    let submitted = repository
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                80,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let stale = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "stale-worker",
+            Duration::seconds(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.attempt_count(), 1);
+
+    clock.set(now + Duration::seconds(6));
+    assert_eq!(repository.reclaim_expired_leases().await.unwrap(), 1);
+    let requeued = repository.get(submitted.job().id()).await.unwrap().unwrap();
+    assert_eq!(requeued.state(), WorkJobState::Pending);
+    assert_eq!(requeued.attempt_count(), 1);
+
+    let current = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "current-worker",
+            Duration::seconds(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.attempt_count(), 2);
+    assert!(matches!(
+        repository.renew(&stale, Duration::seconds(5)).await,
+        Err(WorkJobRepositoryError::LostLease)
+    ));
+    complete(&repository, &database, &current).await;
+}
+
+#[tokio::test]
+async fn running_jobs_with_null_expiry_are_reclaimed() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 7, 18, 10, 20, 0).unwrap();
+    let (repository, _) = repository(&database, now);
+    let submitted = repository
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                80,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "worker",
+            Duration::seconds(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                &Query::update()
+                    .table(Alias::new("work_jobs"))
+                    .value(
+                        Alias::new("lease_expires_at"),
+                        Option::<chrono::DateTime<Utc>>::None,
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(claimed.id().as_uuid()))
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(repository.reclaim_expired_leases().await.unwrap(), 1);
+    assert_eq!(
+        repository
+            .get(submitted.job().id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkJobState::Pending
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keeps the pending-sync lifecycle and revision capture in one contract.
 async fn media_job_waits_durably_for_pending_sync_and_captures_its_committed_revision() {
     let database = database().await;

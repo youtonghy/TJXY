@@ -5,7 +5,6 @@ export interface EnvironmentOverrides {
   siteTitle: boolean;
   publicUrl: boolean;
   listenAddress: boolean;
-  mediaBrowserRoots: boolean;
 }
 
 export interface PublicSiteThemeSettings {
@@ -24,8 +23,6 @@ export interface SystemSettings {
   publicUrl: string;
   listenHost: string;
   port: number;
-  mediaBrowserRoots: string[];
-  invalidMediaBrowserRootIndexes: number[];
   passkeyEnabled: boolean;
   revision: number;
   restartRequired: boolean;
@@ -35,7 +32,7 @@ export interface SystemSettings {
 
 export type SaveSystemSettings = Omit<
   SystemSettings,
-  'restartRequired' | 'environmentOverrides' | 'invalidMediaBrowserRootIndexes' | 'theme'
+  'restartRequired' | 'environmentOverrides' | 'theme'
 >;
 type SettingsResponse = Record<string, unknown>;
 
@@ -66,7 +63,6 @@ export async function saveSystemSettings(settings: SaveSystemSettings): Promise<
       PublicUrl: settings.publicUrl.trim() || null,
       ListenHost: settings.listenHost,
       Port: settings.port,
-      MediaBrowserRoots: settings.mediaBrowserRoots,
       PasskeyEnabled: settings.passkeyEnabled,
       ...(settings.revision > 0 ? { Revision: settings.revision } : {}),
     }),
@@ -111,8 +107,6 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     publicUrl: typeof value.PublicUrl === 'string' ? value.PublicUrl : '',
     listenHost: admin ? stringValue(value.ListenHost) ?? '127.0.0.1' : '127.0.0.1',
     port: admin ? numberValue(value.Port) ?? 8096 : 8096,
-    mediaBrowserRoots: admin ? stringArray(value.MediaBrowserRoots) : [],
-    invalidMediaBrowserRootIndexes: admin ? nonNegativeIntegerArray(value.InvalidMediaBrowserRootIndexes) : [],
     passkeyEnabled: value.PasskeyEnabled === true,
     revision,
     restartRequired: value.RestartRequired === true,
@@ -122,7 +116,6 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
         siteTitle: false,
         publicUrl: false,
         listenAddress: false,
-        mediaBrowserRoots: false,
       },
     theme,
   };
@@ -163,13 +156,5 @@ function isOverrides(value: unknown): value is EnvironmentOverrides {
   const candidate = value as Record<string, unknown>;
   return typeof candidate.siteTitle === 'boolean'
     && typeof candidate.publicUrl === 'boolean'
-    && typeof candidate.listenAddress === 'boolean'
-    && typeof candidate.mediaBrowserRoots === 'boolean';
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : [];
-}
-function nonNegativeIntegerArray(value: unknown): number[] {
-  return Array.isArray(value) && value.every((item) => Number.isSafeInteger(item) && item >= 0) ? value as number[] : [];
+    && typeof candidate.listenAddress === 'boolean';
 }

@@ -566,10 +566,20 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         .active_filesystem_roots()
         .await?
     {
-        if filesystem_backends
-            .iter()
-            .all(|backend| backend.account_id != configured.account_id())
+        if let Some(backend) = filesystem_backends
+            .iter_mut()
+            .find(|backend| backend.account_id == configured.account_id())
         {
+            // Environment-provided roots may omit persistence identity. Fill the durable
+            // root/object ids so remount detection and validation are still scheduled.
+            if backend.storage_root_id.is_none() {
+                backend.storage_root_id = Some(configured.root_id());
+            }
+            if backend.persisted_provider_object_id.is_none() {
+                backend.persisted_provider_object_id =
+                    Some(configured.provider_object_id().to_owned());
+            }
+        } else {
             filesystem_backends.push(FilesystemBackendConfiguration {
                 account_id: configured.account_id(),
                 storage_root_id: Some(configured.root_id()),
@@ -695,6 +705,20 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     );
     worker::spawn_storage_change_reconciler(database.clone());
     worker::spawn_queue_maintenance_worker(database.clone());
+    match tjxy_db::WorkJobRepository::new(&database)
+        .reclaim_expired_leases()
+        .await
+    {
+        Ok(reclaimed) if reclaimed > 0 => {
+            tracing::warn!(reclaimed, "Requeued expired work leases during startup")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "Could not reclaim expired work leases during startup"
+        ),
+    }
+    worker::spawn_work_lease_recovery_worker(database.clone());
     worker::spawn_auth_session_retention_worker(database.clone());
     match tjxy_db::WorkJobRepository::new(&database)
         .retire_stale_discoveries()

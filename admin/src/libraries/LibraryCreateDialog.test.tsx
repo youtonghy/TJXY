@@ -53,6 +53,23 @@ it('creates a music library from the content type selector', async () => {
   }));
 });
 
+it('submits a directly entered media path', async () => {
+  const onCreate = vi.fn().mockResolvedValue(true);
+  const user = userEvent.setup();
+  render(
+    <LibraryCreateDialog isOpen isPending={false} onClose={vi.fn()} onCreate={onCreate} />,
+  );
+
+  await user.type(screen.getByRole('textbox', { name: 'Library name' }), 'Shows');
+  await user.type(screen.getByRole('textbox', { name: 'Media folder' }), '/srv/media/Movies');
+  await user.click(screen.getByRole('button', { name: 'Create library' }));
+
+  expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+    name: 'Shows',
+    path: '/srv/media/Movies',
+  }));
+});
+
 it('preserves all input after failure and exposes HeroUI pending semantics', async () => {
   const onCreate = vi.fn().mockResolvedValue(false);
   const onClose = vi.fn();

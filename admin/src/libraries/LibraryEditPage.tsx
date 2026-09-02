@@ -2,6 +2,7 @@ import {
   Button,
   Input,
   Label,
+  Modal,
   Skeleton,
   TextField,
   Tooltip,
@@ -24,8 +25,6 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { PageHeader } from '../ui/PageHeader';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import { attachFilesystemFolder } from './filesystemApi';
-import type { FilesystemSelection } from './filesystemApi';
-import { FolderPickerDialog } from './FolderPickerDialog';
 import type {
   EffectiveLibraryPolicy,
   LibraryOption,
@@ -71,6 +70,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
   const [deletePending, setDeletePending] = useState(false);
   const [attachPending, setAttachPending] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [folderPath, setFolderPath] = useState('');
   const renameRef = useRef(false);
   const policyRef = useRef(false);
   const deleteRef = useRef(false);
@@ -177,14 +177,17 @@ function LibraryEditPageContent({ id }: { id: string }) {
     }
   };
 
-  const attachFolder = async (selection: FilesystemSelection) => {
+  const attachFolder = async () => {
     if (library === null || attachPending) return;
+    const path = folderPath.trim();
+    if (!path) return;
     setAttachPending(true);
     try {
-      await attachFilesystemFolder(library.id, selection);
+      await attachFilesystemFolder(library.id, path);
       if (!isMounted()) return;
       notify('Media folder attached.', { type: 'success' });
       setFolderPickerOpen(false);
+      setFolderPath('');
       reloadAll();
     } catch (error: unknown) {
       if (!isMounted()) return;
@@ -292,7 +295,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
             <StorageFoldersSection
               isPending={attachPending}
               library={library}
-              onBrowse={() => { setFolderPickerOpen(true); }}
+              onOpen={() => { setFolderPickerOpen(true); }}
             />
             <DangerZone
               isDisabled={renamePending || policyPending}
@@ -303,12 +306,24 @@ function LibraryEditPageContent({ id }: { id: string }) {
           </div>
         )}
       </AsyncContent>
-      <FolderPickerDialog
-        isDisabled={attachPending}
-        isOpen={folderPickerOpen}
-        onClose={() => { setFolderPickerOpen(false); }}
-        onSelect={(selection) => { void attachFolder(selection); }}
-      />
+      <Modal isOpen={folderPickerOpen} onOpenChange={(open) => { if (!open && !attachPending) setFolderPickerOpen(false); }}>
+        <Modal.Backdrop isDismissable={!attachPending} isKeyboardDismissDisabled={attachPending}>
+          <Modal.Container size="sm"><Modal.Dialog>
+            <Modal.CloseTrigger aria-label="Close" isDisabled={attachPending} />
+            <Modal.Header><Modal.Heading>Add media folder</Modal.Heading></Modal.Header>
+            <Modal.Body>
+              <TextField fullWidth isRequired>
+                <Label>Server path</Label>
+                <Input autoFocus maxLength={4096} placeholder="/mnt/media" value={folderPath} onChange={(event) => { setFolderPath(event.currentTarget.value); }} />
+              </TextField>
+            </Modal.Body>
+            <Modal.Footer>
+              <Button isDisabled={attachPending} onPress={() => { setFolderPickerOpen(false); }} variant="tertiary">Cancel</Button>
+              <Button isDisabled={!folderPath.trim()} isPending={attachPending} onPress={() => { void attachFolder(); }}>Attach folder</Button>
+            </Modal.Footer>
+          </Modal.Dialog></Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
     </div>
   );
 }
@@ -323,11 +338,11 @@ function resolveLocalMetadataAccessMode(importMetadata: boolean, importImages: b
 function StorageFoldersSection({
   isPending,
   library,
-  onBrowse,
+  onOpen,
 }: {
   isPending: boolean;
   library: LibraryOption;
-  onBrowse: () => void;
+  onOpen: () => void;
 }) {
   return (
     <section aria-labelledby="storage-folders-heading" className="space-y-5 border-t border-border py-7">
@@ -336,7 +351,7 @@ function StorageFoldersSection({
           <h2 className="text-base font-semibold text-foreground" id="storage-folders-heading">Media folders</h2>
           <p className="mt-1 text-sm text-muted">Attach server folders that contain this library's media.</p>
         </div>
-        <Button isPending={isPending} onPress={onBrowse} variant="secondary">
+        <Button isPending={isPending} onPress={onOpen} variant="secondary">
           {isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <FolderPlus aria-hidden="true" className="size-4" />}
           Add folder
         </Button>

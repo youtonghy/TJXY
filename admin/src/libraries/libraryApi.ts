@@ -30,7 +30,7 @@ export interface CreateLibraryRequest {
   scanProfile: ScanProfile;
   metadataSourceMode: MetadataSourceMode;
   localMetadataAccessMode: LocalMetadataAccessMode;
-  path?: string;
+  path: string;
 }
 
 export interface EffectiveLibraryPolicy {
@@ -82,6 +82,7 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
     collectionType: request.collectionType,
     refreshLibrary: 'false',
   });
+  const location = { Path: requireText(request.path, 'A media path is required.') };
   await apiRequest(`/Library/VirtualFolders?${query.toString()}`, {
     method: 'POST',
     body: JSON.stringify({
@@ -91,7 +92,7 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
         MetadataSourceMode: request.metadataSourceMode,
         LocalMetadataAccessMode: request.localMetadataAccessMode,
       },
-      ...(request.path === undefined ? {} : { Path: requireText(request.path, 'A media path is required.') }),
+      ...location,
     }),
   });
 }

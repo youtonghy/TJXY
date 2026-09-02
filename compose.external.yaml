@@ -18,7 +18,6 @@ services:
       TJXY_LOG_DIR: /data/logs
       TJXY_WORK_HISTORY_RETENTION_ENABLED: ${TJXY_WORK_HISTORY_RETENTION_ENABLED:-true}
       TJXY_WORK_HISTORY_RETENTION_DAYS: ${TJXY_WORK_HISTORY_RETENTION_DAYS:-7}
-      TJXY_MEDIA_BROWSER_ROOTS: /media
     volumes:
       - "${TJXY_CONFIG_DIR:-./.tjxy/config}:/config"
       - "${TJXY_DATA_DIR:-./.tjxy/data}:/data"

@@ -460,7 +460,6 @@ where
         let root = Alias::new("inventory_target_root");
         let object = Alias::new("inventory_target_object");
         let account = Alias::new("inventory_target_account");
-        let enabled_binding = enabled_library_binding_for_root(&root, "inventory_target");
         let mut query = Query::select()
             .expr_as(
                 Expr::col((root.clone(), Alias::new("id"))),
@@ -519,8 +518,13 @@ where
                     .equals((account.clone(), Alias::new("id"))),
             )
             .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
-            .and_where(Expr::exists(enabled_binding))
             .to_owned();
+        if claimed.job().task_kind() != WorkTaskKind::ValidateStorageRoot {
+            query.and_where(Expr::exists(enabled_library_binding_for_root(
+                &root,
+                "inventory_target",
+            )));
+        }
         if let Some(root_id) = claimed.job().storage_root_affinity() {
             query.and_where(Expr::col((root.clone(), Alias::new("id"))).eq(root_id.as_uuid()));
         }
@@ -842,7 +846,6 @@ async fn storage_claim_authorizes_scope(
     let root = Alias::new("authorized_scope_root");
     let object = Alias::new("authorized_scope_object");
     let account = Alias::new("authorized_scope_account");
-    let enabled_binding = enabled_library_binding_for_root(&root, "authorized_scope");
     let query = Query::select()
         .expr_as(
             Expr::col((root.clone(), Alias::new("id"))),
@@ -884,10 +887,19 @@ async fn storage_claim_authorizes_scope(
                 .equals((account.clone(), Alias::new("id"))),
         )
         .and_where(Expr::col((account, Alias::new("status"))).eq("Active"))
-        .and_where(Expr::exists(enabled_binding))
-        .order_by((root, Alias::new("id")), sea_orm::sea_query::Order::Asc)
+        .order_by(
+            (root.clone(), Alias::new("id")),
+            sea_orm::sea_query::Order::Asc,
+        )
         .limit(2)
         .to_owned();
+    let mut query = query;
+    if claimed.job().task_kind() != WorkTaskKind::ValidateStorageRoot {
+        query.and_where(Expr::exists(enabled_library_binding_for_root(
+            &root,
+            "authorized_scope",
+        )));
+    }
     let backend = connection.get_database_backend();
     let roots = connection
         .query_all(backend.build(&query))

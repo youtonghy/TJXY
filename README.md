@@ -190,7 +190,9 @@ new version tag. The launcher pulls the image before recreating TJXY.
 Filesystem storage upgrades persist a root-scoped path-index state. When the mounted device or
 root inode changes, TJXY keeps the service healthy but returns `503 Service Unavailable` with
 `Retry-After: 5` for media under that root until one recursive validation and title publication
-complete. Do not restart the container repeatedly during this rebuild; progress logs include the
+complete. After a transient database outage, startup and the background maintainer reclaim expired
+work leases and requeue the jobs; recursive validation backs off while waiting for staged children
+instead of retrying at a fixed high frequency. Do not restart the container repeatedly during this rebuild; progress logs include the
 root, scanned directory/object counts, revision, and elapsed time. Obsolete title-discovery work is
 retired before workers start, and request handling never performs a recursive filesystem search.
 
