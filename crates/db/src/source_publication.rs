@@ -3,9 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{
-        Alias, CaseStatement, Cond, Expr, JoinType, OnConflict, Order, Query, SimpleExpr,
-    },
+    sea_query::{Alias, CaseStatement, Cond, Expr, JoinType, OnConflict, Order, Query, SimpleExpr},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -3232,9 +3230,7 @@ pub(crate) async fn playback_location(
             Expr::col((canonical_location.clone(), Alias::new("availability_state")))
                 .is_in(["Available", "TemporarilyUnavailable"]),
         )
-        .and_where(
-            Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"),
-        )
+        .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
         .cond_where(catalog_visibility)
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
@@ -3499,9 +3495,7 @@ async fn subtitle_location(
         )))
         .and_where(Expr::col((account, Alias::new("status"))).is_in(["Active", "Ready"]))
         .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
-        .and_where(
-            Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"),
-        )
+        .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"))
         .cond_where(catalog_visibility)
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
