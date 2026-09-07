@@ -3,6 +3,9 @@ import { FastForward } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { CinematicSceneController, CinematicSceneFactory } from './cinematicScene';
+import { getCinematicCaption, getCinematicTimelineFrame } from './cinematicTimeline';
+import type { CinematicPhase } from './cinematicTimeline';
+import './SetupCinematicIntro.css';
 
 type SetupLocale = 'zh-CN' | 'en-US';
 
@@ -21,6 +24,9 @@ export function SetupCinematicIntro({
   const controllerRef = useRef<CinematicSceneController | undefined>(undefined);
   const fallbackTimerRef = useRef<ReturnType<typeof window.setTimeout> | undefined>(undefined);
   const [fallback, setFallback] = useState(false);
+  const [phase, setPhase] = useState<CinematicPhase>('projector');
+  const phaseRef = useRef<CinematicPhase>('projector');
+  const caption = getCinematicCaption(phase, locale);
   const tr = (english: string, chinese: string) => locale === 'en-US' ? english : chinese;
 
   useEffect(() => { completeRef.current = onComplete; }, [onComplete]);
@@ -48,15 +54,28 @@ export function SetupCinematicIntro({
       setFallback(true);
       fallbackTimerRef.current = window.setTimeout(complete, 1_000);
     };
+    const cannotStart = () => cancelled || failureHandled || completedRef.current;
     const startScene = (factory: CinematicSceneFactory) => {
       if (cancelled || completedRef.current) return;
       try {
-        controllerRef.current = factory(canvas, {
+        const controller = factory(canvas, {
           onComplete: complete,
           onFailure: fail,
+          onFrame: (seconds) => {
+            if (cancelled || failureHandled || completedRef.current) return;
+            const nextPhase = getCinematicTimelineFrame(seconds * 1_000).phase;
+            if (phaseRef.current === nextPhase) return;
+            phaseRef.current = nextPhase;
+            setPhase(nextPhase);
+          },
           reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
         });
-        controllerRef.current.start();
+        if (cannotStart()) {
+          controller.dispose();
+          return;
+        }
+        controllerRef.current = controller;
+        controller.start();
       } catch {
         fail();
       }
@@ -78,14 +97,35 @@ export function SetupCinematicIntro({
   return (
     <section
       aria-label={tr('TJXY setup introduction', 'TJXY 安装开场动画')}
-      className="fixed inset-0 z-[100] min-h-dvh overflow-hidden bg-black text-white"
+      className="setup-cinematic fixed inset-0 z-[100] overflow-hidden text-white"
     >
-      <canvas
-        aria-hidden="true"
-        className="absolute inset-0 size-full touch-none"
-        data-testid="setup-cinematic-canvas"
-        ref={canvasRef}
-      />
+      {!fallback && (
+        <header className="setup-cinematic-header">
+          <span aria-hidden="true" className="setup-cinematic-mark">◉</span>
+          <span className="setup-cinematic-brand">TJXY</span>
+          <span className="setup-cinematic-header-label">{tr('A journey through light', '光影的旅程')}</span>
+        </header>
+      )}
+      <div className="setup-cinematic-stage">
+        <canvas
+          aria-hidden="true"
+          className="setup-cinematic-canvas touch-none"
+          data-testid="setup-cinematic-canvas"
+          ref={canvasRef}
+        />
+        {!fallback && (
+          <>
+            <div aria-hidden="true" className="setup-cinematic-vignette" />
+            <div aria-hidden="true" className="setup-cinematic-chapter">
+              <span>{caption.number}</span><span className="setup-cinematic-rule" /><span>{caption.year}</span>
+            </div>
+            <div aria-live="polite" className="setup-cinematic-caption">
+              <h1>{caption.title}</h1>
+              <p>{caption.subtitle}</p>
+            </div>
+          </>
+        )}
+      </div>
       {fallback && (
         <div
           className="absolute inset-0 flex flex-col items-center justify-center bg-black"

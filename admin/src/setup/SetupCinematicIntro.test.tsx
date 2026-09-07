@@ -106,3 +106,47 @@ it('falls back when a running scene loses its WebGL context', () => {
   expect(onComplete).toHaveBeenCalledOnce();
   vi.useRealTimers();
 });
+
+it('updates captions at chapter boundaries using the setup locale', () => {
+  const scene = createSceneFactory();
+  const { rerender } = render(<SetupCinematicIntro createScene={scene.factory} locale="zh-CN" onComplete={vi.fn()} />);
+  expect(screen.getByRole('heading', { name: '光，从这里开始。' })).toBeVisible();
+  act(() => { scene.getOptions()?.onFrame?.(13.9); });
+  expect(screen.getByRole('heading', { name: '把整个世界，带回家。' })).toBeVisible();
+  rerender(<SetupCinematicIntro createScene={scene.factory} locale="en-US" onComplete={vi.fn()} />);
+  expect(screen.getByRole('heading', { name: 'The world came home.' })).toBeVisible();
+  expect(scene.factory).toHaveBeenCalledOnce();
+  act(() => { scene.getOptions()?.onFrame?.(30.5); });
+  expect(screen.getByRole('heading', { name: 'Every screen is a new beginning.' })).toBeVisible();
+});
+
+it('disposes a scene that fails synchronously during creation without starting it', () => {
+  vi.useFakeTimers();
+  const dispose = vi.fn();
+  const start = vi.fn();
+  const onComplete = vi.fn();
+  const factory: CinematicSceneFactory = (_canvas, options) => {
+    options.onFailure();
+    return { dispose, start };
+  };
+  render(<SetupCinematicIntro createScene={factory} locale="zh-CN" onComplete={onComplete} />);
+  expect(dispose).toHaveBeenCalledOnce();
+  expect(start).not.toHaveBeenCalled();
+  expect(screen.getByTestId('setup-cinematic-fallback')).toBeVisible();
+  act(() => { vi.advanceTimersByTime(1_000); });
+  expect(onComplete).toHaveBeenCalledOnce();
+  vi.useRealTimers();
+});
+
+it('clears the fallback callback when the intro is unmounted', () => {
+  vi.useFakeTimers();
+  const scene = createSceneFactory();
+  const onComplete = vi.fn();
+  const { unmount } = render(<SetupCinematicIntro createScene={scene.factory} locale="zh-CN" onComplete={onComplete} />);
+  act(() => { scene.getOptions()?.onFailure(); });
+  unmount();
+  act(() => { vi.advanceTimersByTime(1_000); });
+  expect(onComplete).not.toHaveBeenCalled();
+  expect(scene.dispose).toHaveBeenCalledOnce();
+  vi.useRealTimers();
+});
