@@ -165,6 +165,11 @@ impl ProbedStream {
         self.codec.as_deref()
     }
 
+    #[must_use]
+    pub const fn channels(&self) -> Option<i32> {
+        self.channels
+    }
+
     /// Adds normalized video profile and level metadata.
     ///
     /// # Errors
@@ -242,6 +247,16 @@ impl ProbeResult {
     #[must_use]
     pub fn container(&self) -> &str {
         &self.container
+    }
+
+    #[must_use]
+    pub const fn bitrate(&self) -> Option<i64> {
+        self.bitrate
+    }
+
+    #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.runtime_ticks
     }
 
     #[must_use]

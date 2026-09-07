@@ -76,6 +76,10 @@ impl MediaReadService {
 
     /// Resolves active media metadata without opening backend bytes.
     ///
+    /// Catalog visibility (present, matched, and enabled-library membership) is
+    /// enforced by the underlying playback-location query, so invisible items
+    /// resolve to `None` regardless of the presentation key supplied by the caller.
+    ///
     /// # Errors
     ///
     /// Returns [`MediaReadError`] for unavailable locations or invalid identities.
@@ -95,6 +99,9 @@ impl MediaReadService {
     }
 
     /// Resolves one active external subtitle without exposing its storage identity.
+    ///
+    /// Catalog visibility is enforced by the underlying subtitle-location query;
+    /// invisible items resolve to `None`.
     ///
     /// # Errors
     ///
@@ -320,6 +327,7 @@ fn media_content_type(container: Option<&str>, is_audio: bool) -> &'static str {
         (true, Some("m4a" | "mp4")) => "audio/mp4",
         (true, Some("aac")) => "audio/aac",
         (true, Some("ogg" | "oga")) => "audio/ogg",
+        (true, Some("opus")) => "audio/opus",
         (true, Some("webm")) => "audio/webm",
         (true, Some("flac")) => "audio/flac",
         (true, Some("wav" | "wave")) => "audio/wav",

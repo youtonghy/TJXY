@@ -20,6 +20,7 @@ use crate::{
         CatalogPublicationError, CatalogPublicationRepository, STATE_BUILDING, STATE_READY,
         activate_publication, advance_generation, finish, insert_change_event,
     },
+    catalog_visibility::catalog_item_visibility_condition,
     work_job::{
         ClaimedWorkJob, MetadataRequirement, WorkJobRepository, WorkJobResult, WorkJobSpec,
         WorkScope, WorkTaskKind, ensure_live_claim, fence_live_claim,
@@ -3220,6 +3221,7 @@ pub(crate) async fn playback_location(
             Expr::col((canonical_location.clone(), Alias::new("availability_state")))
                 .is_in(["Available", "TemporarilyUnavailable"]),
         )
+        .cond_where(catalog_item_visibility_condition(&item))
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .cond_where(
@@ -3475,6 +3477,7 @@ async fn subtitle_location(
         )))
         .and_where(Expr::col((account, Alias::new("status"))).is_in(["Active", "Ready"]))
         .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
+        .cond_where(catalog_item_visibility_condition(&item))
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .cond_where(

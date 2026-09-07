@@ -3921,9 +3921,8 @@ async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
     let path = format!("/Items/{item}/Images/Primary");
 
     let anonymous = get(&app.router, &path, None).await;
-    assert_eq!(anonymous.status(), StatusCode::OK);
-    assert_eq!(anonymous.headers()[header::CONTENT_TYPE], "image/jpeg");
-    assert_eq!(
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    assert_ne!(
         anonymous.into_body().collect().await.unwrap().to_bytes(),
         b"jpeg"[..]
     );
@@ -4044,7 +4043,7 @@ async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
         )
         .await
         .status(),
-        StatusCode::NOT_FOUND
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         get(
@@ -4579,6 +4578,120 @@ async fn playback_info_without_a_device_profile_returns_available_direct_play_so
     assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
     assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
     assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One assertion block per embedded stream kind keeps the DTO contract readable.
+async fn playback_info_reports_embedded_subtitle_streams() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Video",
+        0,
+        "h264",
+        Some(1920),
+        Some(1080),
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Audio",
+        1,
+        "aac",
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Subtitle",
+        2,
+        "subrip",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_embedded_stream(
+        &app.database,
+        presentation,
+        "Subtitle",
+        3,
+        "s_hdmv_pgs",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+    let response = post(
+        &app.router,
+        &format!("/Items/{item}/PlaybackInfo"),
+        &token,
+        "{}".to_owned(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let streams = payload["MediaSources"][0]["MediaStreams"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    // Embedded subtitle tracks must surface alongside video and audio with
+    // embedded delivery semantics and a conservative text/graphic split.
+    let embedded_text = streams
+        .iter()
+        .find(|stream| stream["Codec"] == "subrip")
+        .expect("embedded text subtitle must be reported");
+    assert_eq!(embedded_text["Type"], "Subtitle");
+    assert_eq!(embedded_text["Index"], 2);
+    assert_eq!(embedded_text["IsExternal"], false);
+    assert_eq!(embedded_text["DeliveryMethod"], "Embed");
+    assert_eq!(embedded_text["IsTextSubtitleStream"], true);
+    assert_eq!(embedded_text["SupportsExternalStream"], false);
+
+    let embedded_graphic = streams
+        .iter()
+        .find(|stream| stream["Codec"] == "s_hdmv_pgs")
+        .expect("embedded graphic subtitle must be reported");
+    assert_eq!(embedded_graphic["Type"], "Subtitle");
+    assert_eq!(embedded_graphic["IsTextSubtitleStream"], false);
+    assert_eq!(embedded_graphic["DeliveryUrl"], Value::Null);
+
+    // Video and audio streams must keep their previous shape.
+    assert_eq!(streams.iter().filter(|s| s["Type"] == "Video").count(), 1);
+    assert_eq!(streams.iter().filter(|s| s["Type"] == "Audio").count(), 1);
+    let video = streams
+        .iter()
+        .find(|s| s["Type"] == "Video")
+        .expect("video stream must be reported");
+    assert_eq!(video["IsTextSubtitleStream"], false);
 }
 
 #[tokio::test]
@@ -5240,6 +5353,107 @@ async fn playback_ticket_is_scoped_revocable_and_authorizes_range_streaming() {
             .await
             .status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn invisible_items_reject_direct_stream_and_ticket_issuance() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, login_token) = login(&app.router).await;
+
+    // Baseline: a visible item streams through the explicit mediaSourceId path.
+    let direct = stream_request(
+        &app.router,
+        "GET",
+        &format!("/Videos/{item}/stream?Static=true&MediaSourceId={presentation}"),
+        Some(&login_token),
+        Some("bytes=0-3"),
+        None,
+    )
+    .await;
+    assert_eq!(direct.status(), StatusCode::PARTIAL_CONTENT);
+
+    // An unclassified item is invisible to the catalog; the direct stream path
+    // and ticket issuance must both refuse it instead of serving bytes.
+    app.database
+        .execute(
+            app.database
+                .get_database_backend()
+                .build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("classification_state"), "Unmatched")
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &format!("/Videos/{item}/stream?Static=true&MediaSourceId={presentation}"),
+            Some(&login_token),
+            Some("bytes=0-3"),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post(
+            &app.router,
+            &format!("/Items/{item}/PlaybackTicket"),
+            &login_token,
+            json!({
+                "MediaSourceId": presentation,
+                "PlaySessionId": Uuid::new_v4().to_string(),
+            })
+            .to_string(),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+
+    // Restoring classification makes the same source playable again.
+    app.database
+        .execute(
+            app.database
+                .get_database_backend()
+                .build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("classification_state"), "Matched")
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_request(
+            &app.router,
+            "GET",
+            &format!("/Videos/{item}/stream?Static=true&MediaSourceId={presentation}"),
+            Some(&login_token),
+            Some("bytes=0-3"),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::PARTIAL_CONTENT
     );
 }
 

@@ -939,6 +939,13 @@ fn sort_playback_sources(sources: &mut [(u8, PlaybackSource)]) {
     });
 }
 
+fn is_text_subtitle_codec(codec: Option<&str>) -> bool {
+    matches!(
+        codec.unwrap_or_default(),
+        "subrip" | "srt" | "ass" | "ssa" | "vtt" | "webvtt" | "mov_text" | "tx3g" | "subviewer"
+    )
+}
+
 fn media_source_info(
     item_id: Uuid,
     source: &PlaybackSource,
@@ -953,8 +960,11 @@ fn media_source_info(
             let stream_type = match stream.stream_type() {
                 "Video" => MediaStreamType::Video,
                 "Audio" => MediaStreamType::Audio,
+                "Subtitle" => MediaStreamType::Subtitle,
                 _ => return None,
             };
+            let is_text_subtitle_stream =
+                stream_type == MediaStreamType::Subtitle && is_text_subtitle_codec(stream.codec());
             Some(MediaStream {
                 codec: stream.codec().map(str::to_owned),
                 language: stream.language().map(str::to_owned),
@@ -969,7 +979,7 @@ fn media_source_info(
                 delivery_method: Some(DeliveryMethod::Embed),
                 delivery_url: None,
                 is_external_url: false,
-                is_text_subtitle_stream: false,
+                is_text_subtitle_stream,
                 supports_external_stream: false,
                 is_default: stream.is_default(),
                 is_forced: stream.is_forced(),

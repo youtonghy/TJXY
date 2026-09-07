@@ -161,6 +161,8 @@ impl MediaInspector for DefaultMediaInspector {
     fn inspect(&self, input: ProbeInput) -> Result<ProbeResult, ProbeServiceError> {
         if is_iso_bmff(&input) {
             IsoBmffInspector.inspect(input)
+        } else if is_audio_container(&input) {
+            AudioInspector.inspect(input)
         } else {
             MatroskaInspector.inspect(input)
         }
@@ -172,16 +174,13 @@ struct IsoBmffInspector;
 impl MediaInspector for IsoBmffInspector {
     fn inspect(&self, input: ProbeInput) -> Result<ProbeResult, ProbeServiceError> {
         let mut movie = IsoBmffMovie::default();
-        for segment in input.segments {
-            let Some((start, end)) = find_moov_range(&segment) else {
-                continue;
-            };
+        if let Some((start, end)) = find_moov_range(&input)? {
             let mut reader = SparseProbeReader {
-                size: segment.start + segment.bytes.len() as u64,
-                segments: vec![segment],
+                size: input.size,
+                segments: input.segments.clone(),
                 position: start,
             };
-            parse_iso_boxes(&mut reader, end, &mut movie, None)?;
+            parse_iso_boxes(&mut reader, end, &mut movie, None, 0)?;
         }
         let runtime_ticks = movie.duration_ticks()?;
         let resolution = movie.tracks.iter().find_map(|track| {
@@ -283,6 +282,432 @@ impl IsoBmffTrack {
     }
 }
 
+#[derive(Default)]
+pub struct AudioInspector;
+
+struct AudioFacts {
+    container: &'static str,
+    codec: String,
+    channels: Option<i32>,
+    runtime_ticks: Option<i64>,
+}
+
+impl MediaInspector for AudioInspector {
+    fn inspect(&self, input: ProbeInput) -> Result<ProbeResult, ProbeServiceError> {
+        let Some(segment) = input.segments.iter().find(|segment| !segment.bytes.is_empty())
+        else {
+            return Err(ProbeServiceError::Inspection(
+                "audio input contains no bytes".into(),
+            ));
+        };
+        let bytes = &segment.bytes;
+        let facts = if bytes.starts_with(b"fLaC") {
+            parse_flac_streaminfo(bytes)?
+        } else if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WAVE" {
+            parse_wav_header(bytes)?
+        } else if bytes.starts_with(b"OggS") {
+            parse_ogg_pages(&input)?
+        } else {
+            parse_mpeg_audio(&input, bytes)?
+        };
+        let stream = ProbedStream::new(
+            "track:1:Audio",
+            "Audio",
+            1,
+            Some(facts.codec),
+            None,
+            None,
+            None,
+            facts.channels,
+            true,
+            false,
+        )
+        .map_err(|_| ProbeServiceError::Inspection("invalid audio stream metadata".into()))?;
+        Ok(ProbeResult::new(facts.container, vec![stream])
+            .map_err(|_| ProbeServiceError::Inspection("invalid audio Probe result".into()))?
+            .with_video(None, None)
+            .with_timing(None, facts.runtime_ticks))
+    }
+}
+
+fn is_audio_container(input: &ProbeInput) -> bool {
+    let Some(segment) = input.segments.iter().find(|segment| !segment.bytes.is_empty()) else {
+        return false;
+    };
+    let bytes = &segment.bytes;
+    bytes.starts_with(b"fLaC")
+        || (bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WAVE")
+        || bytes.starts_with(b"OggS")
+        || bytes.starts_with(b"ID3")
+        || is_mpeg_audio_sync(bytes)
+}
+
+fn is_mpeg_audio_sync(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes[0] != 0xFF {
+        return false;
+    }
+    let second = bytes[1];
+    if second & 0xE0 != 0xE0 {
+        return false;
+    }
+    let version = (second >> 3) & 0x3;
+    let layer = (second >> 1) & 0x3;
+    if layer == 0 {
+        // ADTS AAC carries a 12-bit sync word and a zero layer.
+        second & 0xF0 == 0xF0 && version != 1
+    } else {
+        version != 1
+    }
+}
+
+fn duration_ticks_from_ratio(numerator: u128, denominator: u128) -> Option<i64> {
+    if denominator == 0 {
+        return None;
+    }
+    i64::try_from(numerator.saturating_mul(10_000_000) / denominator).ok()
+}
+
+fn parse_flac_streaminfo(bytes: &[u8]) -> Result<AudioFacts, ProbeServiceError> {
+    let truncated = |what: &str| ProbeServiceError::Inspection(format!("truncated FLAC {what} header"));
+    // "fLaC" then one metadata block header plus the 34-byte STREAMINFO body.
+    if bytes.len() < 4 + 4 + 34 {
+        return Err(truncated("STREAMINFO"));
+    }
+    if bytes[4] & 0x7F != 0 {
+        return Err(ProbeServiceError::Inspection(
+            "FLAC STREAMINFO block is not first".into(),
+        ));
+    }
+    let packed = u64::from_be_bytes(bytes[18..26].try_into().expect("length checked"));
+    let sample_rate = (packed >> 44) & 0xF_FFFF;
+    let channels = bounded_i32(((packed >> 41) & 0x7) + 1)?.unwrap_or_default();
+    let total_samples = packed & 0xF_FFFF_FFFF;
+    let runtime_ticks = (sample_rate > 0)
+        .then(|| duration_ticks_from_ratio(u128::from(total_samples), u128::from(sample_rate)))
+        .flatten();
+    Ok(AudioFacts {
+        container: "flac",
+        codec: "flac".to_owned(),
+        channels: Some(channels),
+        runtime_ticks,
+    })
+}
+
+fn parse_wav_header(bytes: &[u8]) -> Result<AudioFacts, ProbeServiceError> {
+    let mut position = 12_usize;
+    let mut fmt: Option<(u16, i32, u32, u16)> = None;
+    let mut data_size = None;
+    while position + 8 <= bytes.len() {
+        let identifier = &bytes[position..position + 4];
+        let size = u32::from_le_bytes(
+            bytes[position + 4..position + 8]
+                .try_into()
+                .expect("length checked"),
+        );
+        if identifier == b"fmt " && fmt.is_none() {
+            fmt = Some(wav_format_chunk(&bytes[position + 8..])?);
+        } else if identifier == b"data" {
+            data_size = Some(u64::from(size));
+        }
+        position += 8 + size as usize + usize::from(size % 2 == 1);
+    }
+    let Some((format, channels, byte_rate, bits)) = fmt else {
+        return Err(ProbeServiceError::Inspection(
+            "WAV header has no fmt chunk".into(),
+        ));
+    };
+    let codec = match (format, bits) {
+        (1, 8) => "pcm_u8",
+        (1, 16) => "pcm_s16le",
+        (1, 24) => "pcm_s24le",
+        (1, 32) => "pcm_s32le",
+        (3, 32) => "pcm_f32le",
+        (3, 64) => "pcm_f64le",
+        (6, _) => "alaw",
+        (7, _) => "mulaw",
+        _ => "pcm",
+    }
+    .to_owned();
+    let runtime_ticks = match (data_size, byte_rate) {
+        (Some(data_size), byte_rate) if byte_rate > 0 => {
+            duration_ticks_from_ratio(u128::from(data_size), u128::from(byte_rate))
+        }
+        _ => None,
+    };
+    Ok(AudioFacts {
+        container: "wav",
+        codec,
+        channels: Some(channels),
+        runtime_ticks,
+    })
+}
+
+fn wav_format_chunk(body: &[u8]) -> Result<(u16, i32, u32, u16), ProbeServiceError> {
+    if body.len() < 16 {
+        return Err(ProbeServiceError::Inspection(
+            "truncated WAV fmt chunk".into(),
+        ));
+    }
+    Ok((
+        u16::from_le_bytes(body[0..2].try_into().expect("length checked")),
+        i32::from(u16::from_le_bytes(
+            body[2..4].try_into().expect("length checked"),
+        )),
+        // body[4..8] carries the sample rate; only the byte rate and the bit
+        // depth matter for the probe facts.
+        u32::from_le_bytes(body[8..12].try_into().expect("length checked")),
+        u16::from_le_bytes(body[14..16].try_into().expect("length checked")),
+    ))
+}
+
+fn parse_ogg_pages(input: &ProbeInput) -> Result<AudioFacts, ProbeServiceError> {
+    let head = input
+        .segments
+        .iter()
+        .find(|segment| !segment.bytes.is_empty())
+        .map(|segment| &segment.bytes[..])
+        .ok_or_else(|| ProbeServiceError::Inspection("audio input contains no bytes".into()))?;
+    if head.len() < 27 {
+        return Err(ProbeServiceError::Inspection(
+            "truncated Ogg page header".into(),
+        ));
+    }
+    let segment_count = head[26] as usize;
+    if head.len() < 27 + segment_count {
+        return Err(ProbeServiceError::Inspection(
+            "truncated Ogg segment table".into(),
+        ));
+    }
+    let body_start = 27 + segment_count;
+    let body = head.get(body_start..).unwrap_or(&[]);
+    let (codec, container, channels, rate) = if body.len() >= 7
+        && body[0] == 0x01
+        && body[1..7] == *b"vorbis"
+    {
+        if body.len() < 16 {
+            return Err(ProbeServiceError::Inspection(
+                "truncated Vorbis identification header".into(),
+            ));
+        }
+        let channels = i32::from(body[11]);
+        let rate = u32::from_le_bytes(body[12..16].try_into().expect("length checked"));
+        ("vorbis", "ogg", Some(channels), rate)
+    } else if body.len() >= 8 && body[0..8] == *b"OpusHead" {
+        if body.len() < 12 {
+            return Err(ProbeServiceError::Inspection(
+                "truncated OpusHead header".into(),
+            ));
+        }
+        let channels = i32::from(body[9]);
+        // Opus granule positions always advance at 48 kHz regardless of the
+        // original input sample rate.
+        ("opus", "opus", Some(channels), 48_000)
+    } else {
+        return Err(ProbeServiceError::Inspection(
+            "Ogg first page carries neither Vorbis nor Opus".into(),
+        ));
+    };
+    let last_granule = input
+        .segments
+        .iter()
+        .flat_map(|segment| {
+            (0..segment.bytes.len().saturating_sub(14))
+                .filter(|offset| segment.bytes[*offset..*offset + 4] == *b"OggS")
+                .map(|offset| {
+                    u64::from_le_bytes(
+                        segment.bytes[offset + 6..offset + 14]
+                            .try_into()
+                            .expect("length checked"),
+                    )
+                })
+        })
+        .max();
+    let runtime_ticks = match (last_granule, rate) {
+        (Some(granule), rate) if rate > 0 => {
+            duration_ticks_from_ratio(u128::from(granule), u128::from(rate))
+        }
+        _ => None,
+    };
+    Ok(AudioFacts {
+        container,
+        codec: codec.to_owned(),
+        channels,
+        runtime_ticks,
+    })
+}
+
+const MP3_BITRATES_V1_L3: [u32; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
+const MP3_BITRATES_V2_L3: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+
+fn parse_mpeg_audio(input: &ProbeInput, bytes: &[u8]) -> Result<AudioFacts, ProbeServiceError> {
+    let mut offset = 0_usize;
+    if bytes.starts_with(b"ID3") {
+        if bytes.len() < 10 {
+            return Err(ProbeServiceError::Inspection("truncated ID3 header".into()));
+        }
+        let size = ((bytes[6] as usize & 0x7F) << 21)
+            | ((bytes[7] as usize & 0x7F) << 14)
+            | ((bytes[8] as usize & 0x7F) << 7)
+            | (bytes[9] as usize & 0x7F);
+        offset = 10 + size;
+        if offset + 4 > bytes.len() {
+            return Err(ProbeServiceError::Inspection(
+                "MP3 frame header is beyond the covered input".into(),
+            ));
+        }
+    }
+    if !is_mpeg_audio_sync(&bytes[offset..]) {
+        return Err(ProbeServiceError::Inspection(
+            "unsupported audio frame header".into(),
+        ));
+    }
+    let second = bytes[offset + 1];
+    let version = (second >> 3) & 0x3;
+    let layer = (second >> 1) & 0x3;
+    if layer == 0 {
+        return parse_adts_header(&bytes[offset..]);
+    }
+    let third = bytes[offset + 2];
+    let bitrate_index = ((third >> 4) & 0xF) as usize;
+    let sample_rate_index = (third >> 2) & 0x3;
+    let sample_rate = match (version, sample_rate_index) {
+        (0b11, 0) => 44_100_u32,
+        (0b11, 1) => 48_000_u32,
+        (0b11, 2) => 32_000_u32,
+        (0b10, 0) => 22_050_u32,
+        (0b10, 1) => 24_000_u32,
+        (0b10, 2) => 16_000_u32,
+        (0b00, 0) => 11_025_u32,
+        (0b00, 1) => 12_000_u32,
+        (0b00, 2) => 8_000_u32,
+        _ => {
+            return Err(ProbeServiceError::Inspection(
+                "reserved MP3 sample rate".into(),
+            ))
+        }
+    };
+    let mode = bytes[offset + 3] >> 6;
+    let channels = if mode == 0b11 { Some(1) } else { Some(2) };
+    let runtime_ticks = (layer == 0b01).then(|| {
+        let side_info = if version == 0b11 {
+            if mode == 0b11 {
+                17
+            } else {
+                32
+            }
+        } else if mode == 0b11 {
+            9
+        } else {
+            17
+        };
+        mp3_layer3_runtime_ticks(
+            bytes,
+            offset,
+            side_info,
+            version,
+            sample_rate,
+            input.size,
+            bitrate_index,
+        )
+    })
+    .flatten();
+    Ok(AudioFacts {
+        container: "mp3",
+        codec: "mp3".to_owned(),
+        channels,
+        runtime_ticks,
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Fixed MP3 header positions plus the object size for the CBR estimate.
+fn mp3_layer3_runtime_ticks(
+    bytes: &[u8],
+    offset: usize,
+    side_info: usize,
+    version: u8,
+    sample_rate: u32,
+    object_size: u64,
+    bitrate_index: usize,
+) -> Option<i64> {
+    // Layer III: honor a Xing/Info VBR header when present, otherwise
+    // estimate from the constant bitrate and the object size.
+    let xing_position = offset + 4 + side_info;
+    let table = if version == 0b11 {
+        MP3_BITRATES_V1_L3
+    } else {
+        MP3_BITRATES_V2_L3
+    };
+    let bitrate_kbps = table[bitrate_index];
+    if xing_position + 12 <= bytes.len()
+        && (bytes[xing_position..xing_position + 4] == *b"Xing"
+            || bytes[xing_position..xing_position + 4] == *b"Info")
+    {
+        let flags = u32::from_be_bytes(
+            bytes[xing_position + 4..xing_position + 8]
+                .try_into()
+                .expect("length checked"),
+        );
+        if flags & 0x8000_0000 != 0 {
+            let frames = u32::from_be_bytes(
+                bytes[xing_position + 8..xing_position + 12]
+                    .try_into()
+                    .expect("length checked"),
+            );
+            let samples_per_frame: u32 = if version == 0b11 { 1_152 } else { 576 };
+            return duration_ticks_from_ratio(
+                u128::from(frames) * u128::from(samples_per_frame),
+                u128::from(sample_rate),
+            );
+        }
+        return None;
+    }
+    if bitrate_kbps > 0 {
+        return duration_ticks_from_ratio(
+            u128::from(object_size.saturating_sub(offset as u64)) * 8,
+            u128::from(bitrate_kbps) * 1_000,
+        );
+    }
+    None
+}
+
+fn parse_adts_header(bytes: &[u8]) -> Result<AudioFacts, ProbeServiceError> {
+    if bytes.len() < 4 {
+        return Err(ProbeServiceError::Inspection("truncated ADTS header".into()));
+    }
+    let _sample_rate = match (bytes[2] >> 2) & 0xF {
+        0 => 96_000,
+        1 => 88_200,
+        2 => 64_000,
+        3 => 48_000,
+        4 => 44_100,
+        5 => 32_000,
+        6 => 24_000,
+        7 => 22_050,
+        8 => 16_000,
+        9 => 12_000,
+        10 => 11_025,
+        11 => 8_000,
+        12 => 7_350,
+        _ => {
+            return Err(ProbeServiceError::Inspection(
+                "reserved ADTS sample rate".into(),
+            ))
+        }
+    };
+    let channel_config = ((bytes[2] & 0x01) << 2) | (bytes[3] >> 6);
+    let channels = (channel_config > 0).then_some(i32::from(channel_config));
+    Ok(AudioFacts {
+        container: "aac",
+        codec: "aac".to_owned(),
+        channels,
+        runtime_ticks: None,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct IsoBox {
     kind: [u8; 4],
@@ -296,33 +721,83 @@ fn is_iso_bmff(input: &ProbeInput) -> bool {
     })
 }
 
-fn find_moov_range(segment: &ProbeSegment) -> Option<(u64, u64)> {
-    for offset in 0..=segment.bytes.len().saturating_sub(8) {
-        if segment.bytes.get(offset + 4..offset + 8) != Some(b"moov") {
-            continue;
-        }
-        let size = u64::from(u32::from_be_bytes(
-            segment.bytes.get(offset..offset + 4)?.try_into().ok()?,
-        ));
-        if size < 8 {
-            continue;
-        }
-        let start = segment.start.checked_add(offset as u64)?;
-        let end = start.checked_add(size)?;
-        let segment_end = segment.start.checked_add(segment.bytes.len() as u64)?;
-        if end <= segment_end {
-            return Some((start, end));
+/// One contiguous byte range covered by a probe input's segments.
+struct ProbeExtent {
+    start: u64,
+    end: u64,
+}
+
+fn probe_extents(input: &ProbeInput) -> Vec<ProbeExtent> {
+    let mut segments = input.segments.clone();
+    segments.sort_by_key(|segment| segment.start);
+    let mut extents: Vec<ProbeExtent> = Vec::new();
+    for segment in segments {
+        let start = segment.start;
+        let end = segment.start.saturating_add(segment.bytes.len() as u64);
+        match extents.last_mut() {
+            Some(last) if start <= last.end => last.end = last.end.max(end),
+            _ => extents.push(ProbeExtent { start, end }),
         }
     }
-    None
+    extents
 }
+
+fn find_moov_range(input: &ProbeInput) -> Result<Option<(u64, u64)>, ProbeServiceError> {
+    let extents = probe_extents(input);
+    for segment in &input.segments {
+        for offset in 0..=segment.bytes.len().saturating_sub(8) {
+            if segment.bytes.get(offset + 4..offset + 8) != Some(b"moov") {
+                continue;
+            }
+            let Some(size_bytes) = segment.bytes.get(offset..offset + 4) else {
+                continue;
+            };
+            let Some(size_words) = size_bytes.try_into().ok() else {
+                continue;
+            };
+            let size = u64::from(u32::from_be_bytes(size_words));
+            if size < 8 {
+                continue;
+            }
+            let Some(start) = segment.start.checked_add(offset as u64) else {
+                continue;
+            };
+            let Some(end) = start.checked_add(size) else {
+                continue;
+            };
+            let segment_end = segment.start + segment.bytes.len() as u64;
+            let covered_end = extents
+                .iter()
+                .find(|extent| extent.start <= start && start < extent.end)
+                .map_or(segment_end, |extent| extent.end.max(segment_end));
+            if end <= covered_end {
+                return Ok(Some((start, end)));
+            }
+            // The moov box is only partially covered. Surface the first
+            // uncovered offset so the probe service gap-retry ladder fetches
+            // exactly the missing window instead of failing permanently.
+            return Err(ProbeServiceError::Inspection(format!(
+                "Probe byte budget gap at offset {covered_end}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+const MAX_BOX_DEPTH: u32 = 64;
 
 fn parse_iso_boxes(
     reader: &mut SparseProbeReader,
     end: u64,
     movie: &mut IsoBmffMovie,
     current_track: Option<usize>,
+    depth: u32,
 ) -> Result<(), ProbeServiceError> {
+    if depth > MAX_BOX_DEPTH {
+        return Err(ProbeServiceError::Inspection(
+            "ISO-BMFF box nesting is too deep".into(),
+        ));
+    }
     while reader.position < end {
         let header = read_iso_box(reader, end)?;
         if header.kind == *b"moov"
@@ -330,10 +805,11 @@ fn parse_iso_boxes(
             || header.kind == *b"minf"
             || header.kind == *b"stbl"
         {
-            parse_iso_boxes(reader, header.end, movie, current_track)?;
+            parse_iso_boxes(reader, header.end, movie, current_track, depth + 1)?;
         } else if header.kind == *b"trak" {
             movie.tracks.push(IsoBmffTrack::default());
-            parse_iso_boxes(reader, header.end, movie, Some(movie.tracks.len() - 1))?;
+            let track = movie.tracks.len() - 1;
+            parse_iso_boxes(reader, header.end, movie, Some(track), depth + 1)?;
         } else if header.kind == *b"mvhd" {
             parse_mvhd(&read_iso_prefix(reader, header, 32)?, movie)?;
         } else if header.kind == *b"tkhd" {
@@ -581,6 +1057,10 @@ fn normalize_iso_codec(kind: [u8; 4]) -> String {
         b"av01" => "av1".to_owned(),
         b"mp4a" => "aac".to_owned(),
         b"Opus" | b"opus" => "opus".to_owned(),
+        b"fLaC" | b"flac" => "flac".to_owned(),
+        b"ac-3" => "ac3".to_owned(),
+        b"ec-3" => "eac3".to_owned(),
+        b"tx3g" => "mov_text".to_owned(),
         b"wvtt" => "webvtt".to_owned(),
         other => String::from_utf8_lossy(other).to_ascii_lowercase(),
     }
@@ -1190,13 +1670,30 @@ fn normalize_codec(codec_id: &str) -> String {
     match codec_id {
         "V_MPEG4/ISO/AVC" => "h264".to_owned(),
         "V_MPEGH/ISO/HEVC" => "hevc".to_owned(),
+        "V_MPEG4/ISO/ASP" => "mpeg4".to_owned(),
+        "V_MPEG2" => "mpeg2video".to_owned(),
+        "V_MPEG1" => "mpeg1video".to_owned(),
+        "V_MS/VFW/FOURCC" => "vc1".to_owned(),
         "V_VP9" => "vp9".to_owned(),
+        "V_VP8" => "vp8".to_owned(),
         "V_AV1" => "av1".to_owned(),
-        "A_AAC" => "aac".to_owned(),
+        "V_THEORA" => "theora".to_owned(),
+        "A_AAC" | "A_AAC/MPEG4/LC" => "aac".to_owned(),
         "A_OPUS" => "opus".to_owned(),
         "A_VORBIS" => "vorbis".to_owned(),
+        "A_AC3" => "ac3".to_owned(),
+        "A_EAC3" => "eac3".to_owned(),
+        "A_DTS" => "dts".to_owned(),
+        "A_TRUEHD" => "truehd".to_owned(),
+        "A_FLAC" => "flac".to_owned(),
+        "A_ALAC" => "alac".to_owned(),
+        "A_MPEG/L3" => "mp3".to_owned(),
         "S_TEXT/UTF8" => "subrip".to_owned(),
         "S_TEXT/WEBVTT" => "webvtt".to_owned(),
+        "S_ASS" => "ass".to_owned(),
+        "S_SSA" => "ssa".to_owned(),
+        "S_HDMV/PGS" => "pgssub".to_owned(),
+        "S_VOBSUB" => "dvdsub".to_owned(),
         other => other
             .chars()
             .map(|character| {
@@ -1313,6 +1810,38 @@ mod tests {
         assert_eq!(normalize_codec("V_MPEG4/ISO/AVC"), "h264");
         assert_eq!(normalize_codec("A_OPUS"), "opus");
         assert_eq!(normalize_codec("X CUSTOM/CODEC"), "x_custom_codec");
+    }
+
+    #[test]
+    fn matroska_codec_ids_map_to_ffprobe_codec_names() {
+        assert_eq!(normalize_codec("V_MPEG2"), "mpeg2video");
+        assert_eq!(normalize_codec("V_MPEG1"), "mpeg1video");
+        assert_eq!(normalize_codec("V_MPEG4/ISO/ASP"), "mpeg4");
+        assert_eq!(normalize_codec("V_MS/VFW/FOURCC"), "vc1");
+        assert_eq!(normalize_codec("V_VP8"), "vp8");
+        assert_eq!(normalize_codec("V_THEORA"), "theora");
+        assert_eq!(normalize_codec("A_AAC/MPEG4/LC"), "aac");
+        assert_eq!(normalize_codec("A_AC3"), "ac3");
+        assert_eq!(normalize_codec("A_EAC3"), "eac3");
+        assert_eq!(normalize_codec("A_DTS"), "dts");
+        assert_eq!(normalize_codec("A_TRUEHD"), "truehd");
+        assert_eq!(normalize_codec("A_FLAC"), "flac");
+        assert_eq!(normalize_codec("A_ALAC"), "alac");
+        assert_eq!(normalize_codec("A_MPEG/L3"), "mp3");
+        assert_eq!(normalize_codec("S_ASS"), "ass");
+        assert_eq!(normalize_codec("S_SSA"), "ssa");
+        assert_eq!(normalize_codec("S_HDMV/PGS"), "pgssub");
+        assert_eq!(normalize_codec("S_VOBSUB"), "dvdsub");
+    }
+
+    #[test]
+    fn iso_codec_tags_map_to_ffprobe_codec_names() {
+        assert_eq!(normalize_iso_codec(*b"ac-3"), "ac3");
+        assert_eq!(normalize_iso_codec(*b"ec-3"), "eac3");
+        assert_eq!(normalize_iso_codec(*b"fLaC"), "flac");
+        assert_eq!(normalize_iso_codec(*b"tx3g"), "mov_text");
+        assert_eq!(normalize_iso_codec(*b"avc1"), "h264");
+        assert_eq!(normalize_iso_codec(*b"mp4a"), "aac");
     }
 
     #[test]
@@ -1491,6 +2020,340 @@ mod tests {
         assert_eq!(result.container(), "mp4");
         assert_eq!(result.streams().len(), 1);
         assert_eq!(result.streams()[0].codec(), Some("h264"));
+    }
+
+    #[test]
+    fn default_inspector_requests_gap_fills_when_moov_exceeds_covered_segments() {
+        fn atom(kind: impl AsRef<[u8]>, payload: Vec<u8>) -> Vec<u8> {
+            let size = u32::try_from(payload.len() + 8).unwrap();
+            let mut bytes = size.to_be_bytes().to_vec();
+            bytes.extend(kind.as_ref());
+            bytes.extend(payload);
+            bytes
+        }
+        fn video_track() -> Vec<u8> {
+            let mut tkhd = vec![0; 20];
+            tkhd[12..16].copy_from_slice(&1_u32.to_be_bytes());
+            let mut hdlr = vec![0; 12];
+            hdlr[8..12].copy_from_slice(b"vide");
+            let mut video = vec![0; 28];
+            video[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+            video[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+            let mut stsd = vec![0; 8];
+            stsd[4..8].copy_from_slice(&1_u32.to_be_bytes());
+            stsd.extend(atom(b"avc1", video));
+            atom(
+                b"trak",
+                [
+                    atom(b"tkhd", tkhd),
+                    atom(
+                        b"mdia",
+                        [
+                            atom(b"hdlr", hdlr),
+                            atom(b"minf", atom(b"stbl", atom(b"stsd", stsd))),
+                        ]
+                        .concat(),
+                    ),
+                ]
+                .concat(),
+            )
+        }
+
+        // A long movie's moov easily exceeds the one MiB probe budget; inflate
+        // it with a large skipped `free` box so the moov magic sits inside the
+        // covered tail while the box end does not.
+        let moov = atom(
+            b"moov",
+            [video_track(), atom(b"free", vec![0_u8; 96 * 1024])].concat(),
+        );
+        let head = [
+            atom(b"ftyp", b"isom\0\0\0\0isom".to_vec()),
+            1_000_u32.to_be_bytes().to_vec(),
+            b"mdat".to_vec(),
+        ]
+        .concat();
+        let tail_start = 1_024_u64;
+        let moov_offset_in_tail = 17_usize;
+        let covered = 1_024_usize;
+        let truncated_tail = [vec![0xAA; moov_offset_in_tail], moov[..covered].to_vec()].concat();
+        let covered_end = tail_start + truncated_tail.len() as u64;
+        let sparse_input = ProbeInput {
+            size: tail_start + moov_offset_in_tail as u64 + moov.len() as u64,
+            segments: vec![
+                ProbeSegment {
+                    start: 0,
+                    bytes: head,
+                },
+                ProbeSegment {
+                    start: tail_start,
+                    bytes: truncated_tail,
+                },
+            ],
+        };
+        let error = DefaultMediaInspector
+            .inspect(sparse_input.clone())
+            .unwrap_err();
+        let ProbeServiceError::Inspection(message) = &error else {
+            panic!("a truncated moov must surface an inspection error, got {error}");
+        };
+        assert_eq!(
+            probe_gap_offset(message),
+            Some(covered_end),
+            "a truncated moov must surface a gap error at the coverage edge"
+        );
+
+        // The service gap-retry ladder merges a window covering the remainder;
+        // with that segment the same sparse input now parses completely.
+        let mut filled = sparse_input;
+        filled.segments.push(ProbeSegment {
+            start: covered_end,
+            bytes: moov[covered - moov_offset_in_tail..].to_vec(),
+        });
+        let result = DefaultMediaInspector.inspect(filled).unwrap();
+        assert_eq!(result.container(), "mp4");
+        assert_eq!(result.streams().len(), 1);
+        assert_eq!(result.streams()[0].codec(), Some("h264"));
+    }
+
+    #[test]
+    fn iso_box_nesting_beyond_the_depth_limit_is_rejected() {
+        fn atom(kind: impl AsRef<[u8]>, payload: Vec<u8>) -> Vec<u8> {
+            let size = u32::try_from(payload.len() + 8).unwrap();
+            let mut bytes = size.to_be_bytes().to_vec();
+            bytes.extend(kind.as_ref());
+            bytes.extend(payload);
+            bytes
+        }
+        let mut nested = atom(b"free", Vec::new());
+        for _ in 0..(MAX_BOX_DEPTH + 4) {
+            nested = atom(b"moov", nested);
+        }
+        let bytes = [atom(b"ftyp", b"isom\0\0\0\0isom".to_vec()), nested].concat();
+        let error = IsoBmffInspector
+            .inspect(ProbeInput {
+                size: bytes.len() as u64,
+                segments: vec![ProbeSegment {
+                    start: 0,
+                    bytes,
+                }],
+            })
+            .unwrap_err();
+        let ProbeServiceError::Inspection(message) = &error else {
+            panic!("deep nesting must surface an inspection error, got {error}");
+        };
+        assert_eq!(message, "ISO-BMFF box nesting is too deep");
+    }
+
+    fn single_segment_input(bytes: Vec<u8>, size: Option<u64>) -> ProbeInput {
+        let size = size.unwrap_or(bytes.len() as u64);
+        ProbeInput {
+            size,
+            segments: vec![ProbeSegment { start: 0, bytes }],
+        }
+    }
+
+    fn flac_streaminfo_bytes(sample_rate: u64, total_samples: u64) -> Vec<u8> {
+        let mut flac = b"fLaC".to_vec();
+        flac.push(0x00); // last-flag + STREAMINFO type
+        flac.extend_from_slice(&34_u32.to_be_bytes()[1..]);
+        flac.extend_from_slice(&[0; 10]); // block and frame size bounds
+        let packed = (sample_rate << 44) | (1_u64 << 41) | (15_u64 << 36) | total_samples;
+        flac.extend_from_slice(&packed.to_be_bytes());
+        flac.extend_from_slice(&[0; 16]); // md5 remainder of STREAMINFO
+        flac
+    }
+
+    #[test]
+    fn audio_inspector_parses_flac_and_wav_containers() {
+        // FLAC: STREAMINFO with 48 kHz, 2 channels, 96 000 total samples.
+        let flac = flac_streaminfo_bytes(48_000, 0x1_7700);
+        let result = AudioInspector
+            .inspect(single_segment_input(flac, None))
+            .unwrap();
+        assert_eq!(result.container(), "flac");
+        assert_eq!(result.streams().len(), 1);
+        assert_eq!(result.streams()[0].codec(), Some("flac"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+        assert_eq!(result.runtime_ticks(), Some(2 * 10_000_000));
+
+        // WAV: PCM 16-bit stereo at 48 kHz with 2 seconds of data.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&192_000_u32.to_le_bytes());
+        wav.extend_from_slice(&4_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&384_000_u32.to_le_bytes());
+        let result = AudioInspector
+            .inspect(single_segment_input(wav, None))
+            .unwrap();
+        assert_eq!(result.container(), "wav");
+        assert_eq!(result.streams()[0].codec(), Some("pcm_s16le"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+        assert_eq!(result.runtime_ticks(), Some(2 * 10_000_000));
+    }
+
+    #[test]
+    fn audio_inspector_parses_ogg_opus_and_vorbis_containers() {
+        fn ogg_tail_page(granule: u64) -> Vec<u8> {
+            [
+                b"OggS".as_slice(),
+                &[0x00_u8, 0x04],
+                &granule.to_le_bytes(),
+                &0_u32.to_le_bytes(),
+            ]
+            .concat()
+        }
+        fn ogg_head_page(body: &[u8]) -> Vec<u8> {
+            [
+                b"OggS".as_slice(),
+                &[0x00_u8, 0x02],
+                &0_u64.to_le_bytes(),
+                &0_u32.to_le_bytes(),
+                &0_u32.to_le_bytes(),
+                &0_u32.to_le_bytes(),
+                &[
+                    0x01_u8,
+                    u8::try_from(body.len()).expect("test packet fits one lacing value"),
+                ],
+                body,
+            ]
+            .concat()
+        }
+
+        // Opus: first page carries OpusHead; a tail page supplies the granule.
+        let opus_body = [
+            b"OpusHead".as_slice(),
+            &[1_u8, 2],
+            &0_u16.to_le_bytes(),
+            &48_000_u32.to_le_bytes(),
+            &[0_u8; 3],
+        ]
+        .concat();
+        let opus_head = ogg_head_page(&opus_body);
+        let opus_tail = ogg_tail_page(0x1_7700);
+        let opus_input = ProbeInput {
+            size: (opus_head.len() + opus_tail.len()) as u64,
+            segments: vec![
+                ProbeSegment {
+                    start: 0,
+                    bytes: opus_head,
+                },
+                ProbeSegment {
+                    start: 0,
+                    bytes: opus_tail,
+                },
+            ],
+        };
+        let result = AudioInspector.inspect(opus_input).unwrap();
+        assert_eq!(result.container(), "opus");
+        assert_eq!(result.streams()[0].codec(), Some("opus"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+        assert_eq!(result.runtime_ticks(), Some(2 * 10_000_000));
+
+        // Vorbis: first page carries the identification header.
+        let vorbis_packet = [
+            [0x01_u8].as_slice(),
+            b"vorbis".as_slice(),
+            &0_u32.to_le_bytes(),
+            &[2_u8],
+            &48_000_u32.to_le_bytes(),
+            &0_u32.to_le_bytes(),
+            &0_u32.to_le_bytes(),
+            &0_u32.to_le_bytes(),
+            &[0_u8, 0],
+        ]
+        .concat();
+        let vorbis_head = ogg_head_page(&vorbis_packet);
+        let vorbis_tail = ogg_tail_page(0x1_7700);
+        let vorbis_input = ProbeInput {
+            size: (vorbis_head.len() + vorbis_tail.len()) as u64,
+            segments: vec![
+                ProbeSegment {
+                    start: 0,
+                    bytes: vorbis_head,
+                },
+                ProbeSegment {
+                    start: 64,
+                    bytes: vorbis_tail,
+                },
+            ],
+        };
+        let result = AudioInspector.inspect(vorbis_input).unwrap();
+        assert_eq!(result.container(), "ogg");
+        assert_eq!(result.streams()[0].codec(), Some("vorbis"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+        assert_eq!(result.runtime_ticks(), Some(2 * 10_000_000));
+    }
+
+    #[test]
+    fn audio_inspector_parses_mpeg_audio_containers() {
+        // MP3: MPEG1 Layer III, 128 kbps joint stereo, 44.1 kHz, 2 seconds of
+        // CBR data implied by the object size.
+        let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x40];
+        mp3.resize(32_000, 0);
+        let result = AudioInspector
+            .inspect(single_segment_input(mp3, None))
+            .unwrap();
+        assert_eq!(result.container(), "mp3");
+        assert_eq!(result.streams()[0].codec(), Some("mp3"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+        assert_eq!(result.runtime_ticks(), Some(2 * 10_000_000));
+
+        // MP3 with a Xing frame count: 77 frames at 1 152 samples each.
+        let mut xing = vec![0xFF, 0xFB, 0x90, 0x40];
+        xing.resize(36, 0); // header + 32 bytes of side info
+        xing.extend_from_slice(b"Xing");
+        xing.extend_from_slice(&0x8000_0000_u32.to_be_bytes());
+        xing.extend_from_slice(&77_u32.to_be_bytes());
+        let result = AudioInspector
+            .inspect(single_segment_input(xing, Some(32_000)))
+            .unwrap();
+        assert_eq!(result.container(), "mp3");
+        let expected = (77_u128 * 1_152 * 10_000_000) / 44_100;
+        assert_eq!(
+            result.runtime_ticks(),
+            i64::try_from(expected).ok(),
+            "Xing frame counts must override the CBR estimate"
+        );
+
+        // ADTS AAC: 48 kHz, stereo channel configuration.
+        let adts = vec![0xFF, 0xF1, 0x4C, 0x80];
+        let result = AudioInspector
+            .inspect(single_segment_input(adts, None))
+            .unwrap();
+        assert_eq!(result.container(), "aac");
+        assert_eq!(result.streams()[0].codec(), Some("aac"));
+        assert_eq!(result.streams()[0].channels(), Some(2));
+    }
+
+    #[test]
+    fn default_inspector_dispatches_bare_audio_before_matroska() {
+        let mut flac = b"fLaC".to_vec();
+        flac.push(0x00);
+        flac.extend_from_slice(&34_u32.to_be_bytes()[1..]);
+        flac.extend_from_slice(&[0; 10]);
+        let packed = (0xAC44_u64 << 44) | (1_u64 << 41) | (15_u64 << 36) | 0xAC44;
+        flac.extend_from_slice(&packed.to_be_bytes());
+        flac.extend_from_slice(&[0; 16]);
+        let result = DefaultMediaInspector
+            .inspect(ProbeInput {
+                size: flac.len() as u64,
+                segments: vec![ProbeSegment {
+                    start: 0,
+                    bytes: flac,
+                }],
+            })
+            .unwrap();
+        assert_eq!(result.container(), "flac");
+        assert_eq!(result.streams()[0].codec(), Some("flac"));
     }
 
     #[test]
