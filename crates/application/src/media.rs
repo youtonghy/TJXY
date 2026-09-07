@@ -18,9 +18,12 @@ use crate::{
     strm::{MAX_STRM_BYTES, StrmError, parse_strm},
 };
 
+const READ_AVAILABILITY_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct MediaReadService {
     database: DatabaseConnection,
     backends: StorageBackendRegistry,
+    read_availability_throttle: storage_read::ReadAvailabilityThrottle,
 }
 
 impl MediaReadService {
@@ -29,6 +32,9 @@ impl MediaReadService {
         Self {
             database,
             backends: StorageBackendRegistry::new(),
+            read_availability_throttle: storage_read::ReadAvailabilityThrottle::new(
+                READ_AVAILABILITY_THROTTLE_WINDOW,
+            ),
         }
     }
 
@@ -156,6 +162,7 @@ impl MediaReadService {
                 location.remote_revision(),
                 location.size(),
             ),
+            throttle: self.read_availability_throttle.clone(),
         })
     }
 
@@ -180,6 +187,7 @@ impl MediaReadService {
                 location.storage_object_id(),
                 &descriptor_id,
                 range,
+                &self.read_availability_throttle,
             )
             .await
             .map_err(map_storage_read_error)?;
@@ -225,6 +233,7 @@ impl MediaReadService {
                 object.remote_revision(),
                 target_size,
             ),
+            throttle: self.read_availability_throttle.clone(),
         })
     }
 }
@@ -259,6 +268,7 @@ pub struct ResolvedMedia {
     size: u64,
     content_type: &'static str,
     etag: String,
+    throttle: storage_read::ReadAvailabilityThrottle,
 }
 
 impl ResolvedMedia {
@@ -293,6 +303,7 @@ impl ResolvedMedia {
                 record_id,
                 &self.object_id,
                 range,
+                &self.throttle,
             )
             .await
             .map_err(map_storage_read_error)

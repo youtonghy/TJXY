@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, CaseStatement, Cond, Expr, JoinType, OnConflict, Order, Query, SimpleExpr},
+    sea_query::{
+        Alias, CaseStatement, Cond, Expr, JoinType, OnConflict, Order, Query, SimpleExpr,
+    },
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,7 +22,7 @@ use crate::{
         CatalogPublicationError, CatalogPublicationRepository, STATE_BUILDING, STATE_READY,
         activate_publication, advance_generation, finish, insert_change_event,
     },
-    catalog_visibility::catalog_item_visibility_condition,
+    catalog_visibility::projected_enabled_membership,
     work_job::{
         ClaimedWorkJob, MetadataRequirement, WorkJobRepository, WorkJobResult, WorkJobSpec,
         WorkScope, WorkTaskKind, ensure_live_claim, fence_live_claim,
@@ -3044,6 +3046,15 @@ pub(crate) async fn playback_location(
         )
         .finally(1)
         .into();
+    // Catalog visibility gate matching the browse read model without an
+    // extra correlated probe: the already-joined membership may attach to the
+    // item itself, or the item is visible through its structure publication.
+    let catalog_visibility = Cond::any()
+        .add(
+            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .add(Expr::exists(projected_enabled_membership(&item)));
     let query = Query::select()
         .distinct()
         .expr_as(
@@ -3221,7 +3232,10 @@ pub(crate) async fn playback_location(
             Expr::col((canonical_location.clone(), Alias::new("availability_state")))
                 .is_in(["Available", "TemporarilyUnavailable"]),
         )
-        .cond_where(catalog_item_visibility_condition(&item))
+        .and_where(
+            Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"),
+        )
+        .cond_where(catalog_visibility)
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .cond_where(
@@ -3300,6 +3314,14 @@ async fn subtitle_location(
     let membership = Alias::new("subtitle_membership");
     let library = Alias::new("subtitle_library");
     let library_root = Alias::new("subtitle_library_root");
+    // Same catalog visibility gate as playback_location, expressed against
+    // this query's membership join without an extra correlated probe.
+    let catalog_visibility = Cond::any()
+        .add(
+            Expr::col((membership.clone(), Alias::new("catalog_item_id")))
+                .equals((item.clone(), Alias::new("id"))),
+        )
+        .add(Expr::exists(projected_enabled_membership(&item)));
     let query = Query::select()
         .expr_as(
             Expr::col((object.clone(), Alias::new("id"))),
@@ -3477,7 +3499,10 @@ async fn subtitle_location(
         )))
         .and_where(Expr::col((account, Alias::new("status"))).is_in(["Active", "Ready"]))
         .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
-        .cond_where(catalog_item_visibility_condition(&item))
+        .and_where(
+            Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"),
+        )
+        .cond_where(catalog_visibility)
         .and_where(Expr::col((item, Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .cond_where(

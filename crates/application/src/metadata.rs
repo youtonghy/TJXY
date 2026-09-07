@@ -703,9 +703,16 @@ async fn read_sidecar(
     size: u64,
 ) -> Result<Vec<u8>, MetadataResolveError> {
     let range = ByteRange::new(0, size)?;
-    let mut stream = storage_read::open_range(database, backend, record_id, object_id, range)
-        .await
-        .map_err(metadata_storage_read_error)?;
+    let mut stream = storage_read::open_range(
+        database,
+        backend,
+        record_id,
+        object_id,
+        range,
+        &storage_read::ReadAvailabilityThrottle::unthrottled(),
+    )
+    .await
+    .map_err(metadata_storage_read_error)?;
     let expected = usize::try_from(size).map_err(|_| MetadataResolveError::ObjectChanged)?;
     let mut bytes = Vec::with_capacity(expected);
     while let Some(chunk) = stream.next().await {

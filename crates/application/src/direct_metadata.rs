@@ -127,6 +127,7 @@ impl DirectMetadataReadService {
             object.storage_object_id(),
             &object_id,
             ByteRange::new(0, object.size())?,
+            &storage_read::ReadAvailabilityThrottle::unthrottled(),
         )
         .await
         .map_err(map_storage_read)?;
@@ -160,6 +161,7 @@ impl DirectMetadataReadService {
             object.storage_object_id(),
             &object_id,
             ByteRange::new(0, object.size())?,
+            &storage_read::ReadAvailabilityThrottle::unthrottled(),
         )
         .await
         .map_err(map_storage_read)?;
