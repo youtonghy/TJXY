@@ -37,7 +37,8 @@ archives remain available for maintainers.
   root namespace remains stable.
 - **Metadata pipeline:** discover movies, series, episodes, and music from file
   names and local NFO/artwork, with optional TMDb, MusicBrainz, and TheAudioDB
-  enrichment.
+  enrichment. TMDb title searches with a known year accept candidates only within
+  one year, including relaxed searches; otherwise naming metadata is retained.
 - **Direct playback:** prepare session-scoped playback URLs, stream bounded byte
   ranges, select subtitles and sources, copy temporary direct links, or open
   supported third-party players while retaining in-app play state, favorites,
@@ -253,7 +254,10 @@ Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention
 worker enrolls terminal work left by earlier versions in batches of up to 1,000,
-then clears at most 100 jobs per short transaction. PostgreSQL and SQLite keep
+then clears at most 100 jobs per short transaction. Retired publications are
+re-enrolled with their job's original completion time, including publications
+compacted by older versions. Active references and live work dependencies prevent
+purging; deleting expired projections does not remove media files. PostgreSQL and SQLite keep
 the work-claim index limited to pending and running jobs. PostgreSQL replaces
 this index in the migration transaction, so the first startup after upgrading
 can take longer on a large work history. Legacy processed outbox rows are removed

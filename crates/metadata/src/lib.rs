@@ -1085,6 +1085,8 @@ const TMDB_TITLE_SIMILARITY_THRESHOLD: f64 = 0.6;
 /// Candidates are ranked by normalized-title similarity first and year
 /// proximity second. Candidates below the title-similarity threshold are
 /// rejected entirely so weak matches never displace naming-derived metadata.
+/// When the lookup supplies a year, candidates must have a known year within
+/// one year of it, including after a search without the API year filter.
 fn select_tmdb_candidate<'a>(
     results: &'a [TmdbSearchItem],
     fallback_title: &str,
@@ -1105,9 +1107,18 @@ fn select_tmdb_candidate<'a>(
             if similarity < TMDB_TITLE_SIMILARITY_THRESHOLD {
                 return None;
             }
-            let year_penalty = fallback_year.map_or(0_i32, |wanted| {
-                item.year.map_or(2, |actual| (actual - wanted).abs().min(2))
-            });
+            // A named release year is evidence: tolerate adjacent releases,
+            // but never bind a distant remake or an undated candidate.
+            let year_penalty = match fallback_year {
+                Some(wanted) => {
+                    let distance = item.year?.abs_diff(wanted);
+                    if distance > 1 {
+                        return None;
+                    }
+                    distance
+                }
+                None => 0,
+            };
             Some((similarity, year_penalty, item))
         })
         .max_by(
@@ -1302,7 +1313,8 @@ impl MetadataProvider for TmdbProvider {
                     .transport
                     .search(lookup.kind(), lookup.fallback_title(), None, &self.language)
                     .await?;
-                select_tmdb_candidate(&relaxed, lookup.fallback_title(), None).cloned()
+                select_tmdb_candidate(&relaxed, lookup.fallback_title(), lookup.fallback_year())
+                    .cloned()
             }
             None => None,
         };

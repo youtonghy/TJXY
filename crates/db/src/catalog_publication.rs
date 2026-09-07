@@ -975,6 +975,7 @@ pub(crate) async fn activate_publication(
             .and_where(Expr::col(Alias::new("state")).eq(STATE_ACTIVE))
             .to_owned();
         transaction.execute(backend.build(&retire)).await?;
+        crate::work_retention::enqueue_retired_publication(transaction, previous, now).await?;
     }
     let activate = Query::update()
         .table(Alias::new("catalog_publications"))

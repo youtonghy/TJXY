@@ -32,7 +32,8 @@ TJXY 将影视或音乐条目与实际提供文件内容的存储位置分离。
   挂载后仍是绑定依据；Unix 设备号和 inode 变化只作为重新挂载信号，已有根命名
   空间保持稳定。
 - **元数据处理**：从文件名、本地 NFO 和图片发现电影、剧集、单集及音乐，
-  并可选择使用 TMDb、MusicBrainz 和 TheAudioDB 补充信息。
+  并可选择使用 TMDb、MusicBrainz 和 TheAudioDB 补充信息。TMDb 标题搜索携带年份时，
+  包括放宽搜索在内，只接受年份相差不超过一年的候选；无匹配时保留命名元数据。
 - **直接播放**：生成会话级播放地址、按范围传输媒体、选择字幕和文件来源、复制
   临时直链或调用支持的第三方播放器，并保存站内播放状态、收藏及观看进度。
 - **Web 应用**：同一服务提供响应式媒体客户端 `/app/` 和管理控制台 `/admin/`。
@@ -220,7 +221,9 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 当前版本完成的工作任务默认保留 7 天。可将
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 每次最多登记 1,000 条旧版本
-遗留的终态任务，并以每事务最多 100 条的短批次清理。PostgreSQL 和 SQLite 的任务领取索引只保留
+遗留的终态任务，并以每事务最多 100 条的短批次清理。退休的 publication 会按所属任务原始
+完成时间重新入队，也覆盖旧版本已压缩的数据；仍有活动引用或活跃任务依赖时不会删除。
+清理过期投影不会删除媒体文件。PostgreSQL 和 SQLite 的任务领取索引只保留
 Pending/Running 任务。PostgreSQL 会在迁移事务内替换索引，因此任务历史较大时，升级后的首次启动
 可能需要更长时间。历史已处理 outbox 也会由后台分批清理；storage 事件进入 dead-letter 后保留 7 天。
 

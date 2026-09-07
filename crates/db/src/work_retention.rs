@@ -100,8 +100,15 @@ async fn enroll_legacy(
     now: DateTime<Utc>,
     cutoff: DateTime<Utc>,
 ) -> Result<u64, WorkRetentionError> {
-    let backend = transaction.get_database_backend();
     let entries = legacy_entries(transaction, now, cutoff).await?;
+    Ok(enqueue_entries(transaction, &entries).await?)
+}
+
+async fn enqueue_entries(
+    transaction: &DatabaseTransaction,
+    entries: &[(Uuid, DateTime<Utc>)],
+) -> Result<u64, DbErr> {
+    let backend = transaction.get_database_backend();
     let conflict = if backend == sea_orm::DbBackend::MySql {
         sea_orm::sea_query::OnConflict::new()
             .update_column(Alias::new("job_id"))
@@ -135,6 +142,54 @@ async fn enroll_legacy(
             .rows_affected();
     }
     Ok(enrolled)
+}
+
+/// Re-enroll a compacted publication's terminal job as part of retirement.
+/// Keep its original terminal time and preserve any existing queue lease.
+pub(crate) async fn enqueue_retired_publication(
+    transaction: &DatabaseTransaction,
+    publication_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
+    let job = Alias::new("retired_job");
+    let publication = Alias::new("retired_publication");
+    let row = transaction
+        .query_one(
+            transaction.get_database_backend().build(
+                Query::select()
+                    .columns([
+                        (job.clone(), Alias::new("id")),
+                        (job.clone(), Alias::new("completed_at")),
+                        (job.clone(), Alias::new("created_at")),
+                    ])
+                    .from_as(Alias::new("work_jobs"), job.clone())
+                    .join_as(
+                        JoinType::InnerJoin,
+                        Alias::new("catalog_publications"),
+                        publication.clone(),
+                        Expr::col((publication.clone(), Alias::new("job_id")))
+                            .equals((job.clone(), Alias::new("id"))),
+                    )
+                    .and_where(
+                        Expr::col((publication.clone(), Alias::new("id"))).eq(publication_id),
+                    )
+                    .and_where(
+                        Expr::col((publication, Alias::new("state")))
+                            .eq(crate::catalog_publication::STATE_RETIRED),
+                    )
+                    .and_where(Expr::col((job, Alias::new("state"))).is_in(TERMINAL_STATES)),
+            ),
+        )
+        .await?;
+    if let Some(row) = row {
+        let job_id = row.try_get::<Uuid>("", "id")?;
+        let terminal_at = row
+            .try_get::<Option<DateTime<Utc>>>("", "completed_at")?
+            .or(row.try_get::<Option<DateTime<Utc>>>("", "created_at")?)
+            .unwrap_or(now);
+        enqueue_entries(transaction, &[(job_id, terminal_at)]).await?;
+    }
+    Ok(())
 }
 
 async fn legacy_entries(
@@ -194,7 +249,7 @@ async fn legacy_entries(
                             ),
                     )
                     .and_where(Expr::col((queue, Alias::new("job_id"))).is_null())
-                    .and_where(Expr::col((publication, Alias::new("job_id"))).is_null())
+                    .cond_where(legacy_publication_condition(&publication))
                     .order_by((job.clone(), Alias::new("completed_at")), Order::Asc)
                     .order_by((job, Alias::new("id")), Order::Asc)
                     .limit(LEGACY_ENROLL_LIMIT),
@@ -213,6 +268,33 @@ async fn legacy_entries(
         })
         .collect::<Result<Vec<_>, DbErr>>()?;
     Ok(entries)
+}
+
+fn legacy_publication_condition(publication: &Alias) -> Cond {
+    let mut retired = Cond::all().add(
+        Expr::col((publication.clone(), Alias::new("state")))
+            .eq(crate::catalog_publication::STATE_RETIRED),
+    );
+    // Uncorrelated sets avoid scanning the catalog once per legacy job.
+    // Exclude NULL explicitly so NOT IN does not hide unreferenced rows.
+    for column in [
+        "active_structure_publication_id",
+        "active_source_publication_id",
+    ] {
+        let references = Query::select()
+            .column(Alias::new(column))
+            .from(Alias::new("catalog_items"))
+            .and_where(Expr::col(Alias::new(column)).is_not_null())
+            .to_owned();
+        retired = retired.add(
+            Expr::col((publication.clone(), Alias::new("id")))
+                .in_subquery(references)
+                .not(),
+        );
+    }
+    Cond::any()
+        .add(Expr::col((publication.clone(), Alias::new("job_id"))).is_null())
+        .add(retired)
 }
 
 fn validate(

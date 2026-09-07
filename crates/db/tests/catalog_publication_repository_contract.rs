@@ -932,3 +932,220 @@ async fn structure_publication_rejects_a_scope_outside_the_owner_roots() {
         CatalogPublicationError::UnauthorizedStorageObject
     ));
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercises publish, compaction, replacement and eventual purge together.
+async fn replacing_a_compacted_publication_requeues_its_original_terminal_time() {
+    let database = database().await;
+    let owner = seed_series(&database, 1).await;
+    let rows = structure_rows(&database, owner).await;
+    let manifest = StructurePublicationManifest::from_rows(&rows).unwrap();
+    let publications = CatalogPublicationRepository::new(&database);
+    let (jobs, first_claim) = claimed_expand(&database, owner, 1).await;
+    let first = publications
+        .begin_structure(&first_claim, &manifest)
+        .await
+        .unwrap();
+    publications
+        .stage_structure_batch(&first_claim, first, &rows)
+        .await
+        .unwrap();
+    publications
+        .seal_structure(&first_claim, first)
+        .await
+        .unwrap();
+    publications
+        .publish_structure(&jobs, &first_claim, first)
+        .await
+        .unwrap();
+
+    let backend = database.get_database_backend();
+    let terminal_at = Utc::now() - Duration::days(31);
+    for (table, key, column) in [
+        ("work_jobs", "id", "completed_at"),
+        ("work_job_retention_queue", "job_id", "terminal_at"),
+    ] {
+        database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new(table))
+                        .value(Alias::new(column), terminal_at)
+                        .and_where(Expr::col(Alias::new(key)).eq(first_claim.id().as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let retention = tjxy_db::WorkRetentionRepository::new(&database);
+    assert!(matches!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        tjxy_db::WorkRetentionRun::Processed { compacted: 1, .. }
+    ));
+    assert_eq!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        tjxy_db::WorkRetentionRun::Idle
+    );
+
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("structure_expansion_revision"), 2_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(owner.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let (jobs, second_claim) = claimed_expand(&database, owner, 2).await;
+    let second = publications
+        .begin_structure(&second_claim, &manifest)
+        .await
+        .unwrap();
+    publications
+        .stage_structure_batch(&second_claim, second, &rows)
+        .await
+        .unwrap();
+    publications
+        .seal_structure(&second_claim, second)
+        .await
+        .unwrap();
+    // Fail after retirement and pointer switching, while completing the new
+    // job, to prove re-enrollment is rolled back with the publication.
+    assert_replacement_failure_rolls_back(
+        &database,
+        &jobs,
+        &second_claim,
+        second,
+        first,
+        first_claim.id().as_uuid(),
+    )
+    .await;
+    publications
+        .publish_structure(&jobs, &second_claim, second)
+        .await
+        .unwrap();
+
+    let queued_at = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("terminal_at"))
+                    .from(Alias::new("work_job_retention_queue"))
+                    .and_where(Expr::col(Alias::new("job_id")).eq(first_claim.id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<chrono::DateTime<Utc>>("", "terminal_at")
+        .unwrap();
+    assert_eq!(queued_at.timestamp(), terminal_at.timestamp());
+    assert!(matches!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        tjxy_db::WorkRetentionRun::Processed { purged: 1, .. }
+    ));
+    let active = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("active_structure_publication_id"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(owner.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<uuid::Uuid>("", "active_structure_publication_id")
+        .unwrap();
+    assert_eq!(active, second.as_uuid());
+}
+
+async fn assert_replacement_failure_rolls_back(
+    database: &DatabaseConnection,
+    jobs: &WorkJobRepository<'_>,
+    claimed: &tjxy_db::ClaimedWorkJob,
+    replacement: tjxy_common::PublicationId,
+    previous: tjxy_common::PublicationId,
+    previous_job: uuid::Uuid,
+) {
+    let backend = database.get_database_backend();
+    // The unique job_id forces the final result insert to fail.
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("work_results"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("job_id"),
+                        Alias::new("counters"),
+                        Alias::new("warnings"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        claimed.id().as_uuid().into(),
+                        serde_json::json!({}).into(),
+                        serde_json::json!([]).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        CatalogPublicationRepository::new(database)
+            .publish_structure(jobs, claimed, replacement)
+            .await
+            .is_err()
+    );
+    let state = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("state"))
+                    .from(Alias::new("catalog_publications"))
+                    .and_where(Expr::col(Alias::new("id")).eq(previous.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "state")
+        .unwrap();
+    assert_eq!(state, "Active");
+    assert!(
+        database
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("job_id"))
+                        .from(Alias::new("work_job_retention_queue"))
+                        .and_where(Expr::col(Alias::new("job_id")).eq(previous_job))
+                )
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    database
+        .execute(
+            backend.build(
+                Query::delete()
+                    .from_table(Alias::new("work_results"))
+                    .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}

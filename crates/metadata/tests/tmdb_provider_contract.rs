@@ -314,3 +314,56 @@ async fn original_titles_participate_in_title_matching() {
 
     assert_eq!(transport.detail_ids.lock().unwrap().as_slice(), [31]);
 }
+
+#[tokio::test]
+async fn relaxed_search_preserves_year_ranking_and_rejects_remakes() {
+    for (years, expected) in [
+        (vec![Some(2016), Some(2017), Some(1980)], Some(1)),
+        (vec![Some(2015), Some(2017), Some(1980)], Some(2)),
+        (vec![Some(2014), Some(2018), None], None),
+    ] {
+        let transport = Arc::new(ScriptedTransport {
+            searches: Mutex::new(vec![
+                Ok(Vec::new()),
+                Ok(years
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, year)| {
+                        TmdbSearchItem::new(u64::try_from(index).unwrap() + 1, "Arrival")
+                            .with_details(None, None, year)
+                    })
+                    .collect()),
+            ]),
+            calls: Mutex::new(Vec::new()),
+            detail_ids: Mutex::new(Vec::new()),
+        });
+        let provider = TmdbProvider::with_transport("en-US", transport.clone()).unwrap();
+        let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", Some(2016)).unwrap();
+        assert_eq!(
+            provider.resolve(&lookup).await.unwrap().is_some(),
+            expected.is_some()
+        );
+        assert_eq!(
+            *transport.detail_ids.lock().unwrap(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, Some(2016));
+        assert_eq!(calls[1].2, None);
+    }
+}
+
+#[tokio::test]
+async fn yearless_lookup_accepts_candidates_without_a_year() {
+    let transport = Arc::new(ScriptedTransport {
+        searches: Mutex::new(vec![Ok(vec![TmdbSearchItem::new(1, "Arrival")])]),
+        calls: Mutex::new(Vec::new()),
+        detail_ids: Mutex::new(Vec::new()),
+    });
+    let provider = TmdbProvider::with_transport("en-US", transport.clone()).unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", None).unwrap();
+    assert!(provider.resolve(&lookup).await.unwrap().is_some());
+    assert_eq!(*transport.detail_ids.lock().unwrap(), [1]);
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}

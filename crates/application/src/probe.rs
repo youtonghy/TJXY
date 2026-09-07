@@ -657,20 +657,22 @@ fn mp3_layer3_runtime_ticks(
         MP3_BITRATES_V2_L3
     };
     let bitrate_kbps = table[bitrate_index];
-    if xing_position + 12 <= bytes.len()
+    if xing_position + 4 <= bytes.len()
         && (bytes[xing_position..xing_position + 4] == *b"Xing"
             || bytes[xing_position..xing_position + 4] == *b"Info")
     {
         let flags = u32::from_be_bytes(
-            bytes[xing_position + 4..xing_position + 8]
+            bytes
+                .get(xing_position + 4..xing_position + 8)?
                 .try_into()
-                .expect("length checked"),
+                .ok()?,
         );
-        if flags & 0x8000_0000 != 0 {
+        if flags & 0x0000_0001 != 0 {
             let frames = u32::from_be_bytes(
-                bytes[xing_position + 8..xing_position + 12]
+                bytes
+                    .get(xing_position + 8..xing_position + 12)?
                     .try_into()
-                    .expect("length checked"),
+                    .ok()?,
             );
             let samples_per_frame: u32 = if version == 0b11 { 1_152 } else { 576 };
             return duration_ticks_from_ratio(
@@ -2355,7 +2357,7 @@ mod tests {
         let mut xing = vec![0xFF, 0xFB, 0x90, 0x40];
         xing.resize(36, 0); // header + 32 bytes of side info
         xing.extend_from_slice(b"Xing");
-        xing.extend_from_slice(&0x8000_0000_u32.to_be_bytes());
+        xing.extend_from_slice(&0x0000_0001_u32.to_be_bytes());
         xing.extend_from_slice(&77_u32.to_be_bytes());
         let result = AudioInspector
             .inspect(single_segment_input(xing, Some(32_000)))
@@ -2378,6 +2380,55 @@ mod tests {
         assert_eq!(result.streams()[0].codec(), Some("aac"));
         assert_eq!(result.streams()[0].channels(), Some(2));
         assert_eq!(result.runtime_ticks(), Some(19_840_000));
+    }
+
+    #[test]
+    fn real_lame_mp3_reports_frame_duration() {
+        let bytes = include_bytes!("../tests/fixtures/xing.mp3");
+        let result = DefaultMediaInspector
+            .inspect(single_segment_input(bytes.to_vec(), None))
+            .unwrap();
+        assert_eq!(result.container(), "mp3");
+        // Nine MPEG-1 Layer III frames, including encoder delay/padding.
+        assert_eq!(
+            result.runtime_ticks(),
+            Some(9 * 1_152 * 10_000_000 / 44_100)
+        );
+    }
+
+    #[test]
+    fn xing_and_info_flags_and_truncated_headers_are_handled() {
+        for signature in [b"Xing", b"Info"] {
+            for flags in [1_u32, 0x0f] {
+                let mut bytes = vec![0xFF, 0xFB, 0x90, 0x40];
+                bytes.resize(36, 0);
+                bytes.extend_from_slice(signature);
+                bytes.extend_from_slice(&flags.to_be_bytes());
+                bytes.extend_from_slice(&77_u32.to_be_bytes());
+                let result = AudioInspector
+                    .inspect(single_segment_input(bytes.clone(), Some(32_000)))
+                    .unwrap();
+                assert_eq!(
+                    result.runtime_ticks(),
+                    Some(77 * 1_152 * 10_000_000 / 44_100)
+                );
+                for end in 40..48 {
+                    let result = AudioInspector
+                        .inspect(single_segment_input(bytes[..end].to_vec(), Some(32_000)))
+                        .unwrap();
+                    assert_eq!(
+                        result.runtime_ticks(),
+                        None,
+                        "truncated {signature:?} at {end}"
+                    );
+                }
+                bytes[40..44].copy_from_slice(&2_u32.to_be_bytes());
+                let result = AudioInspector
+                    .inspect(single_segment_input(bytes, Some(32_000)))
+                    .unwrap();
+                assert_eq!(result.runtime_ticks(), None);
+            }
+        }
     }
 
     #[test]

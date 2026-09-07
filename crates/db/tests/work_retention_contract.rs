@@ -778,3 +778,89 @@ async fn ready_publications_are_compacted_not_purged() {
     );
     assert_eq!(table_count(&database, "work_jobs", "id").await, 1);
 }
+
+#[tokio::test]
+async fn compacted_publication_is_reenrolled_only_after_retirement_and_reference_release() {
+    let database = database().await;
+    let (_, publication_id) = seed_job_with_publication(&database, "Active", true).await;
+    let retention = WorkRetentionRepository::new(&database);
+    let run = retention
+        .run_once("worker", Duration::days(30), Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(matches!(
+        run,
+        WorkRetentionRun::Processed { compacted: 1, .. }
+    ));
+    assert_eq!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Idle
+    );
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_publications"))
+                    .value(Alias::new("state"), "Retired")
+                    .and_where(Expr::col(Alias::new("id")).eq(publication_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Idle
+    );
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(
+                        Alias::new("active_source_publication_id"),
+                        Option::<uuid::Uuid>::None,
+                    )
+                    .and_where(
+                        Expr::col(Alias::new("active_source_publication_id")).eq(publication_id),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::EnrolledLegacy { count: 1 }
+    );
+    assert!(matches!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            purged: 1,
+            deleted: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        0
+    );
+    assert_eq!(
+        retention
+            .run_once("worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Idle
+    );
+}
