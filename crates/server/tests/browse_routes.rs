@@ -4030,6 +4030,65 @@ async fn image_get_and_head_stream_original_bytes_with_private_revalidation() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn image_matching_tag_responses_allow_long_immutable_caching() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let sha256 = seed_asset(&app, item, b"jpeg").await;
+    let (_, _, token) = login(&app.router).await;
+    let path = format!("/Items/{item}/Images/Primary");
+
+    let tagged = get(&app.router, &format!("{path}?tag={sha256}"), Some(&token)).await;
+    assert_eq!(tagged.status(), StatusCode::OK);
+    assert_eq!(
+        tagged.headers()[header::CACHE_CONTROL],
+        "private, max-age=604800, immutable"
+    );
+    assert_eq!(
+        tagged.into_body().collect().await.unwrap().to_bytes(),
+        b"jpeg"[..]
+    );
+
+    let stale = get(&app.router, &format!("{path}?tag=deadbeef"), Some(&token)).await;
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(
+        stale.headers()[header::CACHE_CONTROL],
+        "private, max-age=0, must-revalidate"
+    );
+
+    let head = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("{path}?tag={sha256}"))
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers()[header::CACHE_CONTROL],
+        "private, max-age=604800, immutable"
+    );
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn image_route_conceals_unknown_assets_and_rejects_unsupported_inputs() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;
@@ -4639,7 +4698,7 @@ async fn playback_info_reports_embedded_subtitle_streams() {
         presentation,
         "Subtitle",
         3,
-        "s_hdmv_pgs",
+        "pgssub",
         None,
         None,
         None,
@@ -4678,7 +4737,7 @@ async fn playback_info_reports_embedded_subtitle_streams() {
 
     let embedded_graphic = streams
         .iter()
-        .find(|stream| stream["Codec"] == "s_hdmv_pgs")
+        .find(|stream| stream["Codec"] == "pgssub")
         .expect("embedded graphic subtitle must be reported");
     assert_eq!(embedded_graphic["Type"], "Subtitle");
     assert_eq!(embedded_graphic["IsTextSubtitleStream"], false);
@@ -4695,7 +4754,8 @@ async fn playback_info_reports_embedded_subtitle_streams() {
 }
 
 #[tokio::test]
-async fn playback_info_forces_direct_play_for_incompatible_device_profiles() {
+#[allow(clippy::too_many_lines)] // One assertion flow per retention classification keeps the scenario observable.
+async fn playback_info_reports_direct_play_honestly_for_device_profiles() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
     let item = seed_item(&app.database, library, "Arrival", "Movie").await;
@@ -4737,12 +4797,12 @@ async fn playback_info_forces_direct_play_for_incompatible_device_profiles() {
     let (_, _, token) = login(&app.router).await;
     let uri = format!("/Items/{item}/PlaybackInfo");
 
-    for (video_codec, max_width, profile, max_level) in [
-        ("hevc", "3840", "High", "41"),
-        ("h264", "1280", "High", "41"),
-        ("h264", "1920", "Baseline", "41"),
-        ("h264", "1920", "High", "40"),
-        ("h264", "1920", "High", "41"),
+    for (video_codec, max_width, profile, max_level, expected_direct_play) in [
+        ("hevc", "3840", "High", "41", false),
+        ("h264", "1280", "High", "41", false),
+        ("h264", "1920", "Baseline", "41", false),
+        ("h264", "1920", "High", "40", false),
+        ("h264", "1920", "High", "41", true),
     ] {
         let response = post(
             &app.router,
@@ -4791,8 +4851,14 @@ async fn playback_info_forces_direct_play_for_incompatible_device_profiles() {
                 .unwrap();
         assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
         assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
-        assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
+        assert_eq!(
+            payload["MediaSources"][0]["SupportsDirectPlay"], expected_direct_play,
+            "incompatible profiles must not claim direct play support"
+        );
+        assert_eq!(
+            payload["MediaSources"][0]["SupportsDirectStream"], expected_direct_play,
+            "the server only serves original bytes, so direct stream tracks direct play"
+        );
         assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
         assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
     }
@@ -4861,8 +4927,11 @@ async fn playback_info_query_overrides_body_identity_source_and_direct_play_flag
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
     assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
-    assert_eq!(payload["MediaSources"][0]["SupportsDirectPlay"], true);
-    assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], true);
+    assert_eq!(
+        payload["MediaSources"][0]["SupportsDirectPlay"], false,
+        "enableDirectPlay=false must be honored even without a device profile"
+    );
+    assert_eq!(payload["MediaSources"][0]["SupportsDirectStream"], false);
     assert_eq!(payload["MediaSources"][0]["SupportsTranscoding"], false);
     assert_eq!(payload["MediaSources"][0]["TranscodingUrl"], Value::Null);
 }
@@ -5388,14 +5457,12 @@ async fn invisible_items_reject_direct_stream_and_ticket_issuance() {
     // and ticket issuance must both refuse it instead of serving bytes.
     app.database
         .execute(
-            app.database
-                .get_database_backend()
-                .build(
-                    Query::update()
-                        .table(Alias::new("catalog_items"))
-                        .value(Alias::new("classification_state"), "Unmatched")
-                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
-                ),
+            app.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("classification_state"), "Unmatched")
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
         )
         .await
         .unwrap();
@@ -5431,14 +5498,12 @@ async fn invisible_items_reject_direct_stream_and_ticket_issuance() {
     // Restoring classification makes the same source playable again.
     app.database
         .execute(
-            app.database
-                .get_database_backend()
-                .build(
-                    Query::update()
-                        .table(Alias::new("catalog_items"))
-                        .value(Alias::new("classification_state"), "Matched")
-                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
-                ),
+            app.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("classification_state"), "Matched")
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
         )
         .await
         .unwrap();

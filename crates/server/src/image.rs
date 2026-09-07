@@ -93,7 +93,9 @@ async fn original(
                 None => direct.image(item_id, image_type, 0).await,
             };
             return match direct_result {
-                Ok(Some(image)) => direct_image_response(image, headers, head_only),
+                Ok(Some(image)) => {
+                    direct_image_response(image, query.tag.as_deref(), headers, head_only)
+                }
                 Ok(None) => error(StatusCode::NOT_FOUND, "image was not found"),
                 Err(
                     DirectMetadataReadError::Query(_)
@@ -111,20 +113,22 @@ async fn original(
         }
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "asset data is invalid"),
     };
-    asset_response(asset, headers, head_only)
+    asset_response(asset, query.tag.as_deref(), headers, head_only)
 }
 
 fn direct_image_response(
     image: OpenedDirectImage,
+    query_tag: Option<&str>,
     request_headers: &HeaderMap,
     head_only: bool,
 ) -> Response {
     let etag = format!("\"{}\"", image.etag());
+    let cache_control = image_cache_control(query_tag, image.etag());
     if etag_matches(request_headers, &etag) {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, etag)
-            .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+            .header(header::CACHE_CONTROL, cache_control)
             .body(Body::empty())
             .unwrap_or_else(|_| {
                 error(StatusCode::INTERNAL_SERVER_ERROR, "invalid image metadata")
@@ -142,14 +146,15 @@ fn direct_image_response(
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_LENGTH, size)
         .header(header::ETAG, etag)
-        .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+        .header(header::CACHE_CONTROL, cache_control)
         .body(body)
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "invalid image metadata"))
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct ImageQuery {
     library_id: Option<LibraryId>,
+    tag: Option<String>,
 }
 
 fn parse_query(raw_query: Option<&str>) -> Option<ImageQuery> {
@@ -170,7 +175,7 @@ fn parse_query(raw_query: Option<&str>) -> Option<ImageQuery> {
     let mut parameters = normalized;
     parameters.remove("ApiKey");
     parameters.remove("api_key");
-    parameters.remove("tag");
+    let tag = parameters.remove("tag");
     let library_id = match parameters.remove("libraryId") {
         Some(value) => Some(LibraryId::from_uuid(value.parse::<Uuid>().ok()?)),
         None => None,
@@ -221,16 +226,36 @@ fn parse_query(raw_query: Option<&str>) -> Option<ImageQuery> {
             return None;
         }
     }
-    parameters.is_empty().then_some(ImageQuery { library_id })
+    parameters
+        .is_empty()
+        .then_some(ImageQuery { library_id, tag })
 }
 
-fn asset_response(asset: OpenedAsset, request_headers: &HeaderMap, head_only: bool) -> Response {
+/// Matches the Jellyfin `tag` query hint against the current image identity:
+/// a matching tag proves the client already holds this exact version, so the
+/// response may carry a long immutable cache lifetime instead of forcing
+/// revalidation on every request.
+fn image_cache_control(query_tag: Option<&str>, current_identity: &str) -> &'static str {
+    if query_tag.is_some_and(|tag| tag == current_identity) {
+        "private, max-age=604800, immutable"
+    } else {
+        "private, max-age=0, must-revalidate"
+    }
+}
+
+fn asset_response(
+    asset: OpenedAsset,
+    query_tag: Option<&str>,
+    request_headers: &HeaderMap,
+    head_only: bool,
+) -> Response {
     let etag = format!("\"{}\"", asset.sha256());
+    let cache_control = image_cache_control(query_tag, asset.sha256());
     if etag_matches(request_headers, &etag) {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, etag)
-            .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+            .header(header::CACHE_CONTROL, cache_control)
             .body(Body::empty())
             .unwrap_or_else(|_| {
                 error(StatusCode::INTERNAL_SERVER_ERROR, "invalid asset metadata")
@@ -261,7 +286,7 @@ fn asset_response(asset: OpenedAsset, request_headers: &HeaderMap, head_only: bo
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_LENGTH, byte_size)
         .header(header::ETAG, etag)
-        .header(header::CACHE_CONTROL, "private, max-age=0, must-revalidate")
+        .header(header::CACHE_CONTROL, cache_control)
         .body(body)
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "invalid asset metadata"))
 }

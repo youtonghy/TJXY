@@ -58,6 +58,15 @@ impl DeviceProfile {
         })
     }
 
+    /// Returns true when the profile declares no direct-play or codec
+    /// constraints. Clients frequently upload `{}` or empty arrays while
+    /// expecting unrestricted playback; treat those as no restrictions
+    /// rather than rejecting every source.
+    #[must_use]
+    pub fn declares_no_restrictions(&self) -> bool {
+        self.direct_play_profiles.is_empty() && self.codec_profiles.is_empty()
+    }
+
     /// Ranks container and codec compatibility independently from profile limits.
     ///
     /// This is a secondary preference for sources which cannot Direct Play due

@@ -810,7 +810,7 @@ pub(crate) async fn playback_info_post(
         Ok(media_source_id) => media_source_id.map(PresentationKey::from_uuid),
         Err(error) => return error.into_response(),
     };
-    let _enable_direct_play = match json_bool(&payload, "EnableDirectPlay", "enableDirectPlay") {
+    let enable_direct_play = match json_bool(&payload, "EnableDirectPlay", "enableDirectPlay") {
         Ok(enable_direct_play) => enable_direct_play,
         Err(error) => return error.into_response(),
     };
@@ -823,6 +823,7 @@ pub(crate) async fn playback_info_post(
             user_id,
             media_source_id,
             profile,
+            enable_direct_play,
         },
     )
     .await
@@ -846,6 +847,7 @@ async fn playback_info(
     };
     request.user_id = query.user_id.or(request.user_id);
     request.media_source_id = query.media_source_id.or(request.media_source_id);
+    request.enable_direct_play = query.enable_direct_play.or(request.enable_direct_play);
     let Some(catalog) = state.catalog.as_ref() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "catalog is unavailable");
     };
@@ -898,10 +900,21 @@ async fn playback_info(
                 })
                 .collect::<Vec<_>>();
             sort_playback_sources(&mut sources);
+            let enable_direct_play = request.enable_direct_play.unwrap_or(true);
             let media_sources = sources
                 .into_iter()
                 .map(|(_, source)| {
-                    media_source_info(item_id, &source, true, source.presentation_key())
+                    let supports_direct_play = enable_direct_play
+                        && profile.as_ref().is_none_or(|profile| {
+                            profile.declares_no_restrictions()
+                                || profile.supports_direct_play(&source)
+                        });
+                    media_source_info(
+                        item_id,
+                        &source,
+                        supports_direct_play,
+                        source.presentation_key(),
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>();
             match media_sources {
@@ -1044,11 +1057,13 @@ struct PlaybackInfoRequest {
     user_id: Option<UserId>,
     media_source_id: Option<PresentationKey>,
     profile: Option<serde_json::Value>,
+    enable_direct_play: Option<bool>,
 }
 
 struct PlaybackInfoQuery {
     user_id: Option<UserId>,
     media_source_id: Option<PresentationKey>,
+    enable_direct_play: Option<bool>,
 }
 
 fn parse_playback_info_query(
@@ -1058,7 +1073,7 @@ fn parse_playback_info_query(
     let user_id = take_user_id(&mut parameters)?;
     let media_source_id =
         take_uuid(&mut parameters, "mediaSourceId")?.map(PresentationKey::from_uuid);
-    let _enable_direct_play = take_bool(&mut parameters, "enableDirectPlay")?;
+    let enable_direct_play = take_bool(&mut parameters, "enableDirectPlay")?;
     for parameter in [
         "maxStreamingBitrate",
         "startTimeTicks",
@@ -1080,6 +1095,7 @@ fn parse_playback_info_query(
     Ok(PlaybackInfoQuery {
         user_id,
         media_source_id,
+        enable_direct_play,
     })
 }
 
