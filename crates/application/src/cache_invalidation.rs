@@ -73,7 +73,26 @@ impl CacheInvalidationService {
             }
         }
     }
+
+    /// Deletes change-outbox rows already flushed to the cache layer.
+    ///
+    /// Returns the number of rows removed in this bounded batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a repository error when the cursor read or delete fails.
+    pub async fn purge_consumed_outbox(&self) -> Result<u64, CacheInvalidationServiceError> {
+        let deleted = CacheInvalidationRepository::new(&self.database)
+            .purge_consumed_outbox(OUTBOX_PURGE_GENERATION_WINDOW)
+            .await?;
+        Ok(deleted)
+    }
 }
+
+/// Generations deleted per purge call. Each generation maps to at most a
+/// handful of change rows, so `50_000` generations bound the transaction while
+/// still converging quickly after long uptimes.
+const OUTBOX_PURGE_GENERATION_WINDOW: i64 = 50_000;
 
 fn retry_delay(attempt_count: i32) -> chrono::Duration {
     let exponent = u32::try_from(attempt_count).unwrap_or_default().min(6);

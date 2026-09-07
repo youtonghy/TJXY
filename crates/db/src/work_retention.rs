@@ -75,6 +75,7 @@ pub enum WorkRetentionRun {
     Processed {
         deleted: u64,
         compacted: u64,
+        purged: u64,
         deferred: u64,
     },
 }
@@ -88,6 +89,9 @@ struct RetentionClassification {
     compacted: Vec<Uuid>,
     deferred: Vec<Uuid>,
     deleted: Vec<Uuid>,
+    /// Terminal jobs whose retired, unreferenced publication projection is
+    /// deleted alongside the job instead of being compacted forever.
+    purged: Vec<(Uuid, Uuid)>,
     missing: Vec<Uuid>,
 }
 
@@ -318,6 +322,7 @@ async fn process_batch(
             .deleted
             .iter()
             .chain(&classification.compacted)
+            .chain(classification.purged.iter().map(|(job_id, _)| job_id))
             .copied()
             .collect(),
     );
@@ -328,9 +333,23 @@ async fn process_batch(
         clear_terminal_dependencies(transaction, &cleanup_ids).await?;
         delete_child_rows(transaction, &cleanup_ids).await?;
     }
-    if !classification.deleted.is_empty() {
-        delete_jobs(transaction, &classification.deleted).await?;
+    if !classification.purged.is_empty() {
+        delete_retired_publications(transaction, &classification.purged).await?;
     }
+    let fully_deleted = sorted_ids(
+        classification
+            .deleted
+            .iter()
+            .chain(classification.purged.iter().map(|(job_id, _)| job_id))
+            .copied()
+            .collect(),
+    );
+    if !fully_deleted.is_empty() {
+        delete_jobs(transaction, &fully_deleted).await?;
+    }
+    // Queue rows for fully deleted jobs (deleted + purged) vanish through the
+    // work_job_retention_queue -> work_jobs ON DELETE CASCADE foreign key, so
+    // only compacted and missing jobs need an explicit queue-claim delete.
     let queue_ids = sorted_ids(
         classification
             .compacted
@@ -343,10 +362,15 @@ async fn process_batch(
         delete_queue_claims(transaction, claimed, &queue_ids, now).await?;
     }
     Ok(WorkRetentionRun::Processed {
-        deleted: u64::try_from(classification.deleted.len() + classification.missing.len())
-            .expect("retention batch size fits u64"),
+        deleted: u64::try_from(
+            classification.deleted.len()
+                + classification.purged.len()
+                + classification.missing.len(),
+        )
+        .expect("retention batch size fits u64"),
         compacted: u64::try_from(classification.compacted.len())
             .expect("retention batch size fits u64"),
+        purged: u64::try_from(classification.purged.len()).expect("retention batch size fits u64"),
         deferred: u64::try_from(classification.deferred.len())
             .expect("retention batch size fits u64"),
     })
@@ -404,10 +428,12 @@ async fn classify_claims(
     let mut protected_ids = active_dependency_ids(transaction, &existing_ids).await?;
     protected_ids.extend(recovery_cursor_ids(transaction, &existing_ids).await?);
     protected_ids.extend(active_full_scan_child_ids(transaction, &existing_ids).await?);
-    let publication_ids = catalog_publication_ids(transaction, &existing_ids).await?;
+    let publications = publication_ownership(transaction, &existing_ids).await?;
+    let referenced_publications = active_publication_references(transaction, &publications).await?;
     let mut compacted_ids = Vec::new();
     let mut deferred_ids = Vec::new();
     let mut deleted_ids = Vec::new();
+    let mut purged_ids = Vec::new();
     let mut missing_ids = Vec::new();
     for job_id in &claimed.job_ids {
         let Some(state) = states.get(job_id) else {
@@ -416,8 +442,14 @@ async fn classify_claims(
         };
         if !TERMINAL_STATES.contains(&state.as_str()) || protected_ids.contains(job_id) {
             deferred_ids.push(*job_id);
-        } else if publication_ids.contains(job_id) {
-            compacted_ids.push(*job_id);
+        } else if let Some((publication_id, publication_state)) = publications.get(job_id) {
+            if publication_state == crate::catalog_publication::STATE_RETIRED
+                && !referenced_publications.contains(publication_id)
+            {
+                purged_ids.push((*job_id, *publication_id));
+            } else {
+                compacted_ids.push(*job_id);
+            }
         } else {
             deleted_ids.push(*job_id);
         }
@@ -426,8 +458,83 @@ async fn classify_claims(
         compacted: sorted_ids(compacted_ids),
         deferred: sorted_ids(deferred_ids),
         deleted: sorted_ids(deleted_ids),
+        purged: sorted_purges(purged_ids),
         missing: sorted_ids(missing_ids),
     })
+}
+
+/// Maps each claimed job to its publication identity and state. Publications
+/// are unique per job, so at most one entry exists per job id.
+async fn publication_ownership(
+    transaction: &DatabaseTransaction,
+    job_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (Uuid, String)>, DbErr> {
+    if job_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let backend = transaction.get_database_backend();
+    let rows = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .columns([Alias::new("job_id"), Alias::new("id"), Alias::new("state")])
+                    .from(Alias::new("catalog_publications"))
+                    .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied())),
+            ),
+        )
+        .await?;
+    let mut ownership = HashMap::with_capacity(rows.len());
+    for row in rows {
+        ownership.insert(
+            row.try_get::<Uuid>("", "job_id")?,
+            (
+                row.try_get::<Uuid>("", "id")?,
+                row.try_get::<String>("", "state")?,
+            ),
+        );
+    }
+    Ok(ownership)
+}
+
+/// Collects publication ids still referenced by a catalog item's active
+/// structure or source pointer. Retired publications held by these pointers
+/// must stay queryable and therefore cannot be purged.
+async fn active_publication_references(
+    transaction: &DatabaseTransaction,
+    publications: &HashMap<Uuid, (Uuid, String)>,
+) -> Result<HashSet<Uuid>, DbErr> {
+    let publication_ids = publications
+        .values()
+        .map(|(publication_id, _)| *publication_id)
+        .collect::<Vec<_>>();
+    if publication_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let backend = transaction.get_database_backend();
+    let mut referenced = HashSet::new();
+    for column in [
+        "active_structure_publication_id",
+        "active_source_publication_id",
+    ] {
+        let rows = transaction
+            .query_all(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new(column))
+                        .from(Alias::new("catalog_items"))
+                        .and_where(
+                            Expr::col(Alias::new(column)).is_in(publication_ids.iter().copied()),
+                        ),
+                ),
+            )
+            .await?;
+        for row in rows {
+            if let Ok(publication_id) = row.try_get::<Uuid>("", column) {
+                referenced.insert(publication_id);
+            }
+        }
+    }
+    Ok(referenced)
 }
 
 async fn active_dependency_ids(
@@ -463,20 +570,64 @@ async fn recovery_cursor_ids(
     .await
 }
 
-async fn catalog_publication_ids(
+/// Deletes retired publication projections with their change events, children,
+/// and the publication row itself. Children are removed before the parent so
+/// no foreign key is left dangling across the supported SQL dialects.
+async fn delete_retired_publications(
     transaction: &DatabaseTransaction,
-    job_ids: &[Uuid],
-) -> Result<HashSet<Uuid>, DbErr> {
-    selected_ids(
-        transaction,
-        Query::select()
-            .column(Alias::new("job_id"))
-            .from(Alias::new("catalog_publications"))
-            .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied()))
-            .to_owned(),
-        "job_id",
-    )
-    .await
+    purged: &[(Uuid, Uuid)],
+) -> Result<(), WorkRetentionError> {
+    let publication_ids = purged
+        .iter()
+        .map(|(_, publication_id)| *publication_id)
+        .collect::<Vec<_>>();
+    let backend = transaction.get_database_backend();
+    transaction
+        .execute(
+            backend.build(
+                &Query::delete()
+                    .from_table(Alias::new("catalog_change_outbox"))
+                    .and_where(
+                        Expr::col(Alias::new("publication_id"))
+                            .is_in(publication_ids.iter().copied()),
+                    )
+                    .to_owned(),
+            ),
+        )
+        .await?;
+    for table in [
+        "publication_catalog_items",
+        "publication_media_sources",
+        "publication_media_locations",
+        "publication_subtitles",
+    ] {
+        transaction
+            .execute(
+                backend.build(
+                    &Query::delete()
+                        .from_table(Alias::new(table))
+                        .and_where(
+                            Expr::col(Alias::new("publication_id"))
+                                .is_in(publication_ids.iter().copied()),
+                        )
+                        .to_owned(),
+                ),
+            )
+            .await?;
+    }
+    let deleted = transaction
+        .execute(
+            backend.build(
+                &Query::delete()
+                    .from_table(Alias::new("catalog_publications"))
+                    .and_where(Expr::col(Alias::new("id")).is_in(publication_ids.iter().copied()))
+                    .and_where(Expr::col(Alias::new("state")).eq("Retired"))
+                    .to_owned(),
+            ),
+        )
+        .await?
+        .rows_affected();
+    ensure_affected(deleted, purged.len())
 }
 
 async fn active_full_scan_child_ids(
@@ -659,6 +810,12 @@ fn sorted_ids(mut job_ids: Vec<Uuid>) -> Vec<Uuid> {
     job_ids.sort_unstable();
     job_ids.dedup();
     job_ids
+}
+
+fn sorted_purges(mut purges: Vec<(Uuid, Uuid)>) -> Vec<(Uuid, Uuid)> {
+    purges.sort_unstable();
+    purges.dedup();
+    purges
 }
 
 async fn finish<T>(

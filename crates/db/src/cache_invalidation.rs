@@ -211,6 +211,78 @@ where
         .await;
         finish(transaction, result).await
     }
+
+    /// Deletes consumed `catalog_change_outbox` rows in bounded batches.
+    ///
+    /// Rows at or below `cache_invalidation_state.processed_generation` have
+    /// already been flushed to the cache layer, so they are safe to remove.
+    /// Batching is expressed as a generation window over `MIN(generation)` so
+    /// the statement stays portable across `SQLite`, `MySQL`, and `PostgreSQL`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database failure when the cursor or outbox cannot be read or
+    /// the delete fails.
+    pub async fn purge_consumed_outbox(
+        &self,
+        generation_window: i64,
+    ) -> Result<u64, CacheInvalidationRepositoryError> {
+        if generation_window <= 0 {
+            return Err(CacheInvalidationRepositoryError::InvalidGenerationWindow);
+        }
+        let backend = self.database.get_database_backend();
+        let processed = self
+            .database
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("processed_generation"))
+                        .from(Alias::new("cache_invalidation_state"))
+                        .and_where(Expr::col(Alias::new("id")).eq(1_i32)),
+                ),
+            )
+            .await?
+            .ok_or_else(|| {
+                CacheInvalidationRepositoryError::Database(DbErr::Custom(
+                    "cache invalidation state row is missing".to_owned(),
+                ))
+            })?
+            .try_get::<i64>("", "processed_generation")?;
+        let Some(oldest) = self
+            .database
+            .query_one(
+                backend.build(
+                    Query::select()
+                        .expr_as(
+                            Expr::col(Alias::new("generation")).min(),
+                            Alias::new("oldest"),
+                        )
+                        .from(Alias::new("catalog_change_outbox")),
+                ),
+            )
+            .await?
+            .and_then(|row| row.try_get::<i64>("", "oldest").ok())
+        else {
+            return Ok(0);
+        };
+        let ceiling = (oldest + generation_window - 1).min(processed);
+        if ceiling < oldest {
+            return Ok(0);
+        }
+        let deleted = self
+            .database
+            .execute(
+                backend.build(
+                    &Query::delete()
+                        .from_table(Alias::new("catalog_change_outbox"))
+                        .and_where(Expr::col(Alias::new("generation")).lte(ceiling))
+                        .to_owned(),
+                ),
+            )
+            .await?
+            .rows_affected();
+        Ok(deleted)
+    }
 }
 
 fn validate_lease(owner: &str, duration: Duration) -> Result<(), CacheInvalidationRepositoryError> {
@@ -408,6 +480,8 @@ pub enum CacheInvalidationRepositoryError {
     InvalidLeaseDuration,
     #[error("retry backoff must not be negative")]
     InvalidBackoff,
+    #[error("generation window must be positive")]
+    InvalidGenerationWindow,
     #[error("cache invalidation error must contain 1 to 256 characters")]
     InvalidError,
     #[error("lease or retry timestamp is outside the supported range")]

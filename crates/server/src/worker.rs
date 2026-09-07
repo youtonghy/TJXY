@@ -247,6 +247,7 @@ pub(crate) fn spawn_cache_invalidation_worker(
 ) {
     tokio::spawn(async move {
         let service = CacheInvalidationService::new(database, cache);
+        let mut last_outbox_purge = std::time::Instant::now();
         loop {
             let delay = match service.run_once().await {
                 Ok(CacheInvalidationRun::Completed { generation, .. }) => {
@@ -271,10 +272,26 @@ pub(crate) fn spawn_cache_invalidation_worker(
                     StdDuration::from_secs(1)
                 }
             };
+            if last_outbox_purge.elapsed() >= OUTBOX_PURGE_INTERVAL {
+                last_outbox_purge = std::time::Instant::now();
+                match service.purge_consumed_outbox().await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::debug!(deleted, "purged consumed change-outbox rows");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!("change-outbox purge failed: {error}");
+                    }
+                }
+            }
             tokio::time::sleep(delay).await;
         }
     });
 }
+
+/// Cadence of the bounded change-outbox purge driven by the invalidation
+/// worker loop.
+const OUTBOX_PURGE_INTERVAL: StdDuration = StdDuration::from_secs(30);
 
 pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
     tokio::spawn(async move {
@@ -363,11 +380,13 @@ pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retentio
                 Ok(WorkRetentionRun::Processed {
                     deleted,
                     compacted,
+                    purged,
                     deferred,
                 }) => {
                     tracing::debug!(
                         deleted,
                         compacted,
+                        purged,
                         deferred,
                         "Processed work history retention batch"
                     );

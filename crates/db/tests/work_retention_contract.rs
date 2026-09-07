@@ -79,6 +79,7 @@ async fn newly_terminal_job_is_scheduled_and_removed_after_retention() {
         WorkRetentionRun::Processed {
             deleted: 1,
             compacted: 0,
+            purged: 0,
             deferred: 0,
         }
     );
@@ -147,6 +148,7 @@ async fn active_dependency_defers_retention() {
         WorkRetentionRun::Processed {
             deleted: 0,
             compacted: 0,
+            purged: 0,
             deferred: 1,
         }
     );
@@ -198,6 +200,7 @@ async fn retention_deletes_multiple_terminal_jobs_in_one_batch() {
         WorkRetentionRun::Processed {
             deleted: 3,
             compacted: 0,
+            purged: 0,
             deferred: 0,
         }
     );
@@ -289,6 +292,7 @@ async fn retention_mixes_deleted_and_deferred_jobs_in_one_batch() {
         WorkRetentionRun::Processed {
             deleted: 1,
             compacted: 0,
+            purged: 0,
             deferred: 1,
         }
     );
@@ -366,6 +370,7 @@ async fn legacy_terminal_job_is_enrolled_then_deleted() {
         WorkRetentionRun::Processed {
             deleted: 1,
             compacted: 0,
+            purged: 0,
             deferred: 0,
         }
     );
@@ -484,6 +489,7 @@ async fn published_job_is_compacted_once_without_legacy_reenrollment() {
         WorkRetentionRun::Processed {
             deleted: 0,
             compacted: 1,
+            purged: 0,
             deferred: 0,
         }
     );
@@ -521,4 +527,254 @@ async fn table_count(database: &DatabaseConnection, table: &str, column: &str) -
         .unwrap()
         .try_get("", "count")
         .unwrap()
+}
+
+/// Seeds a terminal job plus a publication in the given state and returns the
+/// job id and publication id. The publication owns one outbox change event.
+#[allow(clippy::too_many_lines)] // One seeding flow per classification scenario keeps the fixtures readable.
+async fn seed_job_with_publication(
+    database: &DatabaseConnection,
+    publication_state: &str,
+    referenced_by_item: bool,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let terminal_at = Utc::now() - Duration::days(31);
+    let jobs =
+        WorkJobRepository::with_clock(database, ManualClock(Arc::new(Mutex::new(terminal_at))));
+    let submitted = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let job_id = submitted.job().id().as_uuid();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "retention-contract",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    jobs.fail_terminal(&claimed, "fixture failure")
+        .await
+        .unwrap();
+
+    let backend = database.get_database_backend();
+    let item_id = uuid::Uuid::new_v4();
+    let publication_id = uuid::Uuid::new_v4();
+    database
+        .execute(
+            backend.build(
+                &Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("is_present"),
+                        Alias::new("active_source_publication_id"),
+                    ])
+                    .values_panic([
+                        item_id.into(),
+                        "Movie".into(),
+                        "Retention Purge".into(),
+                        "retention purge".into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "Unexpanded".into(),
+                        "Unknown".into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        true.into(),
+                        referenced_by_item.then_some(publication_id).into(),
+                    ])
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                &Query::insert()
+                    .into_table(Alias::new("catalog_publications"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("job_id"),
+                        Alias::new("owner_catalog_item_id"),
+                        Alias::new("publication_kind"),
+                        Alias::new("expected_revision"),
+                        Alias::new("state"),
+                        Alias::new("manifest_sha256"),
+                        Alias::new("expected_row_count"),
+                        Alias::new("created_at"),
+                    ])
+                    .values_panic([
+                        publication_id.into(),
+                        job_id.into(),
+                        item_id.into(),
+                        "Source".into(),
+                        0_i64.into(),
+                        publication_state.into(),
+                        "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                        0_i64.into(),
+                        terminal_at.into(),
+                    ])
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                &Query::insert()
+                    .into_table(Alias::new("catalog_change_outbox"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("generation"),
+                        Alias::new("event_type"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("publication_id"),
+                        Alias::new("created_at"),
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        1_i64.into(),
+                        "SourcesChanged".into(),
+                        item_id.into(),
+                        publication_id.into(),
+                        terminal_at.into(),
+                    ])
+                    .to_owned(),
+            ),
+        )
+        .await
+        .unwrap();
+    (job_id, publication_id)
+}
+
+#[tokio::test]
+async fn retired_unreferenced_publications_are_purged_with_their_job() {
+    let database = database().await;
+    let (job_id, publication_id) = seed_job_with_publication(&database, "Retired", false).await;
+
+    let run = WorkRetentionRepository::new(&database)
+        .run_once(
+            "retention-worker",
+            Duration::days(30),
+            Duration::seconds(30),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run,
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            compacted: 0,
+            purged: 1,
+            deferred: 0,
+        }
+    );
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        0
+    );
+    assert_eq!(
+        table_count(&database, "catalog_change_outbox", "id").await,
+        0
+    );
+    assert_eq!(
+        table_count(&database, "publication_media_sources", "id").await,
+        0
+    );
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 0);
+    assert_eq!(
+        table_count(&database, "work_job_retention_queue", "job_id").await,
+        0
+    );
+    assert!(!job_id.is_nil());
+    assert!(!publication_id.is_nil());
+}
+
+#[tokio::test]
+async fn retired_publications_still_referenced_by_active_pointers_are_compacted() {
+    let database = database().await;
+    let (job_id, publication_id) = seed_job_with_publication(&database, "Retired", true).await;
+
+    let run = WorkRetentionRepository::new(&database)
+        .run_once(
+            "retention-worker",
+            Duration::days(30),
+            Duration::seconds(30),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run,
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            compacted: 1,
+            purged: 0,
+            deferred: 0,
+        }
+    );
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        1,
+        "active publications must survive retention"
+    );
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 1);
+    assert_eq!(
+        table_count(&database, "work_job_retention_queue", "job_id").await,
+        0
+    );
+    assert!(!job_id.is_nil());
+    assert!(!publication_id.is_nil());
+}
+
+#[tokio::test]
+async fn ready_publications_are_compacted_not_purged() {
+    let database = database().await;
+    let (_job_id, _publication_id) = seed_job_with_publication(&database, "Ready", false).await;
+
+    let run = WorkRetentionRepository::new(&database)
+        .run_once(
+            "retention-worker",
+            Duration::days(30),
+            Duration::seconds(30),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run,
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            compacted: 1,
+            purged: 0,
+            deferred: 0,
+        }
+    );
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        1
+    );
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 1);
 }
