@@ -3754,6 +3754,7 @@ dependencies = [
 name = "tjxy-common"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "thiserror 2.0.18",
  "unicode-normalization",
@@ -3833,6 +3834,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "unicode-normalization",
  "uuid",
  "zeroize",
 ]

@@ -1,12 +1,14 @@
+use chrono::Datelike;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_NAME_CHARS: usize = 512;
 
 /// Incremented whenever persisted Naming evidence must be rebuilt.
-pub const MEDIA_NAME_PARSER_VERSION: i32 = 1;
+pub const MEDIA_NAME_PARSER_VERSION: i32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NumberRange {
@@ -183,7 +185,8 @@ pub enum MediaNameError {
 /// Returns [`MediaNameError`] for empty, unbounded, or control-containing input.
 #[allow(clippy::too_many_lines)] // Keeps token classification in one deterministic precedence order.
 pub fn parse_media_name(value: &str) -> Result<ParsedMediaName, MediaNameError> {
-    let trimmed = value.trim();
+    let normalized: String = value.trim().nfkc().collect();
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return Err(MediaNameError::Empty);
     }
@@ -257,7 +260,7 @@ pub fn parse_media_name(value: &str) -> Result<ParsedMediaName, MediaNameError> 
             continue;
         }
         if parsed.episode.is_none()
-            && let Some(value) = parse_chinese_ordinal(token, '集')
+            && let Some(value) = parse_chinese_episode_ordinal(token)
         {
             parsed.episode = NumberRange::single(value);
             continue;
@@ -409,7 +412,10 @@ fn plausible_year_indexes(tokens: &[String]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, token)| {
-            (index <= boundary && parse_year(token).is_some()).then_some(index)
+            (index <= boundary
+                && parse_year(token).is_some()
+                && normalize_resolution(token).is_none())
+            .then_some(index)
         })
         .collect()
 }
@@ -430,14 +436,19 @@ fn parse_year(token: &str) -> Option<i32> {
         return None;
     }
     let year = token.parse::<i32>().ok()?;
-    (1888..=2199).contains(&year).then_some(year)
+    // Release years cannot come from the far future: title-embedded numbers
+    // such as "Blade Runner 2049" or "Cargo 2160" must stay part of the
+    // title instead of being extracted as the release year.
+    let upper_bound = chrono::Utc::now().year() + 2;
+    (1888..=upper_bound).contains(&year).then_some(year)
 }
 
 fn is_boundary_token(token: &str) -> bool {
     parse_season_episode(token).is_some()
         || token.eq_ignore_ascii_case("season")
         || parse_chinese_ordinal(token, '季').is_some()
-        || parse_chinese_ordinal(token, '集').is_some()
+        || parse_chinese_episode_ordinal(token).is_some()
+        || is_release_tag_token(token)
         || is_strong_technical_token(token)
 }
 
@@ -515,6 +526,35 @@ fn parse_suffix_number(token: &str, suffix: &str) -> Option<u32> {
         .to_ascii_lowercase()
         .strip_suffix(suffix)
         .and_then(parse_positive)
+}
+
+/// Recognizes conservative release-tag tokens that terminate the title.
+///
+/// Deliberately excludes ambiguous title words such as COMPLETE, LIMITED,
+/// DC, HDR, and DV: misclassifying those would corrupt legitimate titles.
+fn is_release_tag_token(token: &str) -> bool {
+    const RELEASE_TAGS: &[&str] = &[
+        "proper",
+        "repack",
+        "remastered",
+        "extended",
+        "unrated",
+        "theatrical",
+        "imax",
+        "multi",
+        "dual",
+        "dubbed",
+        "subbed",
+        "hybrid",
+        "untouched",
+    ];
+    RELEASE_TAGS.contains(&token.to_ascii_lowercase().as_str())
+}
+
+fn parse_chinese_episode_ordinal(token: &str) -> Option<u32> {
+    ['集', '话', '話']
+        .into_iter()
+        .find_map(|suffix| parse_chinese_ordinal(token, suffix))
 }
 
 fn parse_chinese_ordinal(token: &str, suffix: char) -> Option<u32> {
@@ -699,6 +739,12 @@ mod tests {
         let ambiguous_suffix = parse_media_name("Blade.Runner.2049.mkv").unwrap();
         assert_eq!(ambiguous_suffix.title(), Some("Blade Runner 2049"));
         assert_eq!(ambiguous_suffix.year(), None);
+
+        let with_technical_suffix =
+            parse_media_name("Blade.Runner.2049.1080p.BluRay.x264-GROUP.mkv").unwrap();
+        assert_eq!(with_technical_suffix.title(), Some("Blade Runner 2049"));
+        assert_eq!(with_technical_suffix.year(), None);
+        assert_eq!(with_technical_suffix.resolution(), Some("1080p"));
     }
 
     #[test]
@@ -761,5 +807,44 @@ mod tests {
 
         let web_dl = parse_media_name("Movie.2024.WEB-DL.mkv").unwrap();
         assert_eq!(web_dl.release_group(), None);
+    }
+
+    #[test]
+    fn release_tags_bound_titles_without_polluting_them() {
+        let proper =
+            parse_media_name("Movie.Name.PROPER.2020.1080p.BluRay.x264-GROUP.mkv").unwrap();
+        assert_eq!(proper.title(), Some("Movie Name"));
+        assert_eq!(proper.year(), Some(2020));
+        assert_eq!(proper.release_group(), Some("GROUP"));
+
+        let multi = parse_media_name("Movie.MULTi.2020").unwrap();
+        assert_eq!(multi.title(), Some("Movie"));
+
+        let cuts = parse_media_name("Movie.2019.REMASTERED.EXTENDED.1080p.mkv").unwrap();
+        assert_eq!(cuts.title(), Some("Movie"));
+        assert_eq!(cuts.year(), Some(2019));
+    }
+
+    #[test]
+    fn normalizes_fullwidth_input_before_parsing() {
+        let episode = parse_media_name("第１２話").unwrap();
+        assert_eq!(episode.episode(), NumberRange::single(12));
+        assert_eq!(episode.title(), None);
+
+        let movie = parse_media_name("玩具总动员（２０１６）").unwrap();
+        assert_eq!(movie.title(), Some("玩具总动员"));
+        assert_eq!(movie.year(), Some(2016));
+    }
+
+    #[test]
+    fn bare_resolution_numbers_are_not_years() {
+        let parsed = parse_media_name("Movie.2160.WEB-DL.mkv").unwrap();
+        assert_eq!(parsed.title(), Some("Movie"));
+        assert_eq!(parsed.year(), None);
+        assert_eq!(parsed.resolution(), Some("2160p"));
+
+        let regression = parse_media_name("Wonder.Woman.1984.2020.2160p.WEB-DL.mkv").unwrap();
+        assert_eq!(regression.title(), Some("Wonder Woman 1984"));
+        assert_eq!(regression.year(), Some(2020));
     }
 }

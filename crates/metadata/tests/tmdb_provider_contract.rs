@@ -167,3 +167,150 @@ async fn connection_validation_forwards_the_transport_result_without_searching()
     );
     assert!(rejected_transport.calls.lock().unwrap().is_empty());
 }
+
+/// Transport that replays scripted search result batches per call so tests can
+/// observe the year-constrained and relaxed search sequence.
+struct ScriptedTransport {
+    searches: Mutex<Vec<Result<Vec<TmdbSearchItem>, MetadataProviderError>>>,
+    calls: Mutex<Vec<SearchCall>>,
+    detail_ids: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl TmdbTransport for ScriptedTransport {
+    async fn validate(&self) -> Result<(), MetadataProviderError> {
+        Ok(())
+    }
+
+    async fn search(
+        &self,
+        kind: MetadataItemKind,
+        query: &str,
+        year: Option<i32>,
+        language: &str,
+    ) -> Result<Vec<TmdbSearchItem>, MetadataProviderError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((kind, query.to_owned(), year, language.to_owned()));
+        self.searches.lock().unwrap().remove(0)
+    }
+
+    async fn detail(
+        &self,
+        _kind: MetadataItemKind,
+        id: u64,
+        _language: &str,
+    ) -> Result<MetadataCandidate, MetadataProviderError> {
+        self.detail_ids.lock().unwrap().push(id);
+        let source =
+            MetadataSource::new("Tmdb", Some(format!("movie:{id}").as_str()), 8_000).unwrap();
+        Ok(MetadataCandidate::new(source)
+            .with_title("Arrival")
+            .with_details_loaded())
+    }
+}
+
+#[tokio::test]
+async fn year_tolerance_prefers_the_closest_candidate_with_the_same_title() {
+    let transport = Arc::new(ScriptedTransport {
+        searches: Mutex::new(vec![Ok(vec![
+            TmdbSearchItem::new(1, "Arrival").with_details(None, None, Some(2018)),
+            TmdbSearchItem::new(2, "Arrival").with_details(None, None, Some(2016)),
+            TmdbSearchItem::new(3, "Arrival").with_details(None, None, Some(2010)),
+        ])]),
+        calls: Mutex::new(Vec::new()),
+        detail_ids: Mutex::new(Vec::new()),
+    });
+    let provider = TmdbProvider::with_transport("en-US", transport.clone()).unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", Some(2017)).unwrap();
+
+    provider.resolve(&lookup).await.unwrap().unwrap();
+
+    // 2016 is one year from the requested 2017 and must win over 2018 and 2010.
+    assert_eq!(transport.detail_ids.lock().unwrap().as_slice(), [2]);
+    // A tolerable year must not trigger a relaxed re-search.
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn year_mismatch_falls_back_to_one_relaxed_search_without_a_year() {
+    let transport = Arc::new(ScriptedTransport {
+        searches: Mutex::new(vec![
+            Ok(vec![
+                TmdbSearchItem::new(7, "Totally Different").with_details(None, None, Some(2001)),
+            ]),
+            Ok(vec![TmdbSearchItem::new(11, "Arrival").with_details(
+                None,
+                None,
+                Some(2016),
+            )]),
+        ]),
+        calls: Mutex::new(Vec::new()),
+        detail_ids: Mutex::new(Vec::new()),
+    });
+    let provider = TmdbProvider::with_transport("en-US", transport.clone()).unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", Some(2016)).unwrap();
+
+    provider.resolve(&lookup).await.unwrap().unwrap();
+
+    // The relaxed batch without a year must drive the final selection.
+    assert_eq!(transport.detail_ids.lock().unwrap().as_slice(), [11]);
+    let calls = transport.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                MetadataItemKind::Movie,
+                "Arrival".to_owned(),
+                Some(2016),
+                "en-US".to_owned()
+            ),
+            (
+                MetadataItemKind::Movie,
+                "Arrival".to_owned(),
+                None,
+                "en-US".to_owned()
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn weak_title_similarity_is_rejected_instead_of_blindly_binding_the_first_result() {
+    let transport = Arc::new(ScriptedTransport {
+        searches: Mutex::new(vec![Ok(vec![
+            TmdbSearchItem::new(21, "An Unrelated Blockbuster").with_details(None, None, None),
+        ])]),
+        calls: Mutex::new(Vec::new()),
+        detail_ids: Mutex::new(Vec::new()),
+    });
+    let provider = TmdbProvider::with_transport("en-US", transport.clone()).unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", None).unwrap();
+
+    assert!(provider.resolve(&lookup).await.unwrap().is_none());
+    // No relaxed retry happens for lookups that never carried a year.
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    assert!(transport.detail_ids.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn original_titles_participate_in_title_matching() {
+    let transport = Arc::new(ScriptedTransport {
+        searches: Mutex::new(vec![Ok(vec![
+            TmdbSearchItem::new(31, "降临").with_details(
+                Some("Arrival".to_owned()),
+                None,
+                Some(2016),
+            ),
+        ])]),
+        calls: Mutex::new(Vec::new()),
+        detail_ids: Mutex::new(Vec::new()),
+    });
+    let provider = TmdbProvider::with_transport("zh-CN", transport.clone()).unwrap();
+    let lookup = MetadataLookup::new(MetadataItemKind::Movie, "Arrival", Some(2016)).unwrap();
+
+    provider.resolve(&lookup).await.unwrap().unwrap();
+
+    assert_eq!(transport.detail_ids.lock().unwrap().as_slice(), [31]);
+}

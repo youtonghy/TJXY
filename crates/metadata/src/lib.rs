@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use quick_xml::{Reader, events::Event};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_TMDB_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -1073,6 +1074,108 @@ impl TmdbSearchItem {
     }
 }
 
+/// Minimum normalized-title similarity required to bind a [`TmdbSearchItem`] candidate.
+///
+/// Below this threshold the provider returns no candidate so the item keeps
+/// its naming-derived metadata instead of persisting an unrelated match.
+const TMDB_TITLE_SIMILARITY_THRESHOLD: f64 = 0.6;
+
+/// Selects the best `TMDb` search candidate for one lookup.
+///
+/// Candidates are ranked by normalized-title similarity first and year
+/// proximity second. Candidates below the title-similarity threshold are
+/// rejected entirely so weak matches never displace naming-derived metadata.
+fn select_tmdb_candidate<'a>(
+    results: &'a [TmdbSearchItem],
+    fallback_title: &str,
+    fallback_year: Option<i32>,
+) -> Option<&'a TmdbSearchItem> {
+    let wanted = normalize_title_for_match(fallback_title);
+    results
+        .iter()
+        .filter_map(|item| {
+            let similarity = item
+                .original_title
+                .as_deref()
+                .map(str::to_owned)
+                .into_iter()
+                .chain(std::iter::once(item.title.clone()))
+                .map(|candidate| title_similarity(&wanted, &normalize_title_for_match(&candidate)))
+                .fold(0.0_f64, f64::max);
+            if similarity < TMDB_TITLE_SIMILARITY_THRESHOLD {
+                return None;
+            }
+            let year_penalty = fallback_year.map_or(0_i32, |wanted| {
+                item.year.map_or(2, |actual| (actual - wanted).abs().min(2))
+            });
+            Some((similarity, year_penalty, item))
+        })
+        .max_by(
+            |(left_similarity, left_penalty, left), (right_similarity, right_penalty, right)| {
+                left_similarity
+                    .total_cmp(right_similarity)
+                    .then_with(|| right_penalty.cmp(left_penalty))
+                    .then_with(|| left.id.cmp(&right.id))
+            },
+        )
+        .map(|(_, _, item)| item)
+}
+
+/// Folds a title to a comparison key: NFKC, lowercased, punctuation and
+/// non-word symbols dropped, and whitespace collapsed.
+fn normalize_title_for_match(value: &str) -> String {
+    let normalized: String = value.nfkc().collect();
+    let mut folded = String::with_capacity(normalized.len());
+    let mut pending_space = false;
+    for character in normalized.chars() {
+        if character.is_whitespace() {
+            pending_space = !folded.is_empty();
+        } else if character.is_alphanumeric() {
+            if pending_space {
+                folded.push(' ');
+                pending_space = false;
+            }
+            for lower in character.to_lowercase() {
+                folded.push(lower);
+            }
+        }
+    }
+    folded
+}
+
+/// Character-bigram Dice coefficient between two normalized titles.
+///
+/// Returns 0 for inputs shorter than two characters, where bigrams carry no
+/// signal; exact equality short-circuits to 1.0.
+fn title_similarity(left: &str, right: &str) -> f64 {
+    if left == right {
+        return 1.0;
+    }
+    let left_bigrams = bigrams(left);
+    let right_bigrams = bigrams(right);
+    if left_bigrams.is_empty() || right_bigrams.is_empty() {
+        return 0.0;
+    }
+    let shared = u32::try_from(
+        left_bigrams
+            .iter()
+            .filter(|bigram| right_bigrams.contains(bigram))
+            .count(),
+    )
+    .expect("bigram counts fit u32");
+    let total =
+        u32::try_from(left_bigrams.len() + right_bigrams.len()).expect("bigram counts fit u32");
+    f64::from(2 * shared) / f64::from(total)
+}
+
+fn bigrams(value: &str) -> Vec<(char, char)> {
+    let chars = value.chars().collect::<Vec<_>>();
+    chars
+        .windows(2)
+        .map(|window| (window[0], window[1]))
+        .collect()
+}
+
 #[async_trait]
 pub trait TmdbTransport: Send + Sync {
     /// Validates TMDB access without performing a title search.
@@ -1186,10 +1289,23 @@ impl MetadataProvider for TmdbProvider {
                 &self.language,
             )
             .await?;
-        let selected = lookup.fallback_year().map_or_else(
-            || results.first(),
-            |year| results.iter().find(|item| item.year == Some(year)),
-        );
+        let selected =
+            select_tmdb_candidate(&results, lookup.fallback_title(), lookup.fallback_year())
+                .cloned();
+        let selected = match selected {
+            Some(selected) => Some(selected),
+            None if lookup.fallback_year().is_some() => {
+                // Release-year mismatches of one are common between file
+                // naming and TMDb release dates, so retry once without the
+                // year constraint before giving up on remote metadata.
+                let relaxed = self
+                    .transport
+                    .search(lookup.kind(), lookup.fallback_title(), None, &self.language)
+                    .await?;
+                select_tmdb_candidate(&relaxed, lookup.fallback_title(), None).cloned()
+            }
+            None => None,
+        };
         let Some(selected) = selected else {
             return Ok(None);
         };

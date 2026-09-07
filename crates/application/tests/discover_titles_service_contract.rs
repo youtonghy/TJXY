@@ -7,7 +7,9 @@ use tjxy_application::{
     DiscoverTitlesService, MetadataResolveService, SourceIndexService, TaskService,
     TaskServiceError,
 };
-use tjxy_common::{CatalogItemId, SortKey, StorageObjectRecordId, StorageRootId};
+use tjxy_common::{
+    CatalogItemId, MEDIA_NAME_PARSER_VERSION, SortKey, StorageObjectRecordId, StorageRootId,
+};
 use tjxy_db::{
     CatalogPublicationRepository, DiscoverTitlesError, DiscoverTitlesRepository,
     MetadataRequirement, WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind,
@@ -340,7 +342,10 @@ async fn stale_naming_parser_version_reprocesses_a_current_storage_revision() {
         .unwrap();
     assert_eq!(row.try_get::<String>("", "name").unwrap(), "Arrival");
     assert_eq!(row.try_get::<i32>("", "production_year").unwrap(), 2016);
-    assert_eq!(row.try_get::<i32>("", "naming_parser_version").unwrap(), 1);
+    assert_eq!(
+        row.try_get::<i32>("", "naming_parser_version").unwrap(),
+        MEDIA_NAME_PARSER_VERSION
+    );
 }
 
 #[tokio::test]
