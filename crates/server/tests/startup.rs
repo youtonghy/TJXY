@@ -58,14 +58,12 @@ impl TmdbTransport for StartupTmdbTransport {
     async fn search(
         &self,
         _kind: MetadataItemKind,
-        _query: &str,
+        query: &str,
         _year: Option<i32>,
         _language: &str,
     ) -> Result<Vec<TmdbSearchItem>, MetadataProviderError> {
-        Ok(vec![TmdbSearchItem::new(
-            1,
-            format!("{}:{}", self.label, self.language),
-        )])
+        // Search must pass candidate matching; detail carries the active credential marker.
+        Ok(vec![TmdbSearchItem::new(1, query)])
     }
 
     async fn detail(
