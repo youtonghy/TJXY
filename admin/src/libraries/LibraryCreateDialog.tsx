@@ -10,7 +10,7 @@ import {
   Switch,
   TextField,
 } from '@heroui/react';
-import { LoaderCircle, Plus } from 'lucide-react';
+import { FolderOpen, LoaderCircle, Plus } from 'lucide-react';
 import { useState, type SyntheticEvent } from 'react';
 
 import type {
@@ -20,6 +20,8 @@ import type {
   ScanProfile,
 } from './libraryApi';
 import { localMetadataAccessMode } from './libraryApi';
+import { FolderPickerDialog } from './FolderPickerDialog';
+import type { FilesystemSelection } from './filesystemApi';
 import { collectionOptions, scanProfileOptions } from './libraryUi';
 import { useTranslate } from '../settings/i18n';
 
@@ -44,6 +46,8 @@ export function LibraryCreateDialog({
   const [importMetadata, setImportMetadata] = useState(true);
   const [importImages, setImportImages] = useState(true);
   const [path, setPath] = useState('');
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [filesystemSelection, setFilesystemSelection] = useState<FilesystemSelection | null>(null);
   const [enabled, setEnabled] = useState(true);
 
   const reset = () => {
@@ -54,6 +58,8 @@ export function LibraryCreateDialog({
     setImportMetadata(true);
     setImportImages(true);
     setPath('');
+    setFilesystemSelection(null);
+    setFolderPickerOpen(false);
     setEnabled(true);
   };
 
@@ -76,6 +82,7 @@ export function LibraryCreateDialog({
       metadataSourceMode,
       localMetadataAccessMode: localMetadataAccessMode(importMetadata, importImages),
       path: normalizedPath,
+      ...(filesystemSelection === null ? {} : { filesystemSelection }),
     })) {
       reset();
     }
@@ -121,10 +128,22 @@ export function LibraryCreateDialog({
                       maxLength={4096}
                       onChange={(event) => {
                         setPath(event.currentTarget.value);
+                        setFilesystemSelection(null);
                       }}
                       placeholder={tr('/mnt/media or choose a server folder', '/mnt/media 或选择服务器文件夹')}
                       value={path}
                     />
+                    <Button
+                      aria-label={tr('Choose server folder', '选择服务器文件夹')}
+                      className="shrink-0"
+                      isDisabled={isPending}
+                      onPress={() => { setFolderPickerOpen(true); }}
+                      type="button"
+                      variant="secondary"
+                    >
+                      <FolderOpen aria-hidden="true" className="size-4" />
+                      {tr('Browse', '选择')}
+                    </Button>
                   </div>
                 </TextField>
                 <RadioGroup
@@ -197,6 +216,17 @@ export function LibraryCreateDialog({
         </Modal.Container>
       </Modal.Backdrop>
       </Modal>
+      {isOpen && folderPickerOpen && (
+        <FolderPickerDialog
+          isOpen
+          isDisabled={isPending}
+          onClose={() => { setFolderPickerOpen(false); }}
+          onSelect={(selection, displayPath) => {
+            setFilesystemSelection(selection);
+            setPath(displayPath);
+          }}
+        />
+      )}
     </>
   );
 }

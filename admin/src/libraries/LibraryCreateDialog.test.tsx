@@ -1,7 +1,43 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { LibraryCreateDialog } from './LibraryCreateDialog';
+import { listFilesystemDirectories, listFilesystemRoots } from './filesystemApi';
+
+vi.mock('./filesystemApi', () => ({
+  listFilesystemDirectories: vi.fn(),
+  listFilesystemRoots: vi.fn(),
+}));
+
+it.each([false, true])('browses nested folders and handles a subsequent manual edit (%s)', async (editPath) => {
+  vi.mocked(listFilesystemRoots).mockResolvedValue([{ id: 'root-1', name: 'Media' }]);
+  vi.mocked(listFilesystemDirectories).mockImplementation((_rootId, path) => {
+    if (path === '') return Promise.resolve([{ name: 'Movies', relativePath: 'Movies', modifiedAt: null }]);
+    if (path === 'Movies') return Promise.resolve([{ name: 'Family', relativePath: 'Movies/Family', modifiedAt: null }]);
+    return Promise.resolve([]);
+  });
+  const onCreate = vi.fn().mockResolvedValue(true);
+  const user = userEvent.setup();
+  render(<LibraryCreateDialog isOpen isPending={false} onClose={vi.fn()} onCreate={onCreate} />);
+  await user.type(screen.getByRole('textbox', { name: 'Library name' }), 'Family');
+  await user.click(screen.getByRole('button', { name: 'Choose server folder' }));
+  const picker = within(screen.getByRole('dialog', { name: 'Select media folder' }));
+  await user.click(await picker.findByText('Movies', { selector: 'span' }));
+  await user.click(await picker.findByText('Family', { selector: 'span' }));
+  await user.click(screen.getByRole('button', { name: 'Select folder' }));
+  const input = screen.getByRole('textbox', { name: 'Media folder' });
+  expect(input).toHaveValue('Media / Movies / Family');
+  expect(onCreate).not.toHaveBeenCalled();
+  if (editPath) {
+    await user.clear(input);
+    await user.type(input, '/srv/Movies');
+  }
+  await user.click(screen.getByRole('button', { name: 'Create library' }));
+  expect(onCreate).toHaveBeenCalledWith(expect.objectContaining(editPath
+    ? { path: '/srv/Movies' }
+    : { filesystemSelection: { rootId: 'root-1', relativePath: 'Movies/Family' } }));
+  if (editPath) expect(onCreate.mock.calls[0]?.[0]).not.toHaveProperty('filesystemSelection');
+});
 
 it('submits the approved defaults and resets the draft after success', async () => {
   const onCreate = vi.fn().mockResolvedValue(true);

@@ -18,6 +18,18 @@ beforeEach(() => {
   requestMock.mockReset();
 });
 
+it('submits a browsed folder using its server identifier instead of its display label', async () => {
+  requestMock.mockResolvedValue(undefined);
+  await createLibrary({
+    name: 'Movies', collectionType: 'movies', enabled: true, scanProfile: 'Lazy',
+    metadataSourceMode: 'automatic_scrape', localMetadataAccessMode: 'import',
+    path: 'Media / Movies', filesystemSelection: { rootId: 'root-1', relativePath: 'Movies' },
+  });
+  const body = JSON.parse(requestMock.mock.calls[0]?.[1]?.body as string) as Record<string, unknown>;
+  expect(body.FilesystemSelection).toEqual({ RootId: 'root-1', RelativePath: 'Movies' });
+  expect(body).not.toHaveProperty('Path');
+});
+
 it('creates a library from an absolute filesystem path and metadata source mode', async () => {
   requestMock.mockResolvedValue(undefined);
 

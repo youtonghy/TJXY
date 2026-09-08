@@ -1,4 +1,5 @@
 import { ApiError, apiRequest } from '../api/httpClient';
+import type { FilesystemSelection } from './filesystemApi';
 
 export type ScanProfile = 'Full' | 'Lazy' | 'Manual';
 export type LibraryCollectionType = 'mixed' | 'movies' | 'tvshows' | 'music' | 'homevideos';
@@ -31,6 +32,7 @@ export interface CreateLibraryRequest {
   metadataSourceMode: MetadataSourceMode;
   localMetadataAccessMode: LocalMetadataAccessMode;
   path: string;
+  filesystemSelection?: FilesystemSelection;
 }
 
 export interface EffectiveLibraryPolicy {
@@ -82,7 +84,12 @@ export async function createLibrary(request: CreateLibraryRequest): Promise<void
     collectionType: request.collectionType,
     refreshLibrary: 'false',
   });
-  const location = { Path: requireText(request.path, 'A media path is required.') };
+  const location = request.filesystemSelection === undefined
+    ? { Path: requireText(request.path, 'A media path is required.') }
+    : { FilesystemSelection: {
+      RootId: requireText(request.filesystemSelection.rootId, 'A filesystem root is required.'),
+      RelativePath: request.filesystemSelection.relativePath,
+    } };
   await apiRequest(`/Library/VirtualFolders?${query.toString()}`, {
     method: 'POST',
     body: JSON.stringify({
