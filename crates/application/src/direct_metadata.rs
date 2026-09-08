@@ -239,6 +239,8 @@ fn map_storage_read(error: StorageReadError) -> DirectMetadataReadError {
         StorageReadError::Backend(
             BackendError::TemporarilyUnavailable { .. }
             | BackendError::BackendNotReady { .. }
+            | BackendError::FilesystemIndexRebuilding
+            | BackendError::FilesystemIndexFailed
             | BackendError::RateLimited { .. },
         )
         | StorageReadError::Availability(_)

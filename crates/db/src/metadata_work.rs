@@ -165,6 +165,10 @@ impl<'connection> MetadataWorkRepository<'connection> {
             .await?
             .ok_or(MetadataWorkError::StaleOrUnavailable)?;
         let metadata_revision = row.try_get::<i64>("", "metadata_revision")?;
+        let policy =
+            crate::source_publication::metadata_policy_for_item(self.database, item_id, true)
+                .await?
+                .ok_or(MetadataWorkError::StaleOrUnavailable)?;
         WorkJobRepository::new(self.database)
             .enqueue_or_join(
                 &WorkJobSpec::new(
@@ -174,7 +178,10 @@ impl<'connection> MetadataWorkRepository<'connection> {
                     priority,
                 )?
                 .with_metadata_requirement(MetadataRequirement::Full)?
-                .with_input_sync_revision(scope.metadata_input_revision())?,
+                .with_metadata_source_mode(policy.source_mode)?
+                .with_local_metadata_access_mode(policy.access_mode)?
+                .with_input_sync_revision(scope.metadata_input_revision())?
+                .with_storage_root_affinity(scope.storage_root_id())?,
             )
             .await
             .map_err(Into::into)

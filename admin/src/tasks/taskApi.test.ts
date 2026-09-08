@@ -152,3 +152,17 @@ it('rejects malformed job responses instead of rendering unsafe server data', as
 
   await expect(getTaskSnapshot()).rejects.toMatchObject({ category: 'invalid-response' });
 });
+
+it('accepts optional task diagnostics and rejects malformed next-attempt timestamps', async () => {
+  const { listRecentTaskJobs } = await import('./taskApi');
+  const record = { Id: jobId, TaskKind: 'ResolveMetadata', ScopeType: 'CatalogItem', ScopeId: taskId,
+    Status: 'Failed', Priority: 20, AttemptCount: 6, CreatedAt: null, StartedAt: null, CompletedAt: null,
+    LastError: 'Retry limit exceeded (5 retries); skipped.', WaitingReason: null, NextAttemptAt: null,
+    ValidationJobId: jobId, ValidationStatus: 'Failed' };
+  requestMock.mockResolvedValueOnce([record]);
+  await expect(listRecentTaskJobs()).resolves.toEqual([expect.objectContaining({
+    lastError: record.LastError, nextAttemptAt: null, validationJobId: jobId, validationStatus: 'Failed',
+  })]);
+  requestMock.mockResolvedValueOnce([{ ...record, NextAttemptAt: 'invalid date' }]);
+  await expect(listRecentTaskJobs()).rejects.toThrow();
+});

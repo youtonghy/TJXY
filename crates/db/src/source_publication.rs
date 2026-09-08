@@ -1936,7 +1936,7 @@ async fn publish_sources(
     let metadata_revision: i64 = owner_row.try_get("", "metadata_revision")?;
     let input_sync_revision = claimed.job().input_sync_revision();
     let metadata_policy = if input_sync_revision.is_some() {
-        metadata_policy_for_item(transaction, owner).await?
+        metadata_policy_for_item(transaction, owner, false).await?
     } else {
         None
     };
@@ -2011,15 +2011,16 @@ async fn publish_sources(
 }
 
 #[derive(Clone, Copy)]
-struct EffectiveMetadataPolicy {
-    requirement: MetadataRequirement,
-    source_mode: MetadataSourceMode,
-    access_mode: LocalMetadataAccessMode,
+pub(crate) struct EffectiveMetadataPolicy {
+    pub(crate) requirement: MetadataRequirement,
+    pub(crate) source_mode: MetadataSourceMode,
+    pub(crate) access_mode: LocalMetadataAccessMode,
 }
 
-async fn metadata_policy_for_item(
-    transaction: &DatabaseTransaction,
+pub(crate) async fn metadata_policy_for_item(
+    transaction: &impl ConnectionTrait,
     owner: CatalogItemId,
+    explicit: bool,
 ) -> Result<Option<EffectiveMetadataPolicy>, CatalogPublicationError> {
     let item = Alias::new("metadata_policy_item");
     let membership = Alias::new("metadata_policy_membership");
@@ -2069,6 +2070,7 @@ async fn metadata_policy_for_item(
     let mut import_images = false;
     for row in transaction.query_all(backend.build(&query)).await? {
         let current = match row.try_get::<String>("", "metadata_policy")?.as_str() {
+            "none" if explicit => Some(MetadataRequirement::Full),
             "none" => None,
             "basic" => Some(MetadataRequirement::Basic),
             "full" => Some(MetadataRequirement::Full),

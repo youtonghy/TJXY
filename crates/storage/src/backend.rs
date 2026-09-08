@@ -26,6 +26,10 @@ pub enum BackendError {
     TemporarilyUnavailable { message: String },
     #[error("storage backend is not ready: {message}")]
     BackendNotReady { message: String },
+    #[error("filesystem path index is rebuilding; waiting for storage validation")]
+    FilesystemIndexRebuilding,
+    #[error("filesystem path index validation failed; validate storage before retrying")]
+    FilesystemIndexFailed,
     #[error("storage backend rate limit was exceeded")]
     RateLimited { retry_after: Option<Duration> },
     #[error("storage change cursor is no longer valid")]

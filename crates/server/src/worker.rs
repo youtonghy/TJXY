@@ -24,7 +24,7 @@ use tjxy_db::{
     MetadataPublicationError, MetadataWorkError, QueueMaintenanceRepository, QueueMaintenanceRun,
     SeriesExpandRepositoryError, SourceIndexRepositoryError, StorageSyncRepositoryError,
     WorkJobRepository, WorkJobRepositoryError, WorkRetentionRepository, WorkRetentionRun,
-    WorkScope, WorkTaskKind,
+    WorkTaskKind,
 };
 use tjxy_import::{EmbyApiCredentials, EmbyApiImporter, EmbyImportError};
 use tjxy_storage::{BackendError, StorageBackend};
@@ -578,6 +578,13 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                         let result = if discover_error_is_terminal(&error) {
                             tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "title discovery failed terminally");
                             jobs.fail_terminal(&claimed, &message).await
+                        } else if matches!(
+                            error,
+                            DiscoverTitlesServiceError::Repository(
+                                tjxy_db::DiscoverTitlesError::StorageInputPending
+                            )
+                        ) {
+                            jobs.defer(&claimed, Duration::seconds(30), &message).await
                         } else {
                             jobs.retry(
                                 &claimed,
@@ -788,7 +795,12 @@ async fn handle_full_scan_outcome(
         jobs.fail_terminal(claimed, &message).await
     } else {
         let delay = full_scan_retry_delay(&error, claimed.attempt_count());
-        jobs.retry(claimed, delay, &message).await
+        if matches!(error, FullScanError::ChildrenPending { .. }) {
+            jobs.defer(claimed, delay.max(Duration::seconds(30)), &message)
+                .await
+        } else {
+            jobs.retry(claimed, delay, &message).await
+        }
     };
     if let Err(update_error) = result {
         tracing::error!("Full scan worker could not persist failure outcome: {update_error}");
@@ -818,7 +830,8 @@ fn full_scan_error_is_terminal(error: &FullScanError) -> bool {
             | FullScanError::ChildFailed { .. }
             | FullScanError::ChildCompletedWithoutPublication { .. }
             | FullScanError::Work(
-                WorkJobRepositoryError::StaleParentPolicy
+                WorkJobRepositoryError::IncompatibleActiveJob
+                    | WorkJobRepositoryError::StaleParentPolicy
                     | WorkJobRepositoryError::InvalidChildReference
                     | WorkJobRepositoryError::InvalidMetadataWork
             )
@@ -910,7 +923,11 @@ async fn handle_series_expand_outcome(
         } else {
             Duration::seconds(5)
         };
-        jobs.retry(claimed, delay, &message).await
+        if matches!(error, SeriesExpandError::InventoryPending { .. }) {
+            jobs.defer(claimed, Duration::seconds(30), &message).await
+        } else {
+            jobs.retry(claimed, delay, &message).await
+        }
     };
     if let Err(update_error) = result {
         tracing::error!("Series expand worker could not persist failure outcome: {update_error}");
@@ -1109,7 +1126,7 @@ async fn run_storage_worker<Backend>(
                         }
                     }
                 };
-                handle_storage_outcome(&database, &scoped, &jobs, &claimed, outcome).await;
+                handle_storage_outcome(&scoped, &jobs, &claimed, outcome).await;
             }
             Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
             Err(error) => {
@@ -1121,7 +1138,6 @@ async fn run_storage_worker<Backend>(
 }
 
 async fn handle_storage_outcome<Backend>(
-    database: &DatabaseConnection,
     service: &ScopedInventoryService<Backend>,
     jobs: &WorkJobRepository<'_>,
     claimed: &tjxy_db::ClaimedWorkJob,
@@ -1141,8 +1157,16 @@ async fn handle_storage_outcome<Backend>(
             | FullValidateStorageError::Persistence(StorageSyncRepositoryError::LostLease),
         ) => {}
         StorageWorkerError::Scoped(error) => {
-            let message = truncate_error(&error.to_string());
-            if storage_error_is_terminal(&error) {
+            let message = if claimed.attempt_count() > tjxy_db::MAX_WORK_JOB_RETRIES {
+                truncate_error(&format!(
+                    "retry limit exceeded (5 retries); skipped: {error}"
+                ))
+            } else {
+                truncate_error(&error.to_string())
+            };
+            if storage_error_is_terminal(&error)
+                || claimed.attempt_count() > tjxy_db::MAX_WORK_JOB_RETRIES
+            {
                 tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage synchronization failed terminally");
                 if let Err(update_error) = service.fail_terminal(claimed, &message).await {
                     tracing::error!(
@@ -1177,17 +1201,6 @@ async fn handle_storage_outcome<Backend>(
             if let Err(update_error) = result {
                 tracing::error!(
                     "Storage validation worker could not persist outcome: {update_error}"
-                );
-            } else if terminal
-                && let WorkScope::StorageRoot(root_id) = claimed.job().scope()
-                && let Err(state_error) = tjxy_db::FilesystemIndexRepository::new(database)
-                    .mark_failed(root_id, &message)
-                    .await
-            {
-                tracing::error!(
-                    storage_root_id = %root_id,
-                    error = %state_error,
-                    "Filesystem path index failure state could not be persisted"
                 );
             }
         }
@@ -1400,8 +1413,21 @@ async fn handle_metadata_outcome(
     let result = if metadata_error_is_terminal(&error) {
         tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "metadata resolution failed terminally");
         jobs.fail_terminal(claimed, &message).await
+    } else if matches!(
+        error,
+        MetadataResolveError::Storage(BackendError::FilesystemIndexRebuilding)
+    ) {
+        let jitter = i64::from(claimed.id().as_uuid().as_bytes()[0] % 5);
+        jobs.defer(claimed, Duration::seconds(5 + jitter), &message)
+            .await
     } else {
-        jobs.retry(claimed, Duration::seconds(5), &message).await
+        let jitter = i64::from(claimed.id().as_uuid().as_bytes()[0] % 5);
+        jobs.retry(
+            claimed,
+            storage_backoff(claimed.attempt_count()) + Duration::seconds(jitter),
+            &message,
+        )
+        .await
     };
     if let Err(update_error) = result
         && !matches!(update_error, WorkJobRepositoryError::LostLease)
@@ -1421,7 +1447,8 @@ fn metadata_error_is_terminal(error: &MetadataResolveError) -> bool {
             )
             | MetadataResolveError::Metadata(_)
             | MetadataResolveError::Storage(
-                BackendError::UnsupportedCapability { .. }
+                BackendError::FilesystemIndexFailed
+                    | BackendError::UnsupportedCapability { .. }
                     | BackendError::InvalidValue { .. }
                     | BackendError::NotFound
                     | BackendError::RangeNotSatisfiable { .. }
@@ -1486,6 +1513,18 @@ fn truncate_error(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_index_and_deterministic_full_scan_conflicts_are_terminal() {
+        assert!(super::metadata_error_is_terminal(
+            &super::MetadataResolveError::Storage(super::BackendError::FilesystemIndexFailed)
+        ));
+        assert!(!super::metadata_error_is_terminal(
+            &super::MetadataResolveError::Storage(super::BackendError::FilesystemIndexRebuilding)
+        ));
+        assert!(super::full_scan_error_is_terminal(
+            &super::FullScanError::Work(super::WorkJobRepositoryError::IncompatibleActiveJob)
+        ));
+    }
     use std::time::Duration as StdDuration;
 
     use tjxy_application::{FullValidateStorageError, ScopedInventoryError};

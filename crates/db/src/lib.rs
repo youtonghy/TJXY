@@ -227,9 +227,9 @@ pub use user_data::{
     UserDataCommit, UserDataPatch, UserDataRecord, UserDataRepository, UserDataRepositoryError,
 };
 pub use work_job::{
-    ADMIN_CANCELLED_ERROR, ClaimedWorkJob, FullScanChildSubmission, MetadataRequirement,
-    WorkJobAdminOutcome, WorkJobAdminRecord, WorkJobAdminStatus, WorkJobClock, WorkJobRecord,
-    WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState,
-    WorkJobSubmission, WorkJobSystemClock, WorkScope, WorkStagingRow, WorkTaskKind,
+    ADMIN_CANCELLED_ERROR, ClaimedWorkJob, FullScanChildSubmission, MAX_WORK_JOB_RETRIES,
+    MetadataRequirement, WorkJobAdminOutcome, WorkJobAdminRecord, WorkJobAdminStatus, WorkJobClock,
+    WorkJobRecord, WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSpec,
+    WorkJobState, WorkJobSubmission, WorkJobSystemClock, WorkScope, WorkStagingRow, WorkTaskKind,
 };
 pub use work_retention::{WorkRetentionError, WorkRetentionRepository, WorkRetentionRun};

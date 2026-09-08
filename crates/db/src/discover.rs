@@ -379,7 +379,8 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                     .with_metadata_requirement(MetadataRequirement::Full)?
                     .with_metadata_source_mode(source_mode)?
                     .with_local_metadata_access_mode(access_mode)?
-                    .with_input_sync_revision(input_revision)?;
+                    .with_input_sync_revision(input_revision)?
+                    .with_storage_root_affinity(snapshot.root_id)?;
                     crate::work_job::enqueue_in_transaction(&transaction, &spec, Utc::now())
                         .await?;
                 }

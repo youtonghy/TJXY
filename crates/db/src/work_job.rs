@@ -23,6 +23,8 @@ const MAX_STAGING_KEY_CHARS: usize = 512;
 const MAX_ERROR_CHARS: usize = 4096;
 pub const ADMIN_CANCELLED_ERROR: &str = "cancelled by administrator";
 const MAX_OBSERVED_JOBS: u64 = 100;
+/// Execution retries after the first attempt; dependency waits do not consume this budget.
+pub const MAX_WORK_JOB_RETRIES: i32 = 5;
 const METADATA_RETRY_COOLDOWN: Duration = Duration::seconds(5);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -415,6 +417,10 @@ pub struct WorkJobAdminRecord {
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     outcome: Option<WorkJobAdminOutcome>,
+    last_error: Option<String>,
+    next_attempt_at: Option<DateTime<Utc>>,
+    validation_job_id: Option<Uuid>,
+    validation_status: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -424,6 +430,23 @@ pub enum WorkJobAdminOutcome {
 }
 
 impl WorkJobAdminRecord {
+    #[must_use]
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+    #[must_use]
+    pub const fn next_attempt_at(&self) -> Option<DateTime<Utc>> {
+        self.next_attempt_at
+    }
+    #[must_use]
+    pub const fn validation_job_id(&self) -> Option<Uuid> {
+        self.validation_job_id
+    }
+    #[must_use]
+    pub fn validation_status(&self) -> Option<&str> {
+        self.validation_status.as_deref()
+    }
+
     #[must_use]
     pub const fn job(&self) -> &WorkJobRecord {
         &self.job
@@ -757,7 +780,7 @@ where
 
     /// Returns a bounded, newest-first administrator observation of durable work.
     ///
-    /// Persisted error text and lease metadata are deliberately reduced to a safe status enum.
+    /// Error text is retained for trusted callers; HTTP adapters must redact it before exposure.
     ///
     /// # Errors
     ///
@@ -777,10 +800,43 @@ where
             .order_by((table.clone(), Alias::new("id")), Order::Desc)
             .limit(limit);
         select_job_columns(&mut query, &table);
-        for column in ["created_at", "started_at", "completed_at", "last_error"] {
+        for column in [
+            "created_at",
+            "started_at",
+            "completed_at",
+            "last_error",
+            "available_at",
+        ] {
             query.expr_as(
                 Expr::col((table.clone(), Alias::new(column))),
                 Alias::new(column),
+            );
+        }
+        for (column, output) in [("id", "validation_job_id"), ("state", "validation_status")] {
+            let validation = Alias::new("related_validation");
+            let subquery = Query::select()
+                .column((validation.clone(), Alias::new(column)))
+                .from_as(Alias::new("work_jobs"), validation.clone())
+                .and_where(
+                    Expr::col((validation.clone(), Alias::new("task_kind")))
+                        .eq("ValidateStorageRoot"),
+                )
+                .and_where(
+                    Expr::col((validation.clone(), Alias::new("scope_id")))
+                        .equals((table.clone(), Alias::new("storage_root_affinity"))),
+                )
+                .order_by((validation.clone(), Alias::new("created_at")), Order::Desc)
+                .order_by((validation, Alias::new("id")), Order::Desc)
+                .limit(1)
+                .to_owned();
+            query.expr_as(
+                sea_orm::sea_query::SimpleExpr::SubQuery(
+                    None,
+                    Box::new(sea_orm::sea_query::SubQueryStatement::SelectStatement(
+                        subquery,
+                    )),
+                ),
+                Alias::new(output),
             );
         }
         let results = Alias::new("job_results");
@@ -1102,6 +1158,61 @@ where
         if error.trim().is_empty() || error.chars().count() > MAX_ERROR_CHARS {
             return Err(WorkJobRepositoryError::InvalidErrorSummary);
         }
+        if claimed.attempt_count() > MAX_WORK_JOB_RETRIES {
+            tracing::error!(job_id = %claimed.id().as_uuid(), attempts = claimed.attempt_count(), "task retry limit exceeded; skipped");
+            let message: String = format!("retry limit exceeded (5 retries); skipped: {error}")
+                .chars()
+                .take(MAX_ERROR_CHARS)
+                .collect();
+            return self.fail_terminal(claimed, &message).await;
+        }
+        self.reschedule(claimed, backoff, error, false).await
+    }
+
+    /// Waits for a dependency without consuming an execution attempt.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid delay, summary, or expired lease.
+    pub async fn defer(
+        &self,
+        claimed: &ClaimedWorkJob,
+        backoff: Duration,
+        reason: &str,
+    ) -> Result<(), WorkJobRepositoryError> {
+        if backoff < Duration::zero() {
+            return Err(WorkJobRepositoryError::InvalidBackoff);
+        }
+        if reason.trim().is_empty() || reason.chars().count() > MAX_ERROR_CHARS {
+            return Err(WorkJobRepositoryError::InvalidErrorSummary);
+        }
+        let backoff = if backoff > Duration::zero() {
+            let query = Query::select()
+                .column(Alias::new("started_at"))
+                .from(Alias::new("work_jobs"))
+                .and_where(Expr::col(Alias::new("id")).eq(claimed.id().as_uuid()))
+                .to_owned();
+            let started: Option<DateTime<Utc>> = self
+                .database
+                .query_one(self.database.get_database_backend().build(&query))
+                .await?
+                .ok_or(WorkJobRepositoryError::LostLease)?
+                .try_get("", "started_at")?;
+            let age = started.map_or(0, |started| (self.now() - started).num_seconds().max(0));
+            let exponent = u32::try_from(age / 30).unwrap_or(6).min(6);
+            backoff.max(Duration::seconds((5 * (1_i64 << exponent)).min(300)))
+        } else {
+            backoff
+        };
+        self.reschedule(claimed, backoff, reason, true).await
+    }
+
+    async fn reschedule(
+        &self,
+        claimed: &ClaimedWorkJob,
+        backoff: Duration,
+        error: &str,
+        waiting: bool,
+    ) -> Result<(), WorkJobRepositoryError> {
         let now = self.now();
         let available_at = now
             .checked_add_signed(backoff)
@@ -1117,6 +1228,14 @@ where
                 Option::<DateTime<Utc>>::None,
             )
             .value(Alias::new("last_error"), error)
+            .value(
+                Alias::new("attempt_count"),
+                if waiting {
+                    claimed.attempt_count().saturating_sub(1)
+                } else {
+                    claimed.attempt_count()
+                },
+            )
             .cond_where(lease_condition(claimed, now))
             .to_owned();
         if self
@@ -1652,13 +1771,21 @@ async fn cancel_active_task(
     }
     let mut cancelled = 0_u64;
     for parent_id in parent_ids {
-        if cancel_job(transaction, WorkJobId::from_uuid(parent_id), error, now).await? {
+        if cancel_job(
+            transaction,
+            WorkJobId::from_uuid(parent_id),
+            error,
+            now,
+            false,
+        )
+        .await?
+        {
             cancelled += 1;
         }
     }
     for (child_id, created) in children {
         if created && !externally_shared.contains(&child_id) {
-            cancel_job(transaction, child_id, error, now).await?;
+            cancel_job(transaction, child_id, error, now, false).await?;
         }
     }
     Ok(cancelled)
@@ -1751,6 +1878,7 @@ async fn retire_stale_discoveries(
             id,
             "title discovery revision was superseded before execution",
             now,
+            false,
         )
         .await?
         {
@@ -1800,6 +1928,7 @@ async fn cancel_job(
     job_id: WorkJobId,
     error: &str,
     now: DateTime<Utc>,
+    pending_only: bool,
 ) -> Result<bool, WorkJobRepositoryError> {
     let backend = transaction.get_database_backend();
     let mut update = Query::update();
@@ -1816,6 +1945,11 @@ async fn cancel_job(
     if backend == sea_orm::DbBackend::MySql {
         update.value(Alias::new("active_slot"), Option::<String>::None);
     }
+    if pending_only {
+        update
+            .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+            .and_where(Expr::col(Alias::new("attempt_count")).gt(MAX_WORK_JOB_RETRIES));
+    }
     let update = update
         .and_where(Expr::col(Alias::new("id")).eq(job_id.as_uuid()))
         .and_where(Expr::col(Alias::new("state")).is_in([STATE_PENDING, STATE_RUNNING]))
@@ -1828,6 +1962,7 @@ async fn cancel_job(
     {
         return Ok(false);
     }
+    mark_validation_failed(transaction, job_id, error).await?;
     insert_result(
         transaction,
         job_id,
@@ -1884,6 +2019,25 @@ async fn enqueue_or_join(
     spec: &WorkJobSpec,
     now: DateTime<Utc>,
 ) -> Result<WorkJobSubmission, WorkJobRepositoryError> {
+    let mut normalized = spec.clone();
+    if normalized.task_kind == WorkTaskKind::ResolveMetadata
+        && normalized.storage_root_affinity.is_none()
+        && let WorkScope::CatalogItem(item) = normalized.scope
+    {
+        match crate::catalog_storage_scope::resolve_catalog_storage_scope(transaction, item, None)
+            .await
+        {
+            Ok(Some(scope)) => normalized.storage_root_affinity = Some(scope.storage_root_id()),
+            Ok(None) => {}
+            Err(crate::catalog_storage_scope::CatalogStorageScopeError::Ambiguous) => {
+                return Err(WorkJobRepositoryError::IncompatibleActiveJob);
+            }
+            Err(crate::catalog_storage_scope::CatalogStorageScopeError::Database(error)) => {
+                return Err(error.into());
+            }
+        }
+    }
+    let spec = &normalized;
     let now = mysql_compatible_timestamp(transaction.get_database_backend(), now);
     reclaim_expired_leases(transaction, now).await?;
     if let Some(dependency) = spec.required_sync_job_id {
@@ -1991,11 +2145,46 @@ async fn enqueue_or_join(
         .transpose()?
         .ok_or(WorkJobRepositoryError::MissingEnqueuedJob)?;
     let created = job.id == id;
+    if !created
+        && job.task_kind == WorkTaskKind::ResolveMetadata
+        && job.state == WorkJobState::Pending
+        && job.storage_root_affinity.is_none()
+        && job.scope == spec.scope
+        && job.required_sync_job_id == spec.required_sync_job_id
+        && job.input_sync_revision == spec.input_sync_revision
+        && let (WorkScope::CatalogItem(item), Some(root)) = (spec.scope, spec.storage_root_affinity)
+    {
+        let unique =
+            crate::catalog_storage_scope::resolve_catalog_storage_scope(transaction, item, None)
+                .await;
+        if matches!(unique, Ok(Some(scope)) if scope.storage_root_id() == root) {
+            let update = Query::update()
+                .table(Alias::new("work_jobs"))
+                .value(Alias::new("storage_root_affinity"), root.as_uuid())
+                .and_where(Expr::col(Alias::new("id")).eq(job.id.as_uuid()))
+                .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+                .and_where(Expr::col(Alias::new("storage_root_affinity")).eq(Uuid::nil()))
+                .to_owned();
+            transaction.execute(backend.build(&update)).await?;
+            job = transaction
+                .query_one(backend.build(&job_by_id(job.id)))
+                .await?
+                .as_ref()
+                .map(job_from_row)
+                .transpose()?
+                .ok_or(WorkJobRepositoryError::MissingEnqueuedJob)?;
+        }
+    }
     if job.scope != spec.scope
         || job.required_sync_job_id != spec.required_sync_job_id
         || job.input_sync_revision != spec.input_sync_revision
         || job.storage_root_affinity != spec.storage_root_affinity
     {
+        tracing::warn!(existing_job_id = %job.id.as_uuid(), requested_job_id = %id.as_uuid(),
+            existing_root = ?job.storage_root_affinity, requested_root = ?spec.storage_root_affinity,
+            existing_input_revision = ?job.input_sync_revision, requested_input_revision = ?spec.input_sync_revision,
+            existing_dependency = ?job.required_sync_job_id, requested_dependency = ?spec.required_sync_job_id,
+            "active job has incompatible dependency metadata");
         return Err(WorkJobRepositoryError::IncompatibleActiveJob);
     }
     if !created && job.state == WorkJobState::Pending && spec.priority > job.priority {
@@ -2120,6 +2309,17 @@ async fn claim_next(
             return Ok(None);
         };
         let mut job = job_from_row(&row)?;
+        if job.attempt_count() > MAX_WORK_JOB_RETRIES {
+            cancel_job(
+                transaction,
+                job.id(),
+                "retry limit exceeded (5 retries); skipped",
+                now,
+                true,
+            )
+            .await?;
+            continue;
+        }
         if job.required_sync_job_id().is_some() && job.input_sync_revision().is_none() {
             let dependency = job
                 .required_sync_job_id()
@@ -2459,6 +2659,7 @@ async fn fail_terminal(
     {
         return Err(WorkJobRepositoryError::LostLease);
     }
+    mark_validation_failed(transaction, claimed.id(), error).await?;
     insert_result(
         transaction,
         claimed.id(),
@@ -2471,6 +2672,36 @@ async fn fail_terminal(
         },
     )
     .await
+}
+
+async fn mark_validation_failed(
+    transaction: &DatabaseTransaction,
+    job_id: WorkJobId,
+    error: &str,
+) -> Result<(), DbErr> {
+    let job_root = Query::select()
+        .column(Alias::new("scope_id"))
+        .from(Alias::new("work_jobs"))
+        .and_where(Expr::col(Alias::new("id")).eq(job_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("task_kind")).eq("ValidateStorageRoot"))
+        .and_where(Expr::col(Alias::new("scope_type")).eq("StorageRoot"))
+        .to_owned();
+    let account = Query::select()
+        .column(Alias::new("storage_account_id"))
+        .from(Alias::new("storage_roots"))
+        .and_where(Expr::col(Alias::new("id")).in_subquery(job_root))
+        .to_owned();
+    let update = Query::update()
+        .table(Alias::new("filesystem_storage_configs"))
+        .value(Alias::new("path_index_state"), "Failed")
+        .value(Alias::new("path_index_error"), error)
+        .and_where(Expr::col(Alias::new("storage_account_id")).in_subquery(account))
+        .and_where(Expr::col(Alias::new("path_index_state")).eq("Rebuilding"))
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
 }
 
 async fn insert_result(
@@ -3149,7 +3380,16 @@ fn admin_job_from_row(row: &QueryResult) -> Result<WorkJobAdminRecord, WorkJobRe
     } else {
         None
     };
+    let next_attempt_at = if job.state() == WorkJobState::Pending {
+        row.try_get("", "available_at")?
+    } else {
+        None
+    };
     Ok(WorkJobAdminRecord {
+        last_error,
+        next_attempt_at,
+        validation_job_id: row.try_get("", "validation_job_id")?,
+        validation_status: row.try_get("", "validation_status")?,
         job,
         admin_status,
         created_at: row.try_get("", "created_at")?,

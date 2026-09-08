@@ -1246,7 +1246,7 @@ impl CatalogQueryService {
                 target.metadata_revision(),
                 100,
             )?
-            .with_required_sync(sync.job().id(), sync_revision)
+            .with_input_sync_revision(sync_revision)?
         };
         spec = spec
             .with_metadata_requirement(requirement)?

@@ -231,6 +231,8 @@ const fn failure_reason(error: &BackendError) -> Option<TemporaryAvailabilityRea
         BackendError::UnsupportedCapability { .. }
         | BackendError::InvalidValue { .. }
         | BackendError::BackendNotReady { .. }
+        | BackendError::FilesystemIndexRebuilding
+        | BackendError::FilesystemIndexFailed
         | BackendError::RangeNotSatisfiable { .. }
         | BackendError::ChangeCursorInvalid => None,
     }

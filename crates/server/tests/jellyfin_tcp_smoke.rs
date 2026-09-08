@@ -158,6 +158,7 @@ impl TestServer {
             .env("TJXY_REDIS_MODE", "disabled")
             .env("TJXY_ENABLE_REMOTE_PROVIDERS", "false")
             .env("TJXY_FILESYSTEM_REALTIME", "false")
+            .env("TJXY_LOG_DIR", root.join("logs"))
             .env("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS", "0")
             .env("TJXY_LAZY_WAIT_MS", "5000")
             .env("TJXY_BOOTSTRAP_ADMIN_USERNAME", USERNAME)
@@ -1681,4 +1682,134 @@ fn available_port() -> u16 {
 
 fn token_header(token: &str) -> String {
     format!(r#"MediaBrowser Token="{token}""#)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Verifies the complete HTTP creation, scan, NFO, and image workflow.
+async fn tcp_hot_created_library_reads_nfo_and_poster_without_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let media_root = temp.path().join("movies");
+    let movie = media_root.join("Arrival (2016)");
+    fs::create_dir_all(&movie).unwrap();
+    fs::write(movie.join("Arrival (2016).mp4"), FIXTURE_MEDIA).unwrap();
+    fs::write(movie.join("movie.nfo"), "<movie><title>Arrival</title><year>2016</year><plot>Hot activation NFO regression.</plot></movie>").unwrap();
+    let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap();
+    fs::write(movie.join("poster.png"), png).unwrap();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let mut server = TestServer::spawn(temp.path());
+    server.wait_ready(&client).await;
+    let (user, token) = authenticate(&client, &server).await;
+    let mut url = Url::parse(&format!("{}/Library/VirtualFolders", server.base_url)).unwrap();
+    url.query_pairs_mut()
+        .append_pair("name", "Hot NFO Movies")
+        .append_pair("collectionType", "movies")
+        .append_pair("paths", media_root.to_str().unwrap())
+        .append_pair("refreshLibrary", "false");
+    assert_status(client.post(url).header("Authorization", token_header(&token))
+        .json(&json!({"LibraryOptions": {"Enabled": true, "ScanProfile": "Full", "MetadataSourceMode": "local_only", "LocalMetadataAccessMode": "import"}}))
+        .send().await.unwrap(), StatusCode::NO_CONTENT, "hot create NFO library").await;
+    let library = library_id_by_name(&client, &server, &token, &user, "Hot NFO Movies").await;
+    let root = storage_root_id_by_library_name(&client, &server, &token, "Hot NFO Movies").await;
+    let scan = submit_manual_task(
+        &client,
+        &server,
+        &token,
+        &format!("/Admin/Tasks/FullScan/{library}/{root}"),
+        "scan hot NFO library",
+    )
+    .await;
+    wait_for_job(
+        &client,
+        &server,
+        &token,
+        Some(&scan),
+        "FullLibraryRootScan",
+        None,
+        20,
+        "scan hot NFO library",
+    )
+    .await;
+    let item = wait_for_child(
+        &client,
+        &server,
+        &token,
+        &user,
+        &library,
+        "Movie",
+        "hot NFO movie",
+    )
+    .await;
+    let item_id = item["Id"].as_str().unwrap();
+    let metadata_job = submit_manual_task(
+        &client,
+        &server,
+        &token,
+        &format!("/Admin/Tasks/ResolveMetadata/{item_id}"),
+        "resolve hot NFO",
+    )
+    .await;
+    let jobs = json_response(
+        client
+            .get(format!("{}/Admin/Tasks/Jobs?Limit=100", server.base_url))
+            .header("Authorization", token_header(&token))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+        "hot jobs",
+    )
+    .await;
+    let priority = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["Id"] == metadata_job)
+        .unwrap()["Priority"]
+        .as_i64()
+        .unwrap();
+    wait_for_job(
+        &client,
+        &server,
+        &token,
+        Some(&metadata_job),
+        "ResolveMetadata",
+        Some(item_id),
+        priority,
+        "read hot NFO",
+    )
+    .await;
+    let details = json_response(
+        client
+            .get(format!("{}/Users/{user}/Items/{item_id}", server.base_url))
+            .header("Authorization", token_header(&token))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+        "hot movie details",
+    )
+    .await;
+    assert_eq!(
+        details["Overview"],
+        "Hot activation NFO regression.",
+        "details: {details}; logs: {}",
+        server.logs()
+    );
+    assert_status(
+        client
+            .get(format!(
+                "{}/Items/{item_id}/Images/Primary",
+                server.base_url
+            ))
+            .header("Authorization", token_header(&token))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+        "hot movie poster",
+    )
+    .await;
 }

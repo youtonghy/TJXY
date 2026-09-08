@@ -212,6 +212,7 @@ pub(crate) async fn add_virtual_folder(
                 if let Some(runtime) = state.storage_runtime.as_ref()
                     && runtime
                         .activate_filesystem(created.account_id(), backend)
+                        .await
                         .is_err()
                 {
                     if let Err(error) = libraries
@@ -346,6 +347,7 @@ async fn activate_created_filesystem_root(
     if let Some(runtime) = state.storage_runtime.as_ref()
         && runtime
             .activate_filesystem(created.account_id(), backend)
+            .await
             .is_err()
     {
         libraries

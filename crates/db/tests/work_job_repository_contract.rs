@@ -1666,3 +1666,193 @@ async fn full_scan_completion_is_fenced_by_the_library_profile_version() {
         WorkJobState::Running
     );
 }
+
+#[tokio::test]
+async fn execution_stops_after_five_retries_and_other_jobs_continue() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
+    let (repository, _) = repository(&database, now);
+    let spec = WorkJobSpec::new(
+        WorkTaskKind::IndexMediaSources,
+        WorkScope::CatalogItem(CatalogItemId::new()),
+        1,
+        100,
+    )
+    .unwrap();
+    let submitted = repository.enqueue_or_join(&spec).await.unwrap();
+    for attempt in 1..=6 {
+        let claimed = repository
+            .claim_next(
+                &[WorkTaskKind::IndexMediaSources],
+                "retry-limit",
+                Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.attempt_count(), attempt);
+        repository
+            .retry(&claimed, Duration::zero(), "provider unavailable")
+            .await
+            .unwrap();
+        let job = repository.get(submitted.job().id()).await.unwrap().unwrap();
+        assert_eq!(
+            job.state(),
+            if attempt <= 5 {
+                WorkJobState::Pending
+            } else {
+                WorkJobState::Failed
+            }
+        );
+    }
+    assert!(
+        repository
+            .claim_next(
+                &[WorkTaskKind::IndexMediaSources],
+                "retry-limit",
+                Duration::minutes(1)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let next = repository
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "next",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), next.job().id());
+    let records = repository.recent_jobs(50).await.unwrap();
+    let failed = records
+        .iter()
+        .find(|record| record.job().id() == submitted.job().id())
+        .unwrap();
+    assert!(
+        failed
+            .last_error()
+            .unwrap()
+            .contains("retry limit exceeded")
+    );
+    assert_eq!(failed.next_attempt_at(), None);
+}
+
+#[tokio::test]
+async fn dependency_wait_does_not_consume_the_five_retry_budget() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
+    let (repository, _) = repository(&database, now);
+    repository
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        let claimed = repository
+            .claim_next(
+                &[WorkTaskKind::IndexMediaSources],
+                "waiting",
+                Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.attempt_count(), 1);
+        repository
+            .defer(&claimed, Duration::zero(), "waiting for dependency")
+            .await
+            .unwrap();
+        assert!(matches!(
+            repository
+                .defer(&claimed, Duration::zero(), "waiting for dependency")
+                .await,
+            Err(WorkJobRepositoryError::LostLease)
+        ));
+    }
+    let claimed = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "execution",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.attempt_count(), 1);
+    repository
+        .retry(&claimed, Duration::zero(), "provider unavailable")
+        .await
+        .unwrap();
+    let next = repository
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "execution",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.attempt_count(), 2);
+}
+
+#[tokio::test]
+async fn historical_jobs_past_the_retry_limit_are_skipped_before_execution() {
+    let database = database().await;
+    let jobs = WorkJobRepository::new(&database);
+    let submitted = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                20,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let update = Query::update()
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("attempt_count"), 163)
+        .and_where(Expr::col(Alias::new("id")).eq(submitted.job().id().as_uuid()))
+        .to_owned();
+    database
+        .execute(database.get_database_backend().build(&update))
+        .await
+        .unwrap();
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "upgraded-worker",
+            Duration::minutes(1)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let record = jobs.get(submitted.job().id()).await.unwrap().unwrap();
+    assert_eq!(record.state(), WorkJobState::Failed);
+    assert_eq!(record.attempt_count(), 163);
+}

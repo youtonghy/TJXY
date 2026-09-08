@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilesystemIndexState {
+    Uninitialized,
     Ready,
     Rebuilding,
     Failed,
@@ -24,7 +25,7 @@ impl<'connection> FilesystemIndexRepository<'connection> {
 
     /// Reconciles one runtime mount identity with its persisted read-index state.
     ///
-    /// Returns `true` when a single-flight validation must be scheduled.
+    /// Returns `true` when rebuilding is required; validation is enqueued in the same transaction.
     ///
     /// # Errors
     ///
@@ -136,10 +137,13 @@ async fn prepare_mount(
         .and_where(Expr::col(Alias::new("storage_account_id")).eq(account_id))
         .limit(1)
         .to_owned();
-    let row = transaction
+    let Some(row) = transaction
         .query_one(transaction.get_database_backend().build(&query))
         .await?
-        .ok_or_else(|| DbErr::RecordNotFound("filesystem storage configuration".to_owned()))?;
+    else {
+        // Explicitly injected backends can have no persisted filesystem configuration.
+        return Ok(false);
+    };
     let state: Option<String> = row.try_get("", "path_index_state")?;
     let verified: Option<String> = row.try_get("", "verified_physical_root_identity")?;
     let pending: Option<String> = row.try_get("", "pending_physical_root_identity")?;
@@ -175,6 +179,28 @@ async fn prepare_mount(
     transaction
         .execute(transaction.get_database_backend().build(&update))
         .await?;
+    let roots = Query::select()
+        .columns([Alias::new("id"), Alias::new("sync_revision")])
+        .from(Alias::new("storage_roots"))
+        .and_where(Expr::col(Alias::new("storage_account_id")).eq(account_id))
+        .to_owned();
+    for row in transaction
+        .query_all(transaction.get_database_backend().build(&roots))
+        .await?
+    {
+        let root_id = StorageRootId::from_uuid(row.try_get("", "id")?);
+        let spec = crate::WorkJobSpec::new(
+            crate::WorkTaskKind::ValidateStorageRoot,
+            crate::WorkScope::StorageRoot(root_id),
+            row.try_get("", "sync_revision")?,
+            100,
+        )
+        .and_then(|spec| spec.with_storage_root_affinity(root_id))
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+        crate::work_job::enqueue_in_transaction(transaction, &spec, chrono::Utc::now())
+            .await
+            .map_err(|error| DbErr::Custom(error.to_string()))?;
+    }
     Ok(true)
 }
 
@@ -198,7 +224,8 @@ async fn root_account_id(
 fn parse_state(value: Option<&str>) -> Result<FilesystemIndexState, DbErr> {
     match value {
         Some("Ready") => Ok(FilesystemIndexState::Ready),
-        Some("Rebuilding") | None => Ok(FilesystemIndexState::Rebuilding),
+        Some("Rebuilding") => Ok(FilesystemIndexState::Rebuilding),
+        None => Ok(FilesystemIndexState::Uninitialized),
         Some("Failed") => Ok(FilesystemIndexState::Failed),
         Some(value) => Err(DbErr::Custom(format!(
             "invalid filesystem path index state {value}"

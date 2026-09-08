@@ -648,7 +648,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let image_fetcher = Arc::new(ReqwestMetadataImageFetcher::new()?);
     let assets =
         Arc::new(AssetReadService::new(database.clone(), options.assets_dir.clone()).await?);
-    let (filesystem_backends, unavailable_filesystem_accounts, relinked_filesystem_roots) =
+    let (filesystem_backends, unavailable_filesystem_accounts, _relinked_filesystem_roots) =
         prepare_filesystem_backends(
             &database,
             filesystem_backends,
@@ -682,7 +682,8 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         image_fetcher,
         local_reference_fallback,
         filesystem_realtime_enabled: options.filesystem_realtime_enabled,
-    })?;
+    })
+    .await?;
     let direct_metadata = Arc::new(direct_metadata);
     let mut catalog = CatalogQueryService::new(database.clone())
         .with_lazy_wait_timeout(options.lazy_wait_timeout)
@@ -744,19 +745,6 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let media = Arc::new(media);
     let playstate = Arc::new(PlaystateService::new(database.clone()));
     let tasks = Arc::new(TaskService::new(database.clone()));
-    for root_id in relinked_filesystem_roots {
-        match tasks.validate_storage(root_id).await {
-            Ok(submission) => tracing::info!(
-                storage_root_id = %root_id.as_uuid(),
-                job_id = %submission.job().id().as_uuid(),
-                "Scheduled recursive validation after automatic filesystem relink"
-            ),
-            Err(error) => tracing::error!(
-                storage_root_id = %root_id.as_uuid(),
-                "Could not schedule recursive validation after automatic filesystem relink: {error}"
-            ),
-        }
-    }
     if let Some(interval) = options.media_refresh_interval {
         worker::spawn_media_refresh_scheduler(Arc::clone(&tasks), interval);
     }
@@ -1138,7 +1126,7 @@ struct StorageConfiguration<'a> {
     filesystem_realtime_enabled: bool,
 }
 
-fn configure_storage(
+async fn configure_storage(
     config: StorageConfiguration<'_>,
 ) -> Result<
     (
@@ -1178,7 +1166,9 @@ fn configure_storage(
     ));
     for configured in filesystem_backends {
         debug_assert_eq!(configured.realtime_enabled, filesystem_realtime_enabled);
-        runtime.activate_filesystem(configured.account_id, configured.backend)?;
+        runtime
+            .activate_filesystem(configured.account_id, configured.backend)
+            .await?;
     }
     for configured in storage_backends {
         runtime.activate_provider(

@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::natural_key;
 use crate::work_job::{
-    ClaimedWorkJob, WorkJobClock, WorkJobRepository, WorkJobRepositoryError, WorkJobSpec,
-    WorkJobSubmission, WorkJobSystemClock, WorkScope, WorkTaskKind,
+    ClaimedWorkJob, WorkJobClock, WorkJobRepositoryError, WorkJobSpec, WorkJobSubmission,
+    WorkJobSystemClock, WorkScope, WorkTaskKind,
 };
 
 const MAX_IDENTITY_CHARS: usize = 2048;
@@ -283,10 +283,29 @@ where
         .map_err(StorageSyncRepositoryError::WorkJob)?
         .with_storage_root_affinity(root_id)
         .map_err(StorageSyncRepositoryError::WorkJob)?;
-        WorkJobRepository::new(self.database)
-            .enqueue_or_join(&spec)
-            .await
-            .map_err(StorageSyncRepositoryError::WorkJob)
+        let transaction = self.database.begin().await?;
+        let result = async {
+            let account = Query::select()
+                .column(Alias::new("storage_account_id"))
+                .from(Alias::new("storage_roots"))
+                .and_where(Expr::col(Alias::new("id")).eq(root_id.as_uuid()))
+                .to_owned();
+            let update = Query::update()
+                .table(Alias::new("filesystem_storage_configs"))
+                .value(Alias::new("path_index_state"), "Rebuilding")
+                .value(Alias::new("path_index_error"), Option::<String>::None)
+                .and_where(Expr::col(Alias::new("storage_account_id")).in_subquery(account))
+                .and_where(Expr::col(Alias::new("path_index_state")).eq("Failed"))
+                .to_owned();
+            transaction
+                .execute(transaction.get_database_backend().build(&update))
+                .await?;
+            crate::work_job::enqueue_in_transaction(&transaction, &spec, Utc::now())
+                .await
+                .map_err(StorageSyncRepositoryError::WorkJob)
+        }
+        .await;
+        finish(transaction, result).await
     }
 
     /// Enqueues scoped inventory for native filesystem event hints that resolve to live,

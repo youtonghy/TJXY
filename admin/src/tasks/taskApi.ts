@@ -26,6 +26,11 @@ export interface TaskJob {
   startedAt: string | null;
   completedAt: string | null;
   outcome: TaskJobOutcome | null;
+  lastError?: string | null;
+  waitingReason?: string | null;
+  nextAttemptAt?: string | null;
+  validationJobId?: string | null;
+  validationStatus?: string | null;
 }
 
 export interface StorageRootOption {
@@ -157,6 +162,9 @@ function toTaskJob(value: unknown): TaskJob {
     || !validDate(value.StartedAt)
     || !validDate(value.CompletedAt)
     || !validTaskJobOutcome(value.Outcome)
+    || ![value.LastError, value.WaitingReason, value.ValidationStatus].every((entry) => entry == null || typeof entry === 'string')
+    || (value.NextAttemptAt != null && !validDate(value.NextAttemptAt))
+    || (value.ValidationJobId != null && !validId(value.ValidationJobId))
   ) throw invalidResponse('recent task');
   return {
     id: value.Id,
@@ -170,6 +178,11 @@ function toTaskJob(value: unknown): TaskJob {
     startedAt: value.StartedAt,
     completedAt: value.CompletedAt,
     outcome: value.Outcome ?? null,
+    lastError: value.LastError as string | undefined ?? null,
+    waitingReason: value.WaitingReason as string | undefined ?? null,
+    nextAttemptAt: value.NextAttemptAt ?? null,
+    validationJobId: value.ValidationJobId ?? null,
+    validationStatus: value.ValidationStatus as string | undefined ?? null,
   };
 }
 

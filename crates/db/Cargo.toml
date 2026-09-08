@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tracing.workspace = true
 chrono.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true

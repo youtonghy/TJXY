@@ -28,6 +28,8 @@ pub(crate) struct RuntimeStorageManager {
     backends: StorageBackendRegistry,
     workers: Mutex<HashMap<RuntimeStorageKey, ActiveStorageWorkers>>,
     filesystem_realtime_enabled: bool,
+    activation: tokio::sync::Mutex<()>,
+    generations: Mutex<HashMap<RuntimeStorageKey, u64>>,
 }
 
 impl RuntimeStorageManager {
@@ -41,10 +43,12 @@ impl RuntimeStorageManager {
             backends,
             workers: Mutex::new(HashMap::new()),
             filesystem_realtime_enabled,
+            activation: tokio::sync::Mutex::new(()),
+            generations: Mutex::new(HashMap::new()),
         }
     }
 
-    pub(crate) fn activate_filesystem(
+    pub(crate) async fn activate_filesystem(
         &self,
         account_id: Uuid,
         backend: Arc<FilesystemBackend>,
@@ -53,12 +57,42 @@ impl RuntimeStorageManager {
             account_id,
             provider_drive_id: "local".to_owned(),
         };
+        let generation = *self
+            .generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key.clone())
+            .or_default();
+        let _activation = self.activation.lock().await;
+        if self
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&key)
+        {
+            return Ok(false);
+        }
+        tjxy_db::FilesystemIndexRepository::new(&self.database)
+            .prepare_mount(
+                account_id,
+                backend.physical_root_identity(),
+                backend.root_identity_changed(),
+            )
+            .await?;
         let mut workers = self
             .workers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if workers.contains_key(&key) {
-            return Ok(false);
+        if self
+            .generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+            != generation
+        {
+            return Err(RuntimeStorageError::ActivationCancelled);
         }
         let dyn_backend: Arc<dyn StorageBackend> = Arc::new(IndexedFilesystemBackend::new(
             self.database.clone(),
@@ -130,11 +164,17 @@ impl RuntimeStorageManager {
             account_id,
             provider_drive_id: provider_drive_id.to_owned(),
         };
-        let removed = self
+        let mut registry = self
             .workers
             .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *self
+            .generations
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
+            .entry(key.clone())
+            .or_default() += 1;
+        let removed = registry.remove(&key);
         if let Some(workers) = removed.as_ref() {
             for handle in &workers.handles {
                 handle.abort();
@@ -174,6 +214,10 @@ impl Drop for RuntimeStorageManager {
 
 #[derive(Debug, Error)]
 pub enum RuntimeStorageError {
+    #[error("filesystem activation was cancelled by a concurrent deactivation")]
+    ActivationCancelled,
+    #[error("filesystem index initialization failed: {0}")]
+    Database(#[from] sea_orm::DbErr),
     #[error("runtime storage registry rejected the backend: {0}")]
     Registry(#[from] StorageBackendRegistryError),
     #[error(
@@ -194,7 +238,6 @@ mod tests {
     use tempfile::TempDir;
     use tjxy_application::StorageBackendRegistry;
     use tjxy_storage_filesystem::FilesystemBackend;
-    use uuid::Uuid;
 
     use super::RuntimeStorageManager;
 
@@ -206,19 +249,117 @@ mod tests {
         let backend = Arc::new(FilesystemBackend::new(root.path()).await.unwrap());
         let registry = StorageBackendRegistry::new();
         let manager = RuntimeStorageManager::new(database, registry.clone(), false);
-        let account_id = Uuid::new_v4();
+        let policy = tjxy_db::LibraryPolicyUpdate::new(
+            "Lazy",
+            "title_layer",
+            "basic",
+            "on_browse",
+            "on_playback",
+            true,
+        )
+        .unwrap();
+        let draft = tjxy_db::FilesystemRootDraft::new(
+            root.path().to_str().unwrap(),
+            backend.root_id().provider_object_id(),
+            "Media",
+        )
+        .unwrap();
+        let created = tjxy_db::LibraryRepository::new(&manager.database)
+            .create_with_filesystem_root("Movies", "movies", &policy, &draft)
+            .await
+            .unwrap();
+        let account_id = created.account_id();
+        assert_eq!(
+            tjxy_db::FilesystemIndexRepository::new(&manager.database)
+                .state(account_id)
+                .await
+                .unwrap(),
+            tjxy_db::FilesystemIndexState::Uninitialized
+        );
 
         assert!(
             manager
                 .activate_filesystem(account_id, Arc::clone(&backend))
+                .await
                 .unwrap()
         );
+        assert_eq!(
+            tjxy_db::FilesystemIndexRepository::new(&manager.database)
+                .state(account_id)
+                .await
+                .unwrap(),
+            tjxy_db::FilesystemIndexState::Ready
+        );
         assert!(manager.is_active(account_id));
-        assert!(!manager.activate_filesystem(account_id, backend).unwrap());
+        assert!(
+            !manager
+                .activate_filesystem(account_id, backend)
+                .await
+                .unwrap()
+        );
         assert!(registry.backend_for_drive(account_id, "local").is_some());
         assert!(manager.deactivate(account_id, "local").unwrap());
         assert!(!manager.is_active(account_id));
         assert!(registry.backend(account_id).is_none());
         assert!(!manager.deactivate(account_id, "local").unwrap());
+    }
+    #[tokio::test]
+    async fn failed_validation_can_be_requeued_without_restarting_the_backend() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        tjxy_db::Migrator::up(&database, None).await.unwrap();
+        let root = TempDir::new().unwrap();
+        let backend = FilesystemBackend::new(root.path()).await.unwrap();
+        let policy = tjxy_db::LibraryPolicyUpdate::new(
+            "Lazy",
+            "title_layer",
+            "basic",
+            "on_browse",
+            "on_playback",
+            true,
+        )
+        .unwrap();
+        let draft = tjxy_db::FilesystemRootDraft::new(
+            root.path().to_str().unwrap(),
+            backend.root_id().provider_object_id(),
+            "Media",
+        )
+        .unwrap();
+        let created = tjxy_db::LibraryRepository::new(&database)
+            .create_with_filesystem_root("Movies", "movies", &policy, &draft)
+            .await
+            .unwrap();
+        let indexes = tjxy_db::FilesystemIndexRepository::new(&database);
+        assert!(
+            indexes
+                .prepare_mount(created.account_id(), "changed-identity", true)
+                .await
+                .unwrap()
+        );
+        let jobs = tjxy_db::WorkJobRepository::new(&database);
+        let validation = jobs
+            .claim_next(
+                &[tjxy_db::WorkTaskKind::ValidateStorageRoot],
+                "validation",
+                chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        jobs.fail_terminal(&validation, "validation failed")
+            .await
+            .unwrap();
+        assert_eq!(
+            indexes.state(created.account_id()).await.unwrap(),
+            tjxy_db::FilesystemIndexState::Failed
+        );
+        let next = tjxy_db::StorageSyncRepository::new(&database)
+            .enqueue_validation(created.root_id(), 100)
+            .await
+            .unwrap();
+        assert_ne!(next.job().id(), validation.id());
+        assert_eq!(
+            indexes.state(created.account_id()).await.unwrap(),
+            tjxy_db::FilesystemIndexState::Rebuilding
+        );
     }
 }

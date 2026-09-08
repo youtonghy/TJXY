@@ -480,10 +480,68 @@ fn admin_job_info(record: &WorkJobAdminRecord) -> AdminTaskJobInfo {
             }
         }),
     )
+    .with_diagnostics(
+        record.last_error().map(task_error_summary),
+        if matches!(
+            record.admin_status(),
+            WorkJobAdminStatus::Pending | WorkJobAdminStatus::Retrying
+        ) {
+            record.last_error().and_then(|error| {
+                if error.contains("filesystem path index is rebuilding") {
+                    Some("Waiting for storage validation".to_owned())
+                } else if error.contains("pending") {
+                    Some("Waiting for dependent tasks".to_owned())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        },
+        record.next_attempt_at(),
+        record.validation_job_id(),
+        record.validation_status().map(str::to_owned),
+    )
+}
+
+// Return controlled summaries: backend errors may contain signed URLs or credentials.
+fn task_error_summary(error: &str) -> String {
+    let summary = if error.contains("filesystem path index validation failed") {
+        "Storage validation failed; validate storage before retrying"
+    } else if error.contains("filesystem path index is rebuilding") {
+        "Waiting for storage validation"
+    } else if error.contains("uninitialized") {
+        "Storage index has not been initialized"
+    } else if error.contains("incompatible dependency metadata") {
+        "Task conflicts with an active task's storage root, version, or dependency"
+    } else if error.contains("stale") {
+        "Task input is no longer current; submit a new task"
+    } else if error.contains("rate limit") {
+        "Storage or metadata provider rate limit exceeded"
+    } else if error.contains("pending") {
+        "Waiting for dependent tasks"
+    } else if error.contains("cancelled by administrator") {
+        "Cancelled by administrator"
+    } else {
+        "Task execution failed; check server logs for details"
+    };
+    if error.contains("retry limit exceeded") {
+        format!("Retry limit exceeded (5 retries); skipped. {summary}")
+    } else {
+        summary.to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_diagnostics_never_echo_backend_credentials() {
+        let error = "retry limit exceeded (5 retries); skipped: backend https://user:secret@host/file?token=secret";
+        let summary = super::task_error_summary(error);
+        assert!(summary.contains("5 retries"));
+        assert!(!summary.contains("secret"));
+        assert!(!summary.contains("https://"));
+    }
     use axum::http::StatusCode;
     use tjxy_application::TaskServiceError;
     use tjxy_db::DiscoverTitlesError;

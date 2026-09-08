@@ -579,3 +579,27 @@ it('redirects a 403 cancellation and closes its confirmation without local feedb
   expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('private-cancel-auth-detail')).not.toBeInTheDocument();
 });
+
+it('shows retry exhaustion and requeues failed metadata with command feedback', async () => {
+  const user = userEvent.setup();
+  snapshotMock.mockResolvedValue({
+    ...snapshot,
+    jobs: [{ ...completedJob, taskKind: 'ResolveMetadata', status: 'Failed', attemptCount: 6,
+      lastError: 'Retry limit exceeded (5 retries); skipped.', validationJobId: jobId, validationStatus: 'Failed' }],
+  });
+  resolveMock.mockResolvedValue([jobId]);
+  renderTasks();
+  expect(await screen.findByText('Retry limit exceeded (5 retries); skipped.')).toBeVisible();
+  expect(screen.getByText(`Storage validation: Failed (${jobId})`)).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Retry after recovery' }));
+  await waitFor(() => { expect(resolveMock).toHaveBeenCalledWith(taskId); });
+});
+
+it('shows dependency waiting and the next scheduled attempt', async () => {
+  snapshotMock.mockResolvedValue({ ...snapshot, jobs: [{ ...completedJob, status: 'Retrying',
+    waitingReason: 'Waiting for storage validation', nextAttemptAt: '2026-09-09T02:00:00Z' }] });
+  renderTasks();
+  expect(await screen.findByText('Waiting for storage validation')).toBeVisible();
+  expect(screen.getByText(/Next attempt:/)).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Retry after recovery' })).not.toBeInTheDocument();
+});

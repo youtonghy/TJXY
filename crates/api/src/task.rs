@@ -74,6 +74,11 @@ pub struct AdminTaskJobInfo {
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     outcome: Option<AdminTaskJobOutcome>,
+    last_error: Option<String>,
+    waiting_reason: Option<String>,
+    next_attempt_at: Option<DateTime<Utc>>,
+    validation_job_id: Option<Uuid>,
+    validation_status: Option<String>,
 }
 
 impl AdminTaskJobInfo {
@@ -104,6 +109,28 @@ impl AdminTaskJobInfo {
             started_at,
             completed_at,
             outcome,
+            last_error: None,
+            waiting_reason: None,
+            next_attempt_at: None,
+            validation_job_id: None,
+            validation_status: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_diagnostics(
+        mut self,
+        last_error: Option<String>,
+        waiting_reason: Option<String>,
+        next_attempt_at: Option<DateTime<Utc>>,
+        validation_job_id: Option<Uuid>,
+        validation_status: Option<String>,
+    ) -> Self {
+        self.last_error = last_error;
+        self.waiting_reason = waiting_reason;
+        self.next_attempt_at = next_attempt_at;
+        self.validation_job_id = validation_job_id;
+        self.validation_status = validation_status;
+        self
     }
 }

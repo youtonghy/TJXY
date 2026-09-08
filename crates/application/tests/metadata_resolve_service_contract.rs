@@ -2217,3 +2217,61 @@ async fn insert_root_object(
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn metadata_enqueue_normalizes_only_compatible_pending_legacy_affinity() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    let spec = WorkJobSpec::new(
+        WorkTaskKind::ResolveMetadata,
+        WorkScope::CatalogItem(fixture.item),
+        1,
+        20,
+    )
+    .unwrap()
+    .with_input_sync_revision(1)
+    .unwrap();
+    let original = jobs.enqueue_or_join(&spec).await.unwrap();
+    assert_eq!(original.job().storage_root_affinity(), Some(fixture.root));
+    let sql = fixture.database.get_database_backend();
+    let clear = Query::update()
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("storage_root_affinity"), Uuid::nil())
+        .and_where(Expr::col(Alias::new("id")).eq(original.job().id().as_uuid()))
+        .to_owned();
+    fixture.database.execute(sql.build(&clear)).await.unwrap();
+    let joined = jobs.enqueue_or_join(&spec).await.unwrap();
+    assert!(!joined.created());
+    assert_eq!(joined.job().id(), original.job().id());
+    assert_eq!(joined.job().storage_root_affinity(), Some(fixture.root));
+    let other_root = spec
+        .clone()
+        .with_storage_root_affinity(StorageRootId::new())
+        .unwrap();
+    assert!(matches!(
+        jobs.enqueue_or_join(&other_root).await,
+        Err(tjxy_db::WorkJobRepositoryError::IncompatibleActiveJob)
+    ));
+    let other_version = spec.clone().with_input_sync_revision(2).unwrap();
+    assert!(matches!(
+        jobs.enqueue_or_join(&other_version).await,
+        Err(tjxy_db::WorkJobRepositoryError::IncompatibleActiveJob)
+    ));
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "legacy-running",
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.database.execute(sql.build(&clear)).await.unwrap();
+    assert!(matches!(
+        jobs.enqueue_or_join(&spec).await,
+        Err(tjxy_db::WorkJobRepositoryError::IncompatibleActiveJob)
+    ));
+    let running = jobs.get(claimed.id()).await.unwrap().unwrap();
+    assert_eq!(running.state(), WorkJobState::Running);
+    assert_eq!(running.storage_root_affinity(), None);
+}

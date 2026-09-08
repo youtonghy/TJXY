@@ -228,7 +228,9 @@ export function TasksPage() {
             selectedRoot={selectedRoot}
             selectedRootOption={selectedRootOption}
           />
-          <RecentJobs jobs={snapshot.jobs} />
+          <RecentJobs jobs={snapshot.jobs} busyOperations={busyOperations} onRetry={(job) => {
+            void run(`retry-${job.id}`, () => resolveMetadata(job.scopeId), tr('Metadata resolution submitted.', '元数据解析已提交。'));
+          }} />
         </div>
       </AsyncContent>
     </div>
@@ -564,7 +566,7 @@ function CommandButton({
   );
 }
 
-function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
+function RecentJobs({ jobs, busyOperations, onRetry }: { jobs: TaskJob[]; busyOperations: ReadonlySet<string>; onRetry: (job: TaskJob) => void }) {
   const tr = useTranslate();
   return (
     <section aria-labelledby="recent-jobs-heading" className="space-y-4">
@@ -599,8 +601,21 @@ function RecentJobs({ jobs }: { jobs: TaskJob[] }) {
                       <p>{readableIdentifier(job.scopeType)}</p>
                       <p className="break-all text-xs text-muted">{job.scopeId}</p>
                     </Table.Cell>
-                    <Table.Cell><JobStatus status={job.status} /></Table.Cell>
-                    <Table.Cell><JobOutcome outcome={job.outcome} /></Table.Cell>
+                    <Table.Cell>
+                      <JobStatus status={job.status} />
+                      {job.waitingReason && <p className="mt-1 text-xs text-muted">{job.waitingReason}</p>}
+                      {job.nextAttemptAt && <p className="mt-1 text-xs text-muted">{tr('Next attempt', '下次尝试')}: {formatDate(job.nextAttemptAt)}</p>}
+                    </Table.Cell>
+                    <Table.Cell>
+                      <JobOutcome outcome={job.outcome} />
+                      {job.lastError && <p className="mt-1 break-words text-xs">{job.lastError}</p>}
+                      {job.validationJobId && <p className="mt-1 break-all text-xs text-muted">{tr('Storage validation', '存储校验')}: {job.validationStatus} ({job.validationJobId})</p>}
+                      {job.status === 'Failed' && job.taskKind === 'ResolveMetadata' && (
+                        <Button size="sm" variant="secondary" className="mt-2" isPending={busyOperations.has(`retry-${job.id}`)} isDisabled={busyOperations.has(`retry-${job.id}`)} onPress={() => { onRetry(job); }}>
+                          {tr('Retry after recovery', '恢复后重新排队')}
+                        </Button>
+                      )}
+                    </Table.Cell>
                     <Table.Cell><span className="block text-right tabular-nums">{job.attemptCount}</span></Table.Cell>
                     <Table.Cell>{formatDate(job.createdAt)}</Table.Cell>
                     <Table.Cell>{formatDate(job.completedAt)}</Table.Cell>

@@ -62,9 +62,11 @@ impl IndexedFilesystemBackend {
                 elapsed_ms = started.elapsed().as_millis(),
                 "filesystem read rejected while its path index is unavailable"
             );
-            return Err(index_unavailable(
-                "filesystem path index is rebuilding or failed",
-            ));
+            return Err(match state {
+                FilesystemIndexState::Rebuilding => BackendError::FilesystemIndexRebuilding,
+                FilesystemIndexState::Failed => BackendError::FilesystemIndexFailed,
+                _ => index_unavailable("filesystem path index is uninitialized"),
+            });
         }
         let result = tokio::time::timeout(
             PATH_RESOLUTION_TIMEOUT,
