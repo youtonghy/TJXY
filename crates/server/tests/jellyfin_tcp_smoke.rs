@@ -1582,7 +1582,14 @@ async fn wait_for_job(
     priority: i64,
     context: &str,
 ) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Full scans advance through multiple child-job stages with production retry delays
+    // of 2, 4, 8, 16, 32, then 60 seconds. A healthy pipeline can exceed 30 seconds.
+    let timeout = if task_kind == "FullLibraryRootScan" {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(30)
+    };
+    let deadline = Instant::now() + timeout;
     let mut last_jobs = Value::Null;
     while Instant::now() < deadline {
         let response = client
