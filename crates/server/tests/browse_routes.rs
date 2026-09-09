@@ -7194,13 +7194,20 @@ async fn recent_admin_jobs_require_admin_validate_limits_and_hide_persisted_erro
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
     assert!(!body_text.contains("secret"));
-    assert!(!body_text.contains("LastError"));
     assert!(!body_text.contains("Lease"));
     let jobs: Value = serde_json::from_str(&body_text).unwrap();
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["TaskKind"], "FullMediaScan");
     assert_eq!(jobs[0]["ScopeType"], "Library");
     assert_eq!(jobs[0]["Status"], "Failed");
+    assert_eq!(
+        jobs[0]["LastError"],
+        "Task execution failed; check server logs for details"
+    );
+    assert_eq!(jobs[0]["WaitingReason"], Value::Null);
+    assert_eq!(jobs[0]["NextAttemptAt"], Value::Null);
+    assert_eq!(jobs[0]["ValidationJobId"], Value::Null);
+    assert_eq!(jobs[0]["ValidationStatus"], Value::Null);
     assert!(jobs[0]["CreatedAt"].is_string());
     assert!(jobs[0]["CompletedAt"].is_string());
 
