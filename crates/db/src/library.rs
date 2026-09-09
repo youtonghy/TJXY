@@ -361,7 +361,7 @@ impl<'connection> LibraryRepository<'connection> {
         let library_id = LibraryId::new();
         insert_library(&transaction, library_id, name, collection_type, policy).await?;
         crate::advance_catalog_generation(&transaction).await?;
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(library_id)
     }
 
@@ -395,7 +395,7 @@ impl<'connection> LibraryRepository<'connection> {
         insert_library(&transaction, library_id, name, collection_type, policy).await?;
         let created = bind_filesystem_root(&transaction, library_id, root).await?;
         crate::advance_catalog_generation(&transaction).await?;
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(CreatedFilesystemLibrary {
             library: library_id,
             account: created.account,
@@ -431,7 +431,7 @@ impl<'connection> LibraryRepository<'connection> {
         }
         let created = bind_filesystem_root(&transaction, library_id, root).await?;
         crate::advance_catalog_generation(&transaction).await?;
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(CreatedFilesystemLibrary {
             library: library_id,
             account: created.account,
@@ -476,7 +476,7 @@ impl<'connection> LibraryRepository<'connection> {
             }
             crate::advance_catalog_generation(&transaction).await?;
         }
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(())
     }
 
@@ -512,7 +512,7 @@ impl<'connection> LibraryRepository<'connection> {
         let disabled =
             disable_orphaned_storage_accounts(&transaction, &[root_id.as_uuid()]).await?;
         crate::advance_catalog_generation(&transaction).await?;
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(disabled)
     }
 
@@ -688,7 +688,7 @@ impl<'connection> LibraryRepository<'connection> {
         }
         let disabled = disable_orphaned_storage_accounts(&transaction, &detached_roots).await?;
         crate::advance_catalog_generation(&transaction).await?;
-        transaction.commit().await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
         Ok(disabled)
     }
 
@@ -833,7 +833,7 @@ impl<'connection> LibraryRepository<'connection> {
             {
                 crate::metadata::invalidate_metadata_for_library(&transaction, library_id).await?;
             }
-            transaction.commit().await?;
+            crate::work_queue::commit_and_notify(transaction).await?;
             return Ok(next_version);
         }
         let exists = Query::select()

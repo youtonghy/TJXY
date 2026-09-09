@@ -8,6 +8,7 @@ mod ai_settings;
 mod announcements;
 mod api_key;
 mod auth;
+mod bounded_log;
 mod browse;
 mod client_portal;
 mod configuration;
@@ -21,6 +22,7 @@ mod import_admin;
 mod installation_config;
 mod library;
 mod local_metadata_admin;
+mod log_record;
 mod logging_admin;
 mod logging_runtime;
 mod media_collection;
@@ -43,6 +45,7 @@ mod stream;
 mod subtitle;
 mod system_settings;
 mod task;
+mod task_diagnostics;
 mod user_data;
 mod worker;
 
@@ -1100,6 +1103,20 @@ fn library_routes() -> Router<AppState> {
 fn admin_task_routes() -> Router<AppState> {
     Router::new()
         .route("/Admin/Tasks/Jobs", get(task::recent_jobs))
+        .route("/Admin/Tasks/Health", get(task_diagnostics::work_health))
+        .route("/Admin/Tasks/Scans", get(task_diagnostics::scan_history))
+        .route(
+            "/Admin/Tasks/NfoChoices",
+            get(task_diagnostics::nfo_choices).post(task_diagnostics::choose_nfo),
+        )
+        .route(
+            "/Admin/Tasks/Scans/{id}",
+            get(task_diagnostics::scan_report),
+        )
+        .route(
+            "/Admin/Tasks/Scans/{id}/Retry",
+            post(task_diagnostics::retry_scan_issues),
+        )
         .route(
             "/Admin/Tasks/ValidateStorage/{id}",
             post(task::validate_storage),

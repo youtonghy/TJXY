@@ -26,6 +26,9 @@ pub struct FullScanRepository<'connection> {
 }
 
 impl<'connection> FullScanRepository<'connection> {
+    pub(crate) const fn connection(&self) -> &DatabaseConnection {
+        self.database
+    }
     #[must_use]
     pub const fn new(database: &'connection DatabaseConnection) -> Self {
         Self { database }
@@ -1255,7 +1258,7 @@ async fn finish<T>(
 ) -> Result<T, FullScanRepositoryError> {
     match result {
         Ok(value) => {
-            transaction.commit().await?;
+            crate::work_queue::commit_and_notify(transaction).await?;
             Ok(value)
         }
         Err(original) => match transaction.rollback().await {

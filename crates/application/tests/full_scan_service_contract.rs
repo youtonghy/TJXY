@@ -2461,3 +2461,222 @@ async fn full_scan_schedules_source_index_before_it_can_complete() {
         .unwrap();
     assert_eq!(child.job().scope(), WorkScope::CatalogItem(item));
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercises failure isolation, resumption, and exact report accounting end to end.
+async fn an_nfo_conflict_is_isolated_and_the_resumed_scan_completes_with_an_exact_report() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "basic",
+        "on_browse",
+        "on_playback",
+    )
+    .await;
+    let sql = database.get_database_backend();
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only"),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut items = Vec::new();
+    for _ in 0..2 {
+        let (item, _) = seed_indexed_movie_with_source(&database, library).await;
+        let (_, object) = seed_root(&database, library).await;
+        database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("metadata_revision"), 2_i64)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                sql.build(
+                    Query::insert()
+                        .into_table(Alias::new("identity_matches"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("candidate_catalog_item_id"),
+                            Alias::new("confidence"),
+                            Alias::new("state"),
+                            Alias::new("evidence"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            object.as_uuid().into(),
+                            item.as_uuid().into(),
+                            1.0.into(),
+                            "Matched".into(),
+                            serde_json::json!({}).into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        items.push(item);
+    }
+    let parent = claimed_full_scan(&database, library).await;
+    let service = FullScanService::new(database.clone());
+    assert!(matches!(
+        service.execute(&parent).await,
+        Err(FullScanError::ChildrenPending { scheduled: 2 })
+    ));
+    let jobs = WorkJobRepository::new(&database);
+    for _ in 0..2 {
+        let child = jobs
+            .claim_next(
+                &[WorkTaskKind::ResolveMetadata],
+                "isolated-nfo",
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        if child.job().scope() == WorkScope::CatalogItem(items[0]) {
+            jobs.fail_item(&child, "metadata NFO candidates require selection", true)
+                .await
+                .unwrap();
+        } else {
+            MetadataResolveService::new(database.clone())
+                .execute(&child)
+                .await
+                .unwrap();
+        }
+    }
+    jobs.defer(&parent, Duration::zero(), "waiting for children")
+        .await
+        .unwrap();
+    let resumed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "restarted-orchestrator",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    FullScanService::new(database.clone())
+        .execute(&resumed)
+        .await
+        .unwrap();
+    let page = TaskService::new(database.clone())
+        .scan_report(parent.id(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.counters.unwrap(),
+        serde_json::json!({"items": 2, "success": 1, "failed": 0, "skipped": 0, "needs_selection": 1})
+    );
+    assert_eq!(page.issues.len(), 1);
+    assert_eq!(page.issues[0].item_id, items[0].as_uuid());
+    assert!(page.issues[0].needs_selection);
+    assert!(
+        TaskService::new(database.clone())
+            .retry_scan_issues(parent.id(), 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unresolved selections must not be blindly retried"
+    );
+    assert_eq!(
+        jobs.get(parent.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Completed
+    );
+}
+
+#[tokio::test]
+async fn disabled_accounts_cancel_running_storage_work_and_fail_waiting_dependents() {
+    let database = database().await;
+    let library = seed_library(&database).await;
+    let (root, object) = seed_root(&database, library).await;
+    let jobs = WorkJobRepository::new(&database);
+    let sync = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ScopedStorageSync,
+                WorkScope::StorageObject(object),
+                1,
+                20,
+            )
+            .unwrap()
+            .with_storage_root_affinity(root)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let dependent = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::IndexMediaSources,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                20,
+            )
+            .unwrap()
+            .with_pending_required_sync(sync.job().id())
+            .with_storage_root_affinity(root)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let running = jobs
+        .claim_next(
+            &[WorkTaskKind::ScopedStorageSync],
+            "disabled-storage",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("storage_accounts"))
+                    .value(Alias::new("status"), "Disabled"),
+            ),
+        )
+        .await
+        .unwrap();
+    let report = jobs.maintain_queue().await.unwrap();
+    assert_eq!(report.cancelled, 2);
+    assert_eq!(
+        jobs.get(sync.job().id()).await.unwrap().unwrap().state(),
+        WorkJobState::Failed
+    );
+    assert_eq!(
+        jobs.get(dependent.job().id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkJobState::Failed
+    );
+    assert!(matches!(
+        jobs.renew(&running, Duration::minutes(5)).await,
+        Err(tjxy_db::WorkJobRepositoryError::LostLease)
+    ));
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::ScopedStorageSync],
+            "replacement",
+            Duration::minutes(5)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}

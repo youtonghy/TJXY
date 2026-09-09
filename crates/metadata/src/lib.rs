@@ -1,6 +1,7 @@
 //! Metadata provider contracts and bounded offline metadata parsers.
 
 mod music;
+mod nfo_merge;
 mod tmdb_catalog;
 
 pub use music::{MusicBrainzProvider, TheAudioDbProvider};
@@ -1888,6 +1889,21 @@ impl MetadataResolution {
     #[must_use]
     pub const fn details_loaded(&self) -> bool {
         self.details_loaded
+    }
+
+    /// A successfully parsed NFO satisfies local-only resolution without remote IDs.
+    /// This does not claim that a remote rich-detail payload was loaded.
+    #[must_use]
+    pub fn complete_local_nfo(mut self) -> Self {
+        if !self.details_required
+            && self
+                .provenance
+                .values()
+                .any(|value| value.source.provider() == "Nfo")
+        {
+            self.state = MetadataState::Ready;
+        }
+        self
     }
 
     /// Requires a successful rich-detail response before this resolution is considered ready.

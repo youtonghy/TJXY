@@ -63,7 +63,10 @@ impl fmt::Debug for BootstrapAdmin {
     }
 }
 
+type DatabaseMetricCallback = Arc<dyn Fn(&sea_orm::metric::Info<'_>) + Send + Sync>;
+
 pub struct StartupOptions {
+    database_metric_callback: Option<DatabaseMetricCallback>,
     database_url: String,
     identity: ServerIdentity,
     bootstrap_admin: Option<BootstrapAdmin>,
@@ -178,6 +181,7 @@ impl StartupOptions {
     #[must_use]
     pub fn new(database_url: impl Into<String>, identity: ServerIdentity) -> Self {
         Self {
+            database_metric_callback: None,
             database_url: database_url.into(),
             identity,
             bootstrap_admin: None,
@@ -218,6 +222,17 @@ impl StartupOptions {
             ai_admission: AiAdmissionConfig::default(),
             logging_runtime: None,
         }
+    }
+
+    /// Installs an optional bounded observer for SQL measurements in isolated diagnostics.
+    /// The caller must not retain parameter values or credentials.
+    #[must_use]
+    pub fn with_database_metric_callback(
+        mut self,
+        callback: impl Fn(&sea_orm::metric::Info<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        self.database_metric_callback = Some(Arc::new(callback));
+        self
     }
 
     #[must_use]
@@ -494,21 +509,18 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         database.close().await?;
         database = Database::connect(&options.database_url).await?;
     }
+    if let Some(callback) = options.database_metric_callback.take() {
+        database.set_metric_callback(move |info| callback(info));
+    }
     if let Some(runtime) = options.logging_runtime.as_ref() {
         let settings = tjxy_db::LoggingSettingsRepository::new(&database)
             .get()
             .await?;
-        let mode = settings.as_ref().map_or(
-            tjxy_db::LogMode::Error,
-            tjxy_db::LoggingSettingsRecord::mode,
-        );
-        let retention_days = settings
-            .as_ref()
-            .map_or(tjxy_db::DEFAULT_LOG_RETENTION_DAYS, |value| {
-                value.retention_days()
-            });
-        runtime.set_mode(mode)?;
-        runtime.cleanup(retention_days)?;
+        if let Some(settings) = settings {
+            runtime.apply(&settings)?;
+        } else {
+            runtime.cleanup(tjxy_db::DEFAULT_LOG_RETENTION_DAYS)?;
+        }
         tokio::spawn(Arc::clone(runtime).run_retention_scheduler());
     }
     if options.assets_dir_source == "Default" {
@@ -744,7 +756,9 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     worker::spawn_full_scan_worker(database.clone());
     let media = Arc::new(media);
     let playstate = Arc::new(PlaystateService::new(database.clone()));
-    let tasks = Arc::new(TaskService::new(database.clone()));
+    let tasks = Arc::new(
+        TaskService::new(database.clone()).with_history_retention(options.work_history_retention),
+    );
     if let Some(interval) = options.media_refresh_interval {
         worker::spawn_media_refresh_scheduler(Arc::clone(&tasks), interval);
     }

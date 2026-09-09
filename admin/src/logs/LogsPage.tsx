@@ -9,7 +9,7 @@ import { PageHeader } from '../ui/PageHeader';
 import { useTranslate } from '../settings/i18n';
 import { downloadLogFile, getLoggingSettings, getLogPage, listLogFiles, saveLoggingSettings, type LogFile, type LoggingSettings } from './logsApi';
 
-const initialSettings: LoggingSettings = { mode: 'Error', retentionDays: 30, revision: 0, directory: '' };
+const initialSettings: LoggingSettings = { mode: 'Info', retentionDays: 30, revision: 0, directory: '' };
 
 export function LogsPage() {
   const tr = useTranslate();
@@ -80,12 +80,21 @@ export function LogsPage() {
       <section aria-labelledby="logging-settings-title" className="space-y-4">
         <div><h2 className="text-base font-semibold" id="logging-settings-title">{tr('admin.logs.settings')}</h2><p className="text-sm text-muted">{tr('admin.logs.settingsDescription')}</p></div>
         <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_220px_auto] md:items-end">
-          <div className="space-y-2"><Label>{tr('admin.logs.mode')}</Label><Segment isDisabled={loading || saving} onSelectionChange={(key) => { if (key === 'Error' || key === 'Debug') setSettings((current) => ({ ...current, mode: key })); }} selectedKey={settings.mode}><Segment.Item id="Error">Error</Segment.Item><Segment.Item id="Debug">Debug</Segment.Item></Segment><p className="text-xs text-muted">{settings.mode === 'Error' ? tr('admin.logs.errorDescription') : tr('admin.logs.debugDescription')}</p></div>
+          <div className="space-y-2"><Label>{tr('admin.logs.mode')}</Label><Segment isDisabled={loading || saving} onSelectionChange={(key) => { if (key === 'Error' || key === 'Info' || key === 'Debug') setSettings((current) => ({ ...current, mode: key })); }} selectedKey={settings.mode}><Segment.Item id="Error">Error</Segment.Item><Segment.Item id="Info">Info</Segment.Item><Segment.Item id="Debug">Debug</Segment.Item></Segment><p className="text-xs text-muted">{settings.mode === 'Error' ? tr('admin.logs.errorDescription') : settings.mode === 'Info' ? tr('admin.logs.infoDescription') : tr('admin.logs.debugDescription')}</p></div>
           <NumberField isDisabled={loading || saving} maxValue={365} minValue={1} onChange={(value) => { setSettings((current) => ({ ...current, retentionDays: Number.isFinite(value) ? value : 30 })); }} value={settings.retentionDays}>
             <Label>{tr('admin.logs.retention')}</Label><NumberField.Group><NumberField.DecrementButton /><NumberField.Input /><NumberField.IncrementButton /></NumberField.Group>
           </NumberField>
           <Button isDisabled={loading} isPending={saving} onPress={() => { void save(); }}><Save className="size-4" />{tr('admin.logs.save')}</Button>
         </div>
+        <div className="grid gap-5 md:grid-cols-2">
+          <NumberField isDisabled={loading || saving} minValue={1} maxValue={1024} value={(settings.maxFileBytes ?? 32 * 1024 * 1024) / 1024 / 1024} onChange={(value) => { if (Number.isFinite(value)) setSettings((current) => ({ ...current, maxFileBytes: value * 1024 * 1024 })); }}>
+            <Label>{tr('admin.logs.fileBudget')}</Label><NumberField.Group><NumberField.DecrementButton /><NumberField.Input /><NumberField.IncrementButton /></NumberField.Group>
+          </NumberField>
+          <NumberField isDisabled={loading || saving} minValue={(settings.maxFileBytes ?? 32 * 1024 * 1024) / 1024 / 1024} maxValue={16384} value={(settings.maxDirectoryBytes ?? 256 * 1024 * 1024) / 1024 / 1024} onChange={(value) => { if (Number.isFinite(value)) setSettings((current) => ({ ...current, maxDirectoryBytes: value * 1024 * 1024 })); }}>
+            <Label>{tr('admin.logs.directoryBudget')}</Label><NumberField.Group><NumberField.DecrementButton /><NumberField.Input /><NumberField.IncrementButton /></NumberField.Group>
+          </NumberField>
+        </div>
+        {settings.debugExpiresAt && <p className="text-xs text-muted">{tr('admin.logs.debugExpiry')}: {new Date(settings.debugExpiresAt).toLocaleString()}</p>}
         <p className="break-all text-xs text-muted">{settings.directory}</p>
       </section>
 

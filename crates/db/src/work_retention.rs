@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 const MAX_LEASE_OWNER_CHARS: usize = 128;
 const RETENTION_BATCH_SIZE: u64 = 100;
+const CHILD_ROW_BATCH_SIZE: u64 = 500;
 const LEGACY_ENROLL_LIMIT: u64 = 1_000;
 const LEGACY_ENROLL_INSERT_BATCH_SIZE: usize = 200;
 const TERMINAL_STATES: [&str; 2] = ["Completed", "Failed"];
@@ -398,7 +399,7 @@ async fn process_batch(
     now: DateTime<Utc>,
 ) -> Result<WorkRetentionRun, WorkRetentionError> {
     ensure_live_claims(transaction, claimed, now).await?;
-    let classification = classify_claims(transaction, claimed).await?;
+    let mut classification = classify_claims(transaction, claimed).await?;
     let cleanup_ids = sorted_ids(
         classification
             .deleted
@@ -409,11 +410,41 @@ async fn process_batch(
             .collect(),
     );
     if !classification.deferred.is_empty() {
-        defer_claims(transaction, claimed, &classification.deferred, now).await?;
+        defer_claims(
+            transaction,
+            claimed,
+            &classification.deferred,
+            now,
+            Duration::hours(1),
+            DEFERRED_REASON,
+        )
+        .await?;
     }
     if !cleanup_ids.is_empty() {
         clear_terminal_dependencies(transaction, &cleanup_ids).await?;
         delete_child_rows(transaction, &cleanup_ids).await?;
+        let mut remaining = remaining_children(transaction, &cleanup_ids).await?;
+        remaining.extend(trim_retired_projections(transaction, &classification.purged).await?);
+        if !remaining.is_empty() {
+            let remaining = remaining.into_iter().collect::<Vec<_>>();
+            classification
+                .compacted
+                .retain(|id| !remaining.contains(id));
+            classification.deleted.retain(|id| !remaining.contains(id));
+            classification
+                .purged
+                .retain(|(id, _)| !remaining.contains(id));
+            defer_claims(
+                transaction,
+                claimed,
+                &remaining,
+                now,
+                Duration::milliseconds(100),
+                "bounded child cleanup pending",
+            )
+            .await?;
+            classification.deferred.extend(remaining);
+        }
     }
     if !classification.purged.is_empty() {
         delete_retired_publications(transaction, &classification.purged).await?;
@@ -512,6 +543,13 @@ async fn classify_claims(
     protected_ids.extend(active_full_scan_child_ids(transaction, &existing_ids).await?);
     let publications = publication_ownership(transaction, &existing_ids).await?;
     let referenced_publications = active_publication_references(transaction, &publications).await?;
+    let playing = active_playback_publications(transaction, &publications).await?;
+    protected_ids.extend(
+        publications
+            .iter()
+            .filter(|(_, (id, _))| playing.contains(id))
+            .map(|(job, _)| *job),
+    );
     let mut compacted_ids = Vec::new();
     let mut deferred_ids = Vec::new();
     let mut deleted_ids = Vec::new();
@@ -619,6 +657,62 @@ async fn active_publication_references(
     Ok(referenced)
 }
 
+async fn active_playback_publications(
+    transaction: &DatabaseTransaction,
+    publications: &HashMap<Uuid, (Uuid, String)>,
+) -> Result<HashSet<Uuid>, DbErr> {
+    let publication_ids = publications.values().map(|(id, _)| *id).collect::<Vec<_>>();
+    if publication_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut referenced = HashSet::new();
+    let projection = Alias::new("retention_source_projection");
+    let ticket = Alias::new("retention_ticket");
+    let tickets = Query::select()
+        .distinct()
+        .column((projection.clone(), Alias::new("publication_id")))
+        .from_as(Alias::new("publication_media_sources"), projection.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("playback_tickets"),
+            ticket.clone(),
+            Expr::col((ticket.clone(), Alias::new("media_source_id")))
+                .equals((projection.clone(), Alias::new("media_source_id"))),
+        )
+        .and_where(
+            Expr::col((projection, Alias::new("publication_id")))
+                .is_in(publication_ids.iter().copied()),
+        )
+        .and_where(Expr::col((ticket.clone(), Alias::new("revoked_at"))).is_null())
+        .and_where(Expr::col((ticket, Alias::new("expires_at"))).gt(Utc::now()))
+        .to_owned();
+    referenced.extend(selected_ids(transaction, tickets, "publication_id").await?);
+    let publication = Alias::new("retention_live_publication");
+    let session = Alias::new("retention_playback_session");
+    let sessions = Query::select()
+        .distinct()
+        .expr_as(
+            Expr::col((publication.clone(), Alias::new("id"))),
+            Alias::new("publication_id"),
+        )
+        .from_as(Alias::new("catalog_publications"), publication.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("playback_sessions"),
+            session.clone(),
+            Expr::col((session.clone(), Alias::new("catalog_item_id")))
+                .equals((publication.clone(), Alias::new("owner_catalog_item_id"))),
+        )
+        .and_where(Expr::col((publication, Alias::new("id"))).is_in(publication_ids))
+        .and_where(Expr::col((session.clone(), Alias::new("stopped_at"))).is_null())
+        .and_where(
+            Expr::col((session, Alias::new("last_event_at"))).gt(Utc::now() - Duration::hours(24)),
+        )
+        .to_owned();
+    referenced.extend(selected_ids(transaction, sessions, "publication_id").await?);
+    Ok(referenced)
+}
+
 async fn active_dependency_ids(
     transaction: &DatabaseTransaction,
     job_ids: &[Uuid],
@@ -664,39 +758,6 @@ async fn delete_retired_publications(
         .map(|(_, publication_id)| *publication_id)
         .collect::<Vec<_>>();
     let backend = transaction.get_database_backend();
-    transaction
-        .execute(
-            backend.build(
-                &Query::delete()
-                    .from_table(Alias::new("catalog_change_outbox"))
-                    .and_where(
-                        Expr::col(Alias::new("publication_id"))
-                            .is_in(publication_ids.iter().copied()),
-                    )
-                    .to_owned(),
-            ),
-        )
-        .await?;
-    for table in [
-        "publication_catalog_items",
-        "publication_media_sources",
-        "publication_media_locations",
-        "publication_subtitles",
-    ] {
-        transaction
-            .execute(
-                backend.build(
-                    &Query::delete()
-                        .from_table(Alias::new(table))
-                        .and_where(
-                            Expr::col(Alias::new("publication_id"))
-                                .is_in(publication_ids.iter().copied()),
-                        )
-                        .to_owned(),
-                ),
-            )
-            .await?;
-    }
     let deleted = transaction
         .execute(
             backend.build(
@@ -773,9 +834,11 @@ async fn defer_claims(
     claimed: &RetentionClaimBatch,
     job_ids: &[Uuid],
     now: DateTime<Utc>,
+    delay: Duration,
+    reason: &str,
 ) -> Result<(), WorkRetentionError> {
     let available_at = now
-        .checked_add_signed(Duration::hours(1))
+        .checked_add_signed(delay)
         .ok_or(WorkRetentionError::TimestampOverflow)?;
     let backend = transaction.get_database_backend();
     let updated = transaction
@@ -789,7 +852,7 @@ async fn defer_claims(
                         Option::<DateTime<Utc>>::None,
                     )
                     .value(Alias::new("available_at"), available_at)
-                    .value(Alias::new("last_error"), DEFERRED_REASON)
+                    .value(Alias::new("last_error"), reason)
                     .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied()))
                     .and_where(Expr::col(Alias::new("lease_owner")).eq(&claimed.lease_token))
                     .and_where(Expr::col(Alias::new("lease_expires_at")).gt(now)),
@@ -826,19 +889,107 @@ async fn delete_child_rows(
     transaction: &DatabaseTransaction,
     job_ids: &[Uuid],
 ) -> Result<(), DbErr> {
-    let backend = transaction.get_database_backend();
     for table in ["work_staging_rows", "storage_sync_pages", "work_results"] {
+        delete_bounded_rows(transaction, table, "job_id", job_ids).await?;
+    }
+    Ok(())
+}
+async fn delete_bounded_rows(
+    transaction: &DatabaseTransaction,
+    table: &str,
+    foreign_key: &str,
+    parents: &[Uuid],
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let rows = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new(table))
+                    .and_where(Expr::col(Alias::new(foreign_key)).is_in(parents.iter().copied()))
+                    .order_by(Alias::new("id"), Order::Asc)
+                    .limit(CHILD_ROW_BATCH_SIZE),
+            ),
+        )
+        .await?;
+    let ids = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid>("", "id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !ids.is_empty() {
         transaction
             .execute(
                 backend.build(
                     Query::delete()
                         .from_table(Alias::new(table))
-                        .and_where(Expr::col(Alias::new("job_id")).is_in(job_ids.iter().copied())),
+                        .and_where(Expr::col(Alias::new("id")).is_in(ids)),
                 ),
             )
             .await?;
     }
     Ok(())
+}
+async fn remaining_children(
+    transaction: &DatabaseTransaction,
+    parents: &[Uuid],
+) -> Result<HashSet<Uuid>, DbErr> {
+    let mut remaining = HashSet::new();
+    for table in ["work_staging_rows", "storage_sync_pages", "work_results"] {
+        remaining.extend(
+            selected_ids(
+                transaction,
+                Query::select()
+                    .distinct()
+                    .column(Alias::new("job_id"))
+                    .from(Alias::new(table))
+                    .and_where(Expr::col(Alias::new("job_id")).is_in(parents.iter().copied()))
+                    .to_owned(),
+                "job_id",
+            )
+            .await?,
+        );
+    }
+    Ok(remaining)
+}
+async fn trim_retired_projections(
+    transaction: &DatabaseTransaction,
+    purged: &[(Uuid, Uuid)],
+) -> Result<HashSet<Uuid>, DbErr> {
+    if purged.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let publications = purged.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+    let mut remaining = HashSet::new();
+    for table in [
+        "catalog_change_outbox",
+        "publication_catalog_items",
+        "publication_media_sources",
+        "publication_media_locations",
+        "publication_subtitles",
+    ] {
+        delete_bounded_rows(transaction, table, "publication_id", &publications).await?;
+        let ids = selected_ids(
+            transaction,
+            Query::select()
+                .distinct()
+                .column(Alias::new("publication_id"))
+                .from(Alias::new(table))
+                .and_where(
+                    Expr::col(Alias::new("publication_id")).is_in(publications.iter().copied()),
+                )
+                .to_owned(),
+            "publication_id",
+        )
+        .await?;
+        remaining.extend(
+            purged
+                .iter()
+                .filter(|(_, id)| ids.contains(id))
+                .map(|(job, _)| *job),
+        );
+    }
+    Ok(remaining)
 }
 
 async fn delete_jobs(

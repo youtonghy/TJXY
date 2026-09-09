@@ -29,9 +29,26 @@ impl FullScanService {
     /// # Errors
     ///
     /// Returns [`FullScanError::ChildrenPending`] while durable child work remains, or a persistence error.
+    #[allow(clippy::too_many_lines)] // Keep per-item accounting and durable orchestration outcomes together.
     pub async fn execute(&self, claimed: &ClaimedWorkJob) -> Result<FullScanResult, FullScanError> {
         let scans = FullScanRepository::new(&self.database);
         let policy = scans.policy(claimed).await?;
+        let storage_root_scope = scans.storage_root_scope(claimed).await?;
+        let query = CatalogQueryRepository::new(&self.database);
+        let jobs = WorkJobRepository::new(&self.database);
+        let publications = CatalogPublicationRepository::new(&self.database);
+        let principal = UserId::new();
+        // The leased queue maintenance worker reclaims dead children; child workers may also
+        // atomically take over expired leases. Parents do not run global recovery scans.
+        let mut scheduled = self
+            .schedule_root_prerequisites(claimed, &jobs, &policy)
+            .await?;
+        if scheduled > 0 {
+            return Err(FullScanError::ChildrenPending { scheduled });
+        }
+        // Discovery can publish while prerequisite state is being inspected.
+        // Read targets afterwards so an earlier empty snapshot cannot finish a
+        // scan that has just discovered an entire library.
         let targets = scans.targets(claimed).await?;
         tracing::debug!(
             scan_profile = policy.scan_profile(),
@@ -39,71 +56,142 @@ impl FullScanService {
             batch_metadata = policy.metadata_requirement()?.is_some(),
             "full scan policy loaded"
         );
-        let storage_root_scope = scans.storage_root_scope(claimed).await?;
-        let query = CatalogQueryRepository::new(&self.database);
-        let jobs = WorkJobRepository::new(&self.database);
-        let publications = CatalogPublicationRepository::new(&self.database);
-        let principal = UserId::new();
-        // A staged child can outlive the worker that claimed it. Requeue expired children before
-        // interpreting their state so the parent never waits forever on a dead lease.
-        jobs.reclaim_expired_leases().await?;
-        let mut scheduled = self
-            .schedule_root_prerequisites(claimed, &jobs, &policy)
-            .await?;
-        if scheduled > 0 {
-            return Err(FullScanError::ChildrenPending { scheduled });
-        }
+        let mut success = 0_u64;
+        let mut skipped = 0_u64;
+        let mut failed = 0_u64;
+        let mut needs_selection = 0_u64;
         for item in &targets {
-            let target = scan_work_target(&query, principal, *item, storage_root_scope).await?;
-            let Some(target) = target else {
-                continue;
-            };
-            if let Some(requirement) = policy.metadata_requirement()?
-                && target.needs_metadata_resolution(requirement)
+            if let Some(issue) = scans
+                .item_issue(claimed.id(), *item)
+                .await
+                .map_err(FullScanRepositoryError::from)?
             {
-                let (natural_key, spec) = metadata_child_spec(
-                    *item,
-                    target,
-                    requirement,
-                    policy.metadata_source_mode(),
-                    policy.local_metadata_access_mode(),
-                    claimed.job().priority(),
-                    storage_root_scope,
-                )?;
-                scheduled += self
-                    .required_publication_child(claimed, &scans, &jobs, &natural_key, &spec)
-                    .await?;
+                if issue.needs_selection {
+                    needs_selection += 1;
+                } else {
+                    failed += 1;
+                }
                 continue;
             }
-            if let Some(task) = eager_media_task(&policy, target) {
-                let (natural_key, spec) = eager_child_spec(
-                    *item,
-                    task,
-                    target,
-                    claimed.job().priority(),
-                    storage_root_scope,
-                )?;
-                scheduled += self
-                    .required_publication_child(claimed, &scans, &jobs, &natural_key, &spec)
-                    .await?;
-                continue;
-            }
-            if policy.probes_eagerly() {
-                for source in publications.active_sources(*item).await? {
-                    if source.probe_state() == "NotProbed" || source.probe_state() == "Stale" {
-                        let spec = WorkJobSpec::new(
-                            WorkTaskKind::ProbeMedia,
-                            WorkScope::MediaSource(source.id()),
-                            source.probe_revision(),
-                            claimed.job().priority(),
-                        )?;
-                        let natural_key =
-                            format!("ProbeMedia:{}:{}", source.id(), source.probe_revision());
-                        scheduled += self
-                            .required_publication_child(claimed, &scans, &jobs, &natural_key, &spec)
-                            .await?;
+            let item_result = async {
+                let mut item_scheduled = 0;
+                let target = scan_work_target(&query, principal, *item, storage_root_scope).await?;
+                let Some(target) = target else {
+                    return Ok::<usize, FullScanError>(item_scheduled);
+                };
+                if let Some(requirement) = policy.metadata_requirement()?
+                    && target.needs_metadata_resolution(requirement)
+                {
+                    let (natural_key, spec) = metadata_child_spec(
+                        *item,
+                        target,
+                        requirement,
+                        policy.metadata_source_mode(),
+                        policy.local_metadata_access_mode(),
+                        claimed.job().priority(),
+                        storage_root_scope,
+                    )?;
+                    item_scheduled += self
+                        .required_publication_child(claimed, &scans, &jobs, &natural_key, &spec)
+                        .await?;
+                    return Ok::<usize, FullScanError>(item_scheduled);
+                }
+                if let Some(task) = eager_media_task(&policy, target) {
+                    let (natural_key, spec) = eager_child_spec(
+                        *item,
+                        task,
+                        target,
+                        claimed.job().priority(),
+                        storage_root_scope,
+                    )?;
+                    item_scheduled += self
+                        .required_publication_child(claimed, &scans, &jobs, &natural_key, &spec)
+                        .await?;
+                    return Ok::<usize, FullScanError>(item_scheduled);
+                }
+                if policy.probes_eagerly() {
+                    for source in publications.active_sources(*item).await? {
+                        if source.probe_state() == "NotProbed" || source.probe_state() == "Stale" {
+                            let spec = WorkJobSpec::new(
+                                WorkTaskKind::ProbeMedia,
+                                WorkScope::MediaSource(source.id()),
+                                source.probe_revision(),
+                                claimed.job().priority(),
+                            )?;
+                            let natural_key =
+                                format!("ProbeMedia:{}:{}", source.id(), source.probe_revision());
+                            if !scans
+                                .item_had_work(claimed.id(), *item)
+                                .await
+                                .map_err(FullScanRepositoryError::from)?
+                            {
+                                jobs.stage_batch(
+                                    claimed,
+                                    claimed.id().as_uuid(),
+                                    &[tjxy_db::WorkStagingRow::new(
+                                        "FullScanTouched",
+                                        item.to_string(),
+                                        json!({}),
+                                        "Observed",
+                                    )?],
+                                )
+                                .await?;
+                            }
+                            item_scheduled += self
+                                .required_publication_child(
+                                    claimed,
+                                    &scans,
+                                    &jobs,
+                                    &natural_key,
+                                    &spec,
+                                )
+                                .await?;
+                        }
                     }
                 }
+
+                Ok::<usize, FullScanError>(item_scheduled)
+            }
+            .await;
+            match item_result {
+                Ok(pending) if pending > 0 => scheduled += pending,
+                Ok(_) => {
+                    if scans
+                        .item_had_work(claimed.id(), *item)
+                        .await
+                        .map_err(FullScanRepositoryError::from)?
+                    {
+                        success += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                Err(FullScanError::ItemFailed {
+                    task,
+                    scope,
+                    child,
+                    needs_selection: selection,
+                }) => {
+                    scans
+                        .record_item_issue(
+                            claimed,
+                            &tjxy_db::ScanItemIssue {
+                                item_id: item.as_uuid(),
+                                child_job_id: child.as_uuid(),
+                                task_kind: task.as_str().to_owned(),
+                                scope_type: scope.scope_type().to_owned(),
+                                scope_id: scope.id(),
+                                needs_selection: selection,
+                            },
+                        )
+                        .await?;
+                    if selection {
+                        needs_selection += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                Err(error) => return Err(error),
             }
         }
         if policy.expands_in_background() && scheduled == 0 {
@@ -116,7 +204,8 @@ impl FullScanService {
         }
         jobs.complete_full_scan(
             claimed,
-            WorkJobResult::success(json!({"items": targets.len()}), Vec::new()),
+            WorkJobResult::success(json!({"items": targets.len(), "success": success, "failed": failed, "skipped": skipped, "needs_selection": needs_selection}),
+                if failed + needs_selection > 0 { vec![format!("{failed} items failed; {needs_selection} items require NFO selection")] } else { Vec::new() }),
         )
         .await?;
         Ok(FullScanResult { scheduled })
@@ -333,10 +422,24 @@ impl FullScanService {
         {
             None => Ok(0),
             Some(WorkJobState::Pending | WorkJobState::Running) => Ok(1),
-            Some(WorkJobState::Failed) => Err(FullScanError::ChildFailed {
-                task: spec.task_kind(),
-                scope: spec.scope(),
-            }),
+            Some(WorkJobState::Failed) => {
+                let child = scans
+                    .child_dependency(claimed, natural_key)
+                    .await?
+                    .ok_or_else(|| FullScanError::MissingChildDependency(natural_key.to_owned()))?;
+                if let Some(kind) = jobs.item_failure_kind(child).await? {
+                    return Err(FullScanError::ItemFailed {
+                        task: spec.task_kind(),
+                        scope: spec.scope(),
+                        child,
+                        needs_selection: kind == "nfo_selection",
+                    });
+                }
+                Err(FullScanError::ChildFailed {
+                    task: spec.task_kind(),
+                    scope: spec.scope(),
+                })
+            }
             Some(WorkJobState::Completed) => Err(FullScanError::ChildCompletedWithoutPublication {
                 task: spec.task_kind(),
                 scope: spec.scope(),
@@ -483,6 +586,13 @@ impl FullScanResult {
 
 #[derive(Debug, Error)]
 pub enum FullScanError {
+    #[error("full scan isolated an item failure")]
+    ItemFailed {
+        task: WorkTaskKind,
+        scope: WorkScope,
+        child: tjxy_common::WorkJobId,
+        needs_selection: bool,
+    },
     #[error("full scan scheduled {scheduled} child jobs")]
     ChildrenPending { scheduled: usize },
     #[error("full scan item {0} has no matched storage scope")]

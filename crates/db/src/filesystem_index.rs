@@ -236,7 +236,7 @@ fn parse_state(value: Option<&str>) -> Result<FilesystemIndexState, DbErr> {
 async fn finish<T>(transaction: DatabaseTransaction, result: Result<T, DbErr>) -> Result<T, DbErr> {
     match result {
         Ok(value) => {
-            transaction.commit().await?;
+            crate::work_queue::commit_and_notify(transaction).await?;
             Ok(value)
         }
         Err(error) => {

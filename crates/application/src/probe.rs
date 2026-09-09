@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     StorageBackendRegistry, StorageChangeProjectorError,
+    probe_budget::{ProbeBudget, ProbeBudgetError, ProbeLimits},
     storage_read::{self, StorageReadError},
     strm::{MAX_STRM_BYTES, parse_strm},
 };
@@ -56,7 +57,7 @@ impl ProbeInput {
 #[derive(Clone)]
 struct ProbeSegment {
     start: u64,
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
 }
 
 pub trait MediaInspector: Send + Sync {
@@ -1136,6 +1137,7 @@ fn read_be_uint(bytes: &[u8], offset: usize, length: usize) -> Result<u64, Probe
 }
 
 pub struct ProbeService {
+    limits: ProbeLimits,
     database: sea_orm::DatabaseConnection,
     backends: StorageBackendRegistry,
     inspector: Arc<dyn MediaInspector>,
@@ -1145,6 +1147,7 @@ impl ProbeService {
     #[must_use]
     pub fn new(database: sea_orm::DatabaseConnection) -> Self {
         Self {
+            limits: ProbeLimits::default(),
             database,
             backends: StorageBackendRegistry::new(),
             inspector: Arc::new(DefaultMediaInspector),
@@ -1179,6 +1182,34 @@ impl ProbeService {
         self
     }
 
+    #[must_use]
+    pub const fn with_limits(mut self, limits: ProbeLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    async fn inspect_bounded(
+        &self,
+        input: ProbeInput,
+        deadline: tokio::time::Instant,
+    ) -> Result<ProbeResult, ProbeServiceError> {
+        let inspector = Arc::clone(&self.inspector);
+        let permit = tokio::time::timeout_at(deadline, crate::io_admission::parser_permit())
+            .await
+            .map_err(|_| ProbeServiceError::Budget(ProbeBudgetError::Time))?;
+        tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || {
+                let result = inspector.inspect(input);
+                drop(permit);
+                result
+            }),
+        )
+        .await
+        .map_err(|_| ProbeServiceError::Budget(ProbeBudgetError::Time))?
+        .map_err(|_| ProbeServiceError::Inspection("media parser failed".to_owned()))?
+    }
+
     /// Executes one claimed Probe with bounded reads and before/after revision checks.
     ///
     /// # Errors
@@ -1192,6 +1223,36 @@ impl ProbeService {
             .candidate(claimed)
             .await?
             .ok_or(ProbeServiceError::CandidateUnavailable)?;
+        let mut budget = ProbeBudget::new(self.limits);
+        let started = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout_at(
+            budget.deadline,
+            self.execute_candidate(claimed, &candidate, &mut budget),
+        )
+        .await
+        .unwrap_or(Err(ProbeServiceError::Budget(ProbeBudgetError::Time)));
+        tracing::info!(job_id = %claimed.id().as_uuid(), media_source_id = %claimed.job().scope().id(),
+            requests = budget.requests, bytes = budget.bytes, gap_reads = budget.gap_reads,
+            duration_ms = started.elapsed().as_millis(), success = outcome.is_ok(),
+            "media probe resource usage");
+        if let Err(ProbeServiceError::Budget(error)) = &outcome {
+            let message = error.to_string();
+            repository
+                .commit_failure(claimed, &candidate, &message)
+                .await?;
+            return Err(ProbeServiceError::InspectionFailed(message));
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn execute_candidate(
+        &self,
+        claimed: &ClaimedWorkJob,
+        candidate: &ProbeCandidate,
+        budget: &mut ProbeBudget,
+    ) -> Result<i64, ProbeServiceError> {
+        let repository = ProbeRepository::new(&self.database);
         tracing::debug!(
             storage_object_id = %candidate.storage_object_id().as_uuid(),
             catalog_item_id = %candidate.item_id().as_uuid(),
@@ -1210,7 +1271,8 @@ impl ProbeService {
             candidate.provider().to_owned(),
             candidate.provider_object_id().to_owned(),
         )?;
-        ensure_probe_candidate(&repository, claimed, &candidate).await?;
+        ensure_probe_candidate(&repository, claimed, candidate).await?;
+        budget.request(0)?;
         let before = storage_read::get_object(
             &self.database,
             backend.as_ref(),
@@ -1219,7 +1281,7 @@ impl ProbeService {
         )
         .await
         .map_err(probe_storage_read_error)?;
-        validate_object_snapshot(&candidate, &before)?;
+        validate_object_snapshot(candidate, &before)?;
         let mut probe_object_id = object_id.clone();
         let mut probe_size = candidate.size();
         let mut probe_record_id = Some(candidate.storage_object_id());
@@ -1231,7 +1293,7 @@ impl ProbeService {
             if descriptor_size > MAX_STRM_BYTES {
                 let message = "STRM descriptor exceeds 8 KiB".to_owned();
                 repository
-                    .commit_failure(claimed, &candidate, &message)
+                    .commit_failure(claimed, candidate, &message)
                     .await?;
                 return Err(ProbeServiceError::InspectionFailed(message));
             }
@@ -1244,7 +1306,8 @@ impl ProbeService {
                 candidate.size(),
                 &repository,
                 claimed,
-                &candidate,
+                candidate,
+                budget,
             )
             .await?;
             let target = match parse_strm(&descriptor) {
@@ -1252,7 +1315,7 @@ impl ProbeService {
                 Err(error) => {
                     let message = error.to_string();
                     repository
-                        .commit_failure(claimed, &candidate, &message)
+                        .commit_failure(claimed, candidate, &message)
                         .await?;
                     return Err(ProbeServiceError::InspectionFailed(message));
                 }
@@ -1268,11 +1331,12 @@ impl ProbeService {
                 .await?;
             let resolved = match self
                 .backends
-                .resolve_local_reference(
+                .resolve_local_reference_for_probe(
                     candidate.storage_account_id(),
                     &allowed_accounts,
                     &object_id,
                     target,
+                    budget,
                 )
                 .await
             {
@@ -1280,7 +1344,7 @@ impl ProbeService {
                 Err(error) => {
                     let message = format!("STRM target is unavailable: {error}");
                     repository
-                        .commit_failure(claimed, &candidate, &message)
+                        .commit_failure(claimed, candidate, &message)
                         .await?;
                     return Err(ProbeServiceError::InspectionFailed(message));
                 }
@@ -1288,7 +1352,7 @@ impl ProbeService {
             let Some(target_size) = resolved.object.size() else {
                 let message = "STRM target is not a regular file".to_owned();
                 repository
-                    .commit_failure(claimed, &candidate, &message)
+                    .commit_failure(claimed, candidate, &message)
                     .await?;
                 return Err(ProbeServiceError::InspectionFailed(message));
             };
@@ -1300,7 +1364,7 @@ impl ProbeService {
             );
             probe_size = target_size;
             probe_location_revision = strm_probe_revision(
-                &candidate,
+                candidate,
                 resolved.account_id,
                 &resolved.object,
                 target_size,
@@ -1318,11 +1382,14 @@ impl ProbeService {
             probe_size,
             &repository,
             claimed,
-            &candidate,
+            candidate,
+            budget,
         )
         .await?;
         let mut probe_input = input;
-        let mut result = self.inspector.inspect(probe_input.clone());
+        let mut result = self
+            .inspect_bounded(probe_input.clone(), budget.deadline)
+            .await;
         let mut gap_retries = 0;
         while let Err(ProbeServiceError::Inspection(message)) = &result {
             let Some(gap_offset) = probe_gap_offset(message) else {
@@ -1342,12 +1409,17 @@ impl ProbeService {
                 end,
                 &repository,
                 claimed,
-                &candidate,
+                candidate,
+                budget,
             )
             .await?;
-            probe_input.segments.push(ProbeSegment { start, bytes });
+            probe_input.segments.push(ProbeSegment {
+                start,
+                bytes: Arc::new(bytes),
+            });
             probe_input.segments.sort_by_key(|segment| segment.start);
             gap_retries += 1;
+            budget.gap_reads += 1;
             tracing::debug!(
                 size = probe_size,
                 gap_offset,
@@ -1356,7 +1428,9 @@ impl ProbeService {
                 retry = gap_retries,
                 "media probe filled sparse read gap"
             );
-            result = self.inspector.inspect(probe_input.clone());
+            result = self
+                .inspect_bounded(probe_input.clone(), budget.deadline)
+                .await;
         }
         if matches!(
             &result,
@@ -1376,7 +1450,8 @@ impl ProbeService {
                     range_budget,
                     &repository,
                     claimed,
-                    &candidate,
+                    candidate,
+                    budget,
                 )
                 .await?;
                 retry_input
@@ -1384,7 +1459,7 @@ impl ProbeService {
                     .extend(probe_input.segments.iter().cloned());
                 retry_input.segments.sort_by_key(|segment| segment.start);
                 probe_input = retry_input.clone();
-                result = self.inspector.inspect(retry_input);
+                result = self.inspect_bounded(retry_input, budget.deadline).await;
                 if !matches!(
                     &result,
                     Err(ProbeServiceError::Inspection(message))
@@ -1397,7 +1472,8 @@ impl ProbeService {
                 &result,
                 Err(ProbeServiceError::Inspection(message))
                     if message.contains("Probe byte budget gap")
-            ) && probe_size <= SEQUENTIAL_FALLBACK_MAX
+            ) && candidate.locator_kind() != "strm"
+                && probe_size <= SEQUENTIAL_FALLBACK_MAX
             {
                 let full_input = read_exact_probe_input(
                     &self.database,
@@ -1407,17 +1483,18 @@ impl ProbeService {
                     probe_size,
                     &repository,
                     claimed,
-                    &candidate,
+                    candidate,
+                    budget,
                 )
                 .await?;
-                result = self.inspector.inspect(full_input);
+                result = self.inspect_bounded(full_input, budget.deadline).await;
             }
         }
         let result = match result {
             Ok(result) => Ok(result),
             Err(ProbeServiceError::Inspection(message)) => {
                 repository
-                    .commit_failure(claimed, &candidate, &message)
+                    .commit_failure(claimed, candidate, &message)
                     .await?;
                 return Err(ProbeServiceError::InspectionFailed(message));
             }
@@ -1427,13 +1504,14 @@ impl ProbeService {
             Ok(result) => result,
             Err(ProbeServiceError::Inspection(message)) => {
                 repository
-                    .commit_failure(claimed, &candidate, &message)
+                    .commit_failure(claimed, candidate, &message)
                     .await?;
                 return Err(ProbeServiceError::InspectionFailed(message));
             }
             Err(error) => return Err(error),
         };
-        ensure_probe_candidate(&repository, claimed, &candidate).await?;
+        ensure_probe_candidate(&repository, claimed, candidate).await?;
+        budget.request(0)?;
         let after = storage_read::get_object(
             &self.database,
             backend.as_ref(),
@@ -1442,11 +1520,12 @@ impl ProbeService {
         )
         .await
         .map_err(probe_storage_read_error)?;
-        validate_object_snapshot(&candidate, &after)?;
+        validate_object_snapshot(candidate, &after)?;
         if object_revision(&before) != object_revision(&after) || before.size() != after.size() {
             return Err(ProbeServiceError::ObjectChanged);
         }
         if let Some(target_before) = target_before {
+            budget.request(0)?;
             let target_after = probe_backend.get_object(&probe_object_id).await?;
             if object_revision(&target_before) != object_revision(&target_after)
                 || target_before.size() != target_after.size()
@@ -1457,7 +1536,7 @@ impl ProbeService {
         repository
             .commit_success_with_location_revision(
                 claimed,
-                &candidate,
+                candidate,
                 &result,
                 &probe_location_revision,
             )
@@ -1484,6 +1563,8 @@ fn strm_probe_revision(
 
 #[derive(Debug, Error)]
 pub enum ProbeServiceError {
+    #[error(transparent)]
+    Budget(#[from] ProbeBudgetError),
     #[error("Probe candidate is no longer active or authorized")]
     CandidateUnavailable,
     #[error("storage backend is not configured")]
@@ -1516,6 +1597,7 @@ async fn read_probe_input(
     repository: &ProbeRepository<'_>,
     claimed: &ClaimedWorkJob,
     candidate: &ProbeCandidate,
+    budget: &mut ProbeBudget,
 ) -> Result<ProbeInput, ProbeServiceError> {
     read_probe_input_with_budget(
         database,
@@ -1527,6 +1609,7 @@ async fn read_probe_input(
         repository,
         claimed,
         candidate,
+        budget,
     )
     .await
 }
@@ -1542,14 +1625,17 @@ async fn read_probe_input_with_budget(
     repository: &ProbeRepository<'_>,
     claimed: &ClaimedWorkJob,
     candidate: &ProbeCandidate,
+    budget: &mut ProbeBudget,
 ) -> Result<ProbeInput, ProbeServiceError> {
     let segments = if size <= range_budget * 2 {
         vec![ProbeSegment {
             start: 0,
             bytes: read_exact_range(
                 database, backend, record_id, object_id, 0, size, repository, claimed, candidate,
+                budget,
             )
-            .await?,
+            .await?
+            .into(),
         }]
     } else {
         vec![
@@ -1565,8 +1651,10 @@ async fn read_probe_input_with_budget(
                     repository,
                     claimed,
                     candidate,
+                    budget,
                 )
-                .await?,
+                .await?
+                .into(),
             },
             ProbeSegment {
                 start: size - range_budget,
@@ -1580,8 +1668,10 @@ async fn read_probe_input_with_budget(
                     repository,
                     claimed,
                     candidate,
+                    budget,
                 )
-                .await?,
+                .await?
+                .into(),
             },
         ]
     };
@@ -1598,6 +1688,7 @@ async fn read_exact_probe_input(
     repository: &ProbeRepository<'_>,
     claimed: &ClaimedWorkJob,
     candidate: &ProbeCandidate,
+    budget: &mut ProbeBudget,
 ) -> Result<ProbeInput, ProbeServiceError> {
     Ok(ProbeInput {
         size,
@@ -1605,8 +1696,10 @@ async fn read_exact_probe_input(
             start: 0,
             bytes: read_exact_range(
                 database, backend, record_id, object_id, 0, size, repository, claimed, candidate,
+                budget,
             )
-            .await?,
+            .await?
+            .into(),
         }],
     })
 }
@@ -1622,10 +1715,12 @@ async fn read_exact_range(
     repository: &ProbeRepository<'_>,
     claimed: &ClaimedWorkJob,
     candidate: &ProbeCandidate,
+    budget: &mut ProbeBudget,
 ) -> Result<Vec<u8>, ProbeServiceError> {
     if start == end {
         return Ok(Vec::new());
     }
+    budget.request(end - start)?;
     ensure_probe_candidate(repository, claimed, candidate).await?;
     let range = ByteRange::new(start, end)?;
     let mut stream = if let Some(record_id) = record_id {
@@ -1646,12 +1741,14 @@ async fn read_exact_range(
         .map_err(|_| ProbeServiceError::Inspection("Probe range is too large".into()))?;
     let mut bytes = Vec::with_capacity(expected);
     while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk?);
-        if bytes.len() > expected {
+        let chunk = chunk?;
+        budget.received(chunk.len())?;
+        if chunk.len() > expected.saturating_sub(bytes.len()) {
             return Err(ProbeServiceError::Inspection(
                 "backend exceeded the requested Probe range".into(),
             ));
         }
+        bytes.extend_from_slice(&chunk);
     }
     if bytes.len() != expected {
         return Err(ProbeServiceError::Inspection(
@@ -1820,11 +1917,11 @@ mod tests {
             segments: vec![
                 ProbeSegment {
                     start: 0,
-                    bytes: b"abc".to_vec(),
+                    bytes: (b"abc".to_vec()).into(),
                 },
                 ProbeSegment {
                     start: 7,
-                    bytes: b"xyz".to_vec(),
+                    bytes: (b"xyz".to_vec()).into(),
                 },
             ],
             position: 0,
@@ -1922,7 +2019,10 @@ mod tests {
         let result = MatroskaInspector
             .inspect(ProbeInput {
                 size: bytes.len() as u64,
-                segments: vec![ProbeSegment { start: 0, bytes }],
+                segments: vec![ProbeSegment {
+                    start: 0,
+                    bytes: Arc::new(bytes),
+                }],
             })
             .unwrap();
         assert_eq!(result.container(), "mkv");
@@ -1986,7 +2086,10 @@ mod tests {
         let result = DefaultMediaInspector
             .inspect(ProbeInput {
                 size: bytes.len() as u64,
-                segments: vec![ProbeSegment { start: 0, bytes }],
+                segments: vec![ProbeSegment {
+                    start: 0,
+                    bytes: Arc::new(bytes),
+                }],
             })
             .unwrap();
         assert_eq!(result.container(), "mp4");
@@ -2057,11 +2160,11 @@ mod tests {
                 segments: vec![
                     ProbeSegment {
                         start: 0,
-                        bytes: head,
+                        bytes: (head).into(),
                     },
                     ProbeSegment {
                         start: tail_start,
-                        bytes: tail,
+                        bytes: (tail).into(),
                     },
                 ],
             })
@@ -2131,11 +2234,11 @@ mod tests {
             segments: vec![
                 ProbeSegment {
                     start: 0,
-                    bytes: head,
+                    bytes: (head).into(),
                 },
                 ProbeSegment {
                     start: tail_start,
-                    bytes: truncated_tail,
+                    bytes: (truncated_tail).into(),
                 },
             ],
         };
@@ -2156,7 +2259,7 @@ mod tests {
         let mut filled = sparse_input;
         filled.segments.push(ProbeSegment {
             start: covered_end,
-            bytes: moov[covered - moov_offset_in_tail..].to_vec(),
+            bytes: (moov[covered - moov_offset_in_tail..].to_vec()).into(),
         });
         let result = DefaultMediaInspector.inspect(filled).unwrap();
         assert_eq!(result.container(), "mp4");
@@ -2181,7 +2284,10 @@ mod tests {
         let error = IsoBmffInspector
             .inspect(ProbeInput {
                 size: bytes.len() as u64,
-                segments: vec![ProbeSegment { start: 0, bytes }],
+                segments: vec![ProbeSegment {
+                    start: 0,
+                    bytes: Arc::new(bytes),
+                }],
             })
             .unwrap_err();
         let ProbeServiceError::Inspection(message) = &error else {
@@ -2194,7 +2300,10 @@ mod tests {
         let size = size.unwrap_or(bytes.len() as u64);
         ProbeInput {
             size,
-            segments: vec![ProbeSegment { start: 0, bytes }],
+            segments: vec![ProbeSegment {
+                start: 0,
+                bytes: Arc::new(bytes),
+            }],
         }
     }
 
@@ -2290,11 +2399,11 @@ mod tests {
             segments: vec![
                 ProbeSegment {
                     start: 0,
-                    bytes: opus_head,
+                    bytes: (opus_head).into(),
                 },
                 ProbeSegment {
                     start: 0,
-                    bytes: opus_tail,
+                    bytes: (opus_tail).into(),
                 },
             ],
         };
@@ -2324,11 +2433,11 @@ mod tests {
             segments: vec![
                 ProbeSegment {
                     start: 0,
-                    bytes: vorbis_head,
+                    bytes: (vorbis_head).into(),
                 },
                 ProbeSegment {
                     start: 64,
-                    bytes: vorbis_tail,
+                    bytes: (vorbis_tail).into(),
                 },
             ],
         };
@@ -2445,7 +2554,7 @@ mod tests {
                 size: flac.len() as u64,
                 segments: vec![ProbeSegment {
                     start: 0,
-                    bytes: flac,
+                    bytes: (flac).into(),
                 }],
             })
             .unwrap();
@@ -2503,7 +2612,7 @@ mod tests {
             size: moov_start + moov.len() as u64,
             segments: vec![ProbeSegment {
                 start: 0,
-                bytes: head,
+                bytes: (head).into(),
             }],
         };
         let error = DefaultMediaInspector
@@ -2523,7 +2632,7 @@ mod tests {
         let mut filled = sparse_input;
         filled.segments.push(ProbeSegment {
             start: moov_start,
-            bytes: moov,
+            bytes: (moov).into(),
         });
         let result = DefaultMediaInspector.inspect(filled).unwrap();
         assert_eq!(result.container(), "mp4");
@@ -2541,7 +2650,7 @@ mod tests {
                 size: bytes.len() as u64,
                 segments: vec![ProbeSegment {
                     start: 0,
-                    bytes: bytes.to_vec(),
+                    bytes: (bytes.to_vec()).into(),
                 }],
             })
             .unwrap();

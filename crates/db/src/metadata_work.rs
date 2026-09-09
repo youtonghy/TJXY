@@ -8,6 +8,7 @@ use sea_orm::{
     sea_query::{Alias, Cond, Expr, JoinType, Query},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{
     CatalogItemId, ImageType, StorageObjectRecordId, StorageRootId, parse_media_name,
@@ -108,6 +109,9 @@ impl MetadataImageCandidate {
 pub struct MetadataWorkSnapshot {
     lookup: MetadataLookup,
     sidecar: Option<MetadataSidecarCandidate>,
+    sidecars: Vec<MetadataSidecarCandidate>,
+    fingerprint: String,
+    selection: Option<(Uuid, String)>,
     images: Vec<MetadataImageCandidate>,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
 }
@@ -121,6 +125,18 @@ impl MetadataWorkSnapshot {
     #[must_use]
     pub const fn sidecar(&self) -> Option<&MetadataSidecarCandidate> {
         self.sidecar.as_ref()
+    }
+
+    #[must_use]
+    pub fn sidecars(&self) -> &[MetadataSidecarCandidate] {
+        &self.sidecars
+    }
+
+    #[must_use]
+    pub fn selected_content(&self) -> Option<(Uuid, &str)> {
+        self.selection
+            .as_ref()
+            .map(|(id, digest)| (*id, digest.as_str()))
     }
 
     #[must_use]
@@ -139,6 +155,56 @@ pub struct MetadataWorkRepository<'connection> {
 }
 
 impl<'connection> MetadataWorkRepository<'connection> {
+    pub(crate) const fn connection(&self) -> &DatabaseConnection {
+        self.database
+    }
+
+    /// Persists actionable candidate information without changing existing metadata.
+    ///
+    /// # Errors
+    /// Returns a work error for stale claims, changed inventory, or SQL failures.
+    pub async fn record_nfo_conflict(
+        &self,
+        claimed: &ClaimedWorkJob,
+        snapshot: &MetadataWorkSnapshot,
+        candidates: &[crate::NfoCandidateInfo],
+        fields: &[String],
+    ) -> Result<(), MetadataWorkError> {
+        let WorkScope::CatalogItem(item) = claimed.job().scope() else {
+            return Err(MetadataWorkError::InvalidClaim);
+        };
+        let transaction = self.database.begin().await?;
+        crate::work_job::fence_live_claim(&transaction, claimed, chrono::Utc::now()).await?;
+        fence_metadata_revision(&transaction, item, claimed.job().expected_revision()).await?;
+        revalidate_metadata_snapshot(
+            &transaction,
+            item,
+            snapshot.scope,
+            claimed
+                .job()
+                .input_sync_revision()
+                .ok_or(MetadataWorkError::MissingSyncRevision)?,
+            snapshot,
+        )
+        .await?;
+        crate::nfo_choice::record_conflict(
+            &transaction,
+            item,
+            snapshot.storage_root_id(),
+            &snapshot.fingerprint,
+            candidates,
+            fields,
+            claimed.job().expected_revision(),
+            claimed
+                .job()
+                .input_sync_revision()
+                .ok_or(MetadataWorkError::MissingSyncRevision)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     #[must_use]
     pub const fn new(database: &'connection DatabaseConnection) -> Self {
         Self { database }
@@ -277,7 +343,9 @@ impl<'connection> MetadataWorkRepository<'connection> {
         if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
             return Err(MetadataWorkError::TooManySidecars);
         }
-        let video_names = if kind == MetadataItemKind::Episode {
+        let video_names = if kind == MetadataItemKind::Movie {
+            movie_video_names(self.database, item_id, scope, input_revision).await?
+        } else if kind == MetadataItemKind::Episode {
             crate::source_publication::effective_video_storage_names(
                 self.database,
                 item_id,
@@ -288,7 +356,20 @@ impl<'connection> MetadataWorkRepository<'connection> {
         } else {
             Vec::new()
         };
-        let sidecar = select_sidecar(kind, &mut candidates, &video_names)?;
+        let (sidecars, selection, fingerprint) = select_for_item(
+            self.database,
+            item_id,
+            scope.storage_root_id(),
+            kind,
+            candidates,
+            &video_names,
+        )
+        .await?;
+        let sidecar = selection
+            .as_ref()
+            .and_then(|(id, _)| sidecars.iter().find(|file| file.record_id.as_uuid() == *id))
+            .or_else(|| sidecars.first())
+            .cloned();
         let image_rows = self
             .database
             .query_all(
@@ -316,6 +397,9 @@ impl<'connection> MetadataWorkRepository<'connection> {
         Ok(MetadataWorkSnapshot {
             lookup,
             sidecar,
+            sidecars,
+            fingerprint,
+            selection,
             images,
             scope,
         })
@@ -414,7 +498,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                transaction.commit().await?;
+                crate::work_queue::commit_and_notify(transaction).await?;
                 Ok(value)
             }
             Err(error) => {
@@ -518,6 +602,23 @@ impl<'connection> MetadataWorkRepository<'connection> {
             )
             .await?;
             let changed = metadata_changed || asset_changed || direct_report.changed;
+            transaction
+                .execute(
+                    transaction.get_database_backend().build(
+                        Query::update()
+                            .table(Alias::new("nfo_choices"))
+                            .value(Alias::new("status"), "Resolved")
+                            .and_where(
+                                Expr::col(Alias::new("catalog_item_id")).eq(item_id.as_uuid()),
+                            )
+                            .and_where(
+                                Expr::col(Alias::new("storage_root_id"))
+                                    .eq(snapshot.storage_root_id().as_uuid()),
+                            )
+                            .and_where(Expr::col(Alias::new("status")).ne("Resolved")),
+                    ),
+                )
+                .await?;
             WorkJobRepository::new(self.database).complete_in_transaction(
                 &transaction,
                 claimed,
@@ -545,7 +646,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                transaction.commit().await?;
+                crate::work_queue::commit_and_notify(transaction).await?;
                 Ok(value)
             }
             Err(error) => {
@@ -632,7 +733,7 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                transaction.commit().await?;
+                crate::work_queue::commit_and_notify(transaction).await?;
                 Ok(value)
             }
             Err(error) => {
@@ -941,7 +1042,9 @@ async fn revalidate_metadata_snapshot(
     if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
         return Err(MetadataWorkError::TooManySidecars);
     }
-    let video_names = if snapshot.lookup.kind() == MetadataItemKind::Episode {
+    let video_names = if snapshot.lookup.kind() == MetadataItemKind::Movie {
+        movie_video_names(transaction, item_id, scope, input_revision).await?
+    } else if snapshot.lookup.kind() == MetadataItemKind::Episode {
         crate::source_publication::effective_video_storage_names(
             transaction,
             item_id,
@@ -952,7 +1055,19 @@ async fn revalidate_metadata_snapshot(
     } else {
         Vec::new()
     };
-    if select_sidecar(snapshot.lookup.kind(), &mut candidates, &video_names)? != snapshot.sidecar {
+    let (sidecars, selection, fingerprint) = select_for_item(
+        transaction,
+        item_id,
+        scope.storage_root_id(),
+        snapshot.lookup.kind(),
+        candidates,
+        &video_names,
+    )
+    .await?;
+    if sidecars != snapshot.sidecars
+        || selection != snapshot.selection
+        || fingerprint != snapshot.fingerprint
+    {
         return Err(MetadataWorkError::StaleOrUnavailable);
     }
     let image_rows = transaction
@@ -1142,7 +1257,7 @@ pub enum MetadataWorkError {
     Work(#[from] WorkJobRepositoryError),
 }
 
-async fn metadata_storage_scope(
+pub(crate) async fn metadata_storage_scope(
     database: &impl ConnectionTrait,
     item_id: CatalogItemId,
     storage_root: Option<StorageRootId>,
@@ -1160,7 +1275,9 @@ async fn metadata_storage_scope(
         .ok_or(MetadataWorkError::StaleOrUnavailable)
 }
 
-fn metadata_schedule_query(item_id: CatalogItemId) -> sea_orm::sea_query::SelectStatement {
+pub(crate) fn metadata_schedule_query(
+    item_id: CatalogItemId,
+) -> sea_orm::sea_query::SelectStatement {
     let item = Alias::new("schedule_metadata_item");
     Query::select()
         .expr_as(
@@ -1360,6 +1477,18 @@ fn sibling_file_query(
             SiblingFileKind::Nfo => {
                 Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.nfo")
             }
+            SiblingFileKind::Video => {
+                let mut filter = Cond::any();
+                for extension in [
+                    "mkv", "mp4", "m4v", "avi", "mov", "ts", "m2ts", "strm", "iso", "wmv",
+                ] {
+                    filter = filter.add(
+                        Expr::col((object.clone(), Alias::new("normalized_name")))
+                            .like(format!("%.{extension}")),
+                    );
+                }
+                filter.into()
+            }
             SiblingFileKind::Image => Cond::any()
                 .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.jpg"))
                 .add(Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.jpeg"))
@@ -1373,7 +1502,7 @@ fn sibling_file_query(
         .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(input_revision))
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
         .limit(match file_kind {
-            SiblingFileKind::Nfo => MAX_NFO_CANDIDATES + 1,
+            SiblingFileKind::Nfo | SiblingFileKind::Video => MAX_NFO_CANDIDATES + 1,
             SiblingFileKind::Image => MAX_IMAGE_CANDIDATES + 1,
         })
         .to_owned()
@@ -1382,6 +1511,7 @@ fn sibling_file_query(
 #[derive(Clone, Copy)]
 enum SiblingFileKind {
     Nfo,
+    Video,
     Image,
 }
 
@@ -1443,11 +1573,11 @@ fn image_rank(name: &str, image_type: ImageType) -> Option<u8> {
     }
 }
 
-fn select_sidecar(
+fn select_sidecars(
     kind: MetadataItemKind,
-    candidates: &mut Vec<MetadataSidecarCandidate>,
+    mut candidates: Vec<MetadataSidecarCandidate>,
     video_names: &[String],
-) -> Result<Option<MetadataSidecarCandidate>, MetadataWorkError> {
+) -> Result<Vec<MetadataSidecarCandidate>, MetadataWorkError> {
     if kind == MetadataItemKind::Episode {
         let video_stems = video_names
             .iter()
@@ -1464,38 +1594,77 @@ fn select_sidecar(
                     .is_some_and(|stem| video_stems.contains(&stem.to_ascii_lowercase()))
         });
     }
+    candidates.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.record_id.as_uuid().cmp(&right.record_id.as_uuid()))
+    });
+    if kind == MetadataItemKind::Movie && video_names.len() == 1 {
+        let stem = Path::new(&video_names[0])
+            .file_stem()
+            .and_then(|value| value.to_str());
+        let matches = candidates
+            .iter()
+            .filter(|candidate| {
+                stem.is_some_and(|stem| sidecar_stem_matches(&candidate.name, stem))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            return validate_sidecars(matches);
+        }
+    }
     let conventional = match kind {
         MetadataItemKind::Movie => Some("movie.nfo"),
         MetadataItemKind::Series => Some("tvshow.nfo"),
         MetadataItemKind::Season => Some("season.nfo"),
         MetadataItemKind::Audio | MetadataItemKind::Episode => None,
     };
-    let selected = if let Some(conventional) = conventional {
+    if let Some(name) = conventional {
         let matches = candidates
             .iter()
-            .enumerate()
-            .filter(|(_, candidate)| candidate.name.eq_ignore_ascii_case(conventional))
-            .map(|(index, _)| index)
+            .filter(|candidate| candidate.name.eq_ignore_ascii_case(name))
+            .cloned()
             .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] if candidates.len() <= 1 => candidates.pop(),
-            [index] => Some(candidates.swap_remove(*index)),
-            _ => return Err(MetadataWorkError::AmbiguousSidecars),
+        if !matches.is_empty() {
+            candidates = matches;
         }
-    } else {
-        match candidates.len() {
-            0 => None,
-            1 => candidates.pop(),
-            _ => return Err(MetadataWorkError::AmbiguousSidecars),
-        }
-    };
-    if selected
-        .as_ref()
-        .is_some_and(|candidate| candidate.size == 0 || candidate.size > MAX_NFO_BYTES)
+    }
+    if candidates.len() > 1 && kind != MetadataItemKind::Movie {
+        return Err(MetadataWorkError::AmbiguousSidecars);
+    }
+    validate_sidecars(candidates)
+}
+
+fn validate_sidecars(
+    candidates: Vec<MetadataSidecarCandidate>,
+) -> Result<Vec<MetadataSidecarCandidate>, MetadataWorkError> {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.size == 0 || candidate.size > MAX_NFO_BYTES)
     {
         return Err(MetadataWorkError::InvalidSidecarSize);
     }
-    Ok(selected)
+    Ok(candidates)
+}
+
+async fn movie_video_names(
+    connection: &impl sea_orm::ConnectionTrait,
+    item: CatalogItemId,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+    input_revision: i64,
+) -> Result<Vec<String>, MetadataWorkError> {
+    let rows = connection
+        .query_all(connection.get_database_backend().build(&sibling_file_query(
+            item,
+            scope,
+            input_revision,
+            SiblingFileKind::Video,
+        )))
+        .await?;
+    rows.iter()
+        .map(|row| row.try_get("", "name").map_err(Into::into))
+        .collect()
 }
 
 fn parse_kind(value: &str) -> Result<MetadataItemKind, MetadataWorkError> {
@@ -1507,4 +1676,46 @@ fn parse_kind(value: &str) -> Result<MetadataItemKind, MetadataWorkError> {
         "Episode" => Ok(MetadataItemKind::Episode),
         _ => Err(MetadataWorkError::InvalidStoredMetadata),
     }
+}
+
+async fn select_for_item(
+    connection: &impl sea_orm::ConnectionTrait,
+    item: CatalogItemId,
+    root: StorageRootId,
+    kind: MetadataItemKind,
+    mut candidates: Vec<MetadataSidecarCandidate>,
+    videos: &[String],
+) -> Result<
+    (
+        Vec<MetadataSidecarCandidate>,
+        Option<(Uuid, String)>,
+        String,
+    ),
+    MetadataWorkError,
+> {
+    candidates.sort_by_key(|file| file.record_id.as_uuid());
+    let mut hash = Sha256::new();
+    for file in &candidates {
+        hash.update(
+            format!(
+                "{:?}:{:?}:{}:{:?}\n",
+                file.record_id, file.name, file.size, file.remote_revision
+            )
+            .as_bytes(),
+        );
+    }
+    let fingerprint = format!("{:x}", hash.finalize());
+    let selection = crate::nfo_choice::saved_selection(connection, item, root, &fingerprint)
+        .await?
+        .filter(|(id, _)| {
+            candidates
+                .iter()
+                .any(|file| file.record_id.as_uuid() == *id)
+        });
+    let files = if selection.is_some() {
+        validate_sidecars(candidates)?
+    } else {
+        select_sidecars(kind, candidates, videos)?
+    };
+    Ok((files, selection, fingerprint))
 }

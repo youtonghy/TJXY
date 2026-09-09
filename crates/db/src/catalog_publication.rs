@@ -1157,7 +1157,7 @@ pub(crate) async fn finish<T>(
 ) -> Result<T, CatalogPublicationError> {
     match result {
         Ok(value) => {
-            transaction.commit().await?;
+            crate::work_queue::commit_and_notify(transaction).await?;
             Ok(value)
         }
         Err(error) => match transaction.rollback().await {

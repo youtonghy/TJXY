@@ -1261,7 +1261,7 @@ impl CatalogQueryService {
             ) {
             jobs.enqueue_metadata_retry_or_join(&spec).await
         } else {
-            jobs.enqueue_or_join(&spec).await.map(Some)
+            jobs.enqueue_lazy_metadata_or_join(&spec).await
         };
         let submission = match submission {
             Ok(submission) => submission,

@@ -1,0 +1,12 @@
+{
+  "source_change_detected": true,
+  "width": 640,
+  "height": 360,
+  "runtime_ticks": 30000000,
+  "probe_jobs": 1,
+  "assets": {
+    "asset_blobs": 0,
+    "item_assets": 0,
+    "person_assets": 0
+  }
+}

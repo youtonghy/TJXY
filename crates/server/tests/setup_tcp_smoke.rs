@@ -35,10 +35,11 @@ async fn unconfigured_binary_serves_only_the_setup_runtime() {
             directory.path().join("config/tjxy.toml"),
         )
         .env("TJXY_SETUP_DATA_DIR", directory.path().join("data"))
+        .env("TJXY_LOG_DIR", directory.path().join("logs"))
         .env("TJXY_SETUP_BIND", format!("127.0.0.1:{port}"))
         .env("TJXY_ADMIN_DIST_DIR", &dist)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
 
@@ -164,6 +165,7 @@ fn server_command(
         .env_remove("TJXY_BOOTSTRAP_ADMIN_PASSWORD")
         .env("TJXY_CONFIG_FILE", config)
         .env("TJXY_SETUP_DATA_DIR", data)
+        .env("TJXY_LOG_DIR", data.join("logs"))
         .env("TJXY_SETUP_BIND", format!("127.0.0.1:{port}"))
         .env("TJXY_ADMIN_DIST_DIR", dist)
         .env("TJXY_CONTAINER", "true")
@@ -172,7 +174,7 @@ fn server_command(
         .env("TJXY_FILESYSTEM_REALTIME", "false")
         .env("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS", "0")
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::inherit());
     command
 }
 

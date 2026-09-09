@@ -1,0 +1,49 @@
+{
+  "movies": 8,
+  "range_latency": [
+    {
+      "concurrency": 1,
+      "range_64k": {
+        "samples": 20,
+        "p50_ms": 0.8591249970777426,
+        "p95_ms": 3.003374997206265,
+        "max_ms": 3.003374997206265
+      }
+    },
+    {
+      "concurrency": 5,
+      "range_64k": {
+        "samples": 25,
+        "p50_ms": 2.3998750002647284,
+        "p95_ms": 3.0763340000703465,
+        "max_ms": 3.187917001923779
+      }
+    },
+    {
+      "concurrency": 20,
+      "range_64k": {
+        "samples": 100,
+        "p50_ms": 8.661541000037687,
+        "p95_ms": 9.57241599826375,
+        "max_ms": 9.788833998754853
+      }
+    }
+  ],
+  "video_bytes": 6267913,
+  "video_sha256": "642c48a152ce56f013003ab0ced8f4f1e027ac67a0e90130fad36b1ae490f37f",
+  "range_bytes_exact": true,
+  "range_unsatisfiable_status": 416,
+  "head_without_body": true,
+  "image_condition_status": 304,
+  "missing_poster_status": 404,
+  "restored_poster_before_rescan_status": 503,
+  "restored_poster_status": 200,
+  "nfo_updated_year": 2003,
+  "other_movie_years_unchanged": true,
+  "assets": {
+    "asset_blobs": 0,
+    "item_assets": 0,
+    "person_assets": 0
+  },
+  "asset_files": 0
+}

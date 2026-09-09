@@ -1127,6 +1127,20 @@ async fn failed_sync_dependency_terminally_fails_the_waiting_media_job() {
             .unwrap()
             .unwrap()
             .state(),
+        WorkJobState::Pending
+    );
+    assert!(repository.maintain_queue().await.unwrap().acquired);
+    assert!(
+        !repository.maintain_queue().await.unwrap().acquired,
+        "maintenance lease must suppress duplicate passes"
+    );
+    assert_eq!(
+        repository
+            .get(media.job().id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
         WorkJobState::Failed
     );
     let result = database

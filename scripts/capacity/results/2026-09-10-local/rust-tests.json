@@ -1,0 +1,8 @@
+{
+  "rust": "1.88.0",
+  "command": "cargo +1.88.0 test --workspace --locked -- --test-threads=2",
+  "exit_code": 0,
+  "passed": 902,
+  "failed": 0,
+  "ignored": 2
+}

@@ -15,6 +15,7 @@ use crate::{
 pub struct DirectMetadataReadService {
     database: DatabaseConnection,
     backends: StorageBackendRegistry,
+    availability: storage_read::ReadAvailabilityThrottle,
 }
 
 impl DirectMetadataReadService {
@@ -23,6 +24,9 @@ impl DirectMetadataReadService {
         Self {
             database,
             backends: StorageBackendRegistry::new(),
+            availability: storage_read::ReadAvailabilityThrottle::new(
+                std::time::Duration::from_secs(30),
+            ),
         }
     }
 
@@ -121,21 +125,50 @@ impl DirectMetadataReadService {
             object.provider().to_owned(),
             object.provider_object_id().to_owned(),
         )?;
-        let stream = storage_read::open_range(
+        // Validate existence and current source identity before returning validators. The
+        // indexed revision can lag behind a file edit, including on conditional requests.
+        let current = match storage_read::get_object_throttled(
             &self.database,
             backend.as_ref(),
             object.storage_object_id(),
             &object_id,
-            ByteRange::new(0, object.size())?,
-            &storage_read::ReadAvailabilityThrottle::unthrottled(),
+            &self.availability,
         )
         .await
-        .map_err(map_storage_read)?;
+        {
+            Ok(current) => current,
+            Err(StorageReadError::Backend(BackendError::NotFound)) => return Ok(None),
+            Err(error) => return Err(map_storage_read(error)),
+        };
+        let size = current
+            .size()
+            .filter(|size| *size > 0)
+            .ok_or(DirectMetadataReadError::ObjectChanged)?;
+        let etag = direct_etag(&object, &current);
+        let database = self.database.clone();
+        let availability = self.availability.clone();
+        // Opening the body is lazy: HEAD and matching If-None-Match requests never
+        // issue a range request. No image bytes are retained or written to disk.
+        let stream = Box::pin(async_stream::try_stream! {
+            let mut source = storage_read::open_range(
+                &database,
+                backend.as_ref(),
+                object.storage_object_id(),
+                &object_id,
+                ByteRange::new(0, size)?,
+                &availability,
+            ).await.map_err(|_| BackendError::TemporarilyUnavailable {
+                message: "direct image source became unavailable".to_owned(),
+            })?;
+            while let Some(bytes) = source.next().await {
+                yield bytes?;
+            }
+        });
         Ok(Some(OpenedDirectImage {
             stream,
-            size: object.size(),
+            size,
             mime_type,
-            etag: direct_etag(&object),
+            etag,
         }))
     }
 
@@ -219,13 +252,18 @@ fn image_mime(name: &str) -> Option<&'static str> {
     }
 }
 
-fn direct_etag(object: &DirectMetadataObjectRecord) -> String {
+fn direct_etag(
+    object: &DirectMetadataObjectRecord,
+    current: &tjxy_storage::StorageObject,
+) -> String {
     let digest = Sha256::digest(
         format!(
-            "{}:{}:{}:{}",
+            "{}:{:?}:{:?}:{:?}:{:?}:{}",
             object.storage_object_id(),
-            object.remote_revision().unwrap_or(""),
-            object.size(),
+            current.remote_revision(),
+            current.etag(),
+            current.checksum(),
+            current.size(),
             object.input_revision()
         )
         .as_bytes(),

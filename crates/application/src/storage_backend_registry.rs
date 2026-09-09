@@ -32,7 +32,8 @@ impl StorageBackendRegistry {
         *self
             .local_reference_fallback
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(backend);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::io_admission::governed(backend));
     }
 
     /// Registers one account backend without replacing an already active account.
@@ -83,7 +84,7 @@ impl StorageBackendRegistry {
                 account_id,
                 RegisteredStorageBackend {
                     provider_drive_id,
-                    backend,
+                    backend: crate::io_admission::governed(backend),
                 },
             );
     }
@@ -112,7 +113,7 @@ impl StorageBackendRegistry {
             account_id,
             RegisteredStorageBackend {
                 provider_drive_id,
-                backend,
+                backend: crate::io_admission::governed(backend),
             },
         );
         Ok(true)
@@ -196,6 +197,61 @@ impl StorageBackendRegistry {
             });
         }
         Err(BackendError::NotFound)
+    }
+
+    pub(crate) async fn resolve_local_reference_for_probe(
+        &self,
+        preferred_account: Uuid,
+        allowed_accounts: &[Uuid],
+        descriptor: &StorageObjectId,
+        reference: &str,
+        budget: &mut crate::probe_budget::ProbeBudget,
+    ) -> Result<ResolvedLocalReference, crate::ProbeServiceError> {
+        let mut account_ids = Vec::with_capacity(allowed_accounts.len() + 1);
+        account_ids.push(preferred_account);
+        account_ids.extend(
+            allowed_accounts
+                .iter()
+                .copied()
+                .filter(|account_id| *account_id != preferred_account),
+        );
+        for account_id in account_ids {
+            let Some(backend) = self.backend(account_id) else {
+                continue;
+            };
+            budget.request(0)?;
+            match backend.resolve_local_reference(descriptor, reference).await {
+                Ok(object) => {
+                    return Ok(ResolvedLocalReference {
+                        account_id,
+                        backend,
+                        object,
+                    });
+                }
+                Err(BackendError::NotFound | BackendError::UnsupportedCapability { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let fallback = self
+            .local_reference_fallback
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if std::path::Path::new(reference).is_absolute()
+            && let Some(backend) = fallback
+        {
+            budget.request(0)?;
+            let object = backend
+                .resolve_local_reference(descriptor, reference)
+                .await?;
+            return Ok(ResolvedLocalReference {
+                account_id: preferred_account,
+                backend,
+                object,
+            });
+        }
+        Err(BackendError::NotFound.into())
     }
 
     /// Removes an account only when its active provider drive matches the requested drive.

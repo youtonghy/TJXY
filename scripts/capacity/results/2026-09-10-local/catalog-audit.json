@@ -1,0 +1,308 @@
+{
+  "db-8-playback": {
+    "items": 8,
+    "probes": [
+      [
+        "Probed",
+        8
+      ]
+    ],
+    "scan_results": [
+      {
+        "failed": 0,
+        "items": 8,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 8
+      },
+      {
+        "failed": 0,
+        "items": 8,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 8
+      },
+      {
+        "failed": 0,
+        "items": 8,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 8
+      },
+      {
+        "failed": 0,
+        "items": 8,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 8
+      }
+    ],
+    "jobs": [
+      [
+        "DiscoverTitles",
+        "Completed",
+        8
+      ],
+      [
+        "DiscoverTitles",
+        "Failed",
+        1
+      ],
+      [
+        "FullLibraryRootScan",
+        "Completed",
+        4
+      ],
+      [
+        "IndexMediaSources",
+        "Completed",
+        35
+      ],
+      [
+        "ProbeMedia",
+        "Completed",
+        36
+      ],
+      [
+        "ResolveMetadata",
+        "Completed",
+        99
+      ],
+      [
+        "ScopedStorageSync",
+        "Completed",
+        1
+      ],
+      [
+        "ValidateStorageRoot",
+        "Completed",
+        8
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "quick_check": "ok",
+    "foreign_key_violations": 0
+  },
+  "db-274": {
+    "items": 274,
+    "probes": [
+      [
+        "Probed",
+        274
+      ]
+    ],
+    "scan_results": [
+      {
+        "failed": 0,
+        "items": 274,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 274
+      },
+      {
+        "failed": 0,
+        "items": 274,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 274
+      }
+    ],
+    "jobs": [
+      [
+        "DiscoverTitles",
+        "Completed",
+        2
+      ],
+      [
+        "DiscoverTitles",
+        "Failed",
+        1
+      ],
+      [
+        "FullLibraryRootScan",
+        "Completed",
+        2
+      ],
+      [
+        "IndexMediaSources",
+        "Completed",
+        548
+      ],
+      [
+        "ProbeMedia",
+        "Completed",
+        548
+      ],
+      [
+        "ResolveMetadata",
+        "Completed",
+        1096
+      ],
+      [
+        "ScopedStorageSync",
+        "Completed",
+        1
+      ],
+      [
+        "ValidateStorageRoot",
+        "Completed",
+        2
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "quick_check": "ok",
+    "foreign_key_violations": 0
+  },
+  "db-2740": {
+    "items": 2740,
+    "probes": [
+      [
+        "NotProbed",
+        1327
+      ],
+      [
+        "Probed",
+        13
+      ]
+    ],
+    "scan_results": [
+      {
+        "failed": 0,
+        "items": 0,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 0
+      }
+    ],
+    "jobs": [
+      [
+        "DiscoverTitles",
+        "Completed",
+        2
+      ],
+      [
+        "DiscoverTitles",
+        "Failed",
+        1
+      ],
+      [
+        "FullLibraryRootScan",
+        "Completed",
+        1
+      ],
+      [
+        "FullLibraryRootScan",
+        "Running",
+        1
+      ],
+      [
+        "IndexMediaSources",
+        "Completed",
+        1340
+      ],
+      [
+        "ProbeMedia",
+        "Completed",
+        13
+      ],
+      [
+        "ResolveMetadata",
+        "Completed",
+        4087
+      ],
+      [
+        "ResolveMetadata",
+        "Failed",
+        2733
+      ],
+      [
+        "ScopedStorageSync",
+        "Completed",
+        1
+      ],
+      [
+        "ValidateStorageRoot",
+        "Completed",
+        2
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "quick_check": "ok",
+    "foreign_key_violations": 0
+  },
+  "db-2740-fixed": {
+    "items": 2740,
+    "probes": [
+      [
+        "NotProbed",
+        1046
+      ],
+      [
+        "Probed",
+        15
+      ]
+    ],
+    "scan_results": [],
+    "jobs": [
+      [
+        "DiscoverTitles",
+        "Completed",
+        1
+      ],
+      [
+        "DiscoverTitles",
+        "Failed",
+        1
+      ],
+      [
+        "FullLibraryRootScan",
+        "Running",
+        1
+      ],
+      [
+        "IndexMediaSources",
+        "Completed",
+        1061
+      ],
+      [
+        "ProbeMedia",
+        "Completed",
+        15
+      ],
+      [
+        "ResolveMetadata",
+        "Completed",
+        3801
+      ],
+      [
+        "ScopedStorageSync",
+        "Completed",
+        1
+      ],
+      [
+        "ValidateStorageRoot",
+        "Completed",
+        1
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "quick_check": "ok",
+    "foreign_key_violations": 0
+  }
+}

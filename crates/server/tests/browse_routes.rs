@@ -8817,3 +8817,190 @@ async fn playstate_accepts_optional_jellyfin_identity_fields_and_derives_missing
     assert_eq!(data.play_count, 1);
     assert_eq!(data.playback_position_ticks, 600);
 }
+
+#[tokio::test]
+async fn probe_retries_cannot_reset_the_cumulative_byte_allowance() {
+    assert_probe_budget_failure(
+        tjxy_application::ProbeLimits {
+            max_requests: 32,
+            max_bytes: 34,
+            timeout: std::time::Duration::from_secs(10),
+        },
+        "probe cumulative byte budget exhausted",
+        2,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn probe_requests_share_one_allowance_across_retries() {
+    assert_probe_budget_failure(
+        tjxy_application::ProbeLimits {
+            max_requests: 2,
+            max_bytes: 1024,
+            timeout: std::time::Duration::from_secs(10),
+        },
+        "probe cumulative request budget exhausted",
+        1,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn probe_deadline_prevents_starting_storage_reads() {
+    assert_probe_budget_failure(
+        tjxy_application::ProbeLimits {
+            timeout: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+        "probe elapsed time budget exhausted",
+        0,
+    )
+    .await;
+}
+
+async fn assert_probe_budget_failure(
+    limits: tjxy_application::ProbeLimits,
+    expected: &str,
+    reads: usize,
+) {
+    struct GapInspector;
+    impl MediaInspector for GapInspector {
+        fn inspect(&self, _: ProbeInput) -> Result<tjxy_db::ProbeResult, ProbeServiceError> {
+            Err(ProbeServiceError::Inspection(
+                "Probe byte budget gap at offset 8".into(),
+            ))
+        }
+    }
+
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Cloud probe", true).await;
+    let item = seed_item(&app.database, library, "Remote probe", "Movie").await;
+    let presentation = seed_playable_source_for_provider(
+        &app.database,
+        item,
+        app.cloud_account,
+        "cloud-test",
+        &app.cloud_object_id,
+        17,
+        &app.cloud_subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    let source_id: Uuid = app
+        .database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("media_sources"))
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), "NotProbed")
+                    .and_where(Expr::col(Alias::new("id")).eq(source_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    let submission = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ProbeMedia,
+                tjxy_db::WorkScope::MediaSource(tjxy_common::MediaSourceId::from_uuid(source_id)),
+                1,
+                200,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "cloud-probe-test",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), submission.job().id());
+
+    let outcome = ProbeService::new(app.database.clone())
+        .with_backend(app.cloud_account, Arc::clone(&app.cloud_backend))
+        .with_inspector(Arc::new(GapInspector))
+        .with_limits(limits)
+        .execute(&claimed)
+        .await;
+    assert!(
+        matches!(outcome, Err(ProbeServiceError::InspectionFailed(message)) if message == expected)
+    );
+    assert_eq!(
+        app.cloud_backend.ranges(),
+        vec![(app.cloud_object_id.clone(), 0, 17); reads]
+    );
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        tjxy_db::WorkJobState::Failed
+    );
+}
+
+#[tokio::test]
+async fn work_health_is_admin_only_and_returns_a_cached_measured_snapshot() {
+    let app = test_app().await;
+    let uri = "/Admin/Tasks/Health";
+    assert_eq!(
+        get(&app.router, uri, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let auth = AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap();
+    auth.create_user("health-reader", "ordinary password", false)
+        .await
+        .unwrap();
+    let (_, _, user_token) = login_as(&app.router, "health-reader", "ordinary password").await;
+    assert_eq!(
+        get(&app.router, uri, Some(&user_token)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let (_, _, token) = login(&app.router).await;
+    let response = get(&app.router, uri, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let tables = first["Health"]["Tables"].as_array().unwrap();
+    assert_eq!(
+        tables
+            .iter()
+            .find(|row| row["Name"] == "work_jobs")
+            .unwrap()["Rows"],
+        0
+    );
+    assert!(
+        tables
+            .iter()
+            .any(|row| row["Name"] == "direct_metadata_refs")
+    );
+    let response = get(&app.router, uri, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let second: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(first["Health"], second["Health"]);
+}

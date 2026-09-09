@@ -305,7 +305,7 @@ where
                 .map_err(StorageSyncRepositoryError::WorkJob)
         }
         .await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Enqueues scoped inventory for native filesystem event hints that resolve to live,
@@ -452,7 +452,7 @@ where
             Ok(submissions)
         }
         .await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Resolves a live scoped-sync claim to the redacted identities needed by a backend worker.
@@ -614,7 +614,7 @@ where
                 .map(|()| committed),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Records a retryable backend failure against the exact root-local inventory scope.
@@ -805,7 +805,7 @@ where
             self.clock.now(),
         )
         .await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 }
 
@@ -2709,6 +2709,25 @@ async fn finish<T>(
     match result {
         Ok(value) => {
             transaction.commit().await?;
+            Ok(value)
+        }
+        Err(original) => match transaction.rollback().await {
+            Ok(()) => Err(original),
+            Err(rollback) => Err(StorageSyncRepositoryError::RollbackFailed {
+                original: original.to_string(),
+                rollback,
+            }),
+        },
+    }
+}
+
+async fn finish_notifying<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, StorageSyncRepositoryError>,
+) -> Result<T, StorageSyncRepositoryError> {
+    match result {
+        Ok(value) => {
+            crate::work_queue::commit_and_notify(transaction).await?;
             Ok(value)
         }
         Err(original) => match transaction.rollback().await {

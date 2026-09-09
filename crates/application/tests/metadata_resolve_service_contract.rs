@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection,
@@ -571,7 +571,13 @@ async fn resolve_metadata_reads_only_the_sql_selected_nfo_and_completes_durably(
 
 #[tokio::test]
 async fn local_only_metadata_uses_nfo_without_invoking_configured_remote_providers() {
-    let fixture = fixture().await;
+    let mut fixture = fixture().await;
+    let external_id = "<uniqueid type=\"tmdb\">329865</uniqueid>";
+    let nfo = &mut Arc::get_mut(&mut fixture.backend).unwrap().bytes;
+    *nfo = String::from_utf8(nfo.clone())
+        .unwrap()
+        .replace(external_id, &" ".repeat(external_id.len()))
+        .into_bytes();
     let jobs = WorkJobRepository::new(&fixture.database);
     jobs.enqueue_or_join(
         &WorkJobSpec::new(
@@ -605,6 +611,30 @@ async fn local_only_metadata_uses_nfo_without_invoking_configured_remote_provide
 
     assert!(report.used_nfo());
     assert_eq!(report.state().as_str(), "Ready");
+    let row = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .columns([
+                        Alias::new("metadata_state"),
+                        Alias::new("metadata_payload_version"),
+                    ])
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "metadata_state").unwrap(),
+        "Ready"
+    );
+    assert_eq!(
+        row.try_get::<i32>("", "metadata_payload_version").unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -826,12 +856,17 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
         .unwrap();
     let service =
         DirectMetadataReadService::new(fixture.database.clone()).with_backend_registry(registry);
-    let report = MetadataResolveService::new(fixture.database.clone())
+    let assets = TempDir::new().unwrap();
+    let writer = Arc::new(
+        AssetWriteService::new(fixture.database.clone(), assets.path())
+            .await
+            .unwrap(),
+    );
+    let resolver = MetadataResolveService::new(fixture.database.clone())
         .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
         .with_provider(Arc::new(ForbiddenRemoteProvider))
-        .execute(&claimed)
-        .await
-        .unwrap();
+        .with_asset_writer(writer);
+    let report = resolver.execute(&claimed).await.unwrap();
 
     assert!(report.used_nfo());
     assert!(service.nfo(fixture.item).await.unwrap().is_none());
@@ -890,12 +925,11 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
         .await
         .unwrap()
         .unwrap();
-    MetadataResolveService::new(fixture.database.clone())
-        .with_backend(fixture.account, "local", Arc::clone(&fixture.backend))
-        .with_provider(Arc::new(ForbiddenRemoteProvider))
-        .execute(&claimed_again)
-        .await
-        .unwrap();
+    let repeated = resolver.execute(&claimed_again).await.unwrap();
+    assert!(
+        !repeated.changed(),
+        "unchanged NFO must not republish metadata or relationships"
+    );
     let repeated_ref_ids = fixture
         .database
         .query_all(
@@ -926,6 +960,7 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
         )
         .await
         .unwrap();
+    let range_count = fixture.backend.ranges.lock().unwrap().len();
     let image = service
         .image(fixture.item, tjxy_common::ImageType::Primary, 0)
         .await
@@ -933,6 +968,80 @@ async fn metadata_only_import_keeps_local_images_directly_readable() {
         .unwrap();
     assert_eq!(image.mime_type(), "image/png");
     assert_eq!(image.size(), poster_bytes.len() as u64);
+    let original_etag = image.etag().to_owned();
+    assert_eq!(
+        fixture.backend.ranges.lock().unwrap().len(),
+        range_count,
+        "preparing a conditional response must not read image bytes"
+    );
+    let mut image_stream = image.into_stream();
+    assert_eq!(
+        image_stream.next().await.unwrap().unwrap().as_ref(),
+        poster_bytes
+    );
+    assert!(image_stream.next().await.is_none());
+
+    // A source edit is visible even before the next inventory refresh.
+    fixture
+        .backend
+        .extra_objects
+        .lock()
+        .unwrap()
+        .get_mut("direct-poster-object")
+        .unwrap()
+        .2 = "poster-r2".to_owned();
+    let changed = service
+        .image(fixture.item, tjxy_common::ImageType::Primary, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(changed.etag(), original_etag);
+    let poster = fixture
+        .backend
+        .extra_objects
+        .lock()
+        .unwrap()
+        .remove("direct-poster-object")
+        .unwrap();
+    assert!(
+        service
+            .image(fixture.item, tjxy_common::ImageType::Primary, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture
+        .backend
+        .extra_objects
+        .lock()
+        .unwrap()
+        .insert("direct-poster-object".to_owned(), poster);
+    assert!(
+        service
+            .image(fixture.item, tjxy_common::ImageType::Primary, 0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for table in ["asset_blobs", "item_assets", "person_assets"] {
+        assert!(
+            fixture
+                .database
+                .query_one(
+                    backend.build(
+                        Query::select()
+                            .expr(Expr::val(1))
+                            .from(Alias::new(table))
+                            .limit(1)
+                    )
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "{table} must remain empty"
+        );
+    }
+    assert_eq!(std::fs::read_dir(assets.path()).unwrap().count(), 0);
     assert!(
         fixture
             .database
@@ -2274,4 +2383,216 @@ async fn metadata_enqueue_normalizes_only_compatible_pending_legacy_affinity() {
     let running = jobs.get(claimed.id()).await.unwrap().unwrap();
     assert_eq!(running.state(), WorkJobState::Running);
     assert_eq!(running.storage_root_affinity(), None);
+}
+
+async fn versioned_nfo_fixture(
+    first: &str,
+    second: &str,
+    conflict: bool,
+) -> (Fixture, StorageObjectRecordId) {
+    let fixture = fixture().await;
+    let sql = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("name"), first)
+                    .value(Alias::new("normalized_name"), first.to_lowercase())
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.nfo_record.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let extra = StorageObjectRecordId::new();
+    let bytes = if conflict {
+        String::from_utf8(fixture.backend.bytes.clone())
+            .unwrap()
+            .replace("329865", "123456")
+            .into_bytes()
+    } else {
+        fixture.backend.bytes.clone()
+    };
+    fixture.backend.extra_objects.lock().unwrap().insert(
+        "second-nfo".to_owned(),
+        (second.to_owned(), bytes.clone(), "r1".to_owned()),
+    );
+    insert_storage_object(
+        &fixture.database,
+        fixture.account,
+        extra,
+        "second-nfo",
+        second,
+        "File",
+        Some(i64::try_from(bytes.len()).unwrap()),
+        Some("r1"),
+    )
+    .await;
+    insert_root_object(
+        &fixture.database,
+        fixture.root,
+        extra,
+        Some(fixture.parent),
+        false,
+    )
+    .await;
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(
+                        Alias::new("local_metadata_access_mode"),
+                        "import_metadata_only",
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    (fixture, extra)
+}
+
+async fn claim_local_metadata(fixture: &Fixture) -> tjxy_db::ClaimedWorkJob {
+    MetadataWorkRepository::new(&fixture.database)
+        .enqueue(fixture.item, 20)
+        .await
+        .unwrap();
+    WorkJobRepository::new(&fixture.database)
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "version-fixture",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn seven_multiversion_directory_shapes_merge_consistent_movie_metadata() {
+    for (first, second) in [
+        ("暗夜骑士 (2022).nfo", "暗夜骑士 (2022) - 4K.nfo"),
+        (
+            "暗夜博士：莫比亚斯 (2022).nfo",
+            "暗夜博士：莫比亚斯 (2022) - 4K.nfo",
+        ),
+        ("暗花 (1998).nfo", "暗花 (1998) - BluRay.nfo"),
+        (
+            "爱在黎明破晓前 (1995).nfo",
+            "爱在黎明破晓前 (1995) - BluRay.nfo",
+        ),
+        (
+            "爱在日落黄昏时 (2004).nfo",
+            "爱在日落黄昏时 (2004) - BluRay.nfo",
+        ),
+        (
+            "爱在午夜降临前 (2013).nfo",
+            "爱在午夜降临前 (2013) - BluRay.nfo",
+        ),
+        ("埃及艳后 (1963)-cd1.nfo", "埃及艳后 (1963)-cd2.nfo"),
+    ] {
+        let (fixture, _) = versioned_nfo_fixture(first, second, false).await;
+        let claimed = claim_local_metadata(&fixture).await;
+        let service = MetadataResolveService::new(fixture.database.clone())
+            .with_backend(fixture.account, "local", fixture.backend.clone())
+            .with_provider(Arc::new(ForbiddenRemoteProvider));
+        assert!(
+            service.execute(&claimed).await.unwrap().used_nfo(),
+            "{first}"
+        );
+        assert_eq!(fixture.backend.ranges.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn conflicting_versions_remain_actionable_and_explicit_choice_is_content_fenced() {
+    let (fixture, extra) = versioned_nfo_fixture("Arrival.nfo", "Arrival - 4K.nfo", true).await;
+    let claimed = claim_local_metadata(&fixture).await;
+    let service = MetadataResolveService::new(fixture.database.clone()).with_backend(
+        fixture.account,
+        "local",
+        fixture.backend.clone(),
+    );
+    assert!(matches!(
+        service.execute(&claimed).await,
+        Err(MetadataResolveError::NfoSelectionRequired)
+    ));
+    let repository = MetadataWorkRepository::new(&fixture.database);
+    let choices = repository.nfo_choices(0).await.unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].candidates.len(), 2);
+    assert_eq!(choices[0].conflict_fields, vec!["provider_ids"]);
+    WorkJobRepository::new(&fixture.database)
+        .fail_terminal(&claimed, "metadata NFO candidates require selection")
+        .await
+        .unwrap();
+    let automatic = WorkJobSpec::new(
+        WorkTaskKind::ResolveMetadata,
+        WorkScope::CatalogItem(fixture.item),
+        claimed.job().expected_revision(),
+        0,
+    )
+    .unwrap()
+    .with_metadata_requirement(tjxy_db::MetadataRequirement::Full)
+    .unwrap()
+    .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+    .unwrap()
+    .with_local_metadata_access_mode(LocalMetadataAccessMode::ImportMetadataOnly)
+    .unwrap()
+    .with_storage_root_affinity(fixture.root)
+    .unwrap()
+    .with_input_sync_revision(claimed.job().input_sync_revision().unwrap())
+    .unwrap();
+    assert!(
+        WorkJobRepository::new(&fixture.database)
+            .enqueue_lazy_metadata_or_join(&automatic)
+            .await
+            .unwrap()
+            .is_none(),
+        "unchanged unresolved choices must not create another failing detail job"
+    );
+    let selected = repository
+        .choose_nfo(
+            fixture.item,
+            fixture.root,
+            extra.as_uuid(),
+            &choices[0].fingerprint,
+        )
+        .await
+        .unwrap();
+    let repeated = repository
+        .choose_nfo(
+            fixture.item,
+            fixture.root,
+            extra.as_uuid(),
+            &choices[0].fingerprint,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        selected.job().id(),
+        repeated.job().id(),
+        "repeated selection joins the same durably enqueued task"
+    );
+    let retry = claim_local_metadata(&fixture).await;
+    assert!(service.execute(&retry).await.unwrap().used_nfo());
+    assert!(repository.nfo_choices(0).await.unwrap().is_empty());
+
+    // Changing bytes without changing size/revision must invalidate the saved selection.
+    {
+        let mut objects = fixture.backend.extra_objects.lock().unwrap();
+        let source = objects.get_mut("second-nfo").unwrap();
+        source.1 = String::from_utf8(source.1.clone())
+            .unwrap()
+            .replace("123456", "654321")
+            .into_bytes();
+    }
+    let retry = claim_local_metadata(&fixture).await;
+    assert!(matches!(
+        service.execute(&retry).await,
+        Err(MetadataResolveError::NfoSelectionRequired)
+    ));
 }

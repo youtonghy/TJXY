@@ -864,3 +864,261 @@ async fn compacted_publication_is_reenrolled_only_after_retirement_and_reference
         WorkRetentionRun::Idle
     );
 }
+
+#[tokio::test]
+async fn oversized_job_is_trimmed_in_bounded_batches_before_parent_deletion() {
+    let database = database().await;
+    let (job, publication) = seed_job_with_publication(&database, "Retired", false).await;
+    let backend = database.get_database_backend();
+    for index in 0..501 {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("work_staging_rows"))
+                        .columns([
+                            "id",
+                            "job_id",
+                            "publication_id",
+                            "entity_kind",
+                            "natural_key",
+                            "payload",
+                            "validation_state",
+                        ])
+                        .values_panic([
+                            uuid::Uuid::new_v4().into(),
+                            job.into(),
+                            publication.into(),
+                            "Fixture".into(),
+                            index.to_string().into(),
+                            serde_json::json!({}).into(),
+                            "Valid".into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let retention = WorkRetentionRepository::new(&database);
+    assert!(matches!(
+        retention
+            .run_once("batch-worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            deferred: 1,
+            ..
+        }
+    ));
+    assert_eq!(table_count(&database, "work_staging_rows", "id").await, 1);
+    assert_eq!(table_count(&database, "work_jobs", "id").await, 1);
+    // Advance the persisted retry eligibility without sleeping or changing its original terminal age.
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("work_job_retention_queue"))
+                    .value(
+                        Alias::new("available_at"),
+                        Utc::now() - Duration::seconds(1),
+                    )
+                    .and_where(Expr::col(Alias::new("job_id")).eq(job)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        retention
+            .run_once("batch-worker", Duration::days(30), Duration::seconds(30))
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            purged: 1,
+            ..
+        }
+    ));
+    assert_eq!(table_count(&database, "work_staging_rows", "id").await, 0);
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn health_counts_real_rows_and_keeps_unavailable_space_unknown() {
+    let database = database().await;
+    seed_job_with_publication(&database, "Retired", false).await;
+    let health = tjxy_db::sample_work_health(&database, Some(Duration::days(30)))
+        .await
+        .unwrap();
+    assert_eq!(
+        health
+            .tables
+            .iter()
+            .find(|table| table.name == "catalog_items")
+            .unwrap()
+            .rows,
+        1
+    );
+    assert_eq!(
+        health
+            .tables
+            .iter()
+            .find(|table| table.name == "work_jobs")
+            .unwrap()
+            .rows,
+        1
+    );
+    assert_eq!(health.retention_candidates, Some(1));
+    assert_eq!(health.pending_jobs, 0);
+    assert!(health.oldest_pending_at.is_none());
+    if database.get_database_backend() == sea_orm::DbBackend::Sqlite {
+        assert!(health.allocated_bytes.unwrap() > 0);
+        assert_eq!(health.wal_bytes, None);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers the real user/session foreign keys and both retention outcomes.
+async fn retired_publication_survives_active_playback_then_is_purged_after_stop() {
+    let database = database().await;
+    let (_, publication) = seed_job_with_publication(&database, "Retired", false).await;
+    let backend = database.get_database_backend();
+    let item: uuid::Uuid = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("owner_catalog_item_id"))
+                    .from(Alias::new("catalog_publications"))
+                    .and_where(Expr::col(Alias::new("id")).eq(publication)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "owner_catalog_item_id")
+        .unwrap();
+    let now = Utc::now();
+    let auth = tjxy_db::AuthRepository::new(&database);
+    let user = auth
+        .create_user(
+            &tjxy_common::Username::parse("retention-player").unwrap(),
+            "$argon2id$test-only",
+            false,
+            false,
+            now,
+        )
+        .await
+        .unwrap();
+    let session = auth
+        .issue_session_for_user(
+            user.id(),
+            user.auth_revision(),
+            tjxy_db::SessionDraft {
+                id: uuid::Uuid::new_v4(),
+                token_digest: [7; 32],
+                device_id: "retention".into(),
+                device_name: "retention".into(),
+                client_name: "retention".into(),
+                client_version: "1".into(),
+                created_at: now,
+                expires_at: Some(now + Duration::hours(1)),
+            },
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("playback_sessions"))
+                    .columns([
+                        "id",
+                        "auth_session_id",
+                        "play_session_id",
+                        "user_id",
+                        "catalog_item_id",
+                        "presentation_key",
+                        "last_position_ticks",
+                        "started_at",
+                        "last_event_at",
+                    ])
+                    .values_panic([
+                        uuid::Uuid::new_v4().into(),
+                        session.id().into(),
+                        uuid::Uuid::new_v4().into(),
+                        user.id().as_uuid().into(),
+                        item.into(),
+                        uuid::Uuid::new_v4().into(),
+                        0_i64.into(),
+                        now.into(),
+                        now.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let retention = WorkRetentionRepository::new(&database);
+    assert_eq!(
+        retention
+            .run_once(
+                "playback-retention",
+                Duration::days(30),
+                Duration::seconds(30)
+            )
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 0,
+            compacted: 0,
+            purged: 0,
+            deferred: 1
+        }
+    );
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        1
+    );
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("playback_sessions"))
+                    .value(Alias::new("stopped_at"), now),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("work_job_retention_queue"))
+                    .value(Alias::new("available_at"), now - Duration::seconds(1)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retention
+            .run_once(
+                "playback-retention",
+                Duration::days(30),
+                Duration::seconds(30)
+            )
+            .await
+            .unwrap(),
+        WorkRetentionRun::Processed {
+            deleted: 1,
+            compacted: 0,
+            purged: 1,
+            deferred: 0
+        }
+    );
+    assert_eq!(
+        table_count(&database, "catalog_publications", "id").await,
+        0
+    );
+}

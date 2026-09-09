@@ -21,6 +21,9 @@ mod display_preferences;
 mod filesystem_index;
 mod filesystem_path;
 mod full_scan;
+mod scan_report;
+
+pub use scan_report::{ScanHistoryEntry, ScanItemIssue, ScanReportPage};
 mod hybrid_candidate;
 mod import;
 mod import_publication;
@@ -33,6 +36,9 @@ mod media_collection;
 mod metadata;
 mod metadata_provider_settings;
 mod metadata_work;
+mod nfo_choice;
+
+pub use nfo_choice::{NfoCandidateInfo, NfoChoiceInfo};
 mod migration;
 mod natural_key;
 mod outbox;
@@ -56,8 +62,16 @@ mod storage_sync;
 mod system_settings;
 mod title_year;
 mod user_data;
+mod work_health;
 mod work_job;
 mod work_retention;
+pub use work_health::{TableHealth, WorkHealth, sample_work_health};
+mod work_maintenance;
+mod work_queue;
+
+pub use work_maintenance::WorkMaintenanceReport;
+
+pub use work_queue::{WorkQueueWaiter, listen_for_work};
 
 pub use ai::{
     AI_PROVIDER_KEY, AiConversationRecord, AiConversationRepository, AiConversationRepositoryError,
@@ -140,7 +154,7 @@ pub use library::{
     VirtualFolderRecord, VirtualFolderRoot,
 };
 pub use logging_settings::{
-    DEFAULT_LOG_RETENTION_DAYS, LogMode, LoggingSettingsInput, LoggingSettingsRecord,
+    DEFAULT_LOG_RETENTION_DAYS, LogBudget, LogMode, LoggingSettingsInput, LoggingSettingsRecord,
     LoggingSettingsRepository, LoggingSettingsRepositoryError,
 };
 pub use manual_probe::{ManualProbeError, ManualProbeRepository, ManualProbeSubmission};

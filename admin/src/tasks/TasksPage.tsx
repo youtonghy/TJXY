@@ -1,3 +1,4 @@
+import { WorkHealthPanel } from './WorkHealthPanel';
 import {
   Alert,
   Button,
@@ -36,6 +37,7 @@ import { PageHeader } from '../ui/PageHeader';
 import { StatusChip, type StatusTone } from '../ui/StatusChip';
 import { useAuthoritativeLoad } from '../ui/useAuthoritativeLoad';
 import { useTranslate } from '../settings/i18n';
+import { TaskDiagnostics } from './TaskDiagnostics';
 import type {
   ScheduledTask,
   ScheduledTaskState,
@@ -231,6 +233,8 @@ export function TasksPage() {
           <RecentJobs jobs={snapshot.jobs} busyOperations={busyOperations} onRetry={(job) => {
             void run(`retry-${job.id}`, () => resolveMetadata(job.scopeId), tr('Metadata resolution submitted.', '元数据解析已提交。'));
           }} />
+          <TaskDiagnostics jobs={snapshot.jobs} />
+          <WorkHealthPanel />
         </div>
       </AsyncContent>
     </div>
