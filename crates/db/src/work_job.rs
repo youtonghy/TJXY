@@ -1199,7 +1199,20 @@ where
                 .try_get("", "started_at")?;
             let age = started.map_or(0, |started| (self.now() - started).num_seconds().max(0));
             let exponent = u32::try_from(age / 30).unwrap_or(6).min(6);
-            backoff.max(Duration::seconds((5 * (1_i64 << exponent)).min(300)))
+            // Full scans schedule successive child stages. Their total age does not
+            // mean the current stage is stalled; keep checking it at least once a
+            // minute unless the caller explicitly requests a longer delay.
+            let adaptive_limit = if matches!(
+                claimed.job().task_kind(),
+                WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+            ) {
+                60
+            } else {
+                300
+            };
+            backoff.max(Duration::seconds(
+                (5 * (1_i64 << exponent)).min(adaptive_limit),
+            ))
         } else {
             backoff
         };

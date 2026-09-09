@@ -1753,6 +1753,87 @@ async fn execution_stops_after_five_retries_and_other_jobs_continue() {
 }
 
 #[tokio::test]
+async fn full_scan_dependency_polling_stays_bounded_as_the_parent_ages() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
+    let (repository, clock) = repository(&database, now);
+    for (kind, scope, expected_delay) in [
+        (
+            WorkTaskKind::FullLibraryRootScan,
+            WorkScope::LibraryRootBinding(tjxy_common::LibraryRootBindingId::new()),
+            60,
+        ),
+        (
+            WorkTaskKind::FullMediaScan,
+            WorkScope::Library(LibraryId::new()),
+            60,
+        ),
+        (
+            WorkTaskKind::IndexMediaSources,
+            WorkScope::CatalogItem(CatalogItemId::new()),
+            300,
+        ),
+    ] {
+        clock.set(now);
+        repository
+            .enqueue_or_join(&WorkJobSpec::new(kind, scope, 1, 100).unwrap())
+            .await
+            .unwrap();
+        let claimed = repository
+            .claim_next(&[kind], "aging-parent", Duration::minutes(20))
+            .await
+            .unwrap()
+            .unwrap();
+        let deferred_at = now + Duration::minutes(10);
+        clock.set(deferred_at);
+        repository
+            .defer(&claimed, Duration::seconds(30), "waiting for child")
+            .await
+            .unwrap();
+        let records = repository.recent_jobs(100).await.unwrap();
+        let record = records
+            .iter()
+            .find(|job| job.job().id() == claimed.id())
+            .unwrap();
+        assert_eq!(record.job().attempt_count(), 0);
+        assert_eq!(
+            record.next_attempt_at(),
+            Some(deferred_at + Duration::seconds(expected_delay))
+        );
+        clock.set(deferred_at + Duration::seconds(expected_delay - 1));
+        assert!(
+            repository
+                .claim_next(&[kind], "too-early", Duration::minutes(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        clock.set(deferred_at + Duration::seconds(expected_delay));
+        let resumed = repository
+            .claim_next(&[kind], "resumed", Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.id(), claimed.id());
+        assert_eq!(resumed.attempt_count(), 1);
+        // An explicit caller delay must still be respected, even for full scans.
+        repository
+            .defer(&resumed, Duration::minutes(10), "provider requested delay")
+            .await
+            .unwrap();
+        let records = repository.recent_jobs(100).await.unwrap();
+        let record = records
+            .iter()
+            .find(|job| job.job().id() == resumed.id())
+            .unwrap();
+        assert_eq!(
+            record.next_attempt_at(),
+            Some(deferred_at + Duration::seconds(expected_delay) + Duration::minutes(10))
+        );
+    }
+}
+
+#[tokio::test]
 async fn dependency_wait_does_not_consume_the_five_retry_budget() {
     let database = database().await;
     let now = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();

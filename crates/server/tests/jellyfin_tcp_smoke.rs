@@ -1583,8 +1583,8 @@ async fn wait_for_job(
     priority: i64,
     context: &str,
 ) -> Value {
-    // Full scans advance through multiple child-job stages with production retry delays
-    // of 2, 4, 8, 16, 32, then 60 seconds. A healthy pipeline can exceed 30 seconds.
+    // Full scans advance through multiple child-job stages with dependency polling
+    // delays of 30 to 60 seconds. A healthy pipeline can exceed 30 seconds.
     let timeout = if task_kind == "FullLibraryRootScan" {
         Duration::from_secs(300)
     } else {
