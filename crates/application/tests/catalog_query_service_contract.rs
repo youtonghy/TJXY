@@ -10,11 +10,11 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection,
+    ConnectionTrait, DatabaseConnection, TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
-use tjxy_application::{CatalogQueryService, CatalogServiceError};
+use tjxy_application::{CatalogQueryService, CatalogServiceError, PlaybackPreparation};
 use tjxy_cache::{CacheKeyBuilder, CacheStore};
 use tjxy_common::{CatalogItemId, SortKey, UserId, Username};
 use tjxy_db::{
@@ -1847,4 +1847,527 @@ async fn lazy_item_detail_does_not_retry_current_ready_metadata_payload() {
         .await
         .unwrap();
     assert!(rows.is_empty());
+}
+
+async fn set_probe_state(database: &DatabaseConnection, item: CatalogItemId, state: &str) {
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), state)
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn wait_for_work(database: &DatabaseConnection, kind: tjxy_db::WorkTaskKind) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !tjxy_db::WorkJobRepository::new(database)
+            .has_active_task(kind)
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("request must enqueue durable work");
+}
+
+async fn finish_fixture_probe(database: &DatabaseConnection, claimed: &tjxy_db::ClaimedWorkJob) {
+    // Model the worker's atomic publication and completion without external media I/O.
+    let transaction = database.begin().await.unwrap();
+    transaction
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), "Probed")
+                    .and_where(Expr::col(Alias::new("id")).eq(claimed.job().scope().id())),
+            ),
+        )
+        .await
+        .unwrap();
+    tjxy_db::WorkJobRepository::new(database)
+        .complete_in_transaction(
+            &transaction,
+            claimed,
+            tjxy_db::WorkJobResult::success(serde_json::json!({}), Vec::new()),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn first_playback_waits_for_observed_queue_and_probe_delays_and_joins_requests() {
+    for (queue_ms, probe_ms) in [(1_510, 2_869), (186, 7_711)] {
+        let (service, database) = service_fixture().await;
+        let item = seed_playback_cache_fixture(&database).await;
+        set_probe_state(&database, item, "NotProbed").await;
+        let user = UserId::new();
+        let worker = async {
+            wait_for_work(&database, tjxy_db::WorkTaskKind::ProbeMedia).await;
+            tokio::time::sleep(Duration::from_millis(queue_ms)).await;
+            let jobs = tjxy_db::WorkJobRepository::new(&database);
+            let claimed = jobs
+                .claim_next(
+                    &[tjxy_db::WorkTaskKind::ProbeMedia],
+                    "playback-test",
+                    chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(probe_ms)).await;
+            finish_fixture_probe(&database, &claimed).await;
+        };
+        let (first, second, ()) = tokio::join!(
+            service.prepare_playback(user, None, item, None),
+            service.prepare_playback(user, None, item, None),
+            worker,
+        );
+        assert!(
+            matches!(first.unwrap(), Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
+        );
+        assert!(
+            matches!(second.unwrap(), Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
+        );
+        let rows = database
+            .query_all(
+                database.get_database_backend().build(
+                    Query::select()
+                        .columns([Alias::new("state"), Alias::new("attempt_count")])
+                        .from(Alias::new("work_jobs"))
+                        .and_where(Expr::col(Alias::new("task_kind")).eq("ProbeMedia")),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<String>("", "state").unwrap(), "Completed");
+        assert_eq!(rows[0].try_get::<i32>("", "attempt_count").unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn playback_timeout_preserves_job_and_bypasses_a_cached_empty_result_after_completion() {
+    let (service, database) = service_fixture().await;
+    let item = seed_playback_cache_fixture(&database).await;
+    set_probe_state(&database, item, "NotProbed").await;
+    let cache = Arc::new(MemoryCache::default());
+    let service = service
+        .with_playback_wait_timeout(Duration::ZERO)
+        .with_cache(
+            cache.clone(),
+            CacheKeyBuilder::new("tjxy").unwrap(),
+            Duration::from_secs(300),
+        );
+    let user = UserId::new();
+    assert_eq!(
+        service.playback_sources(user, None, item).await.unwrap(),
+        Some(Vec::new())
+    );
+    assert!(!cache.0.lock().unwrap().is_empty());
+    for _ in 0..2 {
+        assert_eq!(
+            service
+                .prepare_playback(user, None, item, None)
+                .await
+                .unwrap(),
+            Some(PlaybackPreparation::Preparing)
+        );
+    }
+    let jobs = tjxy_db::WorkJobRepository::new(&database);
+    let claimed = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "late-probe",
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    finish_fixture_probe(&database, &claimed).await;
+    assert!(
+        matches!(service.prepare_playback(user, None, item, None).await.unwrap(),
+        Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
+    );
+}
+
+#[tokio::test]
+async fn playback_reports_terminal_failure_and_missing_jobs_without_waiting_the_full_budget() {
+    for missing in [false, true] {
+        let (service, database) = service_fixture().await;
+        let item = seed_playback_cache_fixture(&database).await;
+        set_probe_state(&database, item, "NotProbed").await;
+        let worker = async {
+            wait_for_work(&database, tjxy_db::WorkTaskKind::ProbeMedia).await;
+            let jobs = tjxy_db::WorkJobRepository::new(&database);
+            let claimed = jobs
+                .claim_next(
+                    &[tjxy_db::WorkTaskKind::ProbeMedia],
+                    "failed-probe",
+                    chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            if missing {
+                database
+                    .execute(
+                        database.get_database_backend().build(
+                            Query::delete()
+                                .from_table(Alias::new("work_jobs"))
+                                .and_where(Expr::col(Alias::new("id")).eq(claimed.id().as_uuid())),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                jobs.fail_terminal(&claimed, "test probe failure")
+                    .await
+                    .unwrap();
+            }
+        };
+        let (response, ()) = tokio::join!(
+            service.prepare_playback(UserId::new(), None, item, None),
+            worker
+        );
+        assert_eq!(response.unwrap(), Some(PlaybackPreparation::Failed));
+    }
+}
+
+#[tokio::test]
+async fn playback_index_and_sync_timeouts_are_preparing_and_do_not_change_lazy_waits() {
+    for needs_sync in [false, true] {
+        let (service, database, item, user) = lazy_service("Movie", true).await;
+        let service = service.with_playback_wait_timeout(Duration::from_millis(50));
+        if needs_sync {
+            database
+                .execute(
+                    database.get_database_backend().build(
+                        Query::update()
+                            .table(Alias::new("storage_root_objects"))
+                            .value(Alias::new("children_indexed"), false),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        // A zero lazy budget must still return while the playback budget is separate.
+        service.item(user, None, item).await.unwrap();
+        assert_eq!(
+            service
+                .prepare_playback(user, None, item, None)
+                .await
+                .unwrap(),
+            Some(PlaybackPreparation::Preparing)
+        );
+        let kind = if needs_sync {
+            tjxy_db::WorkTaskKind::ScopedStorageSync
+        } else {
+            tjxy_db::WorkTaskKind::IndexMediaSources
+        };
+        assert!(
+            tjxy_db::WorkJobRepository::new(&database)
+                .has_active_task(kind)
+                .await
+                .unwrap()
+        );
+    }
+    let (service, database, item, user) = lazy_service("Movie", false).await;
+    assert_eq!(
+        service
+            .prepare_playback(user, None, item, None)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !tjxy_db::WorkJobRepository::new(&database)
+            .has_active_task(tjxy_db::WorkTaskKind::ProbeMedia)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        service
+            .prepare_playback(user, Some(UserId::new()), item, None)
+            .await,
+        Err(CatalogServiceError::ForbiddenUser)
+    ));
+}
+
+#[tokio::test]
+async fn playback_uses_the_first_ready_source_without_waiting_for_other_probes() {
+    let (service, database) = service_fixture().await;
+    let item = seed_playback_cache_fixture(&database).await;
+    seed_second_playback_source(&database).await;
+    set_probe_state(&database, item, "NotProbed").await;
+    let worker = async {
+        let jobs = tjxy_db::WorkJobRepository::new(&database);
+        let mut claims = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while claims.len() < 2 {
+                if let Some(claimed) = jobs
+                    .claim_next(
+                        &[tjxy_db::WorkTaskKind::ProbeMedia],
+                        "multi-probe",
+                        chrono::Duration::minutes(1),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    claims.push(claimed);
+                } else {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        finish_fixture_probe(&database, &claims[1]).await;
+        claims.remove(0)
+    };
+    let user = UserId::new();
+    let (result, slow) = tokio::join!(service.prepare_playback(user, None, item, None), worker);
+    assert!(
+        matches!(result.unwrap(), Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
+    );
+    let sources = tjxy_db::CatalogPublicationRepository::new(&database)
+        .playable_sources(item)
+        .await
+        .unwrap();
+    let slow_source = sources
+        .iter()
+        .find(|source| source.id().as_uuid() == slow.job().scope().id())
+        .unwrap();
+    let key = slow_source.presentation_key();
+    let service = service.with_playback_wait_timeout(Duration::ZERO);
+    assert_eq!(
+        service
+            .prepare_playback(user, None, item, Some(key))
+            .await
+            .unwrap(),
+        Some(PlaybackPreparation::Preparing)
+    );
+    assert_eq!(
+        service
+            .prepare_playback(user, None, item, Some(tjxy_common::PresentationKey::new()))
+            .await
+            .unwrap(),
+        Some(PlaybackPreparation::NoSources)
+    );
+    assert!(matches!(service.prepare_playback(user, None, item,
+        Some(tjxy_common::PresentationKey::from_uuid(item.as_uuid()))).await.unwrap(),
+        Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1));
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("is_hidden"), true)
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(key.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .prepare_playback(user, None, item, Some(key))
+            .await
+            .unwrap(),
+        Some(PlaybackPreparation::NoSources)
+    );
+}
+
+async fn clone_playback_fixture_row(
+    database: &DatabaseConnection,
+    table: &str,
+    columns: &[&str],
+    overrides: &[(&str, sea_orm::Value)],
+) {
+    let mut select = Query::select();
+    for column in columns {
+        if let Some((_, value)) = overrides.iter().find(|(name, _)| name == column) {
+            select.expr(Expr::val(value.clone()));
+        } else {
+            select.column(Alias::new(*column));
+        }
+    }
+    select.from(Alias::new(table)).limit(1);
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::insert()
+                    .into_table(Alias::new(table))
+                    .columns(columns.iter().map(|column| Alias::new(*column)))
+                    .select_from(select)
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_second_playback_source(database: &DatabaseConnection) {
+    // Both versions share a publication and root but require distinct storage objects.
+    let source = Uuid::new_v4();
+    let presentation = Uuid::new_v4();
+    let location = Uuid::new_v4();
+    let object = seed_second_playback_object(database).await;
+    clone_playback_fixture_row(
+        database,
+        "media_sources",
+        &[
+            "id",
+            "catalog_item_id",
+            "presentation_key",
+            "container",
+            "probe_state",
+            "probe_revision",
+        ],
+        &[
+            ("id", source.into()),
+            ("presentation_key", presentation.into()),
+        ],
+    )
+    .await;
+    clone_playback_fixture_row(
+        database,
+        "publication_media_sources",
+        &[
+            "id",
+            "publication_id",
+            "media_source_id",
+            "catalog_item_id",
+            "presentation_key",
+            "container",
+            "row_sha256",
+        ],
+        &[
+            ("id", Uuid::new_v4().into()),
+            ("media_source_id", source.into()),
+            ("presentation_key", presentation.into()),
+        ],
+    )
+    .await;
+    clone_playback_fixture_row(
+        database,
+        "media_locations",
+        &[
+            "id",
+            "media_source_id",
+            "storage_object_id",
+            "priority",
+            "availability_state",
+        ],
+        &[
+            ("id", location.into()),
+            ("media_source_id", source.into()),
+            ("storage_object_id", object.into()),
+        ],
+    )
+    .await;
+    clone_playback_fixture_row(
+        database,
+        "publication_media_locations",
+        &[
+            "id",
+            "publication_id",
+            "media_location_id",
+            "media_source_id",
+            "storage_object_id",
+            "priority",
+            "row_sha256",
+        ],
+        &[
+            ("id", Uuid::new_v4().into()),
+            ("media_location_id", location.into()),
+            ("media_source_id", source.into()),
+            ("storage_object_id", object.into()),
+        ],
+    )
+    .await;
+}
+
+async fn seed_second_playback_object(database: &DatabaseConnection) -> Uuid {
+    let object = Uuid::new_v4();
+    clone_playback_fixture_row(
+        database,
+        "storage_objects",
+        &[
+            "id",
+            "storage_account_id",
+            "provider_drive_id",
+            "provider_object_id",
+            "name",
+            "normalized_name",
+            "object_type",
+            "size",
+            "observed_sync_revision",
+            "children_indexed",
+            "children_index_revision",
+            "identity_quality",
+            "presence_state",
+        ],
+        &[
+            ("id", object.into()),
+            ("provider_object_id", object.to_string().into()),
+        ],
+    )
+    .await;
+    clone_playback_fixture_row(
+        database,
+        "storage_root_objects",
+        &[
+            "id",
+            "storage_root_id",
+            "storage_object_id",
+            "observed_sync_revision",
+            "children_indexed",
+            "children_index_revision",
+            "presence_state",
+        ],
+        &[
+            ("id", Uuid::new_v4().into()),
+            ("storage_object_id", object.into()),
+        ],
+    )
+    .await;
+    object
+}
+
+#[tokio::test]
+async fn cancelled_playback_request_does_not_cancel_its_durable_probe() {
+    let (service, database) = service_fixture().await;
+    let item = seed_playback_cache_fixture(&database).await;
+    set_probe_state(&database, item, "NotProbed").await;
+    let user = UserId::new();
+    let request_service = service.clone();
+    let request = tokio::spawn(async move {
+        request_service
+            .prepare_playback(user, None, item, None)
+            .await
+    });
+    wait_for_work(&database, tjxy_db::WorkTaskKind::ProbeMedia).await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    let claimed = tjxy_db::WorkJobRepository::new(&database)
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ProbeMedia],
+            "after-disconnect",
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    finish_fixture_probe(&database, &claimed).await;
+    assert!(
+        matches!(service.prepare_playback(user, None, item, None).await.unwrap(),
+        Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
+    );
 }

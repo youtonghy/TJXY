@@ -173,6 +173,11 @@ impl MediaSourceInfo {
     }
 
     #[must_use]
+    pub const fn runtime_ticks(&self) -> Option<i64> {
+        self.run_time_ticks
+    }
+
+    #[must_use]
     pub fn with_details(
         mut self,
         name: Option<String>,
@@ -190,9 +195,17 @@ impl MediaSourceInfo {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase")]
+pub enum PlaybackErrorCode {
+    NoCompatibleStream,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct PlaybackInfoResponse {
     pub media_sources: Vec<MediaSourceInfo>,
     pub play_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<PlaybackErrorCode>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]

@@ -34,7 +34,8 @@ pub use library::{
 };
 pub use playback::{
     DeliveryMethod, MediaProtocol, MediaSourceInfo, MediaStream, MediaStreamType,
-    PlaybackInfoError, PlaybackInfoResponse, PlaybackTicketRequest, PlaybackTicketResponse,
+    PlaybackErrorCode, PlaybackInfoError, PlaybackInfoResponse, PlaybackTicketRequest,
+    PlaybackTicketResponse,
 };
 pub use playstate::PlaybackStateRequest;
 pub use system::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};

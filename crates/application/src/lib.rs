@@ -47,7 +47,8 @@ pub use cache_invalidation::{
     CacheInvalidationRun, CacheInvalidationService, CacheInvalidationServiceError,
 };
 pub use catalog::{
-    CatalogQueryService, CatalogServiceError, PlaybackSource, PlaybackStream, PlaybackSubtitle,
+    CatalogQueryService, CatalogServiceError, PlaybackPreparation, PlaybackSource, PlaybackStream,
+    PlaybackSubtitle,
 };
 pub use device_profile::DeviceProfile;
 pub use direct_metadata::{DirectMetadataReadError, DirectMetadataReadService, OpenedDirectImage};

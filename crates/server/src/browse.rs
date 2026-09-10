@@ -16,7 +16,7 @@ use tjxy_api::{
 use tjxy_application::{
     AuthError, CatalogItemType, CatalogItemsQuery, CatalogItemsScope, CatalogPageRequest,
     CatalogServiceError, CatalogSort, CatalogSortField, CatalogSortOrder, DeviceProfile,
-    PlaybackSource, SessionCapabilities,
+    PlaybackPreparation, PlaybackSource, SessionCapabilities,
 };
 use tjxy_common::{CatalogItemId, PresentationKey, UserId};
 use tjxy_db::{
@@ -873,14 +873,15 @@ async fn playback_info(
     let profile =
         profile.map(|profile| serde_json::from_value::<DeviceProfile>(profile).unwrap_or_default());
     match catalog
-        .playback_sources(
+        .prepare_playback(
             principal.user().id(),
             request.user_id,
             CatalogItemId::from_uuid(item_id),
+            request.media_source_id,
         )
         .await
     {
-        Ok(Some(sources)) => {
+        Ok(Some(PlaybackPreparation::Ready(sources))) => {
             // Jellyfin uses the catalog item id as the id of its primary media
             // source. Treat that id as an explicit request for the default
             // source while keeping presentation keys for alternate versions.
@@ -921,13 +922,41 @@ async fn playback_info(
                 Ok(media_sources) => Json(PlaybackInfoResponse {
                     media_sources,
                     play_session_id: Uuid::new_v4().to_string(),
+                    error_code: None,
                 })
                 .into_response(),
                 Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "playback is unavailable"),
             }
         }
+        Ok(Some(outcome)) => playback_preparation_error(&outcome),
         Ok(None) => error(StatusCode::NOT_FOUND, "catalog item was not found"),
         Err(error) => service_error(&error),
+    }
+}
+
+fn playback_preparation_error(outcome: &PlaybackPreparation) -> Response {
+    match outcome {
+        PlaybackPreparation::Preparing => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Retry-After", "2"), ("Cache-Control", "no-store")],
+            Json(json!({"Message": "playback is preparing; retry shortly"})),
+        )
+            .into_response(),
+        PlaybackPreparation::Failed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Cache-Control", "no-store")],
+            Json(json!({"Message": "playback preparation failed"})),
+        )
+            .into_response(),
+        PlaybackPreparation::NoSources => Json(PlaybackInfoResponse {
+            media_sources: Vec::new(),
+            play_session_id: Uuid::new_v4().to_string(),
+            error_code: Some(tjxy_api::PlaybackErrorCode::NoCompatibleStream),
+        })
+        .into_response(),
+        PlaybackPreparation::Ready(_) => {
+            error(StatusCode::INTERNAL_SERVER_ERROR, "invalid playback state")
+        }
     }
 }
 
@@ -1922,6 +1951,13 @@ fn item_detail_dto(
     media_sources: Vec<MediaSourceInfo>,
 ) -> Result<BaseItemDto, HttpBrowseError> {
     let item = detail.item();
+    // Clients may use the item duration for the playback timeline even when
+    // MediaSources carries the probed duration. Keep both values consistent.
+    let runtime_ticks = media_sources
+        .first()
+        .and_then(MediaSourceInfo::runtime_ticks)
+        .filter(|ticks| *ticks > 0)
+        .or(detail.runtime_ticks());
     let countries = detail
         .countries()
         .iter()
@@ -1952,7 +1988,7 @@ fn item_detail_dto(
     .with_rich_details(
         detail.tagline().map(str::to_owned),
         detail.vote_count(),
-        detail.runtime_ticks(),
+        runtime_ticks,
         detail.premiere_date(),
         detail.end_date(),
         detail.release_status().map(str::to_owned),

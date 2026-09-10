@@ -59,6 +59,8 @@ enum StartupError {
     InvalidMusicMetadataConfiguration,
     #[error("TJXY_LAZY_WAIT_MS must be an integer from 0 through 30000")]
     InvalidLazyWait,
+    #[error("TJXY_PLAYBACK_WAIT_MS must be an integer from 0 through 30000")]
+    InvalidPlaybackWait,
     #[error("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS must be an integer from 0 through 2592000")]
     InvalidMediaRefreshInterval,
     #[error("TJXY_WORK_HISTORY_RETENTION_ENABLED must be true or false")]
@@ -252,6 +254,9 @@ async fn serve_application(
             .filter(|value| *value <= 30_000)
             .ok_or(StartupError::InvalidLazyWait)?;
         startup = startup.with_lazy_wait_timeout(Duration::from_millis(milliseconds));
+    }
+    if let Some(timeout) = playback_wait_timeout(|| env::var("TJXY_PLAYBACK_WAIT_MS"))? {
+        startup = startup.with_playback_wait_timeout(timeout);
     }
     if let Some(interval) =
         media_refresh_interval(|| env::var("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS"))?
@@ -542,6 +547,21 @@ fn ai_admission_number(
     }
 }
 
+fn playback_wait_timeout(
+    read: impl FnOnce() -> Result<String, env::VarError>,
+) -> Result<Option<Duration>, StartupError> {
+    match read() {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value <= 30_000)
+            .map(|value| Some(Duration::from_millis(value)))
+            .ok_or(StartupError::InvalidPlaybackWait),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(StartupError::InvalidPlaybackWait),
+    }
+}
+
 fn media_refresh_interval(
     lookup: impl FnOnce() -> Result<String, env::VarError>,
 ) -> Result<Option<Duration>, StartupError> {
@@ -578,9 +598,27 @@ mod tests {
 
     use super::{
         admin_dist_dir, ai_admission_config, jellyfin_web_dist_dir, media_refresh_interval,
-        parse_credential_keyring, setup_postgres_tls,
+        parse_credential_keyring, playback_wait_timeout, setup_postgres_tls,
     };
     use tjxy_server::DatabaseTlsMode;
+
+    #[test]
+    fn playback_wait_budget_is_independent_optional_and_bounded() {
+        assert_eq!(
+            playback_wait_timeout(|| Err(VarError::NotPresent)).unwrap(),
+            None
+        );
+        for milliseconds in [0_u64, 15_000, 30_000] {
+            assert_eq!(
+                playback_wait_timeout(|| Ok(milliseconds.to_string())).unwrap(),
+                Some(Duration::from_millis(milliseconds))
+            );
+        }
+        for value in ["-1", "30001", "", "15000ms", "18446744073709551616"] {
+            assert!(playback_wait_timeout(|| Ok(value.to_owned())).is_err());
+        }
+        assert!(playback_wait_timeout(|| Err(VarError::NotUnicode("bad".into()))).is_err());
+    }
 
     #[test]
     fn ai_admission_configuration_defaults_and_accepts_overrides() {
