@@ -18,7 +18,7 @@ use tjxy_db::{
     ApiKeyRepositoryError, CredentialRefreshState, LibraryRepository, LibraryRepositoryError,
     MetadataProviderSettingsRepository, MetadataProviderSettingsRepositoryError,
     StorageAccountRepository, StorageAccountRepositoryError, StorageCredentialRepository,
-    StorageCredentialRepositoryError, SystemSettingsRepository, SystemSettingsRepositoryError,
+    StorageCredentialRepositoryError, SystemSettingsRepositoryError,
 };
 use tjxy_metadata::{
     MetadataError, MetadataProvider, MusicBrainzProvider, ReloadableMetadataProvider,
@@ -572,8 +572,15 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
             options.assets_dir_source = "Database";
         }
     }
-    let settings = SystemSettingsRepository::new(&database).get().await?;
-    let browser_roots = crate::system_settings::configured_media_browser_roots(settings.as_ref());
+    // Browse the filesystem visible to this process (the container filesystem when
+    // containerized), independently of legacy media-browser configuration.
+    #[cfg(not(windows))]
+    let browser_roots = [PathBuf::from("/")];
+    #[cfg(windows)]
+    let browser_roots = (b'A'..=b'Z')
+        .map(|drive| PathBuf::from(format!("{}:\\", char::from(drive))))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
     let (filesystem_browser, invalid_root_indexes) =
         FilesystemBrowser::from_available_roots(browser_roots).await;
     if !invalid_root_indexes.is_empty() {

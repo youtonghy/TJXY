@@ -147,7 +147,7 @@ export function FolderPickerDialog({
                   <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
                   <Alert.Content>
                     <Alert.Title>{tr('The folder list could not be loaded', '无法加载文件夹列表')}</Alert.Title>
-                    <Alert.Description>{tr('Check that the server media roots are available.', '请检查服务器媒体根目录是否可用。')}</Alert.Description>
+                    <Alert.Description>{tr('Check that the server folder is accessible.', '请检查服务器目录是否可访问。')}</Alert.Description>
                   </Alert.Content>
                   <Button onPress={retry} size="sm" variant="tertiary">
                     <RefreshCw aria-hidden="true" className="size-4" /> {tr('Retry', '重试')}
@@ -158,8 +158,8 @@ export function FolderPickerDialog({
                 <Alert status="warning">
                   <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
                   <Alert.Content>
-                    <Alert.Title>{tr('No server folders are configured', '尚未配置服务器文件夹')}</Alert.Title>
-                    <Alert.Description>{tr('Add a media browser root in System settings, then restart TJXY.', '请先在系统设置中添加媒体浏览根目录，然后重启 TJXY。')}</Alert.Description>
+                    <Alert.Title>{tr('The server filesystem is unavailable', '服务器文件系统不可用')}</Alert.Title>
+                    <Alert.Description>{tr('Check the server filesystem permissions and try again.', '请检查服务器文件系统权限后重试。')}</Alert.Description>
                   </Alert.Content>
                 </Alert>
               )}
@@ -216,7 +216,7 @@ export function FolderPickerDialog({
                       <Breadcrumbs aria-label={tr('Selected folder path', '所选文件夹路径')} className="min-w-max flex-nowrap">
                         {root !== null && (
                           <Breadcrumbs.Item isDisabled={trail.length === 0} onPress={() => { navigateToRoot(root); }}>
-                            {root.name}
+                            {root.path ?? root.name}
                           </Breadcrumbs.Item>
                         )}
                         {trail.map((entry, index) => (

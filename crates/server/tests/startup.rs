@@ -828,14 +828,27 @@ async fn initialization_migrates_bootstraps_auth_and_only_then_reports_ready() {
 }
 
 #[tokio::test]
-async fn media_browser_roots_load_from_database_and_skip_unavailable_entries() {
+async fn media_browser_opens_server_root_despite_legacy_configuration() {
+    assert_server_root_browser(true).await;
+}
+
+#[tokio::test]
+async fn media_browser_opens_server_root_without_configuration() {
+    assert_server_root_browser(false).await;
+}
+
+async fn assert_server_root_browser(legacy_configuration: bool) {
     let database = reconnectable_test_database().await.unwrap();
     tjxy_db::Migrator::up(database.connection(), None)
         .await
         .unwrap();
     let database_root = TempDir::new().unwrap();
     let settings = SystemSettingsInput {
-        media_browser_roots: vec![database_root.path().to_string_lossy().into_owned()],
+        media_browser_roots: if legacy_configuration {
+            vec![database_root.path().to_string_lossy().into_owned()]
+        } else {
+            Vec::new()
+        },
         ..SystemSettingsInput::default()
     };
     SystemSettingsRepository::new(database.connection())
@@ -876,6 +889,7 @@ async fn media_browser_roots_load_from_database_and_skip_unavailable_entries() {
         serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let token = login["AccessToken"].as_str().unwrap();
     let roots = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/Admin/Filesystem/Roots")
@@ -891,10 +905,29 @@ async fn media_browser_roots_load_from_database_and_skip_unavailable_entries() {
     let roots: Value =
         serde_json::from_slice(&roots.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(roots.as_array().unwrap().len(), 1);
-    assert_eq!(
-        roots[0]["Name"],
-        database_root.path().file_name().unwrap().to_str().unwrap()
-    );
+    assert_eq!(roots[0]["Path"], "/");
+
+    let directories = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/Admin/Filesystem/Directories?RootId={}",
+                    roots[0]["Id"].as_str().unwrap()
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(directories.status(), StatusCode::OK);
+    let directories: Value =
+        serde_json::from_slice(&directories.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert!(!directories["Items"].as_array().unwrap().is_empty());
 
     let settings = SystemSettingsInput {
         media_browser_roots: vec![format!("/definitely/missing/tjxy-{}", Uuid::new_v4())],

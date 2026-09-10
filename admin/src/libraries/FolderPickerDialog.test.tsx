@@ -64,12 +64,12 @@ it('reloads the server roots when the initial request fails', async () => {
   expect(screen.getByRole('button', { name: 'Select folder' })).toBeEnabled();
 });
 
-it('explains how to configure the picker when no server roots are available', async () => {
+it('reports an unavailable filesystem without asking for root configuration', async () => {
   rootsMock.mockResolvedValue([]);
   directoriesMock.mockReset();
   render(<FolderPickerDialog isOpen onClose={vi.fn()} onSelect={vi.fn()} />);
 
-  expect(await screen.findByText('No server folders are configured')).toBeVisible();
+  expect(await screen.findByText('The server filesystem is unavailable')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Select folder' })).toBeDisabled();
 });
 
@@ -82,4 +82,15 @@ it('returns the full physical path rather than a display breadcrumb', async () =
   await waitFor(() => { expect(screen.getByRole('button', { name: 'Select folder' })).toBeEnabled(); });
   await user.click(screen.getByRole('button', { name: 'Select folder' }));
   expect(onSelect).toHaveBeenCalledWith({ rootId: 'root-1', relativePath: 'Movies' }, '/mnt/media/Movies');
+});
+
+it('opens the server root immediately and selects its absolute path', async () => {
+  rootsMock.mockResolvedValue([{ id: 'root-1', name: '/', path: '/' }]);
+  const onSelect = vi.fn();
+  render(<FolderPickerDialog isOpen onClose={vi.fn()} onSelect={onSelect} />);
+  await screen.findByText('Movies', { selector: 'span' });
+  expect(directoriesMock).toHaveBeenCalledWith('root-1', '', expect.any(AbortSignal));
+  expect(screen.queryByText(/Add a media browser root/)).not.toBeInTheDocument();
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Select folder' }));
+  expect(onSelect).toHaveBeenCalledWith({ rootId: 'root-1', relativePath: '' }, '/');
 });
