@@ -1,0 +1,474 @@
+{
+  "items": 128,
+  "concurrency": [
+    1
+  ],
+  "scan_concurrency_mode": "auto",
+  "backend": "SQLite",
+  "fixture": "deterministic local MP4/NFO/PNG",
+  "browser_first_frame": null,
+  "remote_probe": null,
+  "actual_transaction_rate": null,
+  "status": "complete",
+  "before_library": {
+    "rows": {
+      "catalog_items": 0,
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0,
+      "direct_metadata_refs": 0,
+      "work_jobs": 0,
+      "work_results": 0,
+      "work_staging_rows": 0,
+      "storage_sync_pages": 0,
+      "catalog_publications": 0
+    },
+    "allocated_bytes": 1359872,
+    "free_bytes": 0,
+    "wal_file_bytes": 0,
+    "asset_files": 0
+  },
+  "scans": [
+    {
+      "iteration": 1,
+      "duration_seconds": 8.265233083002386,
+      "server_cpu_percent_one_core": 60.01040684745283,
+      "result": {
+        "failed": 0,
+        "items": 128,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 128
+      },
+      "snapshot": {
+        "rows": {
+          "catalog_items": 128,
+          "asset_blobs": 0,
+          "item_assets": 0,
+          "person_assets": 0,
+          "direct_metadata_refs": 128,
+          "work_jobs": 517,
+          "work_results": 516,
+          "work_staging_rows": 476,
+          "storage_sync_pages": 130,
+          "catalog_publications": 128
+        },
+        "allocated_bytes": 3067904,
+        "free_bytes": 0,
+        "wal_file_bytes": 0,
+        "asset_files": 0
+      }
+    },
+    {
+      "iteration": 2,
+      "duration_seconds": 7.761629833999905,
+      "server_cpu_percent_one_core": 61.713842355858716,
+      "result": {
+        "failed": 0,
+        "items": 128,
+        "needs_selection": 0,
+        "skipped": 0,
+        "success": 128
+      },
+      "snapshot": {
+        "rows": {
+          "catalog_items": 128,
+          "asset_blobs": 0,
+          "item_assets": 0,
+          "person_assets": 0,
+          "direct_metadata_refs": 128,
+          "work_jobs": 1032,
+          "work_results": 1031,
+          "work_staging_rows": 955,
+          "storage_sync_pages": 259,
+          "catalog_publications": 256
+        },
+        "allocated_bytes": 3911680,
+        "free_bytes": 0,
+        "wal_file_bytes": 0,
+        "asset_files": 0
+      }
+    }
+  ],
+  "probed_sources": 128,
+  "source_unchanged": true,
+  "job_stages": [
+    {
+      "kind": "DiscoverTitles",
+      "state": "Completed",
+      "jobs": 2,
+      "sum_first_claim_to_completion_ms": 71.011483669281
+    },
+    {
+      "kind": "DiscoverTitles",
+      "state": "Pending",
+      "jobs": 1,
+      "sum_first_claim_to_completion_ms": null
+    },
+    {
+      "kind": "FullLibraryRootScan",
+      "state": "Completed",
+      "jobs": 2,
+      "sum_first_claim_to_completion_ms": 15848.998725414276
+    },
+    {
+      "kind": "IndexMediaSources",
+      "state": "Completed",
+      "jobs": 256,
+      "sum_first_claim_to_completion_ms": 1624.8151659965515
+    },
+    {
+      "kind": "ProbeMedia",
+      "state": "Completed",
+      "jobs": 256,
+      "sum_first_claim_to_completion_ms": 1227.070391178131
+    },
+    {
+      "kind": "ResolveMetadata",
+      "state": "Completed",
+      "jobs": 512,
+      "sum_first_claim_to_completion_ms": 2668.4224605560303
+    },
+    {
+      "kind": "ScopedStorageSync",
+      "state": "Completed",
+      "jobs": 1,
+      "sum_first_claim_to_completion_ms": 136.0282301902771
+    },
+    {
+      "kind": "ValidateStorageRoot",
+      "state": "Completed",
+      "jobs": 2,
+      "sum_first_claim_to_completion_ms": 1851.0058522224426
+    }
+  ],
+  "job_created_to_first_claim": {
+    "samples": 1032,
+    "p50_ms": 587.0014429092407,
+    "p95_ms": 1011.0184550285339,
+    "max_ms": 1070.0002312660217
+  },
+  "api_latency": [
+    {
+      "concurrency": 1,
+      "list": {
+        "samples": 20,
+        "p50_ms": 0.7867499953135848,
+        "p95_ms": 1.713208999717608,
+        "max_ms": 1.713208999717608
+      },
+      "poster": {
+        "samples": 20,
+        "p50_ms": 0.689583997882437,
+        "p95_ms": 0.971500005107373,
+        "max_ms": 0.971500005107373
+      },
+      "playback_info": {
+        "samples": 20,
+        "p50_ms": 1.7793750012060627,
+        "p95_ms": 2.8666660000453703,
+        "max_ms": 2.8666660000453703
+      }
+    }
+  ],
+  "after_requests": {
+    "rows": {
+      "catalog_items": 128,
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0,
+      "direct_metadata_refs": 128,
+      "work_jobs": 1032,
+      "work_results": 1031,
+      "work_staging_rows": 955,
+      "storage_sync_pages": 259,
+      "catalog_publications": 256
+    },
+    "allocated_bytes": 3911680,
+    "free_bytes": 0,
+    "wal_file_bytes": 0,
+    "asset_files": 0
+  },
+  "idle": null,
+  "queue_claim_plan": [
+    "SEARCH job USING INDEX ix_work_jobs_claim_active (state=? AND task_kind=? AND priority>?)",
+    "CORRELATED SCALAR SUBQUERY 1",
+    "SEARCH dependency USING INDEX sqlite_autoindex_work_jobs_1 (id=?)",
+    "SEARCH dependency_result USING INDEX sqlite_autoindex_work_results_2 (job_id=?)",
+    "SEARCH sync_page USING INDEX uq_storage_sync_pages_identity (job_id=?)",
+    "SEARCH scope_state USING INDEX uq_storage_root_objects (storage_root_id=? AND storage_object_id=?)",
+    "SEARCH sync_root USING INDEX sqlite_autoindex_storage_roots_1 (id=?)",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ],
+  "sql_templates": [
+    [
+      "SELECT \"job\".\"id\" AS \"id\", \"job\".\"task_kind\" AS \"task_kind\", \"job\".\"scope_type\" AS \"scope_type\", \"job\".\"scope_id\" AS \"scope_id\", \"job\".\"expected_revision\" AS \"expected_revision\", \"job\".\"required_sync_job_id\" AS \"required_sync_job_id\", \"job\".\"input_sync_revision\" AS \"input_sync_revision\", \"job\".\"state\" AS \"state\", \"job\".\"priority\" AS \"priority\", \"job\".\"attempt_count\" AS \"attempt_count\", \"job\".\"metadata_requirement\" AS \"metadata_requirement\", \"job\".\"metadata_source_mode\" AS \"metadata_source_mode\", \"job\".\"local_metadata_access_mode\" AS \"local_metadata_access_mode\", \"job\".\"storage_root_affinity\" AS \"storage_root_affinity\" FROM \"work_jobs\" AS \"job\" WHERE (job.state IN ('Pending', 'Running')) AND \"job\".\"task_kind\" IN (?) AND ((\"job\".\"state\" = ? AND (\"job\".\"available_at\" IS NULL OR \"job\".\"available_at\" <= ?)) OR (\"job\".\"state\" = ? AND (\"job\".\"lease_expires_at\" IS NULL OR \"job\".\"lease_expires_at\" <= ?))) AND (\"job\".\"required_sync_job_id\" IS NULL OR EXISTS(SELECT ? FROM \"work_jobs\" AS \"dependency\" INNER JOIN \"work_results\" AS \"dependency_result\" ON \"dependency_result\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_sync_pages\" AS \"sync_page\" ON \"sync_page\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_roots\" AS \"sync_root\" ON \"sync_root\".\"id\" = \"sync_page\".\"storage_root_id\" INNER JOIN \"storage_root_objects\" AS \"scope_state\" ON \"scope_state\".\"storage_root_id\" = \"sync_root\".\"id\" AND \"scope_state\".\"storage_object_id\" = \"sync_page\".\"scope_storage_object_id\" WHERE \"dependency\".\"id\" = \"job\".\"required_sync_job_id\" AND \"dependency\".\"state\" = ? AND \"dependency\".\"task_kind\" = ? AND \"dependency\".\"scope_type\" = ? AND \"sync_page\".\"scope_storage_object_id\" = \"dependency\".\"scope_id\" AND (\"dependency\".\"storage_root_affinity\" = ? OR \"dependency\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"job\".\"storage_root_affinity\" = ? OR \"job\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"dependency_result\".\"result_sync_revision\" = \"job\".\"input_sync_revision\" OR \"job\".\"input_sync_revision\" IS NULL) AND \"sync_page\".\"scope_completed\" = ? AND \"sync_page\".\"sync_revision\" = \"dependency_result\".\"result_sync_revision\" AND \"sync_root\".\"reconciled_sync_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"children_indexed\" = ? AND \"scope_state\".\"children_index_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"presence_state\" = ?)) AND \"job\".\"priority\" >= ? ORDER BY \"job\".\"priority\" DESC, \"job\".\"created_at\" ASC, \"job\".\"id\" ASC LIMIT ?",
+      {
+        "statements": 11838,
+        "elapsed_us": 211803,
+        "failures": 0,
+        "max_elapsed_us": 2076
+      }
+    ],
+    [
+      "UPDATE \"work_jobs\" SET \"lease_expires_at\" = \"lease_expires_at\" WHERE \"id\" = ? AND \"state\" = ? AND \"lease_owner\" = ? AND \"lease_expires_at\" > ?",
+      {
+        "statements": 2758,
+        "elapsed_us": 149650,
+        "failures": 0,
+        "max_elapsed_us": 3188
+      }
+    ],
+    [
+      "SELECT ? FROM \"storage_root_objects\" AS \"fact_fence_relation\" INNER JOIN \"storage_objects\" AS \"fact_fence_object\" ON \"fact_fence_object\".\"id\" = \"fact_fence_relation\".\"storage_object_id\" INNER JOIN \"storage_roots\" AS \"fact_fence_root\" ON \"fact_fence_root\".\"id\" = \"fact_fence_relation\".\"storage_root_id\" LEFT JOIN \"storage_roots\" AS \"fact_fence_origin_root\" ON \"fact_fence_origin_root\".\"id\" = \"fact_fence_object\".\"facts_observed_storage_root_id\" WHERE \"fact_fence_relation\".\"storage_root_id\" = ? AND (\"fact_fence_relation\".\"storage_object_id\" IN (?) OR \"fact_fence_relation\".\"parent_storage_object_id\" IN (?)) AND (\"fact_fence_relation\".\"observed_sync_revision\" > \"fact_fence_root\".\"reconciled_sync_revision\" OR (\"fact_fence_object\".\"facts_observed_storage_root_id\" IS NOT NULL AND (\"fact_fence_origin_root\".\"id\" IS NULL OR \"fact_fence_object\".\"observed_sync_revision\" > \"fact_fence_origin_root\".\"reconciled_sync_revision\")) OR (\"fact_fence_object\".\"facts_observed_storage_root_id\" IS NULL AND (\"fact_fence_object\".\"observed_sync_revision\" > \"fact_fence_root\".\"reconciled_sync_revision\" OR EXISTS(SELECT ? FROM \"storage_root_objects\" AS \"fact_fence_other_relation\" WHERE \"fact_fence_other_relation\".\"storage_object_id\" = \"fact_fence_object\".\"id\" AND \"fact_fence_other_relation\".\"storage_root_id\" <> \"fact_fence_relation\".\"storage_root_id\"))) OR (\"fact_fence_object\".\"facts_observed_storage_root_id\" IS NOT NULL AND \"fact_fence_object\".\"facts_observed_storage_root_id\" <> ?) OR (\"fact_fence_relation\".\"storage_object_id\" IN (?) AND \"fact_fence_relation\".\"children_indexed\" = ?)) LIMIT ?",
+      {
+        "statements": 2996,
+        "elapsed_us": 131261,
+        "failures": 0,
+        "max_elapsed_us": 362
+      }
+    ],
+    [
+      "DELETE FROM \"storage_change_outbox\" WHERE \"id\" = ? AND \"state\" = ? AND \"lease_owner\" = ? AND \"lease_expires_at\" > ?",
+      {
+        "statements": 1413,
+        "elapsed_us": 126225,
+        "failures": 0,
+        "max_elapsed_us": 2003
+      }
+    ],
+    [
+      "UPDATE \"storage_change_outbox\" SET \"state\" = ?, \"lease_owner\" = ?, \"lease_expires_at\" = ? WHERE \"id\" = ? AND ((\"state\" = ? AND (\"available_at\" IS NULL OR \"available_at\" <= ?)) OR (\"state\" = ? AND \"lease_expires_at\" <= ?))",
+      {
+        "statements": 1413,
+        "elapsed_us": 120356,
+        "failures": 0,
+        "max_elapsed_us": 813
+      }
+    ],
+    [
+      "SELECT DISTINCT \"nfo_object\".\"id\" AS \"storage_object_id\", \"nfo_object\".\"storage_account_id\" AS \"storage_account_id\", \"nfo_account\".\"provider\" AS \"provider\", \"nfo_object\".\"provider_drive_id\" AS \"provider_drive_id\", \"nfo_object\".\"provider_object_id\" AS \"provider_object_id\", \"nfo_object\".\"name\" AS \"name\", \"nfo_object\".\"size\" AS \"size\", \"nfo_object\".\"remote_revision\" AS \"remote_revision\", \"nfo_object\".\"observed_sync_revision\" AS \"object_observed_sync_revision\", \"nfo_object\".\"facts_observed_storage_root_id\" AS \"facts_observed_storage_root_id\" FROM \"storage_root_objects\" AS \"nfo_parent\" INNER JOIN \"catalog_items\" AS \"nfo_item\" ON \"nfo_item\".\"id\" = ? INNER JOIN \"storage_root_objects\" AS \"nfo_child\" ON \"nfo_child\".\"storage_root_id\" = \"nfo_parent\".\"storage_root_id\" AND \"nfo_child\".\"parent_storage_object_id\" = \"nfo_parent\".\"storage_object_id\" INNER JOIN \"storage_objects\" AS \"nfo_object\" ON \"nfo_object\".\"id\" = \"nfo_child\".\"storage_object_id\" INNER JOIN \"storage_accounts\" AS \"nfo_account\" ON \"nfo_account\".\"id\" = \"nfo_object\".\"storage_account_id\" INNER JOIN \"storage_roots\" AS \"nfo_root\" ON \"nfo_root\".\"id\" = \"nfo_parent\".\"storage_root_id\" INNER JOIN \"library_storage_roots\" AS \"nfo_library_root\" ON \"nfo_library_root\".\"storage_root_id\" = \"nfo_root\".\"id\" INNER JOIN \"library_catalog_items\" AS \"nfo_membership\" ON \"nfo_membership\".\"library_id\" = \"nfo_library_root\".\"library_id\" AND (\"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"id\" OR \"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"structure_owner_item_id\") INNER JOIN \"libraries\" AS \"nfo_library\" ON \"nfo_library\".\"id\" = \"nfo_membership\".\"library_id\" WHERE \"nfo_parent\".\"storage_root_id\" = ? AND \"nfo_parent\".\"storage_object_id\" = ? AND \"nfo_item\".\"is_present\" = ? AND \"nfo_item\".\"classification_state\" = ? AND \"nfo_parent\".\"presence_state\" = ? AND \"nfo_parent\".\"children_indexed\" = ? AND \"nfo_parent\".\"children_index_revision\" = ? AND \"nfo_child\".\"presence_state\" IN (?, ?) AND \"nfo_object\".\"object_type\" = ? AND \"nfo_object\".\"presence_state\" = ? AND (\"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ?) AND \"nfo_account\".\"status\" = ? AND \"nfo_root\".\"reconciled_sync_revision\" >= ? AND \"nfo_library\".\"is_enabled\" = ? LIMIT ?",
+      {
+        "statements": 1024,
+        "elapsed_us": 92861,
+        "failures": 0,
+        "max_elapsed_us": 738
+      }
+    ],
+    [
+      "UPDATE \"work_jobs\" SET \"state\" = ?, \"lease_owner\" = ?, \"lease_expires_at\" = ?, \"available_at\" = ?, \"started_at\" = IFNULL(\"started_at\", ?), \"attempt_count\" = \"attempt_count\" + ? WHERE \"id\" = ? AND ((\"work_jobs\".\"state\" = ? AND (\"work_jobs\".\"available_at\" IS NULL OR \"work_jobs\".\"available_at\" <= ?)) OR (\"work_jobs\".\"state\" = ? AND (\"work_jobs\".\"lease_expires_at\" IS NULL OR \"work_jobs\".\"lease_expires_at\" <= ?)))",
+      {
+        "statements": 1047,
+        "elapsed_us": 92122,
+        "failures": 0,
+        "max_elapsed_us": 937
+      }
+    ],
+    [
+      "SELECT DISTINCT \"nfo_object\".\"id\" AS \"storage_object_id\", \"nfo_object\".\"storage_account_id\" AS \"storage_account_id\", \"nfo_account\".\"provider\" AS \"provider\", \"nfo_object\".\"provider_drive_id\" AS \"provider_drive_id\", \"nfo_object\".\"provider_object_id\" AS \"provider_object_id\", \"nfo_object\".\"name\" AS \"name\", \"nfo_object\".\"size\" AS \"size\", \"nfo_object\".\"remote_revision\" AS \"remote_revision\", \"nfo_object\".\"observed_sync_revision\" AS \"object_observed_sync_revision\", \"nfo_object\".\"facts_observed_storage_root_id\" AS \"facts_observed_storage_root_id\" FROM \"storage_root_objects\" AS \"nfo_parent\" INNER JOIN \"catalog_items\" AS \"nfo_item\" ON \"nfo_item\".\"id\" = ? INNER JOIN \"storage_root_objects\" AS \"nfo_child\" ON \"nfo_child\".\"storage_root_id\" = \"nfo_parent\".\"storage_root_id\" AND \"nfo_child\".\"parent_storage_object_id\" = \"nfo_parent\".\"storage_object_id\" INNER JOIN \"storage_objects\" AS \"nfo_object\" ON \"nfo_object\".\"id\" = \"nfo_child\".\"storage_object_id\" INNER JOIN \"storage_accounts\" AS \"nfo_account\" ON \"nfo_account\".\"id\" = \"nfo_object\".\"storage_account_id\" INNER JOIN \"storage_roots\" AS \"nfo_root\" ON \"nfo_root\".\"id\" = \"nfo_parent\".\"storage_root_id\" INNER JOIN \"library_storage_roots\" AS \"nfo_library_root\" ON \"nfo_library_root\".\"storage_root_id\" = \"nfo_root\".\"id\" INNER JOIN \"library_catalog_items\" AS \"nfo_membership\" ON \"nfo_membership\".\"library_id\" = \"nfo_library_root\".\"library_id\" AND (\"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"id\" OR \"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"structure_owner_item_id\") INNER JOIN \"libraries\" AS \"nfo_library\" ON \"nfo_library\".\"id\" = \"nfo_membership\".\"library_id\" WHERE \"nfo_parent\".\"storage_root_id\" = ? AND \"nfo_parent\".\"storage_object_id\" = ? AND \"nfo_item\".\"is_present\" = ? AND \"nfo_item\".\"classification_state\" = ? AND \"nfo_parent\".\"presence_state\" = ? AND \"nfo_parent\".\"children_indexed\" = ? AND \"nfo_parent\".\"children_index_revision\" = ? AND \"nfo_child\".\"presence_state\" IN (?, ?) AND \"nfo_object\".\"object_type\" = ? AND \"nfo_object\".\"presence_state\" = ? AND (\"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ? OR \"nfo_object\".\"normalized_name\" LIKE ?) AND \"nfo_account\".\"status\" = ? AND \"nfo_root\".\"reconciled_sync_revision\" >= ? AND \"nfo_library\".\"is_enabled\" = ? LIMIT ?",
+      {
+        "statements": 1024,
+        "elapsed_us": 88907,
+        "failures": 0,
+        "max_elapsed_us": 240
+      }
+    ],
+    [
+      "SELECT DISTINCT \"nfo_object\".\"id\" AS \"storage_object_id\", \"nfo_object\".\"storage_account_id\" AS \"storage_account_id\", \"nfo_account\".\"provider\" AS \"provider\", \"nfo_object\".\"provider_drive_id\" AS \"provider_drive_id\", \"nfo_object\".\"provider_object_id\" AS \"provider_object_id\", \"nfo_object\".\"name\" AS \"name\", \"nfo_object\".\"size\" AS \"size\", \"nfo_object\".\"remote_revision\" AS \"remote_revision\", \"nfo_object\".\"observed_sync_revision\" AS \"object_observed_sync_revision\", \"nfo_object\".\"facts_observed_storage_root_id\" AS \"facts_observed_storage_root_id\" FROM \"storage_root_objects\" AS \"nfo_parent\" INNER JOIN \"catalog_items\" AS \"nfo_item\" ON \"nfo_item\".\"id\" = ? INNER JOIN \"storage_root_objects\" AS \"nfo_child\" ON \"nfo_child\".\"storage_root_id\" = \"nfo_parent\".\"storage_root_id\" AND \"nfo_child\".\"parent_storage_object_id\" = \"nfo_parent\".\"storage_object_id\" INNER JOIN \"storage_objects\" AS \"nfo_object\" ON \"nfo_object\".\"id\" = \"nfo_child\".\"storage_object_id\" INNER JOIN \"storage_accounts\" AS \"nfo_account\" ON \"nfo_account\".\"id\" = \"nfo_object\".\"storage_account_id\" INNER JOIN \"storage_roots\" AS \"nfo_root\" ON \"nfo_root\".\"id\" = \"nfo_parent\".\"storage_root_id\" INNER JOIN \"library_storage_roots\" AS \"nfo_library_root\" ON \"nfo_library_root\".\"storage_root_id\" = \"nfo_root\".\"id\" INNER JOIN \"library_catalog_items\" AS \"nfo_membership\" ON \"nfo_membership\".\"library_id\" = \"nfo_library_root\".\"library_id\" AND (\"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"id\" OR \"nfo_membership\".\"catalog_item_id\" = \"nfo_item\".\"structure_owner_item_id\") INNER JOIN \"libraries\" AS \"nfo_library\" ON \"nfo_library\".\"id\" = \"nfo_membership\".\"library_id\" WHERE \"nfo_parent\".\"storage_root_id\" = ? AND \"nfo_parent\".\"storage_object_id\" = ? AND \"nfo_item\".\"is_present\" = ? AND \"nfo_item\".\"classification_state\" = ? AND \"nfo_parent\".\"presence_state\" = ? AND \"nfo_parent\".\"children_indexed\" = ? AND \"nfo_parent\".\"children_index_revision\" = ? AND \"nfo_child\".\"presence_state\" IN (?, ?) AND \"nfo_object\".\"object_type\" = ? AND \"nfo_object\".\"presence_state\" = ? AND \"nfo_object\".\"normalized_name\" LIKE ? AND \"nfo_account\".\"status\" = ? AND \"nfo_root\".\"reconciled_sync_revision\" >= ? AND \"nfo_library\".\"is_enabled\" = ? LIMIT ?",
+      {
+        "statements": 1024,
+        "elapsed_us": 87621,
+        "failures": 0,
+        "max_elapsed_us": 608
+      }
+    ],
+    [
+      "SELECT \"sync_revision\", \"reconciled_sync_revision\" FROM \"storage_roots\" WHERE \"id\" = ?",
+      {
+        "statements": 5658,
+        "elapsed_us": 68949,
+        "failures": 0,
+        "max_elapsed_us": 560
+      }
+    ],
+    [
+      "SELECT DISTINCT \"publication_fact_object\".\"id\" AS \"storage_object_id\" FROM \"storage_root_objects\" AS \"publication_fact_relation\" INNER JOIN \"storage_objects\" AS \"publication_fact_object\" ON \"publication_fact_object\".\"id\" = \"publication_fact_relation\".\"storage_object_id\" INNER JOIN \"storage_roots\" AS \"publication_fact_root\" ON \"publication_fact_root\".\"id\" = \"publication_fact_relation\".\"storage_root_id\" LEFT JOIN \"storage_roots\" AS \"publication_fact_origin_root\" ON \"publication_fact_origin_root\".\"id\" = \"publication_fact_object\".\"facts_observed_storage_root_id\" WHERE \"publication_fact_object\".\"id\" IN (?) AND \"publication_fact_object\".\"presence_state\" = ? AND \"publication_fact_relation\".\"presence_state\" = ? AND \"publication_fact_root\".\"reconciled_sync_revision\" >= \"publication_fact_relation\".\"observed_sync_revision\" AND ((\"publication_fact_object\".\"facts_observed_storage_root_id\" IS NOT NULL AND \"publication_fact_origin_root\".\"reconciled_sync_revision\" >= \"publication_fact_object\".\"observed_sync_revision\" AND \"publication_fact_object\".\"facts_observed_storage_root_id\" = ?) OR (\"publication_fact_object\".\"facts_observed_storage_root_id\" IS NULL AND \"publication_fact_root\".\"reconciled_sync_revision\" >= \"publication_fact_object\".\"observed_sync_revision\" AND (NOT EXISTS(SELECT ? FROM \"storage_root_objects\" AS \"publication_fact_other_relation\" WHERE \"publication_fact_other_relation\".\"storage_object_id\" = \"publication_fact_object\".\"id\" AND \"publication_fact_other_relation\".\"storage_root_id\" <> \"publication_fact_relation\".\"storage_root_id\")))) AND \"publication_fact_relation\".\"storage_root_id\" = ?",
+      {
+        "statements": 4534,
+        "elapsed_us": 66673,
+        "failures": 0,
+        "max_elapsed_us": 706
+      }
+    ],
+    [
+      "SELECT DISTINCT \"catalog_scope_relation\".\"storage_root_id\" AS \"storage_root_id\", \"catalog_scope_relation\".\"storage_object_id\" AS \"storage_object_id\", \"catalog_scope_relation\".\"parent_storage_object_id\" AS \"parent_storage_object_id\", \"catalog_scope_relation\".\"children_indexed\" AS \"children_indexed\", \"catalog_scope_relation\".\"children_index_revision\" AS \"children_index_revision\", \"catalog_scope_root\".\"reconciled_sync_revision\" AS \"reconciled_sync_revision\", \"catalog_scope_object\".\"object_type\" AS \"object_type\" FROM \"catalog_items\" AS \"catalog_scope_item\" INNER JOIN \"identity_matches\" AS \"catalog_scope_identity\" ON \"catalog_scope_identity\".\"candidate_catalog_item_id\" = \"catalog_scope_item\".\"id\" AND \"catalog_scope_identity\".\"state\" = ? INNER JOIN \"storage_objects\" AS \"catalog_scope_object\" ON \"catalog_scope_object\".\"id\" = \"catalog_scope_identity\".\"storage_object_id\" INNER JOIN \"storage_root_objects\" AS \"catalog_scope_relation\" ON \"catalog_scope_relation\".\"storage_object_id\" = \"catalog_scope_object\".\"id\" INNER JOIN \"storage_roots\" AS \"catalog_scope_root\" ON \"catalog_scope_root\".\"id\" = \"catalog_scope_relation\".\"storage_root_id\" INNER JOIN \"library_storage_roots\" AS \"catalog_scope_library_root\" ON \"catalog_scope_library_root\".\"storage_root_id\" = \"catalog_scope_root\".\"id\" INNER JOIN \"library_catalog_items\" AS \"catalog_scope_membership\" ON \"catalog_scope_membership\".\"library_id\" = \"catalog_scope_library_root\".\"library_id\" AND \"catalog_scope_membership\".\"catalog_item_id\" = \"catalog_scope_item\".\"id\" INNER JOIN \"libraries\" AS \"catalog_scope_library\" ON \"catalog_scope_library\".\"id\" = \"catalog_scope_membership\".\"library_id\" WHERE \"catalog_scope_item\".\"id\" = ? AND \"catalog_scope_item\".\"is_present\" = ? AND \"catalog_scope_item\".\"classification_state\" = ? AND \"catalog_scope_object\".\"presence_state\" = ? AND \"catalog_scope_relation\".\"presence_state\" = ? AND \"catalog_scope_library\".\"is_enabled\" = ? AND \"catalog_scope_relation\".\"storage_object_id\" IN (SELECT \"storage_object_id\" FROM \"identity_matches\" WHERE \"candidate_catalog_item_id\" = ? AND \"state\" = ?) AND \"catalog_scope_relation\".\"storage_root_id\" = ? ORDER BY \"catalog_scope_relation\".\"storage_root_id\" ASC LIMIT ?",
+      {
+        "statements": 2997,
+        "elapsed_us": 64771,
+        "failures": 0,
+        "max_elapsed_us": 406
+      }
+    ],
+    [
+      "SELECT DISTINCT \"source_index_object\".\"id\" AS \"storage_object_id\", \"source_index_object\".\"name\" AS \"name\", \"source_index_object\".\"checksum\" AS \"checksum\" FROM \"identity_matches\" AS \"source_index_identity\" INNER JOIN \"storage_root_objects\" AS \"source_index_parent\" ON \"source_index_parent\".\"storage_object_id\" = \"source_index_identity\".\"storage_object_id\" INNER JOIN \"storage_root_objects\" AS \"source_index_child\" ON \"source_index_child\".\"storage_root_id\" = \"source_index_parent\".\"storage_root_id\" AND \"source_index_child\".\"parent_storage_object_id\" = \"source_index_parent\".\"storage_object_id\" INNER JOIN \"storage_objects\" AS \"source_index_object\" ON \"source_index_object\".\"id\" = \"source_index_child\".\"storage_object_id\" INNER JOIN \"storage_roots\" AS \"source_index_root\" ON \"source_index_root\".\"id\" = \"source_index_parent\".\"storage_root_id\" INNER JOIN \"library_storage_roots\" AS \"source_index_library_root\" ON \"source_index_library_root\".\"storage_root_id\" = \"source_index_root\".\"id\" INNER JOIN \"library_catalog_items\" AS \"source_index_membership\" ON \"source_index_membership\".\"library_id\" = \"source_index_library_root\".\"library_id\" AND \"source_index_membership\".\"catalog_item_id\" = ? INNER JOIN \"libraries\" AS \"source_index_library\" ON \"source_index_library\".\"id\" = \"source_index_membership\".\"library_id\" WHERE \"source_index_identity\".\"candidate_catalog_item_id\" = ? AND \"source_index_identity\".\"state\" = ? AND \"source_index_parent\".\"storage_root_id\" = ? AND \"source_index_parent\".\"children_indexed\" = ? AND \"source_index_parent\".\"children_index_revision\" >= ? AND \"source_index_child\".\"presence_state\" = ? AND \"source_index_object\".\"object_type\" = ? AND \"source_index_object\".\"presence_state\" = ? AND \"source_index_root\".\"reconciled_sync_revision\" >= ? AND \"source_index_library\".\"is_enabled\" = ?",
+      {
+        "statements": 256,
+        "elapsed_us": 57057,
+        "failures": 0,
+        "max_elapsed_us": 647
+      }
+    ],
+    [
+      "SELECT \"job\".\"id\" AS \"id\", \"job\".\"task_kind\" AS \"task_kind\", \"job\".\"scope_type\" AS \"scope_type\", \"job\".\"scope_id\" AS \"scope_id\", \"job\".\"expected_revision\" AS \"expected_revision\", \"job\".\"required_sync_job_id\" AS \"required_sync_job_id\", \"job\".\"input_sync_revision\" AS \"input_sync_revision\", \"job\".\"state\" AS \"state\", \"job\".\"priority\" AS \"priority\", \"job\".\"attempt_count\" AS \"attempt_count\", \"job\".\"metadata_requirement\" AS \"metadata_requirement\", \"job\".\"metadata_source_mode\" AS \"metadata_source_mode\", \"job\".\"local_metadata_access_mode\" AS \"local_metadata_access_mode\", \"job\".\"storage_root_affinity\" AS \"storage_root_affinity\" FROM \"work_jobs\" AS \"job\" WHERE (job.state IN ('Pending', 'Running')) AND \"job\".\"task_kind\" IN (?, ?, ?) AND ((\"job\".\"state\" = ? AND (\"job\".\"available_at\" IS NULL OR \"job\".\"available_at\" <= ?)) OR (\"job\".\"state\" = ? AND (\"job\".\"lease_expires_at\" IS NULL OR \"job\".\"lease_expires_at\" <= ?))) AND (\"job\".\"required_sync_job_id\" IS NULL OR EXISTS(SELECT ? FROM \"work_jobs\" AS \"dependency\" INNER JOIN \"work_results\" AS \"dependency_result\" ON \"dependency_result\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_sync_pages\" AS \"sync_page\" ON \"sync_page\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_roots\" AS \"sync_root\" ON \"sync_root\".\"id\" = \"sync_page\".\"storage_root_id\" INNER JOIN \"storage_root_objects\" AS \"scope_state\" ON \"scope_state\".\"storage_root_id\" = \"sync_root\".\"id\" AND \"scope_state\".\"storage_object_id\" = \"sync_page\".\"scope_storage_object_id\" WHERE \"dependency\".\"id\" = \"job\".\"required_sync_job_id\" AND \"dependency\".\"state\" = ? AND \"dependency\".\"task_kind\" = ? AND \"dependency\".\"scope_type\" = ? AND \"sync_page\".\"scope_storage_object_id\" = \"dependency\".\"scope_id\" AND (\"dependency\".\"storage_root_affinity\" = ? OR \"dependency\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"job\".\"storage_root_affinity\" = ? OR \"job\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"dependency_result\".\"result_sync_revision\" = \"job\".\"input_sync_revision\" OR \"job\".\"input_sync_revision\" IS NULL) AND \"sync_page\".\"scope_completed\" = ? AND \"sync_page\".\"sync_revision\" = \"dependency_result\".\"result_sync_revision\" AND \"sync_root\".\"reconciled_sync_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"children_indexed\" = ? AND \"scope_state\".\"children_index_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"presence_state\" = ?)) AND EXISTS(SELECT ? FROM \"storage_accounts\" AS \"claim_scope_account\" WHERE \"claim_scope_account\".\"id\" = ? AND \"claim_scope_account\".\"status\" = ? LIMIT ?) AND ((\"job\".\"scope_type\" = ? AND EXISTS(SELECT ? FROM \"storage_objects\" AS \"claim_scope_object\" WHERE \"claim_scope_object\".\"id\" = \"job\".\"scope_id\" AND \"claim_scope_object\".\"storage_account_id\" = ?)) OR (\"job\".\"scope_type\" = ? AND EXISTS(SELECT ? FROM \"storage_roots\" AS \"claim_scope_root\" INNER JOIN \"storage_root_objects\" AS \"claim_scope_root_relation\" ON \"claim_scope_root_relation\".\"storage_root_id\" = \"claim_scope_root\".\"id\" INNER JOIN \"storage_objects\" AS \"claim_scope_root_object\" ON \"claim_scope_root_object\".\"id\" = \"claim_scope_root_relation\".\"storage_object_id\" WHERE \"claim_scope_root\".\"id\" = \"job\".\"scope_id\" AND \"claim_scope_root\".\"storage_account_id\" = ? AND \"claim_scope_root_relation\".\"parent_storage_object_id\" IS NULL))) ORDER BY \"job\".\"priority\" DESC, \"job\".\"created_at\" ASC, \"job\".\"id\" ASC LIMIT ?",
+      {
+        "statements": 2696,
+        "elapsed_us": 55550,
+        "failures": 0,
+        "max_elapsed_us": 858
+      }
+    ],
+    [
+      "SELECT \"job\".\"id\" AS \"id\", \"job\".\"task_kind\" AS \"task_kind\", \"job\".\"scope_type\" AS \"scope_type\", \"job\".\"scope_id\" AS \"scope_id\", \"job\".\"expected_revision\" AS \"expected_revision\", \"job\".\"required_sync_job_id\" AS \"required_sync_job_id\", \"job\".\"input_sync_revision\" AS \"input_sync_revision\", \"job\".\"state\" AS \"state\", \"job\".\"priority\" AS \"priority\", \"job\".\"attempt_count\" AS \"attempt_count\", \"job\".\"metadata_requirement\" AS \"metadata_requirement\", \"job\".\"metadata_source_mode\" AS \"metadata_source_mode\", \"job\".\"local_metadata_access_mode\" AS \"local_metadata_access_mode\", \"job\".\"storage_root_affinity\" AS \"storage_root_affinity\" FROM \"work_jobs\" AS \"job\" WHERE (job.state IN ('Pending', 'Running')) AND \"job\".\"task_kind\" IN (?) AND ((\"job\".\"state\" = ? AND (\"job\".\"available_at\" IS NULL OR \"job\".\"available_at\" <= ?)) OR (\"job\".\"state\" = ? AND (\"job\".\"lease_expires_at\" IS NULL OR \"job\".\"lease_expires_at\" <= ?))) AND (\"job\".\"required_sync_job_id\" IS NULL OR EXISTS(SELECT ? FROM \"work_jobs\" AS \"dependency\" INNER JOIN \"work_results\" AS \"dependency_result\" ON \"dependency_result\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_sync_pages\" AS \"sync_page\" ON \"sync_page\".\"job_id\" = \"dependency\".\"id\" INNER JOIN \"storage_roots\" AS \"sync_root\" ON \"sync_root\".\"id\" = \"sync_page\".\"storage_root_id\" INNER JOIN \"storage_root_objects\" AS \"scope_state\" ON \"scope_state\".\"storage_root_id\" = \"sync_root\".\"id\" AND \"scope_state\".\"storage_object_id\" = \"sync_page\".\"scope_storage_object_id\" WHERE \"dependency\".\"id\" = \"job\".\"required_sync_job_id\" AND \"dependency\".\"state\" = ? AND \"dependency\".\"task_kind\" = ? AND \"dependency\".\"scope_type\" = ? AND \"sync_page\".\"scope_storage_object_id\" = \"dependency\".\"scope_id\" AND (\"dependency\".\"storage_root_affinity\" = ? OR \"dependency\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"job\".\"storage_root_affinity\" = ? OR \"job\".\"storage_root_affinity\" = \"sync_page\".\"storage_root_id\") AND (\"dependency_result\".\"result_sync_revision\" = \"job\".\"input_sync_revision\" OR \"job\".\"input_sync_revision\" IS NULL) AND \"sync_page\".\"scope_completed\" = ? AND \"sync_page\".\"sync_revision\" = \"dependency_result\".\"result_sync_revision\" AND \"sync_root\".\"reconciled_sync_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"children_indexed\" = ? AND \"scope_state\".\"children_index_revision\" >= \"dependency_result\".\"result_sync_revision\" AND \"scope_state\".\"presence_state\" = ?)) ORDER BY \"job\".\"priority\" DESC, \"job\".\"created_at\" ASC, \"job\".\"id\" ASC LIMIT ?",
+      {
+        "statements": 2962,
+        "elapsed_us": 53814,
+        "failures": 0,
+        "max_elapsed_us": 2144
+      }
+    ],
+    [
+      "WITH RECURSIVE filesystem_path (storage_root_id, storage_object_id, parent_storage_object_id, name, presence_state, observed_sync_revision, reconciled_sync_revision, depth) AS (SELECT r.storage_root_id, r.storage_object_id, r.parent_storage_object_id, o.name, r.presence_state, r.observed_sync_revision, sr.reconciled_sync_revision, CAST(0 AS BIGINT) FROM storage_root_objects r JOIN storage_objects o ON o.id = r.storage_object_id JOIN storage_roots sr ON sr.id = r.storage_root_id AND sr.storage_account_id = o.storage_account_id WHERE o.storage_account_id = ? AND o.provider_drive_id = 'local' AND o.provider_object_id = ? UNION ALL SELECT r.storage_root_id, r.storage_object_id, r.parent_storage_object_id, o.name, r.presence_state, r.observed_sync_revision, p.reconciled_sync_revision, p.depth + CAST(1 AS BIGINT) FROM storage_root_objects r JOIN storage_objects o ON o.id = r.storage_object_id JOIN filesystem_path p ON p.storage_root_id = r.storage_root_id AND p.parent_storage_object_id = r.storage_object_id WHERE p.depth < 4096 ) SELECT storage_root_id, storage_object_id, parent_storage_object_id, name, presence_state, observed_sync_revision, reconciled_sync_revision, depth FROM filesystem_path",
+      {
+        "statements": 2304,
+        "elapsed_us": 48182,
+        "failures": 0,
+        "max_elapsed_us": 308
+      }
+    ],
+    [
+      "INSERT INTO \"work_jobs\" (\"id\", \"task_kind\", \"scope_type\", \"scope_id\", \"expected_revision\", \"required_sync_job_id\", \"input_sync_revision\", \"state\", \"priority\", \"attempt_count\", \"available_at\", \"created_at\", \"metadata_requirement\", \"metadata_source_mode\", \"local_metadata_access_mode\", \"storage_root_affinity\", \"natural_key_storage_root_id\") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT  DO NOTHING",
+      {
+        "statements": 1470,
+        "elapsed_us": 44572,
+        "failures": 0,
+        "max_elapsed_us": 4823
+      }
+    ],
+    [
+      "SELECT \"id\", \"adapter_kind\", \"source_instance_id\", \"state\", \"dry_run\", \"checkpoint\", \"counters\", \"attempt_count\" FROM \"import_jobs\" WHERE \"adapter_kind\" = ? AND ((\"state\" = ? AND (\"available_at\" IS NULL OR \"available_at\" <= ?)) OR (\"state\" = ? AND \"lease_expires_at\" <= ?)) ORDER BY \"created_at\" ASC LIMIT ?",
+      {
+        "statements": 2959,
+        "elapsed_us": 42478,
+        "failures": 0,
+        "max_elapsed_us": 159
+      }
+    ],
+    [
+      "INSERT INTO \"work_staging_rows\" (\"id\", \"job_id\", \"publication_id\", \"entity_kind\", \"natural_key\", \"payload\", \"validation_state\") VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (\"job_id\", \"publication_id\", \"entity_kind\", \"natural_key\") DO UPDATE SET \"payload\" = \"excluded\".\"payload\", \"validation_state\" = \"excluded\".\"validation_state\"",
+      {
+        "statements": 955,
+        "elapsed_us": 39134,
+        "failures": 0,
+        "max_elapsed_us": 597
+      }
+    ],
+    [
+      "SELECT \"work_jobs\".\"id\" AS \"id\", \"work_jobs\".\"task_kind\" AS \"task_kind\", \"work_jobs\".\"scope_type\" AS \"scope_type\", \"work_jobs\".\"scope_id\" AS \"scope_id\", \"work_jobs\".\"expected_revision\" AS \"expected_revision\", \"work_jobs\".\"required_sync_job_id\" AS \"required_sync_job_id\", \"work_jobs\".\"input_sync_revision\" AS \"input_sync_revision\", \"work_jobs\".\"state\" AS \"state\", \"work_jobs\".\"priority\" AS \"priority\", \"work_jobs\".\"attempt_count\" AS \"attempt_count\", \"work_jobs\".\"metadata_requirement\" AS \"metadata_requirement\", \"work_jobs\".\"metadata_source_mode\" AS \"metadata_source_mode\", \"work_jobs\".\"local_metadata_access_mode\" AS \"local_metadata_access_mode\", \"work_jobs\".\"storage_root_affinity\" AS \"storage_root_affinity\" FROM \"work_jobs\" WHERE \"scope_id\" = ? AND \"task_kind\" = ? AND \"expected_revision\" = ? AND \"natural_key_storage_root_id\" = ? AND \"state\" IN (?, ?) LIMIT ?",
+      {
+        "statements": 1470,
+        "elapsed_us": 39017,
+        "failures": 0,
+        "max_elapsed_us": 317
+      }
+    ]
+  ],
+  "scan_concurrency": [
+    {
+      "elapsed_seconds": 1.387836292,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 127,
+      "pending_sample_capped": false,
+      "completed": 0,
+      "cpu_percent": null,
+      "available_memory_bytes": null,
+      "database_p95_ms_upper_bound": 1,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "host_sample_unavailable"
+    },
+    {
+      "elapsed_seconds": 2.00064475,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 70,
+      "pending_sample_capped": false,
+      "completed": 96,
+      "cpu_percent": null,
+      "available_memory_bytes": null,
+      "database_p95_ms_upper_bound": 1,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "host_sample_unavailable"
+    },
+    {
+      "elapsed_seconds": 4.001250333,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 42,
+      "pending_sample_capped": false,
+      "completed": 293,
+      "cpu_percent": 14.524174,
+      "available_memory_bytes": 11993268224,
+      "database_p95_ms_upper_bound": 5,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "holding"
+    },
+    {
+      "elapsed_seconds": 9.531591833,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 127,
+      "pending_sample_capped": false,
+      "completed": 123,
+      "cpu_percent": null,
+      "available_memory_bytes": null,
+      "database_p95_ms_upper_bound": 1,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "host_sample_unavailable"
+    },
+    {
+      "elapsed_seconds": 10.001075167,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 93,
+      "pending_sample_capped": false,
+      "completed": 69,
+      "cpu_percent": null,
+      "available_memory_bytes": null,
+      "database_p95_ms_upper_bound": 1,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "host_sample_unavailable"
+    },
+    {
+      "elapsed_seconds": 12.002314292,
+      "mode": "auto",
+      "slots": 1,
+      "active": 1,
+      "pending_sample": 46,
+      "pending_sample_capped": false,
+      "completed": 302,
+      "cpu_percent": 15.016558,
+      "available_memory_bytes": 12005572608,
+      "database_p95_ms_upper_bound": 5,
+      "foreground_p95_ms_upper_bound": null,
+      "reason": "holding"
+    }
+  ],
+  "elapsed_seconds": 16.542287958000088,
+  "peak_server_rss_mib": 59.09375,
+  "peak_fixture_disk_mib": 6.09375
+}

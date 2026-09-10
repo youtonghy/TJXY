@@ -130,6 +130,47 @@ impl FullScanRepository<'_> {
         .transpose()
     }
 
+    /// Reads durable issues for one bounded target page.
+    /// # Errors
+    /// Returns an invalid page size, database or payload failure.
+    pub async fn item_issues(
+        &self,
+        job: WorkJobId,
+        items: &[CatalogItemId],
+    ) -> Result<std::collections::HashMap<CatalogItemId, ScanItemIssue>, DbErr> {
+        if items.len() > 128 {
+            return Err(DbErr::Custom(
+                "scan report page exceeds 128 items".to_owned(),
+            ));
+        }
+        if items.is_empty() {
+            return Ok(std::collections::HashMap::default());
+        }
+        let database = self.connection();
+        database
+            .query_all(
+                database.get_database_backend().build(
+                    Query::select()
+                        .column(Alias::new("payload"))
+                        .from(Alias::new("work_staging_rows"))
+                        .and_where(Expr::col(Alias::new("job_id")).eq(job.as_uuid()))
+                        .and_where(Expr::col(Alias::new("entity_kind")).eq(ISSUE_KIND))
+                        .and_where(
+                            Expr::col(Alias::new("natural_key"))
+                                .is_in(items.iter().map(ToString::to_string)),
+                        ),
+                ),
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                let issue: ScanItemIssue = serde_json::from_value(row.try_get("", "payload")?)
+                    .map_err(|_| DbErr::Custom("invalid scan item report".to_owned()))?;
+                Ok((CatalogItemId::from_uuid(issue.item_id), issue))
+            })
+            .collect()
+    }
+
     /// Checks recorded child work so a no-change scan reports skipped items accurately.
     ///
     /// # Errors

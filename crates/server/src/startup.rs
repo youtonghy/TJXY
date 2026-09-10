@@ -66,6 +66,8 @@ impl fmt::Debug for BootstrapAdmin {
 type DatabaseMetricCallback = Arc<dyn Fn(&sea_orm::metric::Info<'_>) + Send + Sync>;
 
 pub struct StartupOptions {
+    scan_concurrency: crate::ScanConcurrency,
+    scan_observer: Option<crate::scan_concurrency::ScanObserver>,
     database_metric_callback: Option<DatabaseMetricCallback>,
     database_url: String,
     identity: ServerIdentity,
@@ -184,6 +186,8 @@ impl StartupOptions {
     pub fn new(database_url: impl Into<String>, identity: ServerIdentity) -> Self {
         Self {
             database_metric_callback: None,
+            scan_concurrency: crate::ScanConcurrency::default(),
+            scan_observer: None,
             database_url: database_url.into(),
             identity,
             bootstrap_admin: None,
@@ -235,6 +239,23 @@ impl StartupOptions {
         callback: impl Fn(&sea_orm::metric::Info<'_>) + Send + Sync + 'static,
     ) -> Self {
         self.database_metric_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// Sets the background scan admission mode; foreground workers remain reserved.
+    #[must_use]
+    pub fn with_scan_concurrency(mut self, concurrency: crate::ScanConcurrency) -> Self {
+        self.scan_concurrency = concurrency;
+        self
+    }
+
+    /// Installs an aggregate observer for bounded scan performance diagnostics.
+    #[must_use]
+    pub fn with_scan_observer(
+        mut self,
+        observer: impl Fn(&crate::ScanConcurrencySample) + Send + Sync + 'static,
+    ) -> Self {
+        self.scan_observer = Some(Arc::new(observer));
         self
     }
 
@@ -518,9 +539,15 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         database.close().await?;
         database = Database::connect(&options.database_url).await?;
     }
-    if let Some(callback) = options.database_metric_callback.take() {
-        database.set_metric_callback(move |info| callback(info));
-    }
+    let scan_pressure = Arc::new(crate::scan_concurrency::ScanPressure::default());
+    let sql_pressure = Arc::clone(&scan_pressure);
+    let callback = options.database_metric_callback.take();
+    database.set_metric_callback(move |info| {
+        sql_pressure.database(info.elapsed, info.failed);
+        if let Some(callback) = &callback {
+            callback(info);
+        }
+    });
     if let Some(runtime) = options.logging_runtime.as_ref() {
         let settings = tjxy_db::LoggingSettingsRepository::new(&database)
             .get()
@@ -703,6 +730,9 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         image_fetcher,
         local_reference_fallback,
         filesystem_realtime_enabled: options.filesystem_realtime_enabled,
+        scan_concurrency: options.scan_concurrency,
+        scan_pressure: Arc::clone(&scan_pressure),
+        scan_observer: options.scan_observer.take(),
     })
     .await?;
     let direct_metadata = Arc::new(direct_metadata);
@@ -843,6 +873,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_legacy_query_token_enabled(options.legacy_query_token_enabled)
     .with_ready(true);
+    state.scan_pressure = scan_pressure;
     if let Some(browser) = filesystem_browser {
         state = state.with_filesystem_browser(browser);
     }
@@ -1140,6 +1171,9 @@ fn backend_error_category(error: &tjxy_storage::BackendError) -> &'static str {
 }
 
 struct StorageConfiguration<'a> {
+    scan_concurrency: crate::ScanConcurrency,
+    scan_pressure: Arc<crate::scan_concurrency::ScanPressure>,
+    scan_observer: Option<crate::scan_concurrency::ScanObserver>,
     database: &'a sea_orm::DatabaseConnection,
     filesystem_backends: Vec<PreparedFilesystemBackend>,
     storage_backends: Vec<ConfiguredStorageBackend>,
@@ -1161,6 +1195,9 @@ async fn configure_storage(
     crate::runtime_storage::RuntimeStorageError,
 > {
     let StorageConfiguration {
+        scan_concurrency,
+        scan_pressure,
+        scan_observer,
         database,
         filesystem_backends,
         storage_backends,
@@ -1201,8 +1238,18 @@ async fn configure_storage(
             configured.backend,
         )?;
     }
-    worker::spawn_probe_worker(database.clone(), Arc::new(probe));
-    worker::spawn_metadata_worker(database.clone(), Arc::new(metadata));
+    let probe = Arc::new(probe);
+    let metadata = Arc::new(metadata);
+    worker::spawn_probe_worker(database.clone(), Arc::clone(&probe));
+    worker::spawn_metadata_worker(database.clone(), Arc::clone(&metadata));
+    worker::spawn_background_scan_worker(
+        database.clone(),
+        probe,
+        metadata,
+        scan_concurrency,
+        scan_pressure,
+        scan_observer,
+    );
     Ok((media, direct_metadata, runtime))
 }
 

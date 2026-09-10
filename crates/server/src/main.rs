@@ -95,6 +95,8 @@ enum StartupError {
     InvalidAiAdmissionNumber(&'static str, u64),
     #[error("AI admission configuration is invalid: {0}")]
     InvalidAiAdmissionConfiguration(#[source] AiAdmissionConfigError),
+    #[error("TJXY_SCAN_CONCURRENCY must be auto or an integer from 1 to 8")]
+    InvalidScanConcurrency,
     #[error("service initialization failed: {0}")]
     Initialization(#[from] InitializationError),
     #[error("TJXY admin assets are invalid: {0}")]
@@ -165,6 +167,14 @@ async fn serve_application(
         .with_theaudiodb_provider(Arc::clone(&the_audio_db))
         .with_musicbrainz_provider(Arc::clone(&musicbrainz));
     startup = startup.with_ai_admission_config(ai_admission_config(env::var)?);
+    let scan_mode = match env::var("TJXY_SCAN_CONCURRENCY") {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| StartupError::InvalidScanConcurrency)?,
+        Err(env::VarError::NotPresent) => tjxy_server::ScanConcurrency::default(),
+        Err(env::VarError::NotUnicode(_)) => return Err(StartupError::InvalidScanConcurrency),
+    };
+    startup = startup.with_scan_concurrency(scan_mode);
     let audio_db_key = env::var("TJXY_THEAUDIODB_API_KEY").unwrap_or_else(|_| "2".to_owned());
     let musicbrainz_user_agent = env::var("TJXY_MUSICBRAINZ_USER_AGENT").unwrap_or_else(|_| {
         format!(

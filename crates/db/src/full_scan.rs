@@ -134,6 +134,53 @@ impl<'connection> FullScanRepository<'connection> {
         Ok(ids)
     }
 
+    /// Reads at most 128 targets after a UUID cursor without materializing the library.
+    /// Each projection is bounded independently before merging duplicate memberships.
+    /// # Errors
+    /// Returns stale scan policy or database failures.
+    pub async fn target_page(
+        &self,
+        claimed: &ClaimedWorkJob,
+        after: Option<CatalogItemId>,
+    ) -> Result<Vec<CatalogItemId>, FullScanRepositoryError> {
+        let context = scan_context(self.database, claimed).await?;
+        let mut queries = vec![explicit_targets(
+            context.library_id.as_uuid(),
+            context.root_id,
+        )];
+        if context.policy.selects_all_synced_objects() {
+            queries.push(projected_targets(
+                context.library_id.as_uuid(),
+                context.root_id,
+            ));
+        }
+        let mut ids = HashSet::new();
+        for source in queries {
+            let mut page = Query::select();
+            page.column(Alias::new("catalog_item_id"))
+                .from_subquery(source, Alias::new("scan_page"))
+                .distinct()
+                .order_by(Alias::new("catalog_item_id"), Order::Asc)
+                .limit(128);
+            if let Some(after) = after {
+                page.and_where(Expr::col(Alias::new("catalog_item_id")).gt(after.as_uuid()));
+            }
+            for row in self
+                .database
+                .query_all(self.database.get_database_backend().build(&page))
+                .await?
+            {
+                ids.insert(CatalogItemId::from_uuid(
+                    row.try_get("", "catalog_item_id")?,
+                ));
+            }
+        }
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable_by_key(|id| id.as_uuid());
+        ids.truncate(128);
+        Ok(ids)
+    }
+
     /// Returns a bounded, deterministic set of Series eligible for background expansion.
     ///
     /// # Errors
@@ -1148,8 +1195,6 @@ fn explicit_targets(
 ) -> sea_orm::sea_query::SelectStatement {
     let membership = Alias::new("scan_membership");
     let item = Alias::new("scan_item");
-    let identity = Alias::new("scan_identity");
-    let relation = Alias::new("scan_identity_root");
     let mut query = Query::select();
     query
         .expr_as(
@@ -1168,23 +1213,9 @@ fn explicit_targets(
         .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((item.clone(), Alias::new("classification_state"))).eq("Matched"));
     if let Some(root_id) = root_id {
-        query
-            .join_as(
-                JoinType::InnerJoin,
-                Alias::new("identity_matches"),
-                identity.clone(),
-                Expr::col((identity.clone(), Alias::new("candidate_catalog_item_id")))
-                    .equals((item, Alias::new("id"))),
-            )
-            .join_as(
-                JoinType::InnerJoin,
-                Alias::new("storage_root_objects"),
-                relation.clone(),
-                Expr::col((relation.clone(), Alias::new("storage_object_id")))
-                    .equals((identity.clone(), Alias::new("storage_object_id"))),
-            )
-            .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
-            .and_where(Expr::col((relation, Alias::new("storage_root_id"))).eq(root_id.as_uuid()));
+        query.and_where(
+            Expr::col((item, Alias::new("id"))).in_subquery(root_matched_items(root_id)),
+        );
     }
     query
 }
@@ -1197,8 +1228,6 @@ fn projected_targets(
     let membership = Alias::new("scan_owner_membership");
     let publication = Alias::new("scan_publication");
     let projected = Alias::new("scan_projected");
-    let identity = Alias::new("scan_owner_identity");
-    let relation = Alias::new("scan_owner_root");
     let mut query = Query::select();
     query
         .expr_as(
@@ -1231,25 +1260,32 @@ fn projected_targets(
         .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"));
     if let Some(root_id) = root_id {
         query
-            .join_as(
-                JoinType::InnerJoin,
-                Alias::new("identity_matches"),
-                identity.clone(),
-                Expr::col((identity.clone(), Alias::new("candidate_catalog_item_id")))
-                    .equals((owner, Alias::new("id"))),
+            .and_where(
+                Expr::col((owner, Alias::new("id"))).in_subquery(root_matched_items(root_id)),
             )
-            .join_as(
-                JoinType::InnerJoin,
-                Alias::new("storage_root_objects"),
-                relation.clone(),
-                Expr::col((relation.clone(), Alias::new("storage_object_id")))
-                    .equals((identity.clone(), Alias::new("storage_object_id"))),
-            )
-            .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
-            .and_where(Expr::col((relation, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
             .and_where(Expr::col((projected, Alias::new("storage_root_id"))).eq(root_id.as_uuid()));
     }
     query
+}
+
+// Keep the root inventory independent of the outer library item. A flattened
+// join lets SQLite traverse every object in the root again for every item.
+fn root_matched_items(root_id: StorageRootId) -> SelectStatement {
+    let identity = Alias::new("scan_root_identity");
+    let relation = Alias::new("scan_root_relation");
+    Query::select()
+        .column((identity.clone(), Alias::new("candidate_catalog_item_id")))
+        .from_as(Alias::new("storage_root_objects"), relation.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("identity_matches"),
+            identity.clone(),
+            Expr::col((identity.clone(), Alias::new("storage_object_id")))
+                .equals((relation.clone(), Alias::new("storage_object_id"))),
+        )
+        .and_where(Expr::col((relation, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
+        .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
+        .to_owned()
 }
 
 async fn finish<T>(

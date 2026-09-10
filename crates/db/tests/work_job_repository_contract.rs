@@ -1775,12 +1775,12 @@ async fn full_scan_dependency_polling_stays_bounded_as_the_parent_ages() {
         (
             WorkTaskKind::FullLibraryRootScan,
             WorkScope::LibraryRootBinding(tjxy_common::LibraryRootBindingId::new()),
-            60,
+            30,
         ),
         (
             WorkTaskKind::FullMediaScan,
             WorkScope::Library(LibraryId::new()),
-            60,
+            30,
         ),
         (
             WorkTaskKind::IndexMediaSources,
@@ -1950,4 +1950,157 @@ async fn historical_jobs_past_the_retry_limit_are_skipped_before_execution() {
     let record = jobs.get(submitted.job().id()).await.unwrap().unwrap();
     assert_eq!(record.state(), WorkJobState::Failed);
     assert_eq!(record.attempt_count(), 163);
+}
+
+#[tokio::test]
+async fn adaptive_claims_reserve_foreground_and_exclude_busy_roots() {
+    let database = database().await;
+    let jobs = WorkJobRepository::new(&database);
+    let root = StorageRootId::new();
+    let mut ids = Vec::new();
+    for (priority, affinity) in [(50, Some(root)), (20, None), (100, None)] {
+        let mut spec = WorkJobSpec::new(
+            WorkTaskKind::ExpandItem,
+            WorkScope::CatalogItem(CatalogItemId::new()),
+            1,
+            priority,
+        )
+        .unwrap();
+        if let Some(root) = affinity {
+            spec = spec.with_storage_root_affinity(root).unwrap();
+        }
+        ids.push(jobs.enqueue_or_join(&spec).await.unwrap().job().id());
+    }
+    let kinds = [WorkTaskKind::ExpandItem];
+    let sampled = jobs.pending_background_roots(&kinds, 256).await.unwrap();
+    assert_eq!(sampled.len(), 2);
+    assert!(sampled.contains(&Uuid::nil()));
+    assert!(sampled.contains(&root.as_uuid()));
+    assert_eq!(
+        jobs.pending_background_roots(&kinds, 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let claimed = jobs
+        .claim_next_background(
+            &kinds,
+            &[root.as_uuid()],
+            "background",
+            Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), ids[1]);
+    assert!(
+        jobs.claim_next_background(
+            &kinds,
+            &[root.as_uuid()],
+            "background",
+            Duration::seconds(60)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        jobs.claim_next_foreground(&kinds, "foreground", Duration::seconds(60))
+            .await
+            .unwrap()
+            .unwrap()
+            .id(),
+        ids[2]
+    );
+    assert_eq!(
+        jobs.claim_next_background(&kinds, &[], "background", Duration::seconds(60))
+            .await
+            .unwrap()
+            .unwrap()
+            .id(),
+        ids[0]
+    );
+}
+
+#[tokio::test]
+async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backoff() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 9, 10, 0, 0, 0).unwrap();
+    let (jobs, clock) = repository(&database, now);
+    let mut parents = Vec::new();
+    for message in ["full scan scheduled 4 child jobs", "provider rate limit"] {
+        jobs.enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::FullMediaScan,
+                WorkScope::Library(LibraryId::new()),
+                1,
+                20,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let claimed = jobs
+            .claim_next(
+                &[WorkTaskKind::FullMediaScan],
+                "parent",
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        jobs.defer(&claimed, Duration::seconds(30), message)
+            .await
+            .unwrap();
+        parents.push(claimed.id());
+    }
+    for offset in [0, 100] {
+        clock.set(now + Duration::milliseconds(offset));
+        jobs.enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ExpandItem,
+                WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                20,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let child = jobs
+            .claim_next(&[WorkTaskKind::ExpandItem], "child", Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        complete_with_result(
+            &jobs,
+            &database,
+            &child,
+            WorkJobResult::success(json!({}), Vec::new()),
+        )
+        .await;
+    }
+    let records = jobs.recent_jobs(20).await.unwrap();
+    for (index, id) in parents.into_iter().enumerate() {
+        let record = records
+            .iter()
+            .find(|record| record.job().id() == id)
+            .unwrap();
+        assert_eq!(
+            record.next_attempt_at(),
+            Some(
+                now + if index == 0 {
+                    if database.get_database_backend() == sea_orm::DbBackend::MySql {
+                        Duration::seconds(1)
+                    } else {
+                        Duration::milliseconds(200)
+                    }
+                } else {
+                    Duration::seconds(30)
+                }
+            )
+        );
+        assert_eq!(record.job().state(), WorkJobState::Pending);
+    }
 }
