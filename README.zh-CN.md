@@ -218,6 +218,12 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 打开 `http://127.0.0.1:8096/setup/` 完成安装。默认情况下，安装配置文件会
 保存在当前平台的配置目录中；可以通过 `TJXY_CONFIG_FILE` 指定明确路径。
 
+后台扫描默认使用 `TJXY_SCAN_CONCURRENCY=auto`：按待处理数量、CPU、可用内存、数据库和
+前台请求延迟，在 1–8 个并发任务间缓慢扩容、快速缩容；正在执行的任务会完成后再收缩。
+小于等于 32 项的待处理队列保持单并发，媒体解析同时最多使用 1–4 个后台名额，另为前台保留名额。
+可设置 `TJXY_SCAN_CONCURRENCY=1` 回退到单并发，或设置 2–8 作为固定目标上限；固定模式仍受
+负载保护，采样不可用时退回 1。修改环境变量后重启生效。并发增加不保证更快，SQLite 写入仍然串行。
+
 当前版本完成的工作任务默认保留 7 天。可将
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 每次最多登记 1,000 条旧版本

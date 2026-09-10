@@ -1,0 +1,885 @@
+{
+  "samples_ms": [
+    380.19999999552965,
+    400.1000000014901,
+    543,
+    480.70000000298023,
+    549.3999999985099,
+    504.59999999403954,
+    408.1000000014901,
+    544.4000000059605,
+    427.70000000298023,
+    368.09999999403954
+  ],
+  "first_ms": 380.19999999552965,
+  "repeat_samples_ms": [
+    400.1000000014901,
+    543,
+    480.70000000298023,
+    549.3999999985099,
+    504.59999999403954,
+    408.1000000014901,
+    544.4000000059605,
+    427.70000000298023,
+    368.09999999403954
+  ],
+  "pause_passed": true,
+  "seek_passed": true,
+  "decoded": {
+    "time": 8.113866,
+    "duration": 12,
+    "width": 1280,
+    "height": 720,
+    "paused": false,
+    "error": null
+  },
+  "muted": true,
+  "audio_output_verified": false,
+  "phase": "after root validation, item jobs observed",
+  "active_background_jobs_before_requests": 128,
+  "http": {
+    "movies": 128,
+    "range_latency": [
+      {
+        "concurrency": 1,
+        "range_64k": {
+          "samples": 20,
+          "p50_ms": 26.53275000193389,
+          "p95_ms": 44.490500004030764,
+          "max_ms": 44.490500004030764
+        }
+      },
+      {
+        "concurrency": 5,
+        "range_64k": {
+          "samples": 25,
+          "p50_ms": 40.90100000030361,
+          "p95_ms": 54.576249996898696,
+          "max_ms": 55.191791005199775
+        }
+      },
+      {
+        "concurrency": 20,
+        "range_64k": {
+          "samples": 100,
+          "p50_ms": 76.94404199719429,
+          "p95_ms": 102.61195899511222,
+          "max_ms": 108.5419169976376
+        }
+      }
+    ],
+    "video_bytes": 6267913,
+    "video_sha256": "642c48a152ce56f013003ab0ced8f4f1e027ac67a0e90130fad36b1ae490f37f",
+    "range_bytes_exact": true,
+    "range_unsatisfiable_status": 416,
+    "head_without_body": true,
+    "image_condition_status": 304,
+    "assets": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "scan": [
+    true
+  ],
+  "background_job_samples": [
+    {
+      "elapsed": 0.11380533299961826,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 0.22620720799750416,
+      "active_jobs": 124
+    },
+    {
+      "elapsed": 0.347324166999897,
+      "active_jobs": 122
+    },
+    {
+      "elapsed": 0.4581532500014873,
+      "active_jobs": 122
+    },
+    {
+      "elapsed": 0.5629991669993615,
+      "active_jobs": 122
+    },
+    {
+      "elapsed": 0.6723423329967773,
+      "active_jobs": 122
+    },
+    {
+      "elapsed": 0.7866832500003511,
+      "active_jobs": 120
+    },
+    {
+      "elapsed": 0.901824000000488,
+      "active_jobs": 119
+    },
+    {
+      "elapsed": 1.013349291999475,
+      "active_jobs": 119
+    },
+    {
+      "elapsed": 1.1299556250014575,
+      "active_jobs": 118
+    },
+    {
+      "elapsed": 1.2437294580013258,
+      "active_jobs": 118
+    },
+    {
+      "elapsed": 1.3531010000006063,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 1.4708728749974398,
+      "active_jobs": 116
+    },
+    {
+      "elapsed": 1.6005125829979079,
+      "active_jobs": 116
+    },
+    {
+      "elapsed": 1.719239457997901,
+      "active_jobs": 115
+    },
+    {
+      "elapsed": 1.849391707997711,
+      "active_jobs": 115
+    },
+    {
+      "elapsed": 1.969567583000753,
+      "active_jobs": 113
+    },
+    {
+      "elapsed": 2.0888417919995845,
+      "active_jobs": 113
+    },
+    {
+      "elapsed": 2.2073630419981782,
+      "active_jobs": 113
+    },
+    {
+      "elapsed": 2.326036792001105,
+      "active_jobs": 111
+    },
+    {
+      "elapsed": 2.4522640420036623,
+      "active_jobs": 111
+    },
+    {
+      "elapsed": 2.5663707920029992,
+      "active_jobs": 110
+    },
+    {
+      "elapsed": 2.6804196250013774,
+      "active_jobs": 112
+    },
+    {
+      "elapsed": 2.793812791998789,
+      "active_jobs": 111
+    },
+    {
+      "elapsed": 2.9081074580026325,
+      "active_jobs": 109
+    },
+    {
+      "elapsed": 3.0352265000037733,
+      "active_jobs": 110
+    },
+    {
+      "elapsed": 3.1436943329972564,
+      "active_jobs": 108
+    },
+    {
+      "elapsed": 3.2577163329988252,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 3.371975542002474,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 3.4902004999967176,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 3.604337167002086,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 3.7183032500033733,
+      "active_jobs": 104
+    },
+    {
+      "elapsed": 3.8322697499970673,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 3.9477137499998207,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 4.064227417002257,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 4.179956207997748,
+      "active_jobs": 97
+    },
+    {
+      "elapsed": 4.289152249999461,
+      "active_jobs": 97
+    },
+    {
+      "elapsed": 4.397415125000407,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 4.511636750001344,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 4.625774125001044,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 4.744454042003781,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 4.851845666998997,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 4.961936624997179,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 5.066465042000345,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 5.1806828749977285,
+      "active_jobs": 101
+    },
+    {
+      "elapsed": 5.29234537499724,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 5.402509999999893,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 5.516573542001424,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 5.628914667002391,
+      "active_jobs": 104
+    },
+    {
+      "elapsed": 5.73812766699848,
+      "active_jobs": 103
+    },
+    {
+      "elapsed": 5.853310291997332,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 5.960967582999729,
+      "active_jobs": 104
+    },
+    {
+      "elapsed": 6.073170582996681,
+      "active_jobs": 103
+    },
+    {
+      "elapsed": 6.191129874998296,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 6.308124458002567,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 6.422245000001567,
+      "active_jobs": 107
+    },
+    {
+      "elapsed": 6.5322984579979675,
+      "active_jobs": 108
+    },
+    {
+      "elapsed": 6.6510043750022305,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 6.765109542000573,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 6.883679332997417,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 6.99803108299966,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 7.104793917002098,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 7.214043917003437,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 7.3268891670013545,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 7.438073042001633,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 7.5526068749968545,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 7.668254832999082,
+      "active_jobs": 99
+    },
+    {
+      "elapsed": 7.78426770799706,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 7.8990420830014045,
+      "active_jobs": 99
+    },
+    {
+      "elapsed": 8.013128582999343,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 8.12199474999943,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 8.236241500002507,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 8.351162500002829,
+      "active_jobs": 98
+    },
+    {
+      "elapsed": 8.463064582996594,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 8.570619792000798,
+      "active_jobs": 100
+    },
+    {
+      "elapsed": 8.688107207999565,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 8.79360679200181,
+      "active_jobs": 104
+    },
+    {
+      "elapsed": 8.912369666999439,
+      "active_jobs": 105
+    },
+    {
+      "elapsed": 9.033275000001595,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 9.143409875003272,
+      "active_jobs": 108
+    },
+    {
+      "elapsed": 9.262195333001728,
+      "active_jobs": 110
+    },
+    {
+      "elapsed": 9.385795166999742,
+      "active_jobs": 112
+    },
+    {
+      "elapsed": 9.496901582999271,
+      "active_jobs": 115
+    },
+    {
+      "elapsed": 9.603180291996978,
+      "active_jobs": 116
+    },
+    {
+      "elapsed": 9.726500750002742,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 9.842125957999087,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 9.952338417002466,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 10.067640583001776,
+      "active_jobs": 118
+    },
+    {
+      "elapsed": 10.175513708003564,
+      "active_jobs": 120
+    },
+    {
+      "elapsed": 10.289519749996543,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 10.397061541996663,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 10.51598925000144,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 10.62628862499696,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 10.741673832999368,
+      "active_jobs": 123
+    },
+    {
+      "elapsed": 10.85152595800173,
+      "active_jobs": 124
+    },
+    {
+      "elapsed": 10.970831457998429,
+      "active_jobs": 125
+    },
+    {
+      "elapsed": 11.080884916998912,
+      "active_jobs": 125
+    },
+    {
+      "elapsed": 11.189918417003355,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 11.304569291998632,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 11.418508707996807,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 11.528957082999113,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 11.643431333002809,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 11.762706583002,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 11.87461733300006,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 11.990386249999574,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.105135291996703,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.250601958003244,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.367903582999134,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.481994916997792,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.597014708000643,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.705443250000826,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.811729166998703,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 12.929167166999832,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.044726125001034,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.163868499999808,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.281479874996876,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.400314667000202,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.514233292000426,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.63303283300047,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.741492875000404,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.863762332999613,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 13.984554041999218,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.096349708001071,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.212244207999902,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.395799625002837,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.509909833002894,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.628314125002362,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.750757417001296,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.866218666997156,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 14.973304917002679,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.088151167001342,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.207108125003288,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.321742624997569,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.428003166998678,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.539872583001852,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.653794582998671,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.765978000003088,
+      "active_jobs": 127
+    },
+    {
+      "elapsed": 15.869998000001942,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 15.984638000001723,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 16.089272292003443,
+      "active_jobs": 126
+    },
+    {
+      "elapsed": 16.208770375000313,
+      "active_jobs": 125
+    },
+    {
+      "elapsed": 16.32267037499696,
+      "active_jobs": 123
+    },
+    {
+      "elapsed": 16.441088375002437,
+      "active_jobs": 124
+    },
+    {
+      "elapsed": 16.552709374998813,
+      "active_jobs": 123
+    },
+    {
+      "elapsed": 16.668233083000814,
+      "active_jobs": 122
+    },
+    {
+      "elapsed": 16.78212650000205,
+      "active_jobs": 123
+    },
+    {
+      "elapsed": 16.896475125002326,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 17.01667470800021,
+      "active_jobs": 121
+    },
+    {
+      "elapsed": 17.13069825000275,
+      "active_jobs": 120
+    },
+    {
+      "elapsed": 17.24462208300247,
+      "active_jobs": 119
+    },
+    {
+      "elapsed": 17.358227625001746,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 17.472074042001623,
+      "active_jobs": 117
+    },
+    {
+      "elapsed": 17.586750542002846,
+      "active_jobs": 116
+    },
+    {
+      "elapsed": 17.700724832997366,
+      "active_jobs": 116
+    },
+    {
+      "elapsed": 17.804743708002206,
+      "active_jobs": 115
+    },
+    {
+      "elapsed": 17.917691458002082,
+      "active_jobs": 114
+    },
+    {
+      "elapsed": 18.049474125000415,
+      "active_jobs": 114
+    },
+    {
+      "elapsed": 18.163420958000643,
+      "active_jobs": 113
+    },
+    {
+      "elapsed": 18.28042049999931,
+      "active_jobs": 112
+    },
+    {
+      "elapsed": 18.3943533749989,
+      "active_jobs": 112
+    },
+    {
+      "elapsed": 18.50994583300053,
+      "active_jobs": 111
+    },
+    {
+      "elapsed": 18.622330707999936,
+      "active_jobs": 110
+    },
+    {
+      "elapsed": 18.735054791999573,
+      "active_jobs": 109
+    },
+    {
+      "elapsed": 18.853862707997905,
+      "active_jobs": 107
+    },
+    {
+      "elapsed": 18.975496541999746,
+      "active_jobs": 106
+    },
+    {
+      "elapsed": 19.088883042000816,
+      "active_jobs": 104
+    },
+    {
+      "elapsed": 19.208395791996736,
+      "active_jobs": 103
+    },
+    {
+      "elapsed": 19.32628795799974,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 19.454647250000562,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 19.56331041699741,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 19.6729610830007,
+      "active_jobs": 102
+    },
+    {
+      "elapsed": 19.786502292001387,
+      "active_jobs": 101
+    },
+    {
+      "elapsed": 19.894504582996888,
+      "active_jobs": 99
+    },
+    {
+      "elapsed": 19.99889075000101,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 20.117498999999953,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 20.221910542000842,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 20.338641166999878,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 20.452629999999772,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 20.557642624997243,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 20.674133874999825,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 20.788299041996652,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 20.90195237500302,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 21.009056417002284,
+      "active_jobs": 96
+    },
+    {
+      "elapsed": 21.14224041700072,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 21.254421375000675,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 21.37268458300241,
+      "active_jobs": 94
+    },
+    {
+      "elapsed": 21.494497291998414,
+      "active_jobs": 94
+    },
+    {
+      "elapsed": 21.60718050000287,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 21.721295499999542,
+      "active_jobs": 95
+    },
+    {
+      "elapsed": 21.835757583001396,
+      "active_jobs": 92
+    },
+    {
+      "elapsed": 21.947085708001396,
+      "active_jobs": 89
+    },
+    {
+      "elapsed": 22.061064292000083,
+      "active_jobs": 87
+    },
+    {
+      "elapsed": 22.17294441699778,
+      "active_jobs": 86
+    },
+    {
+      "elapsed": 22.280568750000384,
+      "active_jobs": 84
+    },
+    {
+      "elapsed": 22.395668917000876,
+      "active_jobs": 85
+    },
+    {
+      "elapsed": 22.514269083003455,
+      "active_jobs": 86
+    },
+    {
+      "elapsed": 22.628143542002363,
+      "active_jobs": 86
+    },
+    {
+      "elapsed": 22.734785499997088,
+      "active_jobs": 86
+    },
+    {
+      "elapsed": 22.847930208001344,
+      "active_jobs": 88
+    }
+  ]
+}

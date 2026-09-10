@@ -34,6 +34,10 @@ use uuid::Uuid;
 
 use crate::socket::RealtimeEvents;
 
+mod adaptive;
+mod lease;
+pub(crate) use adaptive::spawn_background_scan_worker;
+
 const LEASE_DURATION: Duration = Duration::minutes(5);
 const WORK_LEASE_RECOVERY_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const LEASE_RENEW_TIMEOUT: StdDuration = StdDuration::from_secs(5);
@@ -42,6 +46,91 @@ const FILESYSTEM_EVENT_PRIORITY: i32 = 90;
 const FILESYSTEM_EVENT_QUIET_WINDOW: StdDuration = StdDuration::from_millis(500);
 const HOME_CACHE_WARM_USER_LIMIT: u64 = 128;
 const SESSION_RETENTION: Duration = Duration::days(180);
+
+async fn renew_scan_execution<T, Error>(
+    database: &DatabaseConnection,
+    claimed: &tjxy_db::ClaimedWorkJob,
+    work: impl Future<Output = Result<T, Error>>,
+    lost_lease: impl Fn(WorkJobRepositoryError) -> Error,
+) -> Result<T, Error>
+where
+    Error: std::fmt::Display,
+{
+    let jobs = WorkJobRepository::new(database);
+    let execution = execute_logged(claimed, work);
+    lease::run(
+        execution,
+        || async {
+            matches!(
+                tokio::time::timeout(LEASE_RENEW_TIMEOUT, jobs.renew(claimed, LEASE_DURATION))
+                    .await,
+                Ok(Ok(()))
+            )
+        },
+        StdDuration::from_secs(60),
+        lost_lease(WorkJobRepositoryError::LostLease),
+    )
+    .await
+}
+
+async fn process_scan_job(
+    database: &DatabaseConnection,
+    services: &adaptive::ScanServices,
+    claimed: &tjxy_db::ClaimedWorkJob,
+) -> bool {
+    let jobs = WorkJobRepository::new(database);
+    match claimed.job().task_kind() {
+        WorkTaskKind::ResolveMetadata => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.metadata.execute(claimed),
+                |error| MetadataResolveError::Work(MetadataWorkError::Work(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_metadata_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::ProbeMedia => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.probe.execute(claimed),
+                |error| ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::IndexMediaSources => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.sources.execute(claimed),
+                |error| SourceIndexError::Publication(CatalogPublicationError::WorkJob(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_source_index_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::ExpandItem => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.series.execute(claimed),
+                |error| SeriesExpandError::Publication(CatalogPublicationError::WorkJob(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_series_expand_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        _ => unreachable!("background dispatcher only accepts scan item stages"),
+    }
+}
 
 pub(crate) fn spawn_auth_session_retention_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
@@ -838,27 +927,13 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
         {
             Ok(Some(claimed)) => {
                 idle.reset();
-                let execution = execute_logged(&claimed, service.execute(&claimed));
-                let mut execution = pin!(execution);
-                let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
-                renewal.tick().await;
-                let outcome = loop {
-                    tokio::select! {
-                        result = &mut execution => break result,
-                        _ = renewal.tick() => {
-                            let renewed = tokio::time::timeout(
-                                LEASE_RENEW_TIMEOUT,
-                                jobs.renew(&claimed, LEASE_DURATION),
-                            )
-                            .await;
-                            if !matches!(renewed, Ok(Ok(()))) {
-                                break Err(FullScanError::Work(
-                                    WorkJobRepositoryError::LostLease,
-                                ));
-                            }
-                        }
-                    }
-                };
+                let outcome = Box::pin(renew_scan_execution(
+                    &database,
+                    &claimed,
+                    service.execute(&claimed),
+                    FullScanError::Work,
+                ))
+                .await;
                 handle_full_scan_outcome(&jobs, &claimed, outcome).await;
             }
             Ok(None) => idle.wait().await,
@@ -889,8 +964,7 @@ async fn handle_full_scan_outcome(
     } else {
         let delay = full_scan_retry_delay(&error, claimed.attempt_count());
         if matches!(error, FullScanError::ChildrenPending { .. }) {
-            jobs.defer(claimed, delay.max(Duration::seconds(30)), &message)
-                .await
+            jobs.defer(claimed, delay, &message).await
         } else {
             jobs.retry(claimed, delay, &message).await
         }
@@ -902,10 +976,9 @@ async fn handle_full_scan_outcome(
 
 fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration {
     if matches!(error, FullScanError::ChildrenPending { .. }) {
-        let exponent = u32::try_from(attempt_count.saturating_sub(1))
-            .unwrap_or_default()
-            .min(5);
-        return Duration::seconds((2_i64 * (1_i64 << exponent)).min(60));
+        // Completions wake a waiting parent sooner; this is the bounded fallback
+        // for a lost hint or a child that finished before the parent deferred.
+        return Duration::seconds(2);
     }
     storage_backoff(attempt_count)
 }
@@ -960,7 +1033,7 @@ async fn run_series_expand_worker(database: DatabaseConnection, service: SeriesE
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ExpandItem], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ExpandItem], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
@@ -1069,7 +1142,7 @@ async fn run_source_index_worker(database: DatabaseConnection, service: SourceIn
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::IndexMediaSources], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::IndexMediaSources], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
@@ -1184,7 +1257,7 @@ async fn run_storage_worker<Backend>(
         match claim {
             Ok(Some(claimed)) => {
                 idle.reset();
-                let execution = execute_logged(&claimed, async {
+                let execution = async {
                     if claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot {
                         let started = Instant::now();
                         validation
@@ -1208,25 +1281,12 @@ async fn run_storage_worker<Backend>(
                             .map(|_| ())
                             .map_err(StorageWorkerError::Scoped)
                     }
-                });
-                let mut execution = pin!(execution);
-                let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
-                renewal.tick().await;
-                let outcome = loop {
-                    tokio::select! {
-                        result = &mut execution => break result,
-                        _ = renewal.tick() => {
-                            let renewed = tokio::time::timeout(
-                                LEASE_RENEW_TIMEOUT,
-                                jobs.renew(&claimed, LEASE_DURATION),
-                            )
-                            .await;
-                            if !matches!(renewed, Ok(Ok(()))) {
-                                break Err(StorageWorkerError::LostLease);
-                            }
-                        }
-                    }
                 };
+                let outcome =
+                    Box::pin(renew_scan_execution(&database, &claimed, execution, |_| {
+                        StorageWorkerError::LostLease
+                    }))
+                    .await;
                 handle_storage_outcome(&scoped, &jobs, &claimed, outcome).await;
             }
             Ok(None) => idle.wait().await,
@@ -1430,7 +1490,7 @@ async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeServic
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ProbeMedia], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ProbeMedia], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
@@ -1470,7 +1530,7 @@ async fn run_metadata_worker(database: DatabaseConnection, service: Arc<Metadata
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ResolveMetadata], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ResolveMetadata], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
@@ -1711,12 +1771,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_full_scan_children_back_off_to_one_minute() {
+    fn pending_full_scan_children_keep_a_short_loss_tolerant_poll() {
         let error = tjxy_application::FullScanError::ChildrenPending { scheduled: 1 };
 
         assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 16);
-        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 60);
+        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 2);
     }
 
     #[test]

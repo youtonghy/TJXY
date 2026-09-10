@@ -63,7 +63,11 @@ fn storage_admission() -> &'static Admission {
 pub(crate) async fn parser_permit() -> impl Send {
     static VALUE: OnceLock<Admission> = OnceLock::new();
     VALUE
-        .get_or_init(|| Admission::new(2, 1))
+        .get_or_init(|| {
+            let background = std::thread::available_parallelism()
+                .map_or(1, |cores| cores.get().saturating_sub(1).clamp(1, 4));
+            Admission::new(background + 1, background)
+        })
         .acquire(BACKGROUND.try_with(|value| *value).unwrap_or(false))
         .await
 }

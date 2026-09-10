@@ -58,7 +58,7 @@ class Run:
         self.base = None
         self.server = None
         self.finished = threading.Event()
-        self.report = {"items": args.items, "concurrency": args.concurrency, "backend": "SQLite",
+        self.report = {"items": args.items, "concurrency": args.concurrency, "scan_concurrency_mode": args.scan_concurrency, "backend": "SQLite",
                        "fixture": "deterministic local MP4/NFO/PNG", "browser_first_frame": None,
                        "remote_probe": None, "actual_transaction_rate": None, "status": "running"}
 
@@ -107,16 +107,27 @@ class Run:
         return int(output[0]), cpu_seconds(output[1])
 
     def monitor(self):
+        disk_failures = 0
         while not self.finished.wait(1):
             try:
                 rss, _ = self.resource_sample()
                 self.peak_rss_kib = max(self.peak_rss_kib, rss)
                 if time.monotonic() - self.last_disk_sample >= 10 and self.root.exists():
-                    disk = int(subprocess.check_output(["du", "-sk", str(self.root)], text=True).split()[0])
-                    self.peak_disk_kib = max(self.peak_disk_kib, disk)
+                    try:
+                        disk = int(subprocess.check_output(["du", "-sk", str(self.root)], text=True, stderr=subprocess.DEVNULL).split()[0])
+                    except subprocess.CalledProcessError:
+                        # SQLite can unlink a transient journal while du walks it.
+                        # Keep RSS/time guards alive and retry the disk sample.
+                        disk_failures += 1
+                        self.report["disk_sample_retries"] = self.report.get("disk_sample_retries", 0) + 1
+                        if disk_failures >= 3:
+                            self.stop_reason = "disk sampling repeatedly unavailable"
+                    else:
+                        disk_failures = 0
+                        self.peak_disk_kib = max(self.peak_disk_kib, disk)
+                        if disk > self.args.max_disk_mib*1024:
+                            self.stop_reason = "disk budget exhausted"
                     self.last_disk_sample = time.monotonic()
-                    if disk > self.args.max_disk_mib*1024:
-                        self.stop_reason = "disk budget exhausted"
                 if rss > self.args.max_rss_mib*1024:
                     self.stop_reason = "RSS budget exhausted"
                 if time.monotonic() >= self.deadline:
@@ -197,7 +208,8 @@ class Run:
     def execute(self):
         log = self.root.parent/(self.root.name+".process.log")
         with log.open("xb") as output:
-            self.server = subprocess.Popen([str(Path(self.args.server_binary).resolve()), str(self.root), str(self.args.items), str(self.args.max_seconds)], stdout=output, stderr=output)
+            environment = dict(os.environ, TJXY_SCAN_CONCURRENCY=self.args.scan_concurrency)
+            self.server = subprocess.Popen([str(Path(self.args.server_binary).resolve()), str(self.root), str(self.args.items), str(self.args.max_seconds)], stdout=output, stderr=output, env=environment)
         monitor = threading.Thread(target=self.monitor, daemon=True)
         monitor.start()
         try:
@@ -252,32 +264,41 @@ class Run:
                 raise RuntimeError("not every fixture movie has a successfully probed source")
             self.report["source_unchanged"] = self.source_digest() == source_digest
             waits = self.rows("SELECT (julianday(started_at)-julianday(created_at))*86400000 FROM work_jobs WHERE started_at IS NOT NULL AND started_at >= created_at")
+            stage_rows = self.rows("SELECT task_kind,state,COUNT(*),SUM((julianday(completed_at)-julianday(started_at))*86400000) FROM work_jobs GROUP BY task_kind,state")
+            self.report["job_stages"] = [{"kind": kind, "state": state, "jobs": count, "sum_first_claim_to_completion_ms": elapsed} for kind, state, count, elapsed in stage_rows]
             self.report["job_created_to_first_claim"] = distribution([row[0] for row in waits if row[0] is not None])
             self.measure_requests(user, library, items)
             self.report["after_requests"] = self.snapshot()
             if any(self.report["after_requests"]["rows"][table] for table in ["asset_blobs","item_assets","person_assets"]):
                 raise RuntimeError("zero-copy invariant violated")
-            # Allow the queue to reach its capped backoff before sampling idle work.
-            time.sleep(10)
-            self.guard()
-            before_sql = read_json(self.root/"metrics.json")
-            _, before_cpu = self.resource_sample()
-            idle_started = time.monotonic()
-            time.sleep(15)
-            self.guard()
-            _, after_cpu = self.resource_sample()
-            after_sql = read_json(self.root/"metrics.json")
-            seconds = time.monotonic()-idle_started
-            differences = {key:{field:value[field]-before_sql.get(key,{}).get(field,0) for field in value} for key,value in after_sql.items()}
-            self.report["idle"] = {"seconds":seconds, "server_cpu_percent_one_core":(after_cpu-before_cpu)/seconds*100,
-                                   "sql":differences, "sql_statements_per_second":sum(v["statements"] for v in differences.values())/seconds,
-                                   "queue_claims_per_second":differences.get("queue_claim",{}).get("statements",0)/seconds}
+            if self.args.idle_seconds:
+                # Allow the queue to reach its capped backoff before sampling idle work.
+                time.sleep(10)
+                self.guard()
+                before_sql = read_json(self.root/"metrics.json")
+                _, before_cpu = self.resource_sample()
+                idle_started = time.monotonic()
+                time.sleep(self.args.idle_seconds)
+                self.guard()
+                _, after_cpu = self.resource_sample()
+                after_sql = read_json(self.root/"metrics.json")
+                seconds = time.monotonic()-idle_started
+                differences = {key:{field:value[field]-before_sql.get(key,{}).get(field,0) for field in ("statements", "elapsed_us", "failures")} for key,value in after_sql.items()}
+                self.report["idle"] = {"seconds":seconds, "server_cpu_percent_one_core":(after_cpu-before_cpu)/seconds*100,
+                                       "sql":differences, "sql_statements_per_second":sum(v["statements"] for v in differences.values())/seconds,
+                                       "queue_claims_per_second":differences.get("queue_claim",{}).get("statements",0)/seconds}
+            else:
+                self.report["idle"] = None
             self.report["queue_claim_plan"] = read_json(self.root/"claim-plan.json") if (self.root/"claim-plan.json").exists() else None
             self.report["status"] = "complete"
         except Exception as error:
             self.report["status"] = "stopped"
             self.report["stop_reason"] = str(error)
         finally:
+            for name in ("sql-templates", "scan-concurrency"):
+                path = self.root/(name+".json")
+                if path.exists():
+                    self.report[name.replace("-", "_")] = read_json(path)
             self.report["elapsed_seconds"] = time.monotonic()-self.started
             self.report["peak_server_rss_mib"] = self.peak_rss_kib/1024 if self.peak_rss_kib else None
             self.report["peak_fixture_disk_mib"] = self.peak_disk_kib/1024 if self.peak_disk_kib else None
@@ -296,8 +317,10 @@ class Run:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True)
-    parser.add_argument("--items", type=int, default=274, choices=[8,274,2740,27400,82200])
+    parser.add_argument("--items", type=int, default=274, choices=[8,32,128,274,512,2740,27400,82200])
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1,5,20], choices=[1,5,20])
+    parser.add_argument("--scan-concurrency", default="auto", choices=["auto", "1", "2", "4", "8"])
+    parser.add_argument("--idle-seconds", type=int, choices=[0, 15], default=15, help="Use 0 to omit idle sampling in sequential scan comparisons")
     parser.add_argument("--max-seconds", type=int, default=600)
     parser.add_argument("--max-disk-mib", type=int, default=2048)
     parser.add_argument("--max-rss-mib", type=int, default=2048)

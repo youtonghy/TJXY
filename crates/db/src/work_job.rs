@@ -27,6 +27,13 @@ const MAX_OBSERVED_JOBS: u64 = 100;
 pub const MAX_WORK_JOB_RETRIES: i32 = 5;
 const METADATA_RETRY_COOLDOWN: Duration = Duration::seconds(5);
 
+#[derive(Clone, Copy, Default)]
+struct ClaimFilter<'a> {
+    storage_scope: Option<(Uuid, Option<&'a str>)>,
+    foreground: Option<bool>,
+    excluded_roots: &'a [Uuid],
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WorkTaskKind {
     ScopedStorageSync,
@@ -1046,6 +1053,112 @@ where
         lease_owner: &str,
         lease_duration: Duration,
     ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter::default(),
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Claims interactive work without letting background saturation consume its worker.
+    /// # Errors
+    /// Returns invalid lease or database failures.
+    pub async fn claim_next_foreground(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter {
+                foreground: Some(true),
+                ..ClaimFilter::default()
+            },
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Claims background work while excluding roots already consuming their fair share.
+    /// Root UUID nil denotes jobs without a root affinity. At most eight exclusions
+    /// are accepted; all predicates participate in the atomic claim transaction.
+    /// # Errors
+    /// Returns invalid exclusions, lease or database failures.
+    pub async fn claim_next_background(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        excluded_roots: &[Uuid],
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        if excluded_roots.len() > 8 {
+            return Err(WorkJobRepositoryError::InvalidClaimFilter);
+        }
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter {
+                foreground: Some(false),
+                excluded_roots,
+                ..ClaimFilter::default()
+            },
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Samples up to 256 pending background rows, never COUNTs historical work.
+    /// Dependency readiness remains the responsibility of the transactional claim.
+    /// # Errors
+    /// Returns invalid limit or database failures.
+    pub async fn pending_background_roots(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        limit: u64,
+    ) -> Result<Vec<Uuid>, WorkJobRepositoryError> {
+        if limit == 0 || limit > 256 {
+            return Err(WorkJobRepositoryError::InvalidClaimFilter);
+        }
+        let query = Query::select()
+            .column(Alias::new("storage_root_affinity"))
+            .from(Alias::new("work_jobs"))
+            .and_where(Expr::cust("state IN ('Pending', 'Running')"))
+            .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+            .and_where(Expr::col(Alias::new("priority")).lt(100))
+            .and_where(
+                Expr::col(Alias::new("task_kind"))
+                    .is_in(accepted_kinds.iter().map(|kind| kind.as_str())),
+            )
+            .cond_where(
+                Cond::any()
+                    .add(Expr::col(Alias::new("available_at")).is_null())
+                    .add(Expr::col(Alias::new("available_at")).lte(self.now())),
+            )
+            .limit(limit)
+            .to_owned();
+        self.database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .map(|row| {
+                row.try_get::<Option<Uuid>>("", "storage_root_affinity")
+                    .map(Option::unwrap_or_default)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    async fn claim_filtered(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        filter: ClaimFilter<'_>,
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
         validate_lease(accepted_kinds, lease_owner, lease_duration)?;
         let now = self.now();
         let lease_expires_at = now
@@ -1055,7 +1168,7 @@ where
         let result = claim_next(
             &transaction,
             accepted_kinds,
-            None,
+            filter,
             lease_owner,
             now,
             lease_expires_at,
@@ -1092,7 +1205,10 @@ where
         let result = claim_next(
             &transaction,
             &accepted_kinds,
-            Some((account_id, None)),
+            ClaimFilter {
+                storage_scope: Some((account_id, None)),
+                ..ClaimFilter::default()
+            },
             lease_owner,
             now,
             lease_expires_at,
@@ -1133,7 +1249,10 @@ where
         let result = claim_next(
             &transaction,
             &accepted_kinds,
-            Some((account_id, Some(provider_drive_id))),
+            ClaimFilter {
+                storage_scope: Some((account_id, Some(provider_drive_id))),
+                ..ClaimFilter::default()
+            },
             lease_owner,
             now,
             lease_expires_at,
@@ -1221,7 +1340,11 @@ where
         if reason.trim().is_empty() || reason.chars().count() > MAX_ERROR_CHARS {
             return Err(WorkJobRepositoryError::InvalidErrorSummary);
         }
-        let backoff = if backoff > Duration::zero() {
+        let full_scan = matches!(
+            claimed.job().task_kind(),
+            WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+        );
+        let backoff = if backoff > Duration::zero() && !full_scan {
             let query = Query::select()
                 .column(Alias::new("started_at"))
                 .from(Alias::new("work_jobs"))
@@ -1235,20 +1358,7 @@ where
                 .try_get("", "started_at")?;
             let age = started.map_or(0, |started| (self.now() - started).num_seconds().max(0));
             let exponent = u32::try_from(age / 30).unwrap_or(6).min(6);
-            // Full scans schedule successive child stages. Their total age does not
-            // mean the current stage is stalled; keep checking it at least once a
-            // minute unless the caller explicitly requests a longer delay.
-            let adaptive_limit = if matches!(
-                claimed.job().task_kind(),
-                WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
-            ) {
-                60
-            } else {
-                300
-            };
-            backoff.max(Duration::seconds(
-                (5 * (1_i64 << exponent)).min(adaptive_limit),
-            ))
+            backoff.max(Duration::seconds((5 * (1_i64 << exponent)).min(300)))
         } else {
             backoff
         };
@@ -1420,26 +1530,10 @@ where
         let transaction = self.database.begin().await?;
         let result = async {
             fence_full_scan_parent(&transaction, claimed).await?;
-            if matches!(
-                spec.task_kind(),
-                WorkTaskKind::ExpandItem | WorkTaskKind::IndexMediaSources
-            ) {
-                match fence_lazy_item(&transaction, spec).await? {
-                    PublicationFence::Current => {
-                        return Ok(FullScanChildSubmission::Current);
-                    }
-                    PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
-                    PublicationFence::NeedsWork => {}
-                }
-            }
-            if spec.task_kind() == WorkTaskKind::ResolveMetadata {
-                match fence_metadata_item(&transaction, spec).await? {
-                    PublicationFence::Current => {
-                        return Ok(FullScanChildSubmission::Current);
-                    }
-                    PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
-                    PublicationFence::NeedsWork => {}
-                }
+            match fence_scan_child(&transaction, spec).await? {
+                PublicationFence::Current => return Ok(FullScanChildSubmission::Current),
+                PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
+                PublicationFence::NeedsWork => {}
             }
             let submission = enqueue_or_join(&transaction, spec, self.now()).await?;
             if spec.task_kind() == WorkTaskKind::DiscoverTitles {
@@ -1484,6 +1578,25 @@ where
         }
         .await;
         finish_notifying(transaction, result).await
+    }
+
+    /// Rechecks publication after observing a completed child. The earlier target
+    /// snapshot may predate that child's atomic publication/completion commit.
+    ///
+    /// # Errors
+    /// Returns parent fencing, invalid specification or database failures.
+    pub async fn full_scan_child_is_current(
+        &self,
+        parent: &ClaimedWorkJob,
+        spec: &WorkJobSpec,
+    ) -> Result<bool, WorkJobRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = async {
+            fence_full_scan_parent(&transaction, parent).await?;
+            Ok(fence_scan_child(&transaction, spec).await? == PublicationFence::Current)
+        }
+        .await;
+        finish(transaction, result).await
     }
 
     /// Atomically revalidates one Full Scan's Library profile and completes the parent claim.
@@ -1590,6 +1703,64 @@ where
             .map(|row| row.try_get("", "result_sync_revision"))
             .transpose()?)
     }
+}
+
+async fn fence_scan_child(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<PublicationFence, WorkJobRepositoryError> {
+    match spec.task_kind() {
+        WorkTaskKind::ExpandItem | WorkTaskKind::IndexMediaSources => {
+            fence_lazy_item(transaction, spec).await
+        }
+        WorkTaskKind::ResolveMetadata => fence_metadata_item(transaction, spec).await,
+        WorkTaskKind::ProbeMedia => fence_probe_source(transaction, spec).await,
+        _ => Ok(PublicationFence::NeedsWork),
+    }
+}
+
+async fn fence_probe_source(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<PublicationFence, WorkJobRepositoryError> {
+    let WorkScope::MediaSource(source) = spec.scope() else {
+        return Err(WorkJobRepositoryError::InvalidChildReference);
+    };
+    let backend = transaction.get_database_backend();
+    let fence = Query::update()
+        .table(Alias::new("media_sources"))
+        .value(
+            Alias::new("probe_revision"),
+            Expr::col(Alias::new("probe_revision")),
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(source.as_uuid()))
+        .and_where(Expr::col(Alias::new("probe_revision")).eq(spec.expected_revision()))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&fence))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Ok(PublicationFence::Stale);
+    }
+    let current = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("media_sources"))
+        .and_where(Expr::col(Alias::new("id")).eq(source.as_uuid()))
+        .and_where(Expr::col(Alias::new("probe_state")).eq("Probed"))
+        .to_owned();
+    Ok(
+        if transaction
+            .query_one(backend.build(&current))
+            .await?
+            .is_some()
+        {
+            PublicationFence::Current
+        } else {
+            PublicationFence::NeedsWork
+        },
+    )
 }
 
 async fn fence_lazy_item(
@@ -1737,6 +1908,8 @@ async fn fence_metadata_item(
 
 #[derive(Debug, Error)]
 pub enum WorkJobRepositoryError {
+    #[error("invalid bounded work claim filter")]
+    InvalidClaimFilter,
     #[error("work revision must not be negative")]
     InvalidRevision,
     #[error("stored metadata requirement is invalid")]
@@ -2427,7 +2600,7 @@ pub(crate) async fn enqueue_in_transaction(
 async fn claim_next(
     transaction: &DatabaseTransaction,
     accepted_kinds: &[WorkTaskKind],
-    storage_scope: Option<(Uuid, Option<&str>)>,
+    filter: ClaimFilter<'_>,
     lease_owner: &str,
     now: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
@@ -2437,7 +2610,7 @@ async fn claim_next(
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
     for _ in 0..8 {
         let Some(row) = transaction
-            .query_one(backend.build(&claim_candidate(accepted_kinds, storage_scope, now)))
+            .query_one(backend.build(&claim_candidate(accepted_kinds, filter, now)))
             .await?
         else {
             return Ok(None);
@@ -2761,7 +2934,52 @@ async fn complete_in_transaction(
     {
         return Err(WorkJobRepositoryError::LostLease);
     }
-    insert_result(transaction, claimed.id(), now, result).await
+    insert_result(transaction, claimed.id(), now, result).await?;
+    wake_waiting_full_scans(transaction, claimed, now).await
+}
+
+// A completion is only a scheduling hint. Parent policy, child revisions and
+// publications are revalidated when it runs. Coalesce bursts and never touch a
+// running, cancelled, provider-backed-off or unrelated root-affine parent.
+async fn wake_waiting_full_scans(
+    transaction: &DatabaseTransaction,
+    child: &ClaimedWorkJob,
+    now: DateTime<Utc>,
+) -> Result<(), WorkJobRepositoryError> {
+    if matches!(
+        child.job().task_kind(),
+        WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+    ) {
+        return Ok(());
+    }
+    // MySQL's existing task timestamps have second precision. Round forward
+    // there so subsecond coalescing cannot become an immediate repeated wake.
+    let wake_at = now
+        + if transaction.get_database_backend() == sea_orm::DbBackend::MySql {
+            Duration::nanoseconds(1_000_000_000 - i64::from(now.timestamp_subsec_nanos()))
+        } else {
+            Duration::milliseconds(200)
+        };
+    let mut update = Query::update();
+    update
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("available_at"), wake_at)
+        .and_where(Expr::cust("state IN ('Pending', 'Running')"))
+        .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+        .and_where(
+            Expr::col(Alias::new("task_kind")).is_in(["FullMediaScan", "FullLibraryRootScan"]),
+        )
+        .and_where(Expr::col(Alias::new("last_error")).like("full scan scheduled % child jobs"))
+        .and_where(Expr::col(Alias::new("available_at")).gt(wake_at));
+    if let Some(root) = child.job().storage_root_affinity() {
+        update.and_where(
+            Expr::col(Alias::new("storage_root_affinity")).is_in([root.as_uuid(), Uuid::nil()]),
+        );
+    }
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
 }
 
 async fn fail_terminal(
@@ -2940,9 +3158,25 @@ pub(crate) async fn fence_live_claim(
     Ok(())
 }
 
+fn apply_scan_claim_filter(query: &mut SelectStatement, job: &Alias, filter: &ClaimFilter<'_>) {
+    if let Some(foreground) = filter.foreground {
+        query.and_where(if foreground {
+            Expr::col((job.clone(), Alias::new("priority"))).gte(100)
+        } else {
+            Expr::col((job.clone(), Alias::new("priority"))).lt(100)
+        });
+    }
+    if !filter.excluded_roots.is_empty() {
+        query.and_where(
+            Expr::col((job.clone(), Alias::new("storage_root_affinity")))
+                .is_not_in(filter.excluded_roots.iter().copied()),
+        );
+    }
+}
+
 fn claim_candidate(
     accepted_kinds: &[WorkTaskKind],
-    storage_scope: Option<(Uuid, Option<&str>)>,
+    filter: ClaimFilter<'_>,
     now: DateTime<Utc>,
 ) -> SelectStatement {
     let job = Alias::new("job");
@@ -2967,7 +3201,8 @@ fn claim_candidate(
         .order_by((job.clone(), Alias::new("created_at")), Order::Asc)
         .order_by((job.clone(), Alias::new("id")), Order::Asc)
         .limit(1);
-    if let Some((account_id, provider_drive_id)) = storage_scope {
+    apply_scan_claim_filter(&mut query, &job, &filter);
+    if let Some((account_id, provider_drive_id)) = filter.storage_scope {
         let account = Alias::new("claim_scope_account");
         query.and_where(Expr::exists(
             Query::select()
@@ -3585,7 +3820,10 @@ mod claim_plan_tests {
         for scope in [None, Some((Uuid::new_v4(), None))] {
             let mut statement = database.get_database_backend().build(&claim_candidate(
                 &[WorkTaskKind::ScopedStorageSync],
-                scope,
+                ClaimFilter {
+                    storage_scope: scope,
+                    ..ClaimFilter::default()
+                },
                 Utc::now(),
             ));
             statement.sql = format!("EXPLAIN QUERY PLAN {}", statement.sql);

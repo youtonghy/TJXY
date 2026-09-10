@@ -70,12 +70,19 @@ async fn main() -> Result<(), Error> {
     let (logging, _guard) = tjxy_server::LoggingRuntime::initialize(root.join("logs"))?;
     let measurements = Arc::new(capacity_support::SqlMeasurements::default());
     let observer = Arc::clone(&measurements);
+    let scan_observer = Arc::clone(&measurements);
     let state = tjxy_server::initialize(
         StartupOptions::new(
             database_url,
             ServerIdentity::new(Uuid::new_v4(), "TJXY isolated capacity", "local"),
         )
         .with_database_metric_callback(move |info| observer.observe(info))
+        .with_scan_concurrency(
+            std::env::var("TJXY_SCAN_CONCURRENCY")
+                .unwrap_or_else(|_| "auto".to_owned())
+                .parse()?,
+        )
+        .with_scan_observer(move |sample| scan_observer.observe_scan(sample))
         .with_bootstrap_admin(BootstrapAdmin::new("Capacity", &password))
         .with_assets_dir(root.join("assets"))
         .with_credential_cipher(cipher)

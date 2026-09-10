@@ -2700,3 +2700,28 @@ async fn publication_migration_down_clears_active_pointers_and_derived_states() 
         "Unknown"
     );
 }
+
+#[tokio::test]
+async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+    let indexes = [
+        ("identity_matches", "ix_identity_matches_candidate_scope"),
+        (
+            "publication_media_locations",
+            "ix_publication_locations_source",
+        ),
+    ];
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
+    Migrator::down(&database, Some(1)).await.unwrap();
+    for (table, index) in indexes {
+        assert!(!schema.has_index(table, index).await.unwrap());
+    }
+    Migrator::up(&database, None).await.unwrap();
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
+}

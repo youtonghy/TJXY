@@ -76,6 +76,7 @@ mod m20260907_000075_normalize_codec_names;
 mod m20260909_000076_work_maintenance;
 mod m20260909_000077_nfo_choices;
 mod m20260909_000078_logging_budgets;
+mod m20260910_000079_scan_lookup_indexes;
 
 use std::collections::HashSet;
 
@@ -351,6 +352,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260909_000076_work_maintenance::Migration),
             Box::new(m20260909_000077_nfo_choices::Migration),
             Box::new(m20260909_000078_logging_budgets::Migration),
+            Box::new(m20260910_000079_scan_lookup_indexes::Migration),
         ]
     }
 }
