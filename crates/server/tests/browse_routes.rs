@@ -358,6 +358,10 @@ async fn test_app() -> TestApp {
 }
 
 async fn test_app_with_user(create_user: bool) -> TestApp {
+    test_app_with_playback_wait(create_user, std::time::Duration::ZERO).await
+}
+
+async fn test_app_with_playback_wait(create_user: bool, wait: std::time::Duration) -> TestApp {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let auth = Arc::new(
@@ -370,7 +374,8 @@ async fn test_app_with_user(create_user: bool) -> TestApp {
             .await
             .unwrap();
     }
-    let catalog = Arc::new(CatalogQueryService::new(database.clone()));
+    let catalog =
+        Arc::new(CatalogQueryService::new(database.clone()).with_playback_wait_timeout(wait));
     let libraries = Arc::new(LibraryService::new(database.clone()));
     let assets = TempDir::new().unwrap();
     let asset_reader = Arc::new(
@@ -3865,6 +3870,70 @@ async fn similar_items_require_auth_and_return_a_bounded_standard_item_page() {
 }
 
 #[tokio::test]
+async fn item_detail_prefers_probed_duration_and_falls_back_to_metadata() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Movies", true).await;
+    let item = seed_item(&app.database, library, "Short test clip", "Movie").await;
+    let backend = app.database.get_database_backend();
+    let metadata_ticks = 57_600_000_000_i64;
+    let actual_ticks = 1_086_666_333_i64;
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("runtime_ticks"), metadata_ticks)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.media_object_id,
+        10,
+        &app.subtitle_object_id,
+    )
+    .await;
+    let (_, _, token) = login(&app.router).await;
+
+    for (probe_state, runtime, expected) in [
+        ("Probed", Some(actual_ticks), actual_ticks),
+        ("Probed", None, metadata_ticks),
+        ("Probed", Some(0), metadata_ticks),
+        ("Pending", Some(actual_ticks), metadata_ticks),
+    ] {
+        app.database
+            .execute(
+                backend.build(
+                    Query::update()
+                        .table(Alias::new("media_sources"))
+                        .values([
+                            (Alias::new("probe_state"), probe_state.into()),
+                            (Alias::new("runtime_ticks"), runtime.into()),
+                        ])
+                        .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+                ),
+            )
+            .await
+            .unwrap();
+        let response = get(&app.router, &format!("/Items/{item}"), Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let detail: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            detail["RunTimeTicks"], expected,
+            "{probe_state} {runtime:?}"
+        );
+        if probe_state == "Probed" && runtime == Some(actual_ticks) {
+            assert_eq!(detail["MediaSources"][0]["RunTimeTicks"], actual_ticks);
+        }
+    }
+}
+
+#[tokio::test]
 async fn item_detail_omits_unprobed_sources_without_scheduling_probe_work() {
     let app = test_app().await;
     let library = seed_library(&app.database, "Movies", true).await;
@@ -4425,6 +4494,7 @@ async fn playback_info_requires_auth_and_never_invents_unprobed_sources() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["MediaSources"], json!([]));
+    assert_eq!(payload["ErrorCode"], "NoCompatibleStream");
     assert!(Uuid::parse_str(payload["PlaySessionId"].as_str().unwrap()).is_ok());
 
     let response = get(
@@ -9003,4 +9073,234 @@ async fn work_health_is_admin_only_and_returns_a_cached_measured_snapshot() {
     let second: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(first["Health"], second["Health"]);
+}
+
+async fn seed_unprobed_strm(app: &TestApp) -> (CatalogItemId, Uuid) {
+    let library = seed_library(&app.database, "Playback preparation", true).await;
+    let item = seed_item(&app.database, library, "First play", "Movie").await;
+    let presentation = seed_playable_source(
+        &app.database,
+        item,
+        app.media_account,
+        &app.strm_object_id,
+        i64::try_from(app.strm_descriptor_size).unwrap(),
+        &app.subtitle_object_id,
+    )
+    .await;
+    let backend = app.database.get_database_backend();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("media_sources"))
+                    .value(Alias::new("probe_state"), "NotProbed")
+                    .value(Alias::new("container"), Option::<String>::None)
+                    .value(Alias::new("locator_kind"), "strm")
+                    .and_where(Expr::col(Alias::new("presentation_key")).eq(presentation)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("publication_media_sources"))
+                    .value(Alias::new("container"), Option::<String>::None)
+                    .value(Alias::new("locator_kind"), "strm"),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("name"), "First.strm")
+                    .value(Alias::new("normalized_name"), "first.strm")
+                    .and_where(
+                        Expr::col(Alias::new("provider_object_id")).eq(app.strm_object_id.as_str()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    (item, presentation)
+}
+
+async fn claim_playback_probe(app: &TestApp) -> tjxy_db::ClaimedWorkJob {
+    claim_playback_work(app, tjxy_db::WorkTaskKind::ProbeMedia).await
+}
+
+async fn claim_playback_work(
+    app: &TestApp,
+    kind: tjxy_db::WorkTaskKind,
+) -> tjxy_db::ClaimedWorkJob {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(claimed) = tjxy_db::WorkJobRepository::new(&app.database)
+                .claim_next(&[kind], "http-playback-test", Duration::minutes(1))
+                .await
+                .unwrap()
+            {
+                return claimed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("PlaybackInfo should enqueue a probe")
+}
+
+async fn run_strm_probe(app: &TestApp, claimed: &tjxy_db::ClaimedWorkJob) {
+    let registry = StorageBackendRegistry::new();
+    registry
+        .set_local_reference_fallback(Arc::clone(&app.process_backend) as Arc<dyn StorageBackend>);
+    ProbeService::new(app.database.clone())
+        .with_backend_registry(registry)
+        .with_backend(app.media_account, Arc::clone(&app.media_backend))
+        .with_inspector(Arc::new(CloudProbeInspector))
+        .execute(claimed)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn playback_info_get_and_post_wait_for_strm_probe_then_advertise_a_readable_stream() {
+    for is_post in [false, true] {
+        let app = test_app_with_playback_wait(true, std::time::Duration::from_secs(15)).await;
+        let (item, presentation) = seed_unprobed_strm(&app).await;
+        let (_, _, token) = login(&app.router).await;
+        let uri = format!("/Items/{item}/PlaybackInfo");
+        let request = async {
+            if is_post {
+                post(&app.router, &uri, &token, String::new()).await
+            } else {
+                get(&app.router, &uri, Some(&token)).await
+            }
+        };
+        let worker = async {
+            let claimed = claim_playback_probe(&app).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            run_strm_probe(&app, &claimed).await;
+        };
+        let (response, ()) = tokio::join!(request, worker);
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(payload.get("ErrorCode").is_none());
+        assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["MediaSources"][0]["Id"], presentation.to_string());
+        let stream_url = payload["MediaSources"][0]["DirectStreamUrl"]
+            .as_str()
+            .unwrap();
+        assert!(stream_url.starts_with("/Videos/"));
+        let response = get(&app.router, stream_url, Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            tokio::fs::read(&app.strm_target_path).await.unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn playback_info_timeout_is_retryable_and_reuses_work_until_background_completion() {
+    let app = test_app().await;
+    let (item, _) = seed_unprobed_strm(&app).await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Items/{item}/PlaybackInfo");
+    for is_post in [false, true] {
+        let response = if is_post {
+            post(&app.router, &uri, &token, String::new()).await
+        } else {
+            get(&app.router, &uri, Some(&token)).await
+        };
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["Retry-After"], "2");
+        assert_eq!(response.headers()["Cache-Control"], "no-store");
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            payload,
+            json!({"Message": "playback is preparing; retry shortly"})
+        );
+    }
+    let claimed = claim_playback_probe(&app).await;
+    assert!(
+        tjxy_db::WorkJobRepository::new(&app.database)
+            .claim_next(
+                &[tjxy_db::WorkTaskKind::ProbeMedia],
+                "no-duplicate",
+                Duration::minutes(1)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    run_strm_probe(&app, &claimed).await;
+    assert_eq!(
+        get(&app.router, &uri, Some(&token)).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn playback_info_failed_preparation_has_no_retry_hint_or_upstream_error_details() {
+    let app = test_app_with_playback_wait(true, std::time::Duration::from_secs(15)).await;
+    let (item, _) = seed_unprobed_strm(&app).await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Items/{item}/PlaybackInfo");
+    let worker = async {
+        let claimed = claim_playback_probe(&app).await;
+        tjxy_db::WorkJobRepository::new(&app.database)
+            .fail_terminal(
+                &claimed,
+                "fixture upstream secret must not reach the response",
+            )
+            .await
+            .unwrap();
+    };
+    let (response, ()) = tokio::join!(get(&app.router, &uri, Some(&token)), worker);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().get("Retry-After").is_none());
+    let payload: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(payload, json!({"Message": "playback preparation failed"}));
+}
+
+#[tokio::test]
+async fn playback_index_and_probe_consume_one_budget_instead_of_resetting_at_the_next_stage() {
+    let app = test_app_with_playback_wait(true, std::time::Duration::from_secs(2)).await;
+    let fixture = seed_cloud_multi_source_inventory(&app).await;
+    let (_, _, token) = login(&app.router).await;
+    let uri = format!("/Items/{}/PlaybackInfo", fixture.item);
+    let worker = async {
+        let index = claim_playback_work(&app, tjxy_db::WorkTaskKind::IndexMediaSources).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        SourceIndexService::new(app.database.clone())
+            .execute(&index)
+            .await
+            .unwrap();
+        let probe = claim_playback_probe(&app).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        ProbeService::new(app.database.clone())
+            .with_backend(app.cloud_account, Arc::clone(&app.cloud_backend))
+            .with_inspector(Arc::new(CloudProbeInspector))
+            .execute(&probe)
+            .await
+            .unwrap();
+    };
+    let (response, ()) = tokio::join!(get(&app.router, &uri, Some(&token)), worker);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["Retry-After"], "2");
+    let response = get(&app.router, &uri, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
 }

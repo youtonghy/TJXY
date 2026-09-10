@@ -250,6 +250,37 @@ Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.
 
+Playback preparation has its own wait budget. `TJXY_PLAYBACK_WAIT_MS` defaults to
+`15000` and accepts integers from `0` through `30000`. The budget covers storage
+sync prerequisites, source indexing, probe queue time, and probe execution within
+one `GET` or `POST /Items/{id}/PlaybackInfo` request. Zero schedules work without
+waiting; it still checks the current published result. `TJXY_LAZY_WAIT_MS`
+continues to control ordinary lazy catalog work (default `2500`); it does not
+configure this playback budget or lengthen playback event reporting.
+
+An already playable version is returned immediately while other eligible probes
+can continue. An explicit `MediaSourceId` waits only for that version; an item ID
+continues to mean the default selection. Only published, probed, visible sources
+with available locations are advertised, using local TJXY streaming routes.
+
+If preparation is still pending when the budget ends, PlaybackInfo returns HTTP
+`503`, `Retry-After: 2`, `Cache-Control: no-store`, and a preparation message.
+Terminal preparation failures also return `503` with a distinct sanitized message
+and no retry hint. A completed preparation with no usable source returns a
+PlaybackInfo response with `ErrorCode: NoCompatibleStream`. Successful responses
+omit `ErrorCode`. Durable work survives request cancellation or timeout; repeated
+requests join active work, and a fresh request reads the published result directly
+so an old empty cache entry cannot hide a completed probe.
+
+The 15-second default covers the observed 4.38- and 7.90-second first-play delays,
+but slower sources can still time out. HTTP waiting does not change the worker's
+own probe limits. Clients and reverse proxies must allow the selected wait time;
+`Retry-After` does not guarantee that a third-party client retries automatically.
+Validate the affected client/version before deployment. Rolling back this change
+requires reverting the server build and removing `TJXY_PLAYBACK_WAIT_MS`; this
+feature adds no database migration. Background pre-probing and production capacity
+changes are outside this fix.
+
 Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention

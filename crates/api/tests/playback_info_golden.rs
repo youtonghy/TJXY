@@ -46,6 +46,7 @@ fn direct_play_response_matches_the_pinned_pascal_case_golden() {
     let response = PlaybackInfoResponse {
         media_sources: vec![source],
         play_session_id: "session-1".to_owned(),
+        error_code: None,
     };
 
     let actual = serde_json::to_value(response).unwrap();
@@ -103,5 +104,20 @@ fn direct_play_urls_must_be_local_tjxy_routes() {
     assert_eq!(
         error.to_string(),
         "subtitle route must be a local TJXY path"
+    );
+}
+
+#[test]
+fn unavailable_playback_response_has_a_compatible_error_code() {
+    let response = PlaybackInfoResponse {
+        media_sources: Vec::new(),
+        play_session_id: "session-1".to_owned(),
+        error_code: Some(tjxy_api::PlaybackErrorCode::NoCompatibleStream),
+    };
+    assert_eq!(
+        serde_json::to_value(response).unwrap(),
+        serde_json::json!({
+            "MediaSources": [], "PlaySessionId": "session-1", "ErrorCode": "NoCompatibleStream",
+        })
     );
 }

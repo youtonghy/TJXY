@@ -77,6 +77,7 @@ pub struct StartupOptions {
     assets_dir: PathBuf,
     assets_dir_source: &'static str,
     lazy_wait_timeout: StdDuration,
+    playback_wait_timeout: StdDuration,
     filesystem_backends: Vec<FilesystemBackendConfiguration>,
     filesystem_realtime_enabled: bool,
     storage_backends: Vec<ConfiguredStorageBackend>,
@@ -139,6 +140,7 @@ impl fmt::Debug for StartupOptions {
             )
             .field("assets_dir", &self.assets_dir)
             .field("lazy_wait_timeout", &self.lazy_wait_timeout)
+            .field("playback_wait_timeout", &self.playback_wait_timeout)
             .field("filesystem_backend_count", &self.filesystem_backends.len())
             .field(
                 "filesystem_realtime_enabled",
@@ -192,6 +194,7 @@ impl StartupOptions {
             assets_dir: PathBuf::from("./data/assets"),
             assets_dir_source: "Default",
             lazy_wait_timeout: StdDuration::from_millis(2_500),
+            playback_wait_timeout: StdDuration::from_secs(15),
             filesystem_backends: Vec::new(),
             filesystem_realtime_enabled: true,
             storage_backends: Vec::new(),
@@ -282,6 +285,12 @@ impl StartupOptions {
     #[must_use]
     pub const fn with_lazy_wait_timeout(mut self, timeout: StdDuration) -> Self {
         self.lazy_wait_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_playback_wait_timeout(mut self, timeout: StdDuration) -> Self {
+        self.playback_wait_timeout = timeout;
         self
     }
 
@@ -699,6 +708,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let direct_metadata = Arc::new(direct_metadata);
     let mut catalog = CatalogQueryService::new(database.clone())
         .with_lazy_wait_timeout(options.lazy_wait_timeout)
+        .with_playback_wait_timeout(options.playback_wait_timeout)
         .with_direct_metadata(Arc::clone(&direct_metadata));
     if cache.is_enabled() {
         catalog = catalog.with_cache_ttls(
