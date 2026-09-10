@@ -29,7 +29,14 @@ pub(crate) async fn roots(
         browser
             .roots()
             .into_iter()
-            .map(|root| FilesystemRootDto::new(root.id(), root.label()))
+            .map(|root| {
+                FilesystemRootDto::new(root.id(), root.label()).with_path(
+                    browser
+                        .root_path(root.id())
+                        .and_then(|path| path.to_str())
+                        .map(str::to_owned),
+                )
+            })
             .collect::<Vec<_>>(),
     )
     .into_response()
@@ -79,7 +86,7 @@ fn directory_query(raw_query: Option<&str>) -> Result<(Uuid, String), ()> {
     Ok((root_id, query.get("Path").cloned().unwrap_or_default()))
 }
 
-fn browser_error_response(error: &FilesystemBrowserError) -> Response {
+pub(crate) fn browser_error_response(error: &FilesystemBrowserError) -> Response {
     match error {
         FilesystemBrowserError::UnknownRoot | FilesystemBrowserError::DirectoryUnavailable => {
             StatusCode::NOT_FOUND.into_response()
@@ -87,8 +94,8 @@ fn browser_error_response(error: &FilesystemBrowserError) -> Response {
         FilesystemBrowserError::InvalidRelativePath | FilesystemBrowserError::EscapedRoot => {
             StatusCode::BAD_REQUEST.into_response()
         }
-        FilesystemBrowserError::DirectoryLimit
-        | FilesystemBrowserError::InvalidDirectoryName
+        FilesystemBrowserError::DirectoryLimit => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        FilesystemBrowserError::InvalidDirectoryName
         | FilesystemBrowserError::InvalidRoot { .. }
         | FilesystemBrowserError::DuplicateRoot { .. } => {
             StatusCode::SERVICE_UNAVAILABLE.into_response()

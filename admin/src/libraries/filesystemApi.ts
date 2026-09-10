@@ -1,6 +1,6 @@
 import { ApiError, apiRequest } from '../api/httpClient';
 
-export interface FilesystemRoot { id: string; name: string }
+export interface FilesystemRoot { id: string; name: string; path?: string }
 export interface FilesystemDirectory { name: string; relativePath: string; modifiedAt: string | null }
 export interface FilesystemSelection { rootId: string; relativePath: string }
 
@@ -9,7 +9,8 @@ export async function listFilesystemRoots(signal?: AbortSignal): Promise<Filesys
   if (!Array.isArray(value)) throw invalidResponse();
   return value.map((root) => {
     if (!isRecord(root) || !validText(root.Id) || !validText(root.Name)) throw invalidResponse();
-    return { id: root.Id, name: root.Name };
+    if (root.Path !== undefined && !validText(root.Path)) throw invalidResponse();
+    return { id: root.Id, name: root.Name, ...(typeof root.Path === 'string' ? { path: root.Path } : {}) };
   });
 }
 

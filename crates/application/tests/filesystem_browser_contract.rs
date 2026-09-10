@@ -89,3 +89,80 @@ async fn available_roots_return_no_browser_when_every_entry_is_invalid() {
     assert!(browser.is_none());
     assert_eq!(invalid, [0]);
 }
+
+#[tokio::test]
+async fn content_preview_includes_file_metadata_but_selection_still_lists_only_directories() {
+    let root = TempDir::new().unwrap();
+    tokio::fs::create_dir(root.path().join("child"))
+        .await
+        .unwrap();
+    tokio::fs::write(root.path().join("notes.txt"), b"hello")
+        .await
+        .unwrap();
+    let browser = FilesystemBrowser::from_roots([root.path()]).await.unwrap();
+    let id = browser.roots()[0].id();
+    let page = browser.contents(id, Path::new("")).await.unwrap();
+    assert_eq!(page.entries().len(), 2);
+    assert!(page.entries()[0].is_directory());
+    assert_eq!(page.entries()[1].size(), Some(5));
+    assert!(!page.entries()[1].is_directory());
+    assert_eq!(
+        browser
+            .list(id, Path::new(""))
+            .await
+            .unwrap()
+            .entries()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        browser.contents(id, Path::new("../outside")).await,
+        Err(FilesystemBrowserError::InvalidRelativePath)
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn content_preview_does_not_follow_file_or_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    tokio::fs::write(outside.path().join("private.txt"), b"private")
+        .await
+        .unwrap();
+    symlink(outside.path(), root.path().join("escape")).unwrap();
+    symlink(
+        outside.path().join("private.txt"),
+        root.path().join("private.txt"),
+    )
+    .unwrap();
+    let browser = FilesystemBrowser::from_roots([root.path()]).await.unwrap();
+    let id = browser.roots()[0].id();
+    assert!(
+        browser
+            .contents(id, Path::new(""))
+            .await
+            .unwrap()
+            .entries()
+            .is_empty()
+    );
+    assert!(matches!(
+        browser.contents(id, Path::new("escape")).await,
+        Err(FilesystemBrowserError::EscapedRoot)
+    ));
+}
+
+#[tokio::test]
+async fn preview_rejects_oversized_directories_instead_of_reporting_partial_counts() {
+    let root = TempDir::new().unwrap();
+    for index in 0..10_001 {
+        std::fs::write(root.path().join(format!("file-{index}")), b"").unwrap();
+    }
+    let browser = FilesystemBrowser::from_roots([root.path()]).await.unwrap();
+    assert!(matches!(
+        browser
+            .contents(browser.roots()[0].id(), Path::new(""))
+            .await,
+        Err(FilesystemBrowserError::DirectoryLimit)
+    ));
+}

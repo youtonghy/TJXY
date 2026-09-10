@@ -454,7 +454,7 @@ async fn test_app_with_playback_wait(create_user: bool, wait: std::time::Duratio
 }
 
 #[tokio::test]
-async fn filesystem_browser_requires_an_administrator_and_exposes_only_relative_paths() {
+async fn filesystem_browser_requires_an_administrator_and_exposes_the_real_root_path() {
     let app = test_app().await;
     let response = get(&app.router, "/Admin/Filesystem/Roots", None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -466,7 +466,10 @@ async fn filesystem_browser_requires_an_administrator_and_exposes_only_relative_
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(roots.as_array().unwrap().len(), 1);
     assert_eq!(roots[0]["Name"], "library");
-    assert!(roots[0].get("Path").is_none());
+    assert_eq!(
+        roots[0]["Path"],
+        app.media_backend.root_path().to_str().unwrap()
+    );
     let root_id = roots[0]["Id"].as_str().unwrap();
 
     let response = get(
@@ -9303,4 +9306,190 @@ async fn playback_index_and_probe_consume_one_budget_instead_of_resetting_at_the
     let payload: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(payload["MediaSources"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn administrator_previews_attached_filesystem_folders_without_scanning() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let root = TempDir::new().unwrap();
+    tokio::fs::create_dir(root.path().join("Child"))
+        .await
+        .unwrap();
+    tokio::fs::write(root.path().join("notes.txt"), b"hello")
+        .await
+        .unwrap();
+    let response = post(
+        &app.router,
+        "/Library/VirtualFolders?name=Preview&collectionType=movies",
+        &token,
+        json!({"Path": root.path().to_str().unwrap()}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let libraries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let id = libraries[0]["ItemId"].as_str().unwrap();
+    let url = format!("/Admin/Libraries/{id}/Folders");
+    assert_eq!(
+        get(&app.router, &url, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &url, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        folders[0]["Path"],
+        root.path().canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(folders[0]["Provider"], "filesystem");
+    let root_id = folders[0]["Id"].as_str().unwrap();
+    let url = format!("{url}/{root_id}/Contents");
+    assert_eq!(
+        get(&app.router, &url, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, &url, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["Indexed"], false);
+    assert_eq!(page["Items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["Items"][0]["Name"], "Child");
+    assert_eq!(page["Items"][0]["IsDirectory"], true);
+    assert_eq!(page["Items"][1]["Name"], "notes.txt");
+    assert_eq!(page["Items"][1]["Size"], 5);
+    let response = get(&app.router, &format!("{url}?Path=Child"), Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("{url}?Path=..%2Foutside"),
+            Some(&token)
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get(&app.router, &format!("{url}?Path=missing"), Some(&token))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let unrelated = format!(
+        "/Admin/Libraries/{}/Folders/{root_id}/Contents",
+        Uuid::new_v4()
+    );
+    assert_eq!(
+        get(&app.router, &unrelated, Some(&token)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn cloud_folder_preview_uses_root_scoped_inventory_and_rejects_non_admins() {
+    let app = test_app().await;
+    let fixture = seed_cloud_multi_source_inventory(&app).await;
+    let backend = app.database.get_database_backend();
+    // Reuse the inventory as a nested directory plus a subtitle below it.
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("object_type"), "Directory")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.default_object)),
+            ),
+        )
+        .await
+        .unwrap();
+    app.database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_root_objects"))
+                    .value(
+                        Alias::new("parent_storage_object_id"),
+                        fixture.default_object,
+                    )
+                    .and_where(
+                        Expr::col(Alias::new("storage_object_id")).eq(fixture.subtitle_object),
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let (_, _, token) = login(&app.router).await;
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let libraries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let library_id = libraries[0]["ItemId"].as_str().unwrap();
+    let base = format!("/Admin/Libraries/{library_id}/Folders");
+    let response = get(&app.router, &base, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(folders[0]["Path"], Value::Null);
+    assert_eq!(folders[0]["Name"], "Remote Default");
+    let url = format!("{base}/{}/Contents", fixture.root);
+    let response = get(&app.router, &url, Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["Indexed"], true);
+    assert_eq!(page["Items"].as_array().unwrap().len(), 2);
+    let response = get(
+        &app.router,
+        &format!("{url}?Path={}", fixture.default_object),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["Items"][0]["Name"], "Remote Default.eng.srt");
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("{url}?Path={}", fixture.alternate_object),
+            Some(&token)
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(
+            &app.router,
+            &format!("{url}?Path={}", Uuid::new_v4()),
+            Some(&token)
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    AuthService::new(
+        app.database.clone(),
+        SystemClock,
+        Some(Duration::days(30)),
+        2,
+    )
+    .await
+    .unwrap()
+    .create_user("FolderReader", "ordinary password", false)
+    .await
+    .unwrap();
+    let (_, _, reader_token) = login_as(&app.router, "FolderReader", "ordinary password").await;
+    for endpoint in [base.as_str(), url.as_str(), "/Admin/Filesystem/Roots"] {
+        assert_eq!(
+            get(&app.router, endpoint, Some(&reader_token))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 }

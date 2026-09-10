@@ -51,3 +51,15 @@ fn library_folder_selections_deserialize_as_opaque_root_and_relative_path() {
     assert_eq!(attach_selection.root_id(), root_id);
     assert_eq!(attach_selection.relative_path(), "TV");
 }
+
+#[test]
+fn admin_browser_roots_can_include_the_physical_path_without_changing_selection_ids() {
+    let id = Uuid::new_v4();
+    let root = FilesystemRootDto::new(id, "Movies").with_path(Some("/srv/media/Movies".to_owned()));
+    assert_eq!(
+        serde_json::to_value(root).unwrap(),
+        json!({
+            "Id": id, "Name": "Movies", "Path": "/srv/media/Movies"
+        })
+    );
+}

@@ -72,3 +72,14 @@ it('explains how to configure the picker when no server roots are available', as
   expect(await screen.findByText('No server folders are configured')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Select folder' })).toBeDisabled();
 });
+
+it('returns the full physical path rather than a display breadcrumb', async () => {
+  rootsMock.mockResolvedValue([{ id: 'root-1', name: 'Media', path: '/mnt/media' }]);
+  const onSelect = vi.fn();
+  render(<FolderPickerDialog isOpen onClose={vi.fn()} onSelect={onSelect} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByText('Movies', { selector: 'span' }));
+  await waitFor(() => { expect(screen.getByRole('button', { name: 'Select folder' })).toBeEnabled(); });
+  await user.click(screen.getByRole('button', { name: 'Select folder' }));
+  expect(onSelect).toHaveBeenCalledWith({ rootId: 'root-1', relativePath: 'Movies' }, '/mnt/media/Movies');
+});

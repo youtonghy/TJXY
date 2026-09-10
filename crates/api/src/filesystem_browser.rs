@@ -6,14 +6,23 @@ use uuid::Uuid;
 pub struct FilesystemRootDto {
     id: Uuid,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 impl FilesystemRootDto {
+    #[must_use]
+    pub fn with_path(mut self, path: Option<String>) -> Self {
+        self.path = path;
+        self
+    }
+
     #[must_use]
     pub fn new(id: Uuid, name: impl Into<String>) -> Self {
         Self {
             id,
             name: name.into(),
+            path: None,
         }
     }
 }

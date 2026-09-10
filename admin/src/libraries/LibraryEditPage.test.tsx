@@ -1,4 +1,4 @@
-import { Toast } from '@heroui/react';
+import { Modal, Toast } from '@heroui/react';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -7,6 +7,7 @@ import { defaultTestAuthProvider, renderWithAdmin } from '../test/renderWithAdmi
 import { AdminNotifications } from '../ui/AdminNotifications';
 import { LibraryEditPage } from './LibraryEditPage';
 import { attachFilesystemFolder } from './filesystemApi';
+import { listLibraryFolders } from './libraryFoldersApi';
 import type { LibraryOption } from './libraryApi';
 import {
   deleteLibrary,
@@ -21,15 +22,17 @@ vi.mock('./libraryApi', () => ({
   renameLibrary: vi.fn(),
   updateLibraryPolicy: vi.fn(),
 }));
+vi.mock('./libraryFoldersApi', () => ({ listLibraryFolders: vi.fn(), listFolderContents: vi.fn() }));
 vi.mock('./filesystemApi', () => ({ attachFilesystemFolder: vi.fn() }));
 vi.mock('./FolderPickerDialog', () => ({
   FolderPickerDialog: ({ isOpen, onSelect }: {
     isOpen: boolean;
-    onSelect: (selection: { rootId: string; relativePath: string }) => void;
+    onSelect: (selection: { rootId: string; relativePath: string }, path: string) => void;
   }) => isOpen ? (
-    <button onClick={() => { onSelect({ rootId: 'root-2', relativePath: 'Movies' }); }} type="button">
-      Choose media fixture
-    </button>
+    <Modal isOpen><Modal.Backdrop><Modal.Container><Modal.Dialog>
+      <Modal.Header><Modal.Heading>Fixture picker</Modal.Heading></Modal.Header>
+      <Modal.Body><button onClick={() => { onSelect({ rootId: 'root-2', relativePath: 'Movies' }, '/srv/media/Movies'); }} type="button">Choose media fixture</button></Modal.Body>
+    </Modal.Dialog></Modal.Container></Modal.Backdrop></Modal>
   ) : null,
 }));
 
@@ -101,6 +104,7 @@ async function selectOption(user: ReturnType<typeof userEvent.setup>, label: str
 }
 
 beforeEach(() => {
+  vi.mocked(listLibraryFolders).mockResolvedValue([{ id: 'root-1', name: 'Movies', path: '/srv/media/Movies', provider: 'filesystem' }]);
   listMock.mockReset();
   renameMock.mockReset();
   updateMock.mockReset();
@@ -401,4 +405,23 @@ it('routes policy authorization failure through logout without local feedback', 
   await waitFor(() => { expect(screen.getByTestId('current-route')).toHaveTextContent('/admin/login'); });
   expect(dangerToast).not.toHaveBeenCalled();
   expect(screen.queryByText('private-policy-auth-detail')).not.toBeInTheDocument();
+});
+
+it('selects an actual server folder and clears the selection when its path is edited', async () => {
+  renderEdit();
+  const user = userEvent.setup();
+  await loadedNameInput();
+  await user.click(screen.getByRole('button', { name: 'Add folder' }));
+  await user.click(screen.getByRole('button', { name: 'Browse server folders' }));
+  await user.click(screen.getByRole('button', { name: 'Choose media fixture' }));
+  expect(screen.getByRole('textbox', { name: /Server path/u })).toHaveValue('/srv/media/Movies');
+  await user.click(screen.getByRole('button', { name: 'Attach folder' }));
+  await waitFor(() => { expect(attachMock).toHaveBeenCalledWith(libraryId, { rootId: 'root-2', relativePath: 'Movies' }); });
+  await user.click(screen.getByRole('button', { name: 'Add folder' }));
+  await user.click(screen.getByRole('button', { name: 'Browse server folders' }));
+  await user.click(screen.getByRole('button', { name: 'Choose media fixture' }));
+  await user.clear(screen.getByRole('textbox', { name: /Server path/u }));
+  await user.type(screen.getByRole('textbox', { name: /Server path/u }), '/srv/other');
+  await user.click(screen.getByRole('button', { name: 'Attach folder' }));
+  await waitFor(() => { expect(attachMock).toHaveBeenLastCalledWith(libraryId, '/srv/other'); });
 });

@@ -56,9 +56,20 @@ pub struct FilesystemDirectoryEntry {
     name: String,
     relative_path: String,
     modified_at: Option<DateTime<Utc>>,
+    is_directory: bool,
+    size: Option<u64>,
 }
 
 impl FilesystemDirectoryEntry {
+    #[must_use]
+    pub const fn is_directory(&self) -> bool {
+        self.is_directory
+    }
+    #[must_use]
+    pub const fn size(&self) -> Option<u64> {
+        self.size
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -143,6 +154,14 @@ impl FilesystemBrowser {
             .collect()
     }
 
+    #[must_use]
+    pub fn root_path(&self, id: Uuid) -> Option<&Path> {
+        self.roots
+            .iter()
+            .find(|root| root.id == id)
+            .map(|root| root.canonical_path.as_path())
+    }
+
     /// Lists direct child directories under one validated selection.
     ///
     /// # Errors
@@ -153,25 +172,47 @@ impl FilesystemBrowser {
         root_id: Uuid,
         relative_path: &Path,
     ) -> Result<FilesystemDirectoryPage, FilesystemBrowserError> {
+        self.list_entries(root_id, relative_path, false).await
+    }
+
+    /// Lists files and directories inside a validated root, bounded to 10,000 entries.
+    /// # Errors
+    /// Returns the same path and availability errors as directory selection.
+    pub async fn contents(
+        &self,
+        root_id: Uuid,
+        relative_path: &Path,
+    ) -> Result<FilesystemDirectoryPage, FilesystemBrowserError> {
+        self.list_entries(root_id, relative_path, true).await
+    }
+
+    async fn list_entries(
+        &self,
+        root_id: Uuid,
+        relative_path: &Path,
+        include_files: bool,
+    ) -> Result<FilesystemDirectoryPage, FilesystemBrowserError> {
         let resolved = self.resolve(root_id, relative_path).await?;
         let root = self.root(root_id)?;
         let mut reader = tokio::fs::read_dir(resolved.path())
             .await
             .map_err(|_| FilesystemBrowserError::DirectoryUnavailable)?;
         let mut entries = Vec::new();
+        let mut examined = 0;
         while let Some(entry) = reader
             .next_entry()
             .await
             .map_err(|_| FilesystemBrowserError::DirectoryUnavailable)?
         {
-            if entries.len() >= MAX_DIRECTORY_ENTRIES {
+            if examined >= MAX_DIRECTORY_ENTRIES {
                 return Err(FilesystemBrowserError::DirectoryLimit);
             }
+            examined += 1;
             let file_type = entry
                 .file_type()
                 .await
                 .map_err(|_| FilesystemBrowserError::DirectoryUnavailable)?;
-            if !file_type.is_dir() {
+            if !(file_type.is_dir() || include_files && file_type.is_file()) {
                 continue;
             }
             let canonical = tokio::fs::canonicalize(entry.path())
@@ -197,10 +238,17 @@ impl FilesystemBrowser {
                 .ok()
                 .and_then(|metadata| metadata.modified().ok())
                 .map(DateTime::<Utc>::from);
+            let size = if file_type.is_file() {
+                entry.metadata().await.ok().map(|metadata| metadata.len())
+            } else {
+                None
+            };
             entries.push(FilesystemDirectoryEntry {
                 name,
                 relative_path,
                 modified_at,
+                is_directory: file_type.is_dir(),
+                size,
             });
         }
         entries.sort_by(|left, right| {

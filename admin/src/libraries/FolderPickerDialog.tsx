@@ -10,7 +10,7 @@ import {
   RefreshCw,
   TriangleAlert,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { useTranslate } from '../settings/i18n';
 import type { FilesystemDirectory, FilesystemRoot, FilesystemSelection } from './filesystemApi';
@@ -35,6 +35,7 @@ export function FolderPickerDialog({
   onSelect,
 }: FolderPickerDialogProps) {
   const tr = useTranslate();
+  const requestSequence = useRef(0);
   const [roots, setRoots] = useState<FilesystemRoot[]>([]);
   const [root, setRoot] = useState<FilesystemRoot | null>(null);
   const [trail, setTrail] = useState<TrailEntry[]>([]);
@@ -47,27 +48,32 @@ export function FolderPickerDialog({
     nextTrail: TrailEntry[],
     signal?: AbortSignal,
   ) => {
+    const sequence = ++requestSequence.current;
+    const isCurrent = () => sequence === requestSequence.current && signal?.aborted !== true;
     setLoading(true);
     setError(false);
     try {
       const currentPath = nextTrail.at(-1)?.relativePath ?? '';
       const items = await listFilesystemDirectories(nextRoot.id, currentPath, signal);
+      if (!isCurrent()) return;
       setRoot(nextRoot);
       setTrail(nextTrail);
       setDirectories(items);
     } catch (loadError: unknown) {
-      if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) setError(true);
+      if (isCurrent() && !(loadError instanceof DOMException && loadError.name === 'AbortError')) setError(true);
     } finally {
-      if (signal?.aborted !== true) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, []);
 
   const loadRoots = useCallback(async (signal?: AbortSignal) => {
+    const sequence = ++requestSequence.current;
+    const isCurrent = () => sequence === requestSequence.current && signal?.aborted !== true;
     setLoading(true);
     setError(false);
     try {
       const nextRoots = await listFilesystemRoots(signal);
-      if (signal?.aborted === true) return;
+      if (!isCurrent()) return;
       setRoots(nextRoots);
       if (nextRoots[0] !== undefined) {
         await loadDirectory(nextRoots[0], [], signal);
@@ -77,8 +83,8 @@ export function FolderPickerDialog({
         setLoading(false);
       }
     } catch (loadError: unknown) {
-      if (!(loadError instanceof DOMException && loadError.name === 'AbortError')) setError(true);
-      if (signal?.aborted !== true) setLoading(false);
+      if (isCurrent() && !(loadError instanceof DOMException && loadError.name === 'AbortError')) setError(true);
+      if (isCurrent()) setLoading(false);
     }
   }, [loadDirectory]);
 
@@ -89,7 +95,7 @@ export function FolderPickerDialog({
       if (controller.signal.aborted) return undefined;
       return loadRoots(controller.signal);
     });
-    return () => { controller.abort(); };
+    return () => { controller.abort(); requestSequence.current += 1; };
   }, [isOpen, loadRoots]);
 
   const navigateToRoot = (nextRoot: FilesystemRoot) => {
@@ -121,7 +127,7 @@ export function FolderPickerDialog({
     if (root === null) return;
     onSelect(
       { rootId: root.id, relativePath: trail.at(-1)?.relativePath ?? '' },
-      [root.name, ...trail.map((entry) => entry.name)].join(' / '),
+      root.path !== undefined ? `${root.path.replace(/\/$/u, '')}/${trail.at(-1)?.relativePath ?? ''}`.replace(/\/$/u, '') || '/' : [root.name, ...trail.map((entry) => entry.name)].join(' / '),
     );
     onClose();
   };
@@ -130,12 +136,12 @@ export function FolderPickerDialog({
     <Modal isOpen={isOpen} onOpenChange={(open) => { if (!open && !isDisabled) onClose(); }}>
       <Modal.Backdrop isDismissable={!isDisabled} isKeyboardDismissDisabled={isDisabled}>
         <Modal.Container placement="center" size="lg">
-          <Modal.Dialog className="max-h-[min(48rem,calc(100vh-2rem))]">
+          <Modal.Dialog className="max-h-[min(48rem,calc(100dvh-2rem))] sm:w-[min(56rem,calc(100vw-5rem))] sm:max-w-4xl">
             <Modal.CloseTrigger aria-label={tr('Close folder picker', '关闭文件夹选择器')} isDisabled={isDisabled} />
             <Modal.Header>
               <Modal.Heading>{tr('Select media folder', '选择媒体文件夹')}</Modal.Heading>
             </Modal.Header>
-            <Modal.Body className="min-h-0">
+            <Modal.Body className="min-h-0 overflow-y-auto">
               {error && (
                 <Alert role="alert" status="danger">
                   <Alert.Indicator><TriangleAlert aria-hidden="true" className="size-4" /></Alert.Indicator>
@@ -158,6 +164,7 @@ export function FolderPickerDialog({
                 </Alert>
               )}
 
+              {root?.path !== undefined && <p className="mb-3 break-all font-mono text-xs text-muted">{`${root.path.replace(/\/$/u, '')}/${trail.at(-1)?.relativePath ?? ''}`}</p>}
               <div className="grid min-h-96 overflow-hidden border border-border md:grid-cols-[15rem_minmax(0,1fr)]">
                 <aside className="min-h-0 overflow-auto border-b border-border bg-surface-secondary p-3 md:border-b-0 md:border-r">
                   <p className="mb-2 px-2 text-xs font-semibold uppercase text-muted">{tr('Server folders', '服务器文件夹')}</p>
@@ -182,7 +189,7 @@ export function FolderPickerDialog({
                         id={`root:${candidate.id}`}
                         icon={candidate.id === root?.id ? <FolderOpen aria-hidden="true" /> : <HardDrive aria-hidden="true" />}
                         key={candidate.id}
-                        title={candidate.name}
+                        title={candidate.path ?? candidate.name}
                       >
                         {candidate.id === root?.id ? renderTrail(root.id, trail, 0) : null}
                       </FileTree.Item>
@@ -245,7 +252,7 @@ export function FolderPickerDialog({
                         <Skeleton className="h-12 w-full" />
                         <Skeleton className="h-12 w-full" />
                       </div>
-                    ) : (
+                    ) : error ? null : (
                       <ListView
                         aria-label={tr('Folder list view', '文件夹列表')}
                         onAction={(key) => {
@@ -276,7 +283,7 @@ export function FolderPickerDialog({
             </Modal.Body>
             <Modal.Footer>
               <Button isDisabled={isDisabled} onPress={onClose} variant="tertiary">{tr('Cancel', '取消')}</Button>
-              <Button isDisabled={root === null || loading || isDisabled} onPress={select}>
+              <Button isDisabled={root === null || loading || error || isDisabled} onPress={select}>
                 <FolderOpen aria-hidden="true" className="size-4" /> {tr('Select folder', '选择文件夹')}
               </Button>
             </Modal.Footer>

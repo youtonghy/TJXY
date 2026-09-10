@@ -21,6 +21,7 @@ mod image;
 mod import_admin;
 mod installation_config;
 mod library;
+mod library_folders_admin;
 mod local_metadata_admin;
 mod log_record;
 mod logging_admin;
@@ -1173,6 +1174,14 @@ fn admin_task_routes() -> Router<AppState> {
 
 fn admin_filesystem_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/Admin/Libraries/{library_id}/Folders",
+            get(library_folders_admin::folders),
+        )
+        .route(
+            "/Admin/Libraries/{library_id}/Folders/{root_id}/Contents",
+            get(library_folders_admin::contents),
+        )
         .route("/Admin/Filesystem/Roots", get(filesystem_admin::roots))
         .route(
             "/Admin/Filesystem/Directories",

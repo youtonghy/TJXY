@@ -30,6 +30,8 @@ mod import_publication;
 mod import_runtime;
 mod installation;
 mod library;
+mod library_folders;
+pub use library_folders::{LibraryFolder, LibraryFolderEntry, LibraryFolderRepository};
 mod logging_settings;
 mod manual_probe;
 mod media_collection;

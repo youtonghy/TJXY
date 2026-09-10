@@ -41,6 +41,31 @@ impl LibraryService {
             .map_err(Into::into)
     }
 
+    /// Reads administrator folder information for one library.
+    /// # Errors
+    /// Returns a database error if the folder read model is unavailable.
+    pub async fn folders(
+        &self,
+        library_id: uuid::Uuid,
+    ) -> Result<Vec<tjxy_db::LibraryFolder>, sea_orm::DbErr> {
+        tjxy_db::LibraryFolderRepository::new(&self.database)
+            .folders(library_id)
+            .await
+    }
+
+    /// Reads synchronized children within a storage root.
+    /// # Errors
+    /// Returns a database error if the inventory is unavailable.
+    pub async fn folder_children(
+        &self,
+        root_id: uuid::Uuid,
+        parent_id: uuid::Uuid,
+    ) -> Result<Vec<tjxy_db::LibraryFolderEntry>, sea_orm::DbErr> {
+        tjxy_db::LibraryFolderRepository::new(&self.database)
+            .children(root_id, parent_id)
+            .await
+    }
+
     /// Creates an empty virtual folder. Storage roots are attached through storage admin flows.
     ///
     /// # Errors
