@@ -1,0 +1,12 @@
+{
+  "range_during_root_validation": "failed: 20 of 264 sequential requests returned 404; 244 returned 206",
+  "headed_playback": "first frame decoded; audible output clock stalled, zero volume and muted clocks advanced",
+  "headless_playback": "audible output clock also stalled; muted decode/time/pause/seek passed",
+  "read_fence_before_adaptive": {
+    "requests": 220,
+    "status_206": 207,
+    "status_404": 13
+  },
+  "item_phase_playback": "128 active background jobs observed before verified Range and muted browser playback",
+  "stress_scan": "first root scan Completed; second scan interrupted by measurement wrapper at 180s, not a complete capacity pass"
+}

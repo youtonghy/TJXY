@@ -1,0 +1,141 @@
+{
+  "basis": "first scan minus before library, SQLite dbstat payload; excludes page headers and free space; 274 synthetic items, normalization is not a scale forecast",
+  "groups": {
+    "metadata": {
+      "tables_or_indexes": {
+        "catalog_items": 62636,
+        "genres": 23,
+        "media_sources": 104394,
+        "media_streams": 39182,
+        "metadata_provenance": 137548
+      },
+      "payload_delta_bytes": 343783,
+      "normalized_bytes_per_1000_items": 1254682.48
+    },
+    "relations": {
+      "tables_or_indexes": {
+        "direct_metadata_refs": 26727,
+        "identity_matches": 23564,
+        "item_genres": 14248,
+        "library_catalog_items": 14522,
+        "media_locations": 18084,
+        "media_stream_index_map": 33976
+      },
+      "payload_delta_bytes": 131121,
+      "normalized_bytes_per_1000_items": 478543.8
+    },
+    "inventory": {
+      "tables_or_indexes": {
+        "storage_objects": 414404,
+        "storage_root_objects": 127159
+      },
+      "payload_delta_bytes": 541563,
+      "normalized_bytes_per_1000_items": 1976507.3
+    },
+    "runtime_and_publications": {
+      "tables_or_indexes": {
+        "catalog_publications": 67276,
+        "publication_media_locations": 42470,
+        "publication_media_sources": 107134,
+        "storage_sync_pages": 64412,
+        "work_job_retention_queue": 61656,
+        "work_jobs": 258918,
+        "work_maintenance_state": 7,
+        "work_results": 138933,
+        "work_staging_rows": 107108
+      },
+      "payload_delta_bytes": 847914,
+      "normalized_bytes_per_1000_items": 3094576.64
+    },
+    "indexes": {
+      "tables_or_indexes": {
+        "idx_catalog_items_parent_browse": 11928,
+        "idx_catalog_items_parent_index": 11928,
+        "idx_catalog_items_type_browse": 13298,
+        "idx_direct_metadata_refs_storage_object": 5626,
+        "idx_libraries_browse": 29,
+        "idx_library_catalog_items_reverse": 10284,
+        "idx_media_locations_source_availability": 13298,
+        "idx_media_sources_item_probe": 12202,
+        "ix_catalog_items_latest": 15216,
+        "ix_catalog_items_structure_owner": 5900,
+        "ix_catalog_publications_owner": 9736,
+        "ix_item_genres_genre_item": 10412,
+        "ix_library_catalog_items_hybrid_admin": 10558,
+        "ix_media_sources_playback_policy": 6448,
+        "ix_storage_objects_facts_observed_root_revision": 25549,
+        "ix_storage_root_objects_object": 22909,
+        "ix_storage_root_objects_object_root": 41558,
+        "ix_storage_root_objects_parent": 50318,
+        "ix_work_job_retention_claim": 42811,
+        "sqlite_autoindex_catalog_items_1": 5626,
+        "sqlite_autoindex_catalog_publications_1": 5626,
+        "sqlite_autoindex_catalog_publications_2": 5626,
+        "sqlite_autoindex_direct_metadata_refs_1": 5626,
+        "sqlite_autoindex_filesystem_storage_configs_1": 19,
+        "sqlite_autoindex_genres_1": 19,
+        "sqlite_autoindex_genres_2": 7,
+        "sqlite_autoindex_identity_matches_1": 5626,
+        "sqlite_autoindex_identity_matches_2": 10284,
+        "sqlite_autoindex_item_genres_1": 5754,
+        "sqlite_autoindex_item_genres_2": 10412,
+        "sqlite_autoindex_libraries_1": 19,
+        "sqlite_autoindex_library_catalog_items_1": 5626,
+        "sqlite_autoindex_library_catalog_items_2": 10284,
+        "sqlite_autoindex_library_storage_roots_1": 19,
+        "sqlite_autoindex_library_storage_roots_2": 36,
+        "sqlite_autoindex_media_locations_1": 5626,
+        "sqlite_autoindex_media_locations_2": 5626,
+        "sqlite_autoindex_media_sources_1": 5626,
+        "sqlite_autoindex_media_sources_2": 10284,
+        "sqlite_autoindex_media_stream_index_map_1": 11380,
+        "sqlite_autoindex_media_stream_index_map_2": 12202,
+        "sqlite_autoindex_media_stream_index_map_3": 20696,
+        "sqlite_autoindex_media_streams_1": 11380,
+        "sqlite_autoindex_metadata_provenance_1": 17262,
+        "sqlite_autoindex_metadata_provenance_2": 29044,
+        "sqlite_autoindex_publication_media_locations_1": 5626,
+        "sqlite_autoindex_publication_media_sources_1": 5626,
+        "sqlite_autoindex_storage_accounts_1": 19,
+        "sqlite_autoindex_storage_accounts_2": 90,
+        "sqlite_autoindex_storage_objects_1": 22909,
+        "sqlite_autoindex_storage_objects_2": 66789,
+        "sqlite_autoindex_storage_root_objects_1": 22909,
+        "sqlite_autoindex_storage_roots_1": 19,
+        "sqlite_autoindex_storage_sync_pages_1": 5668,
+        "sqlite_autoindex_work_job_retention_queue_1": 22993,
+        "sqlite_autoindex_work_jobs_1": 22993,
+        "sqlite_autoindex_work_results_1": 22993,
+        "sqlite_autoindex_work_results_2": 22993,
+        "sqlite_autoindex_work_staging_rows_1": 11443,
+        "sqlite_autoindex_work_staging_rows_2": 57977,
+        "uq_direct_metadata_refs_item_kind_priority": 12750,
+        "uq_filesystem_config_root_path": 47,
+        "uq_media_streams_identity": 15764,
+        "uq_publication_media_locations_identity": 10284,
+        "uq_publication_media_locations_object": 10284,
+        "uq_publication_media_sources_identity": 10284,
+        "uq_publication_media_sources_presentation": 10284,
+        "uq_storage_objects_identity_key": 95311,
+        "uq_storage_root_objects": 41558,
+        "uq_storage_sync_pages_identity": 22736
+      },
+      "payload_delta_bytes": 1040092,
+      "normalized_bytes_per_1000_items": 3795956.2
+    },
+    "other": {
+      "tables_or_indexes": {
+        "cache_invalidation_state": 2,
+        "catalog_state": 2,
+        "filesystem_storage_configs": 89,
+        "libraries": 120,
+        "library_storage_roots": 57,
+        "storage_accounts": 175,
+        "storage_roots": 81
+      },
+      "payload_delta_bytes": 526,
+      "normalized_bytes_per_1000_items": 1919.71
+    }
+  },
+  "allocated_file_delta_bytes": 3387392
+}

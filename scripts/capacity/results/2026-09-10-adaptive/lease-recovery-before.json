@@ -1,0 +1,34 @@
+{
+  "phase": "before concurrent lease renewal fix",
+  "capacity_status": "complete",
+  "elapsed_seconds": 888.3413108329987,
+  "scan_seconds": [
+    459.60616854199907,
+    401.72691083300015
+  ],
+  "parent_state_and_attempt_count": [
+    [
+      "Completed",
+      2
+    ],
+    [
+      "Completed",
+      2
+    ]
+  ],
+  "inactive_sampling_gaps_over_100_seconds": [
+    {
+      "start": 206.009548792,
+      "end": 424.164778583,
+      "seconds": 218.15522979099998
+    },
+    {
+      "start": 636.005668583,
+      "end": 835.0277235,
+      "seconds": 199.022054917
+    }
+  ],
+  "old_renewal_regression_exit": 101,
+  "fixed_renewal_regression_exit": 0,
+  "regression": "A scan transaction holds the only SQLite pool connection when renewal starts. Work must keep polling to release that connection; pausing work makes renewal time out."
+}

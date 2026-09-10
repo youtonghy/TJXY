@@ -34,7 +34,7 @@ it('loads daily logs and applies debug mode without a restart', async () => {
   await waitFor(() => {
     expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({ mode: 'Debug', retentionDays: 30, revision: 1 }));
   });
-  expect(screen.getByText('Record complete scanning, ingestion, and Lazy work flows.')).toBeVisible();
+  expect(screen.getByText('Record detailed workflows; restore the previous level 30 minutes after saving.')).toBeVisible();
 });
 
 it('loads older bounded pages before current lines', async () => {
@@ -46,4 +46,14 @@ it('loads older bounded pages before current lines', async () => {
   expect(await screen.findByText('old')).toBeVisible();
   expect(screen.getByText('new')).toBeVisible();
   expect(pageMock).toHaveBeenLastCalledWith('2026-08-13', 256);
+});
+
+it('shows persistent debug expiry and saves the configured capacity with Info mode', async () => {
+  getSettingsMock.mockResolvedValue({ mode: 'Debug', retentionDays: 30, revision: 3, directory: './logs', maxFileBytes: 8*1024*1024, maxDirectoryBytes: 64*1024*1024, debugExpiresAt: '2026-09-09T12:00:00Z' });
+  renderWithAdmin(<LogsPage />, { initialEntries: ['/admin/logs'] });
+  const user = userEvent.setup();
+  expect(await screen.findByText(/Debug expires at/)).toBeVisible();
+  await user.click(screen.getByRole('radio', { name: 'Info' }));
+  await user.click(screen.getByRole('button', { name: 'Save settings' }));
+  await waitFor(() => { expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({ mode: 'Info', maxFileBytes: 8*1024*1024, maxDirectoryBytes: 64*1024*1024 })); });
 });

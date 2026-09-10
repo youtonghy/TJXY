@@ -1569,7 +1569,28 @@ async fn wait_for_child(
         }
         sleep(Duration::from_millis(200)).await;
     }
-    panic!("timed out waiting for {context}:\n{}", server.logs());
+    let database = Database::connect(&server.database_url).await.unwrap();
+    let jobs = database
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT task_kind, state, last_error FROM work_jobs ORDER BY created_at DESC LIMIT 30",
+        ))
+        .await
+        .unwrap();
+    let diagnostics = jobs
+        .iter()
+        .map(|row| {
+            (
+                row.try_get::<String>("", "task_kind").unwrap(),
+                row.try_get::<String>("", "state").unwrap(),
+                row.try_get::<Option<String>>("", "last_error").unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    panic!(
+        "timed out waiting for {context}:\n{}\nRecent fixture jobs: {diagnostics:?}",
+        server.logs()
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

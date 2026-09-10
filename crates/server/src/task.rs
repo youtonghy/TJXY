@@ -345,7 +345,9 @@ fn accepted_task(submission: &tjxy_db::WorkJobSubmission) -> Response {
 
 fn manual_task_error(error: &TaskServiceError) -> Response {
     match error {
-        TaskServiceError::Probe(
+        TaskServiceError::InvalidManualMediaItemType
+        | TaskServiceError::StaleDiagnostic
+        | TaskServiceError::Probe(
             ManualProbeError::NoActiveMediaSources
             | ManualProbeError::NoAvailableMediaSources
             | ManualProbeError::TooManyMediaSources,
@@ -353,7 +355,6 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
         | TaskServiceError::Discover(DiscoverTitlesError::AlreadyCurrent) => {
             StatusCode::CONFLICT.into_response()
         }
-        TaskServiceError::InvalidManualMediaItemType => StatusCode::CONFLICT.into_response(),
         TaskServiceError::ManualMediaItemUnavailable
         | TaskServiceError::FullScan(FullScanRepositoryError::UnavailableLibraryRoot)
         | TaskServiceError::Probe(ManualProbeError::ItemUnavailable)
@@ -380,7 +381,8 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
         TaskServiceError::FullScan(FullScanRepositoryError::InvalidCandidateLimit) => {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-        TaskServiceError::Catalog(_)
+        TaskServiceError::Diagnostics(_)
+        | TaskServiceError::Catalog(_)
         | TaskServiceError::Repository(_)
         | TaskServiceError::FullScan(
             FullScanRepositoryError::InvalidClaim

@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use sea_orm_migration::MigratorTrait;
 use tjxy_common::Username;
 use tjxy_db::{AuthRepository, PasskeyChallenge, PasskeyCredential, PasskeyRepository};
@@ -10,7 +10,8 @@ async fn challenge_is_consumed_once_and_expired_state_is_rejected() {
     let database = test_database().await.unwrap();
     tjxy_db::Migrator::up(&database, None).await.unwrap();
     let repository = PasskeyRepository::new(&database);
-    let now = Utc::now();
+    // Use the timestamp precision supported by every backend for this identity assertion.
+    let now = Utc::now().with_nanosecond(0).unwrap();
     let active = PasskeyChallenge {
         id: Uuid::new_v4(),
         user_id: None,
@@ -104,4 +105,48 @@ async fn deleting_a_user_cascades_passkey_state() {
         repository.take_challenge(challenge_id, now).await.unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn full_length_credential_ids_preserve_case_sensitive_identity() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let now = Utc::now();
+    let user = AuthRepository::new(&database)
+        .create_user(
+            &Username::parse("credential-case").unwrap(),
+            "$argon2id$test-only",
+            true,
+            false,
+            now,
+        )
+        .await
+        .unwrap();
+    let repository = PasskeyRepository::new(&database);
+    for value in ["A".repeat(1024), "a".repeat(1024)] {
+        let id = Uuid::new_v4();
+        repository
+            .insert(&PasskeyCredential {
+                id,
+                user_id: user.id().as_uuid(),
+                credential_id: value.clone(),
+                public_key: vec![1],
+                counter: 0,
+                name: "Case".to_owned(),
+                created_at: now,
+                last_used_at: now,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_by_credential_id(&value)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
+    }
+    assert_eq!(repository.list(user.id().as_uuid()).await.unwrap().len(), 2);
 }

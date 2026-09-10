@@ -54,6 +54,13 @@ impl ReadAvailabilityThrottle {
         if guard.len() >= THROTTLE_PRUNE_THRESHOLD {
             guard.retain(|_, recorded| now.duration_since(*recorded) < self.window);
         }
+        if guard.len() >= THROTTLE_PRUNE_THRESHOLD && !guard.contains_key(&object) {
+            let mut oldest = guard.iter().map(|(id, at)| (*id, *at)).collect::<Vec<_>>();
+            oldest.sort_unstable_by_key(|(_, at)| *at);
+            for (id, _) in oldest.into_iter().take(THROTTLE_PRUNE_THRESHOLD / 4) {
+                guard.remove(&id);
+            }
+        }
         match guard.get(&object) {
             Some(recorded) if now.duration_since(*recorded) < self.window => false,
             _ => {
@@ -82,12 +89,33 @@ pub(crate) async fn get_object(
     record_id: StorageObjectRecordId,
     backend_id: &StorageObjectId,
 ) -> Result<StorageObject, StorageReadError> {
+    get_object_throttled(
+        database,
+        backend,
+        record_id,
+        backend_id,
+        &ReadAvailabilityThrottle::unthrottled(),
+    )
+    .await
+}
+
+pub(crate) async fn get_object_throttled(
+    database: &DatabaseConnection,
+    backend: &dyn StorageBackend,
+    record_id: StorageObjectRecordId,
+    backend_id: &StorageObjectId,
+    throttle: &ReadAvailabilityThrottle,
+) -> Result<StorageObject, StorageReadError> {
     match backend.get_object(backend_id).await {
         Ok(object) => {
-            record_and_project_availability(database, record_id, ReadAvailability::Present).await?;
+            if throttle.should_record_present(record_id) {
+                record_and_project_availability(database, record_id, ReadAvailability::Present)
+                    .await?;
+            }
             Ok(object)
         }
         Err(error) => {
+            throttle.reset(record_id);
             record_backend_failure(database, record_id, &error).await?;
             Err(StorageReadError::Backend(error))
         }
@@ -287,5 +315,16 @@ mod tests {
 
         assert!(throttle.should_record_present(object));
         assert!(throttle.should_record_present(object));
+    }
+    #[test]
+    fn high_cardinality_reads_keep_throttle_memory_bounded() {
+        let throttle = ReadAvailabilityThrottle::new(std::time::Duration::from_secs(60));
+        for _ in 0..super::THROTTLE_PRUNE_THRESHOLD * 2 {
+            assert!(throttle.should_record_present(tjxy_common::StorageObjectRecordId::new()));
+        }
+        assert!(throttle.inner.lock().unwrap().len() <= super::THROTTLE_PRUNE_THRESHOLD);
+        let recent = tjxy_common::StorageObjectRecordId::new();
+        assert!(throttle.should_record_present(recent));
+        assert!(!throttle.should_record_present(recent));
     }
 }

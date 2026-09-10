@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::Duration;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use tjxy_application::{
     AuthService, CacheInvalidationRun, CacheInvalidationService, CatalogQueryService,
     DiscoverTitlesService, DiscoverTitlesServiceError, FullScanError, FullScanService,
@@ -34,14 +34,103 @@ use uuid::Uuid;
 
 use crate::socket::RealtimeEvents;
 
+mod adaptive;
+mod lease;
+pub(crate) use adaptive::spawn_background_scan_worker;
+
 const LEASE_DURATION: Duration = Duration::minutes(5);
-const WORK_LEASE_RECOVERY_INTERVAL: StdDuration = StdDuration::from_secs(15);
+const WORK_LEASE_RECOVERY_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const LEASE_RENEW_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const IMPORT_LEASE_DURATION: Duration = Duration::minutes(5);
 const FILESYSTEM_EVENT_PRIORITY: i32 = 90;
 const FILESYSTEM_EVENT_QUIET_WINDOW: StdDuration = StdDuration::from_millis(500);
 const HOME_CACHE_WARM_USER_LIMIT: u64 = 128;
 const SESSION_RETENTION: Duration = Duration::days(180);
+
+async fn renew_scan_execution<T, Error>(
+    database: &DatabaseConnection,
+    claimed: &tjxy_db::ClaimedWorkJob,
+    work: impl Future<Output = Result<T, Error>>,
+    lost_lease: impl Fn(WorkJobRepositoryError) -> Error,
+) -> Result<T, Error>
+where
+    Error: std::fmt::Display,
+{
+    let jobs = WorkJobRepository::new(database);
+    let execution = execute_logged(claimed, work);
+    lease::run(
+        execution,
+        || async {
+            matches!(
+                tokio::time::timeout(LEASE_RENEW_TIMEOUT, jobs.renew(claimed, LEASE_DURATION))
+                    .await,
+                Ok(Ok(()))
+            )
+        },
+        StdDuration::from_secs(60),
+        lost_lease(WorkJobRepositoryError::LostLease),
+    )
+    .await
+}
+
+async fn process_scan_job(
+    database: &DatabaseConnection,
+    services: &adaptive::ScanServices,
+    claimed: &tjxy_db::ClaimedWorkJob,
+) -> bool {
+    let jobs = WorkJobRepository::new(database);
+    match claimed.job().task_kind() {
+        WorkTaskKind::ResolveMetadata => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.metadata.execute(claimed),
+                |error| MetadataResolveError::Work(MetadataWorkError::Work(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_metadata_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::ProbeMedia => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.probe.execute(claimed),
+                |error| ProbeServiceError::Repository(tjxy_db::ProbeRepositoryError::Work(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::IndexMediaSources => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.sources.execute(claimed),
+                |error| SourceIndexError::Publication(CatalogPublicationError::WorkJob(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_source_index_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        WorkTaskKind::ExpandItem => {
+            let outcome = Box::pin(renew_scan_execution(
+                database,
+                claimed,
+                services.series.execute(claimed),
+                |error| SeriesExpandError::Publication(CatalogPublicationError::WorkJob(error)),
+            ))
+            .await;
+            let success = outcome.is_ok();
+            handle_series_expand_outcome(&jobs, claimed, outcome).await;
+            success
+        }
+        _ => unreachable!("background dispatcher only accepts scan item stages"),
+    }
+}
 
 pub(crate) fn spawn_auth_session_retention_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
@@ -87,11 +176,16 @@ where
     async move {
         let started = Instant::now();
         tracing::debug!("work job started");
-        let outcome = work.await;
-        match &outcome {
-            Ok(_) => tracing::debug!(duration_ms = started.elapsed().as_millis(), outcome = "completed", "work job finished"),
-            Err(error) => tracing::debug!(duration_ms = started.elapsed().as_millis(), outcome = "deferred_or_failed", error = %error, "work job finished"),
-        }
+        let outcome = tjxy_application::with_work_io_priority(claimed.job().priority(), work).await;
+        tracing::debug!(
+            duration_ms = started.elapsed().as_millis(),
+            outcome = if outcome.is_ok() {
+                "completed"
+            } else {
+                "deferred_or_failed"
+            },
+            "work job finished"
+        );
         outcome
     }
     .instrument(job_span(claimed))
@@ -247,15 +341,23 @@ pub(crate) fn spawn_cache_invalidation_worker(
 ) {
     tokio::spawn(async move {
         let service = CacheInvalidationService::new(database, cache);
+        let mut waiter = tjxy_db::WorkQueueWaiter::default();
         let mut last_outbox_purge = std::time::Instant::now();
         loop {
             let delay = match service.run_once().await {
                 Ok(CacheInvalidationRun::Completed { generation, .. }) => {
+                    waiter.reset();
                     events.publish_library_changed(generation);
+                    StdDuration::from_millis(100)
+                }
+                Ok(CacheInvalidationRun::Progressed { .. }) => {
+                    waiter.reset();
+                    StdDuration::from_millis(25)
+                }
+                Ok(CacheInvalidationRun::Idle) => {
+                    waiter.wait().await;
                     StdDuration::ZERO
                 }
-                Ok(CacheInvalidationRun::Progressed { .. }) => StdDuration::ZERO,
-                Ok(CacheInvalidationRun::Idle) => StdDuration::from_millis(250),
                 Ok(CacheInvalidationRun::Deferred {
                     generation,
                     failure,
@@ -296,6 +398,7 @@ const OUTBOX_PURGE_INTERVAL: StdDuration = StdDuration::from_secs(30);
 pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
     tokio::spawn(async move {
         let mut reconciler = StorageChangeReconciler::new(database);
+        let mut waiter = tjxy_db::WorkQueueWaiter::default();
         loop {
             let delay = match reconciler.run_once().await {
                 Ok(report) => {
@@ -307,9 +410,11 @@ pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
                         );
                     }
                     if report.events_processed() == 0 {
-                        StdDuration::from_millis(250)
-                    } else {
+                        waiter.wait().await;
                         StdDuration::ZERO
+                    } else {
+                        waiter.reset();
+                        StdDuration::from_millis(100)
                     }
                 }
                 Err(error) => {
@@ -349,6 +454,20 @@ pub(crate) fn spawn_queue_maintenance_worker(database: DatabaseConnection) {
 }
 
 pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection) {
+    if database.get_database_backend() == sea_orm::DbBackend::Postgres {
+        let notifications_database = database.clone();
+        tokio::spawn(async move {
+            loop {
+                if tjxy_db::listen_for_work(&notifications_database)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Work notifications disconnected; workers continue polling");
+                }
+                tokio::time::sleep(StdDuration::from_secs(30)).await;
+            }
+        });
+    }
     tokio::spawn(async move {
         let repository = WorkJobRepository::new(&database);
         let mut schedule = tokio::time::interval(WORK_LEASE_RECOVERY_INTERVAL);
@@ -356,9 +475,13 @@ pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection) {
         schedule.tick().await;
         loop {
             schedule.tick().await;
-            match repository.reclaim_expired_leases().await {
-                Ok(reclaimed) if reclaimed > 0 => {
-                    tracing::warn!(reclaimed, "Requeued work jobs with expired leases");
+            match repository.maintain_queue().await {
+                Ok(report) if report.reclaimed + report.cancelled > 0 => {
+                    tracing::info!(
+                        reclaimed = report.reclaimed,
+                        cancelled = report.cancelled,
+                        "Maintained work queue"
+                    );
                 }
                 Ok(_) => {}
                 Err(error) => tracing::error!("Work lease recovery failed: {error}"),
@@ -367,16 +490,65 @@ pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection) {
     });
 }
 
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub(crate) struct RetentionObservation {
+    last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    deleted: u64,
+    compacted: u64,
+    purged: u64,
+    deferred: u64,
+    failed_runs: u64,
+}
+fn retention_observations() -> &'static std::sync::Mutex<RetentionObservation> {
+    static VALUE: std::sync::OnceLock<std::sync::Mutex<RetentionObservation>> =
+        std::sync::OnceLock::new();
+    VALUE.get_or_init(|| std::sync::Mutex::new(RetentionObservation::default()))
+}
+pub(crate) fn retention_observation() -> RetentionObservation {
+    retention_observations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+fn observe_retention(outcome: &Result<WorkRetentionRun, tjxy_db::WorkRetentionError>) {
+    let mut observation = retention_observations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    observation.last_run_at = Some(chrono::Utc::now());
+    match outcome {
+        Ok(WorkRetentionRun::Processed {
+            deleted,
+            compacted,
+            purged,
+            deferred,
+        }) => {
+            observation.deleted = observation.deleted.saturating_add(*deleted);
+            observation.compacted = observation.compacted.saturating_add(*compacted);
+            observation.purged = observation.purged.saturating_add(*purged);
+            observation.deferred = observation.deferred.saturating_add(*deferred);
+        }
+        Err(_) => observation.failed_runs = observation.failed_runs.saturating_add(1),
+        _ => {}
+    }
+}
+
 pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retention: StdDuration) {
     tokio::spawn(async move {
         let owner = format!("work-retention-{}", Uuid::new_v4());
         let retention = Duration::from_std(retention).expect("validated work retention duration");
         let repository = WorkRetentionRepository::new(&database);
+        let mut burst_started = Instant::now();
         loop {
-            let delay = match repository
+            if burst_started.elapsed() >= StdDuration::from_secs(2) {
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
+                burst_started = Instant::now();
+            }
+            let outcome = repository
                 .run_once(&owner, retention, Duration::seconds(30))
-                .await
-            {
+                .await;
+            observe_retention(&outcome);
+            let delay = match outcome {
                 Ok(WorkRetentionRun::Processed {
                     deleted,
                     compacted,
@@ -390,11 +562,11 @@ pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retentio
                         deferred,
                         "Processed work history retention batch"
                     );
-                    StdDuration::ZERO
+                    StdDuration::from_millis(100)
                 }
                 Ok(WorkRetentionRun::EnrolledLegacy { count }) => {
                     tracing::debug!(count, "Enrolled legacy work history for retention");
-                    StdDuration::ZERO
+                    StdDuration::from_millis(100)
                 }
                 Ok(WorkRetentionRun::Idle) => StdDuration::from_secs(60),
                 Err(error) => {
@@ -410,6 +582,7 @@ pub(crate) fn spawn_work_retention_worker(database: DatabaseConnection, retentio
 pub(crate) fn spawn_import_worker(database: DatabaseConnection, cipher: Arc<CredentialCipher>) {
     tokio::spawn(async move {
         let owner = format!("emby-import-worker-{}", Uuid::new_v4());
+        let mut idle = tjxy_db::WorkQueueWaiter::default();
         loop {
             let jobs = ImportJobRepository::new(&database);
             match jobs
@@ -417,9 +590,10 @@ pub(crate) fn spawn_import_worker(database: DatabaseConnection, cipher: Arc<Cred
                 .await
             {
                 Ok(Some(claimed)) => {
+                    idle.reset();
                     run_claimed_import(&database, &cipher, &jobs, &claimed).await;
                 }
-                Ok(None) => tokio::time::sleep(StdDuration::from_millis(250)).await,
+                Ok(None) => idle.wait().await,
                 Err(error) => {
                     tracing::error!("Emby import worker could not claim work: {error}");
                     tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -549,6 +723,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
     tokio::spawn(async move {
         let service = DiscoverTitlesService::new(database.clone());
         let owner = format!("discover-worker-{}", Uuid::new_v4());
+        let mut idle = tjxy_db::WorkQueueWaiter::default();
         'worker: loop {
             let jobs = WorkJobRepository::new(&database);
             match jobs
@@ -556,6 +731,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                 .await
             {
                 Ok(Some(claimed)) => {
+                    idle.reset();
                     let execution = execute_logged(&claimed, service.execute(&claimed));
                     let mut execution = pin!(execution);
                     let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
@@ -576,7 +752,11 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                     if let Err(error) = outcome {
                         let message = truncate_error(&error.to_string());
                         let result = if discover_error_is_terminal(&error) {
-                            tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "title discovery failed terminally");
+                            log_terminal_failure(
+                                &claimed,
+                                "title discovery failed terminally",
+                                &error,
+                            );
                             jobs.fail_terminal(&claimed, &message).await
                         } else if matches!(
                             error,
@@ -602,7 +782,7 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                         }
                     }
                 }
-                Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+                Ok(None) => idle.wait().await,
                 Err(error) => {
                     tracing::error!("Discover worker could not claim work: {error}");
                     tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -731,6 +911,7 @@ pub(crate) fn spawn_full_scan_worker(database: DatabaseConnection) {
 
 async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanService) {
     let owner = format!("full-scan-worker-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
@@ -745,30 +926,17 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
             .await
         {
             Ok(Some(claimed)) => {
-                let execution = execute_logged(&claimed, service.execute(&claimed));
-                let mut execution = pin!(execution);
-                let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
-                renewal.tick().await;
-                let outcome = loop {
-                    tokio::select! {
-                        result = &mut execution => break result,
-                        _ = renewal.tick() => {
-                            let renewed = tokio::time::timeout(
-                                LEASE_RENEW_TIMEOUT,
-                                jobs.renew(&claimed, LEASE_DURATION),
-                            )
-                            .await;
-                            if !matches!(renewed, Ok(Ok(()))) {
-                                break Err(FullScanError::Work(
-                                    WorkJobRepositoryError::LostLease,
-                                ));
-                            }
-                        }
-                    }
-                };
+                idle.reset();
+                let outcome = Box::pin(renew_scan_execution(
+                    &database,
+                    &claimed,
+                    service.execute(&claimed),
+                    FullScanError::Work,
+                ))
+                .await;
                 handle_full_scan_outcome(&jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Full scan worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -791,13 +959,12 @@ async fn handle_full_scan_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if full_scan_error_is_terminal(&error) {
-        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "full scan failed terminally");
+        log_terminal_failure(claimed, "full scan failed terminally", &error);
         jobs.fail_terminal(claimed, &message).await
     } else {
         let delay = full_scan_retry_delay(&error, claimed.attempt_count());
         if matches!(error, FullScanError::ChildrenPending { .. }) {
-            jobs.defer(claimed, delay.max(Duration::seconds(30)), &message)
-                .await
+            jobs.defer(claimed, delay, &message).await
         } else {
             jobs.retry(claimed, delay, &message).await
         }
@@ -809,10 +976,9 @@ async fn handle_full_scan_outcome(
 
 fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration {
     if matches!(error, FullScanError::ChildrenPending { .. }) {
-        let exponent = u32::try_from(attempt_count.saturating_sub(1))
-            .unwrap_or_default()
-            .min(5);
-        return Duration::seconds((2_i64 * (1_i64 << exponent)).min(60));
+        // Completions wake a waiting parent sooner; this is the bounded fallback
+        // for a lost hint or a child that finished before the parent deferred.
+        return Duration::seconds(2);
     }
     storage_backoff(attempt_count)
 }
@@ -863,13 +1029,15 @@ fn full_scan_error_is_terminal(error: &FullScanError) -> bool {
 
 async fn run_series_expand_worker(database: DatabaseConnection, service: SeriesExpandService) {
     let owner = format!("series-expand-worker-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ExpandItem], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ExpandItem], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
+                idle.reset();
                 let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
@@ -890,7 +1058,7 @@ async fn run_series_expand_worker(database: DatabaseConnection, service: SeriesE
                 };
                 handle_series_expand_outcome(&jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Series expand worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -915,16 +1083,18 @@ async fn handle_series_expand_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if series_expand_error_is_terminal(&error) {
-        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "series expansion failed terminally");
+        log_terminal_failure(claimed, "series expansion failed terminally", &error);
         jobs.fail_terminal(claimed, &message).await
     } else {
-        let delay = if matches!(error, SeriesExpandError::InventoryPending { .. }) {
+        let delay = if matches!(error, SeriesExpandError::InventoryPending { .. })
+            && claimed.job().priority() >= 100
+        {
             Duration::milliseconds(200)
         } else {
             Duration::seconds(5)
         };
         if matches!(error, SeriesExpandError::InventoryPending { .. }) {
-            jobs.defer(claimed, Duration::seconds(30), &message).await
+            jobs.defer(claimed, delay, &message).await
         } else {
             jobs.retry(claimed, delay, &message).await
         }
@@ -968,13 +1138,15 @@ fn series_expand_error_is_terminal(error: &SeriesExpandError) -> bool {
 
 async fn run_source_index_worker(database: DatabaseConnection, service: SourceIndexService) {
     let owner = format!("source-index-worker-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::IndexMediaSources], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::IndexMediaSources], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
+                idle.reset();
                 let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
@@ -995,7 +1167,7 @@ async fn run_source_index_worker(database: DatabaseConnection, service: SourceIn
                 };
                 handle_source_index_outcome(&jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Source index worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -1020,7 +1192,7 @@ async fn handle_source_index_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if source_index_error_is_terminal(&error) {
-        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "media source indexing failed terminally");
+        log_terminal_failure(claimed, "media source indexing failed terminally", &error);
         jobs.fail_terminal(claimed, &message).await
     } else {
         jobs.retry(claimed, Duration::seconds(5), &message).await
@@ -1069,6 +1241,7 @@ async fn run_storage_worker<Backend>(
     Backend: StorageBackend + ?Sized,
 {
     let owner = format!("storage-worker-{account_id}-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         let claim = match provider_drive_id.as_deref() {
@@ -1083,7 +1256,8 @@ async fn run_storage_worker<Backend>(
         };
         match claim {
             Ok(Some(claimed)) => {
-                let execution = execute_logged(&claimed, async {
+                idle.reset();
+                let execution = async {
                     if claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot {
                         let started = Instant::now();
                         validation
@@ -1107,28 +1281,15 @@ async fn run_storage_worker<Backend>(
                             .map(|_| ())
                             .map_err(StorageWorkerError::Scoped)
                     }
-                });
-                let mut execution = pin!(execution);
-                let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
-                renewal.tick().await;
-                let outcome = loop {
-                    tokio::select! {
-                        result = &mut execution => break result,
-                        _ = renewal.tick() => {
-                            let renewed = tokio::time::timeout(
-                                LEASE_RENEW_TIMEOUT,
-                                jobs.renew(&claimed, LEASE_DURATION),
-                            )
-                            .await;
-                            if !matches!(renewed, Ok(Ok(()))) {
-                                break Err(StorageWorkerError::LostLease);
-                            }
-                        }
-                    }
                 };
+                let outcome =
+                    Box::pin(renew_scan_execution(&database, &claimed, execution, |_| {
+                        StorageWorkerError::LostLease
+                    }))
+                    .await;
                 handle_storage_outcome(&scoped, &jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Storage worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -1167,7 +1328,7 @@ async fn handle_storage_outcome<Backend>(
             if storage_error_is_terminal(&error)
                 || claimed.attempt_count() > tjxy_db::MAX_WORK_JOB_RETRIES
             {
-                tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage synchronization failed terminally");
+                log_terminal_failure(claimed, "storage synchronization failed terminally", &error);
                 if let Err(update_error) = service.fail_terminal(claimed, &message).await {
                     tracing::error!(
                         "Storage worker could not persist terminal outcome: {update_error}"
@@ -1188,7 +1349,7 @@ async fn handle_storage_outcome<Backend>(
             let message = truncate_error(&error.to_string());
             let terminal = validation_error_is_terminal(&error);
             let result = if terminal {
-                tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "storage validation failed terminally");
+                log_terminal_failure(claimed, "storage validation failed terminally", &error);
                 jobs.fail_terminal(claimed, &message).await
             } else {
                 jobs.retry(
@@ -1325,13 +1486,15 @@ fn validation_error_is_terminal(error: &FullValidateStorageError) -> bool {
 
 async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeService>) {
     let owner = format!("probe-worker-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ProbeMedia], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ProbeMedia], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
+                idle.reset();
                 let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
@@ -1352,7 +1515,7 @@ async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeServic
                 };
                 handle_outcome(&jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Probe worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -1363,13 +1526,15 @@ async fn run_probe_worker(database: DatabaseConnection, service: Arc<ProbeServic
 
 async fn run_metadata_worker(database: DatabaseConnection, service: Arc<MetadataResolveService>) {
     let owner = format!("metadata-worker-{}", Uuid::new_v4());
+    let mut idle = tjxy_db::WorkQueueWaiter::default();
     loop {
         let jobs = WorkJobRepository::new(&database);
         match jobs
-            .claim_next(&[WorkTaskKind::ResolveMetadata], &owner, LEASE_DURATION)
+            .claim_next_foreground(&[WorkTaskKind::ResolveMetadata], &owner, LEASE_DURATION)
             .await
         {
             Ok(Some(claimed)) => {
+                idle.reset();
                 let execution = execute_logged(&claimed, service.execute(&claimed));
                 let mut execution = pin!(execution);
                 let mut renewal = tokio::time::interval(StdDuration::from_secs(60));
@@ -1388,7 +1553,7 @@ async fn run_metadata_worker(database: DatabaseConnection, service: Arc<Metadata
                 };
                 handle_metadata_outcome(&jobs, &claimed, outcome).await;
             }
-            Ok(None) => tokio::time::sleep(StdDuration::from_millis(200)).await,
+            Ok(None) => idle.wait().await,
             Err(error) => {
                 tracing::error!("Metadata worker could not claim work: {error}");
                 tokio::time::sleep(StdDuration::from_secs(1)).await;
@@ -1411,8 +1576,31 @@ async fn handle_metadata_outcome(
     }
     let message = truncate_error(&error.to_string());
     let result = if metadata_error_is_terminal(&error) {
-        tracing::error!(job_id = %claimed.id().as_uuid(), error = %error, "metadata resolution failed terminally");
-        jobs.fail_terminal(claimed, &message).await
+        log_terminal_failure(claimed, "metadata resolution failed terminally", &error);
+        if matches!(
+            error,
+            MetadataResolveError::NfoSelectionRequired
+                | MetadataResolveError::NfoKindMismatch
+                | MetadataResolveError::Metadata(_)
+                | MetadataResolveError::Work(
+                    MetadataWorkError::AmbiguousSidecars
+                        | MetadataWorkError::InvalidSidecarSize
+                        | MetadataWorkError::TooManySidecars
+                )
+        ) {
+            jobs.fail_item(
+                claimed,
+                &message,
+                matches!(
+                    error,
+                    MetadataResolveError::NfoSelectionRequired
+                        | MetadataResolveError::Work(MetadataWorkError::AmbiguousSidecars)
+                ),
+            )
+            .await
+        } else {
+            jobs.fail_terminal(claimed, &message).await
+        }
     } else if matches!(
         error,
         MetadataResolveError::Storage(BackendError::FilesystemIndexRebuilding)
@@ -1440,6 +1628,7 @@ fn metadata_error_is_terminal(error: &MetadataResolveError) -> bool {
     matches!(
         error,
         MetadataResolveError::ObjectChanged
+            | MetadataResolveError::NfoSelectionRequired
             | MetadataResolveError::NfoKindMismatch
             | MetadataResolveError::Provider(
                 tjxy_metadata::MetadataProviderError::Rejected
@@ -1507,8 +1696,23 @@ async fn handle_outcome(
     }
 }
 
+fn log_terminal_failure(
+    claimed: &tjxy_db::ClaimedWorkJob,
+    code: &'static str,
+    error: &impl std::fmt::Display,
+) {
+    tracing::error!(job_id = %claimed.id().as_uuid(), scope_id = %claimed.job().scope().id(),
+        scope_type = claimed.job().scope().scope_type(), stage = claimed.job().task_kind().as_str(),
+        expected_revision = claimed.job().expected_revision(), error_code = code,
+        terminal = true, attempt = claimed.attempt_count(), error = %truncate_error(&error.to_string()),
+        "work failed terminally");
+}
+
 fn truncate_error(error: &str) -> String {
-    error.chars().take(4096).collect()
+    crate::log_record::redact_urls(error)
+        .chars()
+        .take(4096)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1567,12 +1771,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_full_scan_children_back_off_to_one_minute() {
+    fn pending_full_scan_children_keep_a_short_loss_tolerant_poll() {
         let error = tjxy_application::FullScanError::ChildrenPending { scheduled: 1 };
 
         assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 16);
-        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 60);
+        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 2);
     }
 
     #[test]

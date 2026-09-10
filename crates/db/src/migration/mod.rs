@@ -73,6 +73,10 @@ mod m20260826_000072_internal_queue_maintenance;
 mod m20260827_000073_active_work_claim_index;
 mod m20260901_000074_filesystem_path_index_state;
 mod m20260907_000075_normalize_codec_names;
+mod m20260909_000076_work_maintenance;
+mod m20260909_000077_nfo_choices;
+mod m20260909_000078_logging_budgets;
+mod m20260910_000079_scan_lookup_indexes;
 
 use std::collections::HashSet;
 
@@ -345,6 +349,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260827_000073_active_work_claim_index::Migration),
             Box::new(m20260901_000074_filesystem_path_index_state::Migration),
             Box::new(m20260907_000075_normalize_codec_names::Migration),
+            Box::new(m20260909_000076_work_maintenance::Migration),
+            Box::new(m20260909_000077_nfo_choices::Migration),
+            Box::new(m20260909_000078_logging_budgets::Migration),
+            Box::new(m20260910_000079_scan_lookup_indexes::Migration),
         ]
     }
 }

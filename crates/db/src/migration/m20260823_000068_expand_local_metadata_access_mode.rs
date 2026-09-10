@@ -17,7 +17,9 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(Alias::new("libraries"))
-                    .modify_column(string_len(Alias::new("local_metadata_access_mode"), 32))
+                    .modify_column(
+                        string_len(Alias::new("local_metadata_access_mode"), 32).default("import"),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -42,7 +44,9 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(Alias::new("libraries"))
-                    .modify_column(string_len(Alias::new("local_metadata_access_mode"), 16))
+                    .modify_column(
+                        string_len(Alias::new("local_metadata_access_mode"), 16).default("import"),
+                    )
                     .to_owned(),
             )
             .await?;

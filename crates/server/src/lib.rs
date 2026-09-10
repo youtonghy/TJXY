@@ -8,6 +8,7 @@ mod ai_settings;
 mod announcements;
 mod api_key;
 mod auth;
+mod bounded_log;
 mod browse;
 mod client_portal;
 mod configuration;
@@ -21,6 +22,7 @@ mod import_admin;
 mod installation_config;
 mod library;
 mod local_metadata_admin;
+mod log_record;
 mod logging_admin;
 mod logging_runtime;
 mod media_collection;
@@ -32,6 +34,7 @@ mod playstate;
 mod qr;
 mod relink_admin;
 mod runtime_storage;
+mod scan_concurrency;
 mod session;
 mod setup;
 mod socket;
@@ -43,8 +46,10 @@ mod stream;
 mod subtitle;
 mod system_settings;
 mod task;
+mod task_diagnostics;
 mod user_data;
 mod worker;
+pub use scan_concurrency::{InvalidScanConcurrency, ScanConcurrency, ScanConcurrencySample};
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -158,6 +163,7 @@ impl ServerIdentity {
 
 #[derive(Clone)]
 pub struct AppState {
+    scan_pressure: Arc<scan_concurrency::ScanPressure>,
     identity: Arc<ServerIdentity>,
     ready: Arc<AtomicBool>,
     auth: Option<Arc<AuthService<SystemClock>>>,
@@ -198,6 +204,7 @@ impl AppState {
     #[must_use]
     pub fn new(identity: ServerIdentity) -> Self {
         Self {
+            scan_pressure: Arc::default(),
             identity: Arc::new(identity),
             ready: Arc::new(AtomicBool::new(false)),
             auth: None,
@@ -893,7 +900,33 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .layer(middleware::from_fn(refresh_session_cookie))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state.scan_pressure),
+            observe_foreground_latency,
+        ))
         .with_state(state)
+}
+
+async fn observe_foreground_latency(
+    axum::extract::State(pressure): axum::extract::State<Arc<scan_concurrency::ScanPressure>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let section = path.split('/').nth(1).unwrap_or_default();
+    let observe = ["Items", "Videos", "Audio"]
+        .iter()
+        .any(|candidate| section.eq_ignore_ascii_case(candidate))
+        || (section.eq_ignore_ascii_case("Users")
+            && path
+                .split('/')
+                .any(|part| part.eq_ignore_ascii_case("Items")));
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    if observe {
+        pressure.foreground(started.elapsed());
+    }
+    response
 }
 
 async fn refresh_session_cookie(request: Request, next: Next) -> Response {
@@ -1100,6 +1133,20 @@ fn library_routes() -> Router<AppState> {
 fn admin_task_routes() -> Router<AppState> {
     Router::new()
         .route("/Admin/Tasks/Jobs", get(task::recent_jobs))
+        .route("/Admin/Tasks/Health", get(task_diagnostics::work_health))
+        .route("/Admin/Tasks/Scans", get(task_diagnostics::scan_history))
+        .route(
+            "/Admin/Tasks/NfoChoices",
+            get(task_diagnostics::nfo_choices).post(task_diagnostics::choose_nfo),
+        )
+        .route(
+            "/Admin/Tasks/Scans/{id}",
+            get(task_diagnostics::scan_report),
+        )
+        .route(
+            "/Admin/Tasks/Scans/{id}/Retry",
+            post(task_diagnostics::retry_scan_issues),
+        )
         .route(
             "/Admin/Tasks/ValidateStorage/{id}",
             post(task::validate_storage),
@@ -1287,5 +1334,32 @@ async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+    }
+}
+
+#[cfg(test)]
+mod scan_latency_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn lowercase_media_routes_contribute_to_foreground_pressure() {
+        let state = AppState::new(ServerIdentity::new(Uuid::new_v4(), "Test", "test"));
+        let pressure = Arc::clone(&state.scan_pressure);
+        let router = build_router(state);
+        for path in [
+            "/videos/missing/stream",
+            "/audio/missing/stream",
+            "/Items",
+            "/Users/missing/Items",
+        ] {
+            router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(pressure.drain().foreground_p95_ms.is_some(), "{path}");
+        }
     }
 }

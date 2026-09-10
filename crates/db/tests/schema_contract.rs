@@ -411,6 +411,20 @@ async fn applied_migration_with_missing_schema_object_is_reported_as_drift() {
     let database = test_database().await.unwrap();
     migrate_database(&database).await.unwrap();
     let manager = SchemaManager::new(&database);
+    if database.get_database_backend() == DbBackend::MySql {
+        // Keep the foreign key valid while deliberately removing only the
+        // required uniqueness index that the schema drift check must detect.
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_ai_messages_drift_fixture_fk")
+                    .table(Alias::new("ai_messages"))
+                    .col(Alias::new("conversation_id"))
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+    }
     manager
         .drop_index(
             Index::drop()
@@ -2685,4 +2699,29 @@ async fn publication_migration_down_clears_active_pointers_and_derived_states() 
         row.try_get::<String>("", "source_state").unwrap(),
         "Unknown"
     );
+}
+
+#[tokio::test]
+async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+    let indexes = [
+        ("identity_matches", "ix_identity_matches_candidate_scope"),
+        (
+            "publication_media_locations",
+            "ix_publication_locations_source",
+        ),
+    ];
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
+    Migrator::down(&database, Some(1)).await.unwrap();
+    for (table, index) in indexes {
+        assert!(!schema.has_index(table, index).await.unwrap());
+    }
+    Migrator::up(&database, None).await.unwrap();
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
 }

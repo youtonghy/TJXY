@@ -27,6 +27,13 @@ const MAX_OBSERVED_JOBS: u64 = 100;
 pub const MAX_WORK_JOB_RETRIES: i32 = 5;
 const METADATA_RETRY_COOLDOWN: Duration = Duration::seconds(5);
 
+#[derive(Clone, Copy, Default)]
+struct ClaimFilter<'a> {
+    storage_scope: Option<(Uuid, Option<&'a str>)>,
+    foreground: Option<bool>,
+    excluded_roots: &'a [Uuid],
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WorkTaskKind {
     ScopedStorageSync,
@@ -320,6 +327,11 @@ impl WorkJobSpec {
     #[must_use]
     pub const fn scope(&self) -> WorkScope {
         self.scope
+    }
+
+    #[must_use]
+    pub const fn input_sync_revision(&self) -> Option<i64> {
+        self.input_sync_revision
     }
 
     #[must_use]
@@ -706,7 +718,11 @@ impl<'connection, Clock> WorkJobRepository<'connection, Clock>
 where
     Clock: WorkJobClock,
 {
-    fn now(&self) -> DateTime<Utc> {
+    pub(crate) const fn connection(&self) -> &DatabaseConnection {
+        self.database
+    }
+
+    pub(crate) fn now(&self) -> DateTime<Utc> {
         mysql_compatible_timestamp(self.database.get_database_backend(), self.clock.now())
     }
 
@@ -734,7 +750,7 @@ where
         }
         let transaction = self.database.begin().await?;
         let result = enqueue_or_join(&transaction, spec, self.now()).await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Enqueues or joins one policy-aware media scan for each enabled Library with automatic work.
@@ -751,7 +767,7 @@ where
     ) -> Result<Vec<WorkJobSubmission>, WorkJobRepositoryError> {
         let transaction = self.database.begin().await?;
         let result = enqueue_enabled_library_scans(&transaction, priority, self.now()).await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Reports whether any pending or running job exists for a task type.
@@ -879,7 +895,7 @@ where
         }
         let transaction = self.database.begin().await?;
         let result = cancel_active_task(&transaction, task_kind, error, self.now()).await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Terminates active title-discovery jobs whose immutable root revision is obsolete.
@@ -927,7 +943,31 @@ where
                 .map(Some),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
+    }
+
+    /// Schedules detail metadata while keeping an unchanged NFO conflict actionable.
+    /// Explicit administrator actions use `enqueue_or_join` and can retry immediately.
+    /// # Errors
+    /// Returns invalid metadata specifications or persistence failures.
+    pub async fn enqueue_lazy_metadata_or_join(
+        &self,
+        spec: &WorkJobSpec,
+    ) -> Result<Option<WorkJobSubmission>, WorkJobRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = async {
+            if crate::nfo_choice::awaiting_selection(&transaction, spec, self.now()).await? {
+                return Ok(None);
+            }
+            match fence_metadata_item(&transaction, spec).await? {
+                PublicationFence::Current | PublicationFence::Stale => Ok(None),
+                PublicationFence::NeedsWork => enqueue_or_join(&transaction, spec, self.now())
+                    .await
+                    .map(Some),
+            }
+        }
+        .await;
+        finish_notifying(transaction, result).await
     }
 
     /// Retries incomplete automatic metadata resolution with a short cooldown.
@@ -948,6 +988,9 @@ where
             return Err(WorkJobRepositoryError::InvalidMetadataWork);
         };
         let transaction = self.database.begin().await?;
+        if crate::nfo_choice::awaiting_selection(&transaction, spec, self.now()).await? {
+            return finish(transaction, Ok(None)).await;
+        }
         let backend = transaction.get_database_backend();
         let incomplete = Query::select()
             .expr(Expr::val(1_i32))
@@ -996,7 +1039,7 @@ where
         let result = enqueue_or_join(&transaction, spec, self.now())
             .await
             .map(Some);
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
     }
 
     /// Claims the highest-priority ready job among the accepted task kinds.
@@ -1010,6 +1053,112 @@ where
         lease_owner: &str,
         lease_duration: Duration,
     ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter::default(),
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Claims interactive work without letting background saturation consume its worker.
+    /// # Errors
+    /// Returns invalid lease or database failures.
+    pub async fn claim_next_foreground(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter {
+                foreground: Some(true),
+                ..ClaimFilter::default()
+            },
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Claims background work while excluding roots already consuming their fair share.
+    /// Root UUID nil denotes jobs without a root affinity. At most eight exclusions
+    /// are accepted; all predicates participate in the atomic claim transaction.
+    /// # Errors
+    /// Returns invalid exclusions, lease or database failures.
+    pub async fn claim_next_background(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        excluded_roots: &[Uuid],
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
+        if excluded_roots.len() > 8 {
+            return Err(WorkJobRepositoryError::InvalidClaimFilter);
+        }
+        self.claim_filtered(
+            accepted_kinds,
+            ClaimFilter {
+                foreground: Some(false),
+                excluded_roots,
+                ..ClaimFilter::default()
+            },
+            lease_owner,
+            lease_duration,
+        )
+        .await
+    }
+
+    /// Samples up to 256 pending background rows, never COUNTs historical work.
+    /// Dependency readiness remains the responsibility of the transactional claim.
+    /// # Errors
+    /// Returns invalid limit or database failures.
+    pub async fn pending_background_roots(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        limit: u64,
+    ) -> Result<Vec<Uuid>, WorkJobRepositoryError> {
+        if limit == 0 || limit > 256 {
+            return Err(WorkJobRepositoryError::InvalidClaimFilter);
+        }
+        let query = Query::select()
+            .column(Alias::new("storage_root_affinity"))
+            .from(Alias::new("work_jobs"))
+            .and_where(Expr::cust("state IN ('Pending', 'Running')"))
+            .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+            .and_where(Expr::col(Alias::new("priority")).lt(100))
+            .and_where(
+                Expr::col(Alias::new("task_kind"))
+                    .is_in(accepted_kinds.iter().map(|kind| kind.as_str())),
+            )
+            .cond_where(
+                Cond::any()
+                    .add(Expr::col(Alias::new("available_at")).is_null())
+                    .add(Expr::col(Alias::new("available_at")).lte(self.now())),
+            )
+            .limit(limit)
+            .to_owned();
+        self.database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .map(|row| {
+                row.try_get::<Option<Uuid>>("", "storage_root_affinity")
+                    .map(Option::unwrap_or_default)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    async fn claim_filtered(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        filter: ClaimFilter<'_>,
+        lease_owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
         validate_lease(accepted_kinds, lease_owner, lease_duration)?;
         let now = self.now();
         let lease_expires_at = now
@@ -1019,7 +1168,7 @@ where
         let result = claim_next(
             &transaction,
             accepted_kinds,
-            None,
+            filter,
             lease_owner,
             now,
             lease_expires_at,
@@ -1056,7 +1205,10 @@ where
         let result = claim_next(
             &transaction,
             &accepted_kinds,
-            Some((account_id, None)),
+            ClaimFilter {
+                storage_scope: Some((account_id, None)),
+                ..ClaimFilter::default()
+            },
             lease_owner,
             now,
             lease_expires_at,
@@ -1097,7 +1249,10 @@ where
         let result = claim_next(
             &transaction,
             &accepted_kinds,
-            Some((account_id, Some(provider_drive_id))),
+            ClaimFilter {
+                storage_scope: Some((account_id, Some(provider_drive_id))),
+                ..ClaimFilter::default()
+            },
             lease_owner,
             now,
             lease_expires_at,
@@ -1185,7 +1340,11 @@ where
         if reason.trim().is_empty() || reason.chars().count() > MAX_ERROR_CHARS {
             return Err(WorkJobRepositoryError::InvalidErrorSummary);
         }
-        let backoff = if backoff > Duration::zero() {
+        let full_scan = matches!(
+            claimed.job().task_kind(),
+            WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+        );
+        let backoff = if backoff > Duration::zero() && !full_scan {
             let query = Query::select()
                 .column(Alias::new("started_at"))
                 .from(Alias::new("work_jobs"))
@@ -1199,20 +1358,7 @@ where
                 .try_get("", "started_at")?;
             let age = started.map_or(0, |started| (self.now() - started).num_seconds().max(0));
             let exponent = u32::try_from(age / 30).unwrap_or(6).min(6);
-            // Full scans schedule successive child stages. Their total age does not
-            // mean the current stage is stalled; keep checking it at least once a
-            // minute unless the caller explicitly requests a longer delay.
-            let adaptive_limit = if matches!(
-                claimed.job().task_kind(),
-                WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
-            ) {
-                60
-            } else {
-                300
-            };
-            backoff.max(Duration::seconds(
-                (5 * (1_i64 << exponent)).min(adaptive_limit),
-            ))
+            backoff.max(Duration::seconds((5 * (1_i64 << exponent)).min(300)))
         } else {
             backoff
         };
@@ -1278,7 +1424,69 @@ where
         }
         let transaction = self.database.begin().await?;
         let result = fail_terminal(&transaction, claimed, error, self.now()).await;
-        finish(transaction, result).await
+        finish_notifying(transaction, result).await
+    }
+
+    /// Records a terminal item failure with a stable classification for scan isolation.
+    ///
+    /// # Errors
+    /// Returns validation, lease, or database failures.
+    pub async fn fail_item(
+        &self,
+        claimed: &ClaimedWorkJob,
+        error: &str,
+        needs_selection: bool,
+    ) -> Result<(), WorkJobRepositoryError> {
+        if error.trim().is_empty() || error.chars().count() > MAX_ERROR_CHARS {
+            return Err(WorkJobRepositoryError::InvalidErrorSummary);
+        }
+        let transaction = self.database.begin().await?;
+        let result = async {
+            fail_terminal(&transaction, claimed, error, self.now()).await?;
+            transaction.execute(transaction.get_database_backend().build(Query::update()
+                .table(Alias::new("work_results"))
+                .value(Alias::new("counters"), serde_json::json!({"failure_kind": if needs_selection { "nfo_selection" } else { "item" }}))
+                .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())))).await?;
+            Ok(())
+        }.await;
+        finish_notifying(transaction, result).await
+    }
+
+    /// Returns only recognized item-level failure classes; infrastructure failures stay fatal.
+    ///
+    /// # Errors
+    /// Returns database or decoding failures.
+    pub async fn item_failure_kind(
+        &self,
+        job: WorkJobId,
+    ) -> Result<Option<String>, WorkJobRepositoryError> {
+        let row = self
+            .database
+            .query_one(
+                self.database.get_database_backend().build(
+                    Query::select()
+                        .columns([Alias::new("counters"), Alias::new("error_summary")])
+                        .from(Alias::new("work_results"))
+                        .and_where(Expr::col(Alias::new("job_id")).eq(job.as_uuid())),
+                ),
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let counters: Value = row.try_get("", "counters")?;
+        if let Some(kind @ ("nfo_selection" | "item")) =
+            counters.get("failure_kind").and_then(Value::as_str)
+        {
+            return Ok(Some(kind.to_owned()));
+        }
+        let error: Option<String> = row.try_get("", "error_summary")?;
+        Ok(error
+            .filter(|message| {
+                message == "metadata NFO candidates require selection"
+                    || message.ends_with("metadata inventory has ambiguous NFO candidates")
+            })
+            .map(|_| "nfo_selection".to_owned()))
     }
 
     /// Idempotently writes one staging batch under a live claim.
@@ -1322,26 +1530,10 @@ where
         let transaction = self.database.begin().await?;
         let result = async {
             fence_full_scan_parent(&transaction, claimed).await?;
-            if matches!(
-                spec.task_kind(),
-                WorkTaskKind::ExpandItem | WorkTaskKind::IndexMediaSources
-            ) {
-                match fence_lazy_item(&transaction, spec).await? {
-                    PublicationFence::Current => {
-                        return Ok(FullScanChildSubmission::Current);
-                    }
-                    PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
-                    PublicationFence::NeedsWork => {}
-                }
-            }
-            if spec.task_kind() == WorkTaskKind::ResolveMetadata {
-                match fence_metadata_item(&transaction, spec).await? {
-                    PublicationFence::Current => {
-                        return Ok(FullScanChildSubmission::Current);
-                    }
-                    PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
-                    PublicationFence::NeedsWork => {}
-                }
+            match fence_scan_child(&transaction, spec).await? {
+                PublicationFence::Current => return Ok(FullScanChildSubmission::Current),
+                PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
+                PublicationFence::NeedsWork => {}
             }
             let submission = enqueue_or_join(&transaction, spec, self.now()).await?;
             if spec.task_kind() == WorkTaskKind::DiscoverTitles {
@@ -1385,6 +1577,25 @@ where
             Ok(FullScanChildSubmission::Job(submission))
         }
         .await;
+        finish_notifying(transaction, result).await
+    }
+
+    /// Rechecks publication after observing a completed child. The earlier target
+    /// snapshot may predate that child's atomic publication/completion commit.
+    ///
+    /// # Errors
+    /// Returns parent fencing, invalid specification or database failures.
+    pub async fn full_scan_child_is_current(
+        &self,
+        parent: &ClaimedWorkJob,
+        spec: &WorkJobSpec,
+    ) -> Result<bool, WorkJobRepositoryError> {
+        let transaction = self.database.begin().await?;
+        let result = async {
+            fence_full_scan_parent(&transaction, parent).await?;
+            Ok(fence_scan_child(&transaction, spec).await? == PublicationFence::Current)
+        }
+        .await;
         finish(transaction, result).await
     }
 
@@ -1404,7 +1615,7 @@ where
             complete_in_transaction(&transaction, claimed, result, self.now()).await
         }
         .await;
-        finish(transaction, completion).await
+        finish_notifying(transaction, completion).await
     }
 
     /// Marks a live claim completed inside the caller's publication transaction.
@@ -1492,6 +1703,64 @@ where
             .map(|row| row.try_get("", "result_sync_revision"))
             .transpose()?)
     }
+}
+
+async fn fence_scan_child(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<PublicationFence, WorkJobRepositoryError> {
+    match spec.task_kind() {
+        WorkTaskKind::ExpandItem | WorkTaskKind::IndexMediaSources => {
+            fence_lazy_item(transaction, spec).await
+        }
+        WorkTaskKind::ResolveMetadata => fence_metadata_item(transaction, spec).await,
+        WorkTaskKind::ProbeMedia => fence_probe_source(transaction, spec).await,
+        _ => Ok(PublicationFence::NeedsWork),
+    }
+}
+
+async fn fence_probe_source(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<PublicationFence, WorkJobRepositoryError> {
+    let WorkScope::MediaSource(source) = spec.scope() else {
+        return Err(WorkJobRepositoryError::InvalidChildReference);
+    };
+    let backend = transaction.get_database_backend();
+    let fence = Query::update()
+        .table(Alias::new("media_sources"))
+        .value(
+            Alias::new("probe_revision"),
+            Expr::col(Alias::new("probe_revision")),
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(source.as_uuid()))
+        .and_where(Expr::col(Alias::new("probe_revision")).eq(spec.expected_revision()))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&fence))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Ok(PublicationFence::Stale);
+    }
+    let current = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("media_sources"))
+        .and_where(Expr::col(Alias::new("id")).eq(source.as_uuid()))
+        .and_where(Expr::col(Alias::new("probe_state")).eq("Probed"))
+        .to_owned();
+    Ok(
+        if transaction
+            .query_one(backend.build(&current))
+            .await?
+            .is_some()
+        {
+            PublicationFence::Current
+        } else {
+            PublicationFence::NeedsWork
+        },
+    )
 }
 
 async fn fence_lazy_item(
@@ -1612,6 +1881,10 @@ async fn fence_metadata_item(
         .and_where(Expr::col(Alias::new("metadata_resolved_requirement")).gte(requirement.as_i32()))
         .cond_where(
             Cond::any()
+                .add(
+                    Expr::val(spec.metadata_source_mode == Some(MetadataSourceMode::LocalOnly))
+                        .eq(true),
+                )
                 .add(Expr::col(Alias::new("item_type")).is_not_in(["Movie", "Series"]))
                 .add(
                     Expr::col(Alias::new("metadata_payload_version"))
@@ -1635,6 +1908,8 @@ async fn fence_metadata_item(
 
 #[derive(Debug, Error)]
 pub enum WorkJobRepositoryError {
+    #[error("invalid bounded work claim filter")]
+    InvalidClaimFilter,
     #[error("work revision must not be negative")]
     InvalidRevision,
     #[error("stored metadata requirement is invalid")]
@@ -1901,11 +2176,37 @@ async fn retire_stale_discoveries(
     Ok(retired)
 }
 
-async fn reclaim_expired_leases(
+pub(crate) async fn reclaim_expired_leases(
     transaction: &DatabaseTransaction,
     now: DateTime<Utc>,
 ) -> Result<u64, WorkJobRepositoryError> {
     let backend = transaction.get_database_backend();
+    let expired = Cond::all()
+        .add(Expr::col(Alias::new("state")).eq(STATE_RUNNING))
+        .add(
+            Cond::any()
+                .add(Expr::col(Alias::new("lease_expires_at")).is_null())
+                .add(Expr::col(Alias::new("lease_expires_at")).lte(now)),
+        );
+    let ids = transaction
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("work_jobs"))
+                    .cond_where(expired.clone())
+                    .order_by(Alias::new("lease_expires_at"), Order::Asc)
+                    .order_by(Alias::new("id"), Order::Asc)
+                    .limit(100),
+            ),
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<Uuid>("", "id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
     let mut update = Query::update();
     update
         .table(Alias::new("work_jobs"))
@@ -1920,12 +2221,8 @@ async fn reclaim_expired_leases(
             Alias::new("last_error"),
             "previous lease expired; work was requeued",
         )
-        .and_where(Expr::col(Alias::new("state")).eq(STATE_RUNNING))
-        .cond_where(
-            Cond::any()
-                .add(Expr::col(Alias::new("lease_expires_at")).is_null())
-                .add(Expr::col(Alias::new("lease_expires_at")).lte(now)),
-        );
+        .and_where(Expr::col(Alias::new("id")).is_in(ids))
+        .cond_where(expired);
     if backend == sea_orm::DbBackend::MySql {
         update.value(Alias::new("active_slot"), Option::<String>::None);
     }
@@ -1936,7 +2233,7 @@ async fn reclaim_expired_leases(
         .rows_affected())
 }
 
-async fn cancel_job(
+pub(crate) async fn cancel_job(
     transaction: &DatabaseTransaction,
     job_id: WorkJobId,
     error: &str,
@@ -2052,7 +2349,6 @@ async fn enqueue_or_join(
     }
     let spec = &normalized;
     let now = mysql_compatible_timestamp(transaction.get_database_backend(), now);
-    reclaim_expired_leases(transaction, now).await?;
     if let Some(dependency) = spec.required_sync_job_id {
         let backend = transaction.get_database_backend();
         let dependency = transaction
@@ -2304,7 +2600,7 @@ pub(crate) async fn enqueue_in_transaction(
 async fn claim_next(
     transaction: &DatabaseTransaction,
     accepted_kinds: &[WorkTaskKind],
-    storage_scope: Option<(Uuid, Option<&str>)>,
+    filter: ClaimFilter<'_>,
     lease_owner: &str,
     now: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
@@ -2312,11 +2608,9 @@ async fn claim_next(
     let backend = transaction.get_database_backend();
     let now = mysql_compatible_timestamp(backend, now);
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
-    reclaim_expired_leases(transaction, now).await?;
-    fail_terminal_dependents(transaction, accepted_kinds, now).await?;
     for _ in 0..8 {
         let Some(row) = transaction
-            .query_one(backend.build(&claim_candidate(accepted_kinds, storage_scope, now)))
+            .query_one(backend.build(&claim_candidate(accepted_kinds, filter, now)))
             .await?
         else {
             return Ok(None);
@@ -2397,7 +2691,7 @@ async fn claim_next(
     Ok(None)
 }
 
-async fn fail_terminal_dependents(
+pub(crate) async fn fail_terminal_dependents(
     transaction: &DatabaseTransaction,
     accepted_kinds: &[WorkTaskKind],
     now: DateTime<Utc>,
@@ -2615,6 +2909,7 @@ async fn complete_in_transaction(
     result: WorkJobResult,
     now: DateTime<Utc>,
 ) -> Result<(), WorkJobRepositoryError> {
+    crate::work_maintenance::fence_storage_account(transaction, claimed).await?;
     let backend = transaction.get_database_backend();
     let mut update = Query::update();
     update
@@ -2639,7 +2934,52 @@ async fn complete_in_transaction(
     {
         return Err(WorkJobRepositoryError::LostLease);
     }
-    insert_result(transaction, claimed.id(), now, result).await
+    insert_result(transaction, claimed.id(), now, result).await?;
+    wake_waiting_full_scans(transaction, claimed, now).await
+}
+
+// A completion is only a scheduling hint. Parent policy, child revisions and
+// publications are revalidated when it runs. Coalesce bursts and never touch a
+// running, cancelled, provider-backed-off or unrelated root-affine parent.
+async fn wake_waiting_full_scans(
+    transaction: &DatabaseTransaction,
+    child: &ClaimedWorkJob,
+    now: DateTime<Utc>,
+) -> Result<(), WorkJobRepositoryError> {
+    if matches!(
+        child.job().task_kind(),
+        WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+    ) {
+        return Ok(());
+    }
+    // MySQL's existing task timestamps have second precision. Round forward
+    // there so subsecond coalescing cannot become an immediate repeated wake.
+    let wake_at = now
+        + if transaction.get_database_backend() == sea_orm::DbBackend::MySql {
+            Duration::nanoseconds(1_000_000_000 - i64::from(now.timestamp_subsec_nanos()))
+        } else {
+            Duration::milliseconds(200)
+        };
+    let mut update = Query::update();
+    update
+        .table(Alias::new("work_jobs"))
+        .value(Alias::new("available_at"), wake_at)
+        .and_where(Expr::cust("state IN ('Pending', 'Running')"))
+        .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+        .and_where(
+            Expr::col(Alias::new("task_kind")).is_in(["FullMediaScan", "FullLibraryRootScan"]),
+        )
+        .and_where(Expr::col(Alias::new("last_error")).like("full scan scheduled % child jobs"))
+        .and_where(Expr::col(Alias::new("available_at")).gt(wake_at));
+    if let Some(root) = child.job().storage_root_affinity() {
+        update.and_where(
+            Expr::col(Alias::new("storage_root_affinity")).is_in([root.as_uuid(), Uuid::nil()]),
+        );
+    }
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
 }
 
 async fn fail_terminal(
@@ -2818,9 +3158,25 @@ pub(crate) async fn fence_live_claim(
     Ok(())
 }
 
+fn apply_scan_claim_filter(query: &mut SelectStatement, job: &Alias, filter: &ClaimFilter<'_>) {
+    if let Some(foreground) = filter.foreground {
+        query.and_where(if foreground {
+            Expr::col((job.clone(), Alias::new("priority"))).gte(100)
+        } else {
+            Expr::col((job.clone(), Alias::new("priority"))).lt(100)
+        });
+    }
+    if !filter.excluded_roots.is_empty() {
+        query.and_where(
+            Expr::col((job.clone(), Alias::new("storage_root_affinity")))
+                .is_not_in(filter.excluded_roots.iter().copied()),
+        );
+    }
+}
+
 fn claim_candidate(
     accepted_kinds: &[WorkTaskKind],
-    storage_scope: Option<(Uuid, Option<&str>)>,
+    filter: ClaimFilter<'_>,
     now: DateTime<Utc>,
 ) -> SelectStatement {
     let job = Alias::new("job");
@@ -2828,6 +3184,9 @@ fn claim_candidate(
     let mut query = Query::select();
     query
         .from_as(Alias::new("work_jobs"), job.clone())
+        // Keep the partial-index predicate literal: bound state parameters inside
+        // the OR below do not let SQLite prove that this index is applicable.
+        .and_where(Expr::cust("job.state IN ('Pending', 'Running')"))
         .and_where(
             Expr::col((job.clone(), Alias::new("task_kind")))
                 .is_in(accepted_kinds.iter().map(|kind| kind.as_str())),
@@ -2842,7 +3201,8 @@ fn claim_candidate(
         .order_by((job.clone(), Alias::new("created_at")), Order::Asc)
         .order_by((job.clone(), Alias::new("id")), Order::Asc)
         .limit(1);
-    if let Some((account_id, provider_drive_id)) = storage_scope {
+    apply_scan_claim_filter(&mut query, &job, &filter);
+    if let Some((account_id, provider_drive_id)) = filter.storage_scope {
         let account = Alias::new("claim_scope_account");
         query.and_where(Expr::exists(
             Query::select()
@@ -3361,7 +3721,12 @@ fn admin_job_from_row(row: &QueryResult) -> Result<WorkJobAdminRecord, WorkJobRe
         WorkJobState::Pending => WorkJobAdminStatus::Pending,
         WorkJobState::Running => WorkJobAdminStatus::Running,
         WorkJobState::Completed => WorkJobAdminStatus::Completed,
-        WorkJobState::Failed if last_error.as_deref() == Some(ADMIN_CANCELLED_ERROR) => {
+        WorkJobState::Failed
+            if matches!(
+                last_error.as_deref(),
+                Some(ADMIN_CANCELLED_ERROR | crate::work_maintenance::INACTIVE_SCOPE_REASON)
+            ) =>
+        {
             WorkJobAdminStatus::Cancelled
         }
         WorkJobState::Failed => WorkJobAdminStatus::Failed,
@@ -3428,5 +3793,55 @@ async fn finish<T>(
                 rollback,
             }),
         },
+    }
+}
+
+async fn finish_notifying<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, WorkJobRepositoryError>,
+) -> Result<T, WorkJobRepositoryError> {
+    match result {
+        Ok(value) => {
+            crate::work_queue::commit_and_notify(transaction).await?;
+            Ok(value)
+        }
+        Err(error) => finish(transaction, Err(error)).await,
+    }
+}
+
+#[cfg(test)]
+mod claim_plan_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_claim_uses_the_active_partial_index() {
+        let database = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        crate::migrate_database(&database).await.unwrap();
+        for scope in [None, Some((Uuid::new_v4(), None))] {
+            let mut statement = database.get_database_backend().build(&claim_candidate(
+                &[WorkTaskKind::ScopedStorageSync],
+                ClaimFilter {
+                    storage_scope: scope,
+                    ..ClaimFilter::default()
+                },
+                Utc::now(),
+            ));
+            statement.sql = format!("EXPLAIN QUERY PLAN {}", statement.sql);
+            let rows = database.query_all(statement).await.unwrap();
+            let details = rows
+                .iter()
+                .map(|row| row.try_get::<String>("", "detail").unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("ix_work_jobs_claim_active")),
+                "{details:?}"
+            );
+            assert!(
+                !details.iter().any(|detail| detail == "SCAN job"),
+                "{details:?}"
+            );
+        }
     }
 }

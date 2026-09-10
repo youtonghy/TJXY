@@ -18,12 +18,152 @@ const MAX_MANUAL_PROBE_SOURCES: usize = 256;
 /// Application boundary for durable administrator and scheduled work.
 pub struct TaskService {
     database: DatabaseConnection,
+    health_cache: tokio::sync::Mutex<Option<(tokio::time::Instant, tjxy_db::WorkHealth)>>,
+    retention: Option<chrono::Duration>,
 }
 
 impl TaskService {
     #[must_use]
-    pub const fn new(database: DatabaseConnection) -> Self {
-        Self { database }
+    pub fn with_history_retention(mut self, retention: Option<std::time::Duration>) -> Self {
+        self.retention = retention.and_then(|duration| chrono::Duration::from_std(duration).ok());
+        self
+    }
+    /// Returns a coalesced, five-minute cached queue and storage-space snapshot.
+    /// # Errors
+    /// Returns database or timeout errors without replacing the previous sample.
+    pub async fn work_health(&self) -> Result<tjxy_db::WorkHealth, TaskServiceError> {
+        let mut cache = self.health_cache.lock().await;
+        if let Some((at, value)) = cache.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(300) {
+                return Ok(value.clone());
+            }
+        }
+        let sampled = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tjxy_db::sample_work_health(&self.database, self.retention),
+        )
+        .await
+        .map_err(|_| {
+            TaskServiceError::Diagnostics(sea_orm::DbErr::Custom(
+                "diagnostic sampling timed out".into(),
+            ))
+        })??;
+        *cache = Some((tokio::time::Instant::now(), sampled.clone()));
+        Ok(sampled)
+    }
+
+    /// Reads one bounded page of actionable NFO choices.
+    ///
+    /// # Errors
+    /// Returns persistence failures.
+    pub async fn nfo_choices(
+        &self,
+        offset: u64,
+    ) -> Result<Vec<tjxy_db::NfoChoiceInfo>, TaskServiceError> {
+        Ok(MetadataWorkRepository::new(&self.database)
+            .nfo_choices(offset)
+            .await?)
+    }
+
+    /// Saves an administrator's source choice and submits current-revision metadata work.
+    ///
+    /// # Errors
+    /// Returns stale-choice, policy, or persistence failures.
+    pub async fn choose_nfo(
+        &self,
+        item: CatalogItemId,
+        root: StorageRootId,
+        candidate: uuid::Uuid,
+        fingerprint: &str,
+    ) -> Result<WorkJobSubmission, TaskServiceError> {
+        MetadataWorkRepository::new(&self.database)
+            .choose_nfo(item, root, candidate, fingerprint)
+            .await
+            .map_err(|error| match error {
+                sea_orm::DbErr::Custom(_) => TaskServiceError::StaleDiagnostic,
+                error => TaskServiceError::Diagnostics(error),
+            })
+    }
+
+    /// Reads a bounded scan history page independent of child jobs.
+    /// # Errors
+    /// Returns database failures.
+    pub async fn scan_history(
+        &self,
+        offset: u64,
+    ) -> Result<Vec<tjxy_db::ScanHistoryEntry>, TaskServiceError> {
+        Ok(FullScanRepository::new(&self.database)
+            .history_page(offset)
+            .await?)
+    }
+
+    /// Reads a scan's bounded issue page and summary, without exposing raw worker errors.
+    ///
+    /// # Errors
+    /// Returns unavailable-task or persistence failures.
+    pub async fn scan_report(
+        &self,
+        job: tjxy_common::WorkJobId,
+        offset: u64,
+    ) -> Result<tjxy_db::ScanReportPage, TaskServiceError> {
+        let record = WorkJobRepository::new(&self.database)
+            .get(job)
+            .await?
+            .ok_or(TaskServiceError::ManualMediaItemUnavailable)?;
+        if !matches!(
+            record.task_kind(),
+            WorkTaskKind::FullMediaScan | WorkTaskKind::FullLibraryRootScan
+        ) {
+            return Err(TaskServiceError::ManualMediaItemUnavailable);
+        }
+        Ok(FullScanRepository::new(&self.database)
+            .report_page(job, offset)
+            .await?)
+    }
+
+    /// Retries only failed metadata items in one completed scan-report page.
+    /// Pending choices remain explicit and do not create repeated failing jobs.
+    ///
+    /// # Errors
+    /// Returns stale-report, policy, or persistence failures.
+    pub async fn retry_scan_issues(
+        &self,
+        job: tjxy_common::WorkJobId,
+        offset: u64,
+    ) -> Result<Vec<uuid::Uuid>, TaskServiceError> {
+        let jobs = WorkJobRepository::new(&self.database);
+        let record = jobs
+            .get(job)
+            .await?
+            .ok_or(TaskServiceError::ManualMediaItemUnavailable)?;
+        if matches!(
+            record.state(),
+            tjxy_db::WorkJobState::Pending | tjxy_db::WorkJobState::Running
+        ) {
+            return Err(TaskServiceError::StaleDiagnostic);
+        }
+        let page = self.scan_report(job, offset).await?;
+        let mut accepted = Vec::new();
+        for issue in page.issues {
+            if !issue.needs_selection && issue.task_kind == "ResolveMetadata" {
+                accepted.push(
+                    self.resolve_metadata(CatalogItemId::from_uuid(issue.item_id))
+                        .await?
+                        .job()
+                        .id()
+                        .as_uuid(),
+                );
+            }
+        }
+        Ok(accepted)
+    }
+    #[must_use]
+    pub fn new(database: DatabaseConnection) -> Self {
+        Self {
+            database,
+            health_cache: tokio::sync::Mutex::new(None),
+            retention: Some(chrono::Duration::days(7)),
+        }
     }
 
     /// Enqueues or joins a policy-aware media scan for each enabled Library with automatic work.
@@ -265,6 +405,10 @@ impl TaskService {
 
 #[derive(Debug, Error)]
 pub enum TaskServiceError {
+    #[error("diagnostic state changed; reload before retrying")]
+    StaleDiagnostic,
+    #[error("task diagnostics are unavailable: {0}")]
+    Diagnostics(#[from] sea_orm::DbErr),
     #[error("manual media task item is unavailable")]
     ManualMediaItemUnavailable,
     #[error("manual media task is incompatible with the catalog item type")]

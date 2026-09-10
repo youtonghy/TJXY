@@ -585,6 +585,18 @@ fn direct_scope_query(
         .and_where(Expr::col((object, Alias::new("presence_state"))).eq("Present"))
         .and_where(Expr::col((relation.clone(), Alias::new("presence_state"))).eq("Present"))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true));
+    // Select the item's object IDs once. Without this independent set SQLite
+    // can walk the entire root inventory for each single-item lookup.
+    query.and_where(
+        Expr::col((relation.clone(), Alias::new("storage_object_id"))).in_subquery(
+            Query::select()
+                .column(Alias::new("storage_object_id"))
+                .from(Alias::new("identity_matches"))
+                .and_where(Expr::col(Alias::new("candidate_catalog_item_id")).eq(item_id.as_uuid()))
+                .and_where(Expr::col(Alias::new("state")).eq("Matched"))
+                .to_owned(),
+        ),
+    );
     if let Some(required_root) = required_root {
         query.and_where(
             Expr::col((relation.clone(), Alias::new("storage_root_id")))

@@ -250,6 +250,16 @@ Complete setup at `http://127.0.0.1:8096/setup/`. The installation manifest is
 stored at the platform configuration path by default; set `TJXY_CONFIG_FILE` to
 use an explicit location.
 
+Background scans default to `TJXY_SCAN_CONCURRENCY=auto`. Pending work, CPU,
+available memory, database latency and foreground request latency control admission
+between 1 and 8 concurrent jobs. Expansion is gradual; shrinking lets active jobs
+finish. Queues of at most 32 items stay serial. Background media parsing is capped
+at 1–4 slots with a separate foreground reserve. Set `TJXY_SCAN_CONCURRENCY=1`
+for serial admission, or 2–8 for a fixed target bound. Fixed mode still applies
+pressure protection; unavailable host samples fall back to 1. Restart after changing
+this setting. More concurrency does not guarantee higher throughput; SQLite writes
+remain serialized.
+
 Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention

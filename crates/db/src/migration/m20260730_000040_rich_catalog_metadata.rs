@@ -66,10 +66,9 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Indexes on NEW_TABLES are removed with those tables. Dropping them
+        // separately can violate InnoDB foreign-key index requirements.
         for (table, index) in [
-            ("metadata_snapshots", "uq_metadata_snapshots_identity"),
-            ("person_provider_ids", "uq_person_provider_ids_person"),
-            ("person_provider_ids", "uq_person_provider_ids_identity"),
             ("item_people", "idx_item_people_order"),
             ("catalog_items", "idx_catalog_items_parent_index"),
         ] {

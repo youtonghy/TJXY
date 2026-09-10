@@ -11,6 +11,14 @@ pub struct Migration;
 #[sea_orm_migration::async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let mut credential_id = string_len(Alias::new("credential_id"), 1024);
+        if manager.get_database_backend() == sea_orm::DbBackend::MySql {
+            // Credential IDs are base64url. ASCII keeps the full unique index below
+            // InnoDB's byte limit and preserves case-sensitive identity comparisons.
+            credential_id.custom(Alias::new(
+                "varchar(1024) CHARACTER SET ascii COLLATE ascii_bin",
+            ));
+        }
         manager
             .alter_table(
                 Table::alter()
@@ -32,7 +40,7 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(uuid(Alias::new("id")).primary_key().take())
                     .col(uuid(Alias::new("user_id")).not_null())
-                    .col(string_len(Alias::new("credential_id"), 1024))
+                    .col(&mut credential_id)
                     .col(blob(Alias::new("public_key")).not_null())
                     .col(
                         ColumnDef::new(Alias::new("counter"))

@@ -162,7 +162,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
         .await;
         match result {
             Ok(submission) => {
-                transaction.commit().await?;
+                crate::work_queue::commit_and_notify(transaction).await?;
                 Ok(submission)
             }
             Err(error) => {
@@ -414,7 +414,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                transaction.commit().await?;
+                crate::work_queue::commit_and_notify(transaction).await?;
                 Ok(value)
             }
             Err(error) => {

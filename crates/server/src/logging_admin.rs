@@ -29,6 +29,9 @@ struct LoggingSettingsDto {
     retention_days: u16,
     revision: i64,
     directory: String,
+    max_file_bytes: u64,
+    max_directory_bytes: u64,
+    debug_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +40,8 @@ pub(crate) struct UpdateLoggingSettingsRequest {
     mode: String,
     retention_days: u16,
     revision: Option<i64>,
+    max_file_bytes: Option<u64>,
+    max_directory_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -88,20 +93,27 @@ pub(crate) async fn put_settings(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let repository = LoggingSettingsRepository::new(system.database());
+    let budget = match (request.max_file_bytes, request.max_directory_bytes) {
+        (None, None) => None,
+        (Some(max_file_bytes), Some(max_directory_bytes)) => Some(tjxy_db::LogBudget {
+            max_file_bytes,
+            max_directory_bytes,
+        }),
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
     match repository
-        .put(
+        .put_with_budget(
             LoggingSettingsInput {
                 mode,
                 retention_days: request.retention_days,
             },
             request.revision,
+            budget,
         )
         .await
     {
         Ok(record) => {
-            if runtime.set_mode(record.mode()).is_err()
-                || runtime.cleanup(record.retention_days()).is_err()
-            {
+            if runtime.apply(&record).is_err() {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
             Json(settings_dto(&record, runtime.directory())).into_response()
@@ -109,7 +121,8 @@ pub(crate) async fn put_settings(
         Err(LoggingSettingsRepositoryError::Conflict) => StatusCode::CONFLICT.into_response(),
         Err(
             LoggingSettingsRepositoryError::InvalidMode
-            | LoggingSettingsRepositoryError::InvalidRetentionDays,
+            | LoggingSettingsRepositoryError::InvalidRetentionDays
+            | LoggingSettingsRepositoryError::InvalidBudget,
         ) => StatusCode::BAD_REQUEST.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -219,7 +232,10 @@ async fn settings_response(state: &AppState) -> Response {
     {
         Ok(Some(record)) => Json(settings_dto(&record, runtime.directory())).into_response(),
         Ok(None) => Json(LoggingSettingsDto {
-            mode: LogMode::Error.as_str(),
+            mode: LogMode::Info.as_str(),
+            max_file_bytes: tjxy_db::LogBudget::default().max_file_bytes,
+            max_directory_bytes: tjxy_db::LogBudget::default().max_directory_bytes,
+            debug_expires_at: None,
             retention_days: DEFAULT_LOG_RETENTION_DAYS,
             revision: 0,
             directory: runtime.directory().display().to_string(),
@@ -231,7 +247,12 @@ async fn settings_response(state: &AppState) -> Response {
 
 fn settings_dto(record: &tjxy_db::LoggingSettingsRecord, directory: &Path) -> LoggingSettingsDto {
     LoggingSettingsDto {
-        mode: record.mode().as_str(),
+        mode: record.effective_mode_at(chrono::Utc::now()).as_str(),
+        max_file_bytes: record.budget().max_file_bytes,
+        max_directory_bytes: record.budget().max_directory_bytes,
+        debug_expires_at: record
+            .debug_expires_at()
+            .filter(|expires| *expires > chrono::Utc::now()),
         retention_days: record.retention_days(),
         revision: record.revision(),
         directory: directory.display().to_string(),
@@ -247,10 +268,17 @@ async fn collect_files(directory: &Path) -> std::io::Result<Vec<LogFileDto>> {
         let Some(date) = log_file_date(&name) else {
             continue;
         };
+        if !entry.file_type().await?.is_file() {
+            continue;
+        }
         let metadata = entry.metadata().await?;
         if metadata.is_file() {
             files.push(LogFileDto {
-                date: date.to_string(),
+                date: name
+                    .strip_prefix("tjxy.")
+                    .and_then(|name| name.strip_suffix(".log"))
+                    .unwrap_or_default()
+                    .to_owned(),
                 size_bytes: metadata.len(),
                 current: date == today,
             });
@@ -261,11 +289,9 @@ async fn collect_files(directory: &Path) -> std::io::Result<Vec<LogFileDto>> {
 }
 
 fn file_path(directory: &Path, date: &str) -> Option<PathBuf> {
-    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    if parsed.to_string() != date {
-        return None;
-    }
-    Some(directory.join(format!("tjxy.{date}.log")))
+    let name = format!("tjxy.{date}.log");
+    log_file_date(&name)?;
+    Some(directory.join(name))
 }
 
 async fn read_page(path: &Path, date: &str, before: Option<u64>) -> std::io::Result<LogPageDto> {

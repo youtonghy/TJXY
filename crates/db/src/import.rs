@@ -251,6 +251,7 @@ impl<'connection> ImportJobRepository<'connection> {
             .to_owned();
         let backend = self.database.get_database_backend();
         self.database.execute(backend.build(&insert)).await?;
+        crate::work_queue::notify_after_commit(self.database).await;
         Ok(ImportJobRecord {
             id,
             adapter_kind,
@@ -362,7 +363,9 @@ impl<'connection> ImportJobRepository<'connection> {
             ImportJobState::Pending,
             ["Paused", "Failed"],
         )
-        .await
+        .await?;
+        crate::work_queue::notify_after_commit(self.database).await;
+        Ok(())
     }
 
     /// Extends a live import lease without changing its claim token.

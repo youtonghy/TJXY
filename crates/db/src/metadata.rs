@@ -312,7 +312,8 @@ impl EffectiveMetadata {
             .or_else(|| current.overview.clone());
         let metadata_state = if resolution.details_required() && !resolution.details_loaded() {
             "Partial"
-        } else if resolution.details_loaded()
+        } else if resolution.state() == tjxy_metadata::MetadataState::Ready
+            || resolution.details_loaded()
             || (production_year.is_some()
                 && overview.as_deref().is_some_and(|value| !value.is_empty())
                 && !provider_ids.is_empty())

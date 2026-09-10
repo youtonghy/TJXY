@@ -1,0 +1,39 @@
+{
+  "scan_seconds": 95.30879645799723,
+  "states": [
+    [
+      "Ready",
+      2003
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ],
+    [
+      "Ready",
+      2001
+    ]
+  ],
+  "movies": 8,
+  "post_fix_ready": true
+}

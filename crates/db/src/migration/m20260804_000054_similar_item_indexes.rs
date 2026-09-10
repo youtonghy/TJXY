@@ -1,3 +1,4 @@
+use sea_orm::{ConnectionTrait, DbBackend};
 use sea_orm_migration::prelude::{
     Alias, DbErr, DeriveMigrationName, Index, MigrationTrait, SchemaManager,
 };
@@ -40,7 +41,24 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        for (table, index, _) in INDEXES.into_iter().rev() {
+        for (table, index, feature_column) in INDEXES.into_iter().rev() {
+            // InnoDB may remove its implicit FK index when this covering index
+            // is created. Restore that index before removing its replacement.
+            if manager.get_connection().get_database_backend() == DbBackend::MySql {
+                let foreign_index =
+                    format!("fk_{table}_{}", feature_column.trim_end_matches("_id"));
+                if !manager.has_index(table, &foreign_index).await? {
+                    manager
+                        .create_index(
+                            Index::create()
+                                .name(&foreign_index)
+                                .table(Alias::new(table))
+                                .col(Alias::new(feature_column))
+                                .to_owned(),
+                        )
+                        .await?;
+                }
+            }
             manager
                 .drop_index(
                     Index::drop()

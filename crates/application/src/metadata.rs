@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE};
 use sea_orm::DatabaseConnection;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{CatalogItemId, ImageType};
 use tjxy_db::{
@@ -344,6 +345,11 @@ impl MetadataResolveService {
             .ok_or(MetadataResolveError::Work(MetadataWorkError::InvalidClaim))?;
         let import_metadata = access_mode.imports_metadata();
         let import_images = access_mode.imports_images();
+        if !import_metadata && snapshot.sidecars().len() > 1 {
+            return Err(MetadataResolveError::Work(
+                MetadataWorkError::AmbiguousSidecars,
+            ));
+        }
         if !import_metadata && !import_images {
             if claimed.job().metadata_source_mode() != Some(MetadataSourceMode::LocalOnly) {
                 return Err(MetadataResolveError::Work(MetadataWorkError::InvalidClaim));
@@ -378,47 +384,11 @@ impl MetadataResolveService {
         let mut execution_warnings = Vec::new();
         let (mut resolution, used_nfo) = if !import_metadata {
             (resolver.resolve(snapshot.lookup()).await, false)
-        } else if let Some(sidecar) = snapshot.sidecar() {
-            let backend = self
-                .backends
-                .backend_for_drive(sidecar.storage_account_id(), sidecar.provider_drive_id())
-                .ok_or(MetadataResolveError::BackendUnavailable)?;
-            let object_id = StorageObjectId::new(
-                sidecar.provider().to_owned(),
-                sidecar.provider_object_id().to_owned(),
-            )?;
-            let before = storage_read::get_object(
-                &self.database,
-                backend.as_ref(),
-                sidecar.record_id(),
-                &object_id,
-            )
-            .await
-            .map_err(metadata_storage_read_error)?;
-            validate_sidecar(sidecar, &object_id, &before)?;
-            let bytes = read_sidecar(
-                &self.database,
-                backend.as_ref(),
-                sidecar.record_id(),
-                &object_id,
-                sidecar.size(),
-            )
-            .await?;
-            let after = storage_read::get_object(
-                &self.database,
-                backend.as_ref(),
-                sidecar.record_id(),
-                &object_id,
-            )
-            .await
-            .map_err(metadata_storage_read_error)?;
-            validate_sidecar(sidecar, &object_id, &after)?;
-            if object_revision(&before) != object_revision(&after) || before.size() != after.size()
+        } else if !snapshot.sidecars().is_empty() {
+            match self
+                .read_nfo_candidates(claimed, &snapshot, &repository)
+                .await
             {
-                return Err(MetadataResolveError::ObjectChanged);
-            }
-            let source_reference = format!("storage-object:{}", sidecar.record_id());
-            match NfoDocument::parse(&bytes, &source_reference) {
                 Ok(document) => {
                     if document.kind() != snapshot.lookup().kind() {
                         return Err(MetadataResolveError::NfoKindMismatch);
@@ -430,14 +400,21 @@ impl MetadataResolveService {
                         true,
                     )
                 }
-                Err(error) => {
+                Err(MetadataResolveError::Metadata(error))
+                    if claimed.job().metadata_source_mode()
+                        != Some(MetadataSourceMode::LocalOnly) =>
+                {
                     execution_warnings.push(format!("Nfo: {error}"));
                     (resolver.resolve(snapshot.lookup()).await, false)
                 }
+                Err(error) => return Err(error),
             }
         } else {
             (resolver.resolve(snapshot.lookup()).await, false)
         };
+        if used_nfo && claimed.job().metadata_source_mode() == Some(MetadataSourceMode::LocalOnly) {
+            resolution = resolution.complete_local_nfo();
+        }
         if requires_remote_details {
             resolution = resolution.require_complete_details();
         }
@@ -495,6 +472,130 @@ impl MetadataResolveService {
             state: resolution.state(),
             used_nfo,
         })
+    }
+
+    #[allow(clippy::too_many_lines)] // Read, compare and persist one immutable candidate set together.
+    async fn read_nfo_candidates(
+        &self,
+        claimed: &ClaimedWorkJob,
+        snapshot: &tjxy_db::MetadataWorkSnapshot,
+        repository: &MetadataWorkRepository<'_>,
+    ) -> Result<NfoDocument, MetadataResolveError> {
+        let files = snapshot.sidecars();
+        let mut info = files
+            .iter()
+            .map(|file| tjxy_db::NfoCandidateInfo {
+                id: file.record_id().as_uuid(),
+                name: std::path::Path::new(file.name())
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("NFO")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(512)
+                    .collect(),
+                digest: String::new(),
+            })
+            .collect::<Vec<_>>();
+        if files.len() > 16
+            || files
+                .iter()
+                .map(tjxy_db::MetadataSidecarCandidate::size)
+                .sum::<u64>()
+                > 8 * 1024 * 1024
+        {
+            repository
+                .record_nfo_conflict(claimed, snapshot, &info, &["candidate_budget".to_owned()])
+                .await?;
+            return Err(MetadataResolveError::NfoSelectionRequired);
+        }
+        let mut documents = Vec::new();
+        let mut conflicts = Vec::new();
+        let group_reference = if files.len() > 1 && snapshot.selected_content().is_none() {
+            Some(format!(
+                "nfo-group:{}",
+                files
+                    .iter()
+                    .map(|file| file.record_id().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+        } else {
+            None
+        };
+        for (index, file) in files.iter().enumerate() {
+            let backend = self
+                .backends
+                .backend_for_drive(file.storage_account_id(), file.provider_drive_id())
+                .ok_or(MetadataResolveError::BackendUnavailable)?;
+            let id = StorageObjectId::new(file.provider(), file.provider_object_id())?;
+            let before =
+                storage_read::get_object(&self.database, backend.as_ref(), file.record_id(), &id)
+                    .await
+                    .map_err(metadata_storage_read_error)?;
+            validate_sidecar(file, &id, &before)?;
+            let bytes = read_sidecar(
+                &self.database,
+                backend.as_ref(),
+                file.record_id(),
+                &id,
+                file.size(),
+            )
+            .await?;
+            let after =
+                storage_read::get_object(&self.database, backend.as_ref(), file.record_id(), &id)
+                    .await
+                    .map_err(metadata_storage_read_error)?;
+            validate_sidecar(file, &id, &after)?;
+            if object_revision(&before) != object_revision(&after) || before.size() != after.size()
+            {
+                return Err(MetadataResolveError::ObjectChanged);
+            }
+            info[index].digest = format!("{:x}", Sha256::digest(&bytes));
+            let reference = group_reference
+                .clone()
+                .unwrap_or_else(|| format!("storage-object:{}", file.record_id()));
+            match NfoDocument::parse(&bytes, &reference) {
+                Ok(document) => documents.push((file.record_id().as_uuid(), document)),
+                Err(error) if files.len() == 1 => return Err(error.into()),
+                Err(_) => conflicts.push("invalid_nfo".to_owned()),
+            }
+        }
+        if let Some((selected, digest)) = snapshot.selected_content() {
+            if info
+                .iter()
+                .any(|file| file.id == selected && file.digest == digest)
+                && let Some((_, document)) = documents.iter().find(|(id, _)| *id == selected)
+            {
+                return Ok(document.clone());
+            }
+            conflicts.push("selected_source_changed".to_owned());
+        }
+        let multipart = multipart_nfo(files);
+        let mut merged = documents.first().map(|(_, doc)| doc.clone());
+        for (_, document) in documents.into_iter().skip(1) {
+            if let Some(current) = merged.take() {
+                match current.clone().merge_consistent(document, multipart) {
+                    Ok(value) => merged = Some(value),
+                    Err(fields) => {
+                        merged = Some(current);
+                        conflicts.extend(fields.into_iter().map(str::to_owned));
+                    }
+                }
+            }
+        }
+        if !conflicts.is_empty() || merged.is_none() {
+            conflicts.sort();
+            conflicts.dedup();
+            repository
+                .record_nfo_conflict(claimed, snapshot, &info, &conflicts)
+                .await?;
+            return Err(MetadataResolveError::NfoSelectionRequired);
+        }
+        if files.len() > 1 {
+            tracing::info!(item_id = %claimed.job().scope().id(), candidate_count = files.len(), reason = if multipart { "consistent_multipart" } else { "consistent_movie_candidates" }, "Selected consistent local NFO metadata");
+        }
+        merged.ok_or(MetadataResolveError::NfoSelectionRequired)
     }
 
     async fn prepare_local_images(
@@ -673,6 +774,8 @@ impl MetadataResolveReport {
 
 #[derive(Debug, Error)]
 pub enum MetadataResolveError {
+    #[error("metadata NFO candidates require selection")]
+    NfoSelectionRequired,
     #[error("metadata storage backend is not configured")]
     BackendUnavailable,
     #[error("metadata sidecar changed while it was being read")]
@@ -753,4 +856,32 @@ fn validate_sidecar(
 
 fn object_revision(object: &StorageObject) -> (Option<&str>, Option<&str>, Option<&str>) {
     (object.remote_revision(), object.etag(), object.checksum())
+}
+
+fn multipart_nfo(files: &[tjxy_db::MetadataSidecarCandidate]) -> bool {
+    let parts = files
+        .iter()
+        .map(|file| {
+            let stem = std::path::Path::new(file.name())
+                .file_stem()?
+                .to_str()?
+                .to_ascii_lowercase();
+            let (base, number) = stem.rsplit_once("cd")?;
+            if !base.ends_with(['-', ' ', '_', '.']) {
+                return None;
+            }
+            let part = number.parse::<u32>().ok().filter(|part| *part > 0)?;
+            Some((base.trim_end_matches(['-', ' ', '_', '.']).to_owned(), part))
+        })
+        .collect::<Option<Vec<_>>>();
+    parts.is_some_and(|parts| {
+        parts.len() > 1
+            && parts.iter().all(|(base, _)| base == &parts[0].0)
+            && parts
+                .iter()
+                .map(|(_, part)| *part)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == parts.len()
+    })
 }

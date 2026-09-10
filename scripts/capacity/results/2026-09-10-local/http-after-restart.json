@@ -1,0 +1,44 @@
+{
+  "movies": 8,
+  "range_latency": [
+    {
+      "concurrency": 1,
+      "range_64k": {
+        "samples": 20,
+        "p50_ms": 0.7155419989430811,
+        "p95_ms": 3.38249999913387,
+        "max_ms": 3.38249999913387
+      }
+    },
+    {
+      "concurrency": 5,
+      "range_64k": {
+        "samples": 25,
+        "p50_ms": 2.351958999497583,
+        "p95_ms": 4.353916996478802,
+        "max_ms": 4.37245799912489
+      }
+    },
+    {
+      "concurrency": 20,
+      "range_64k": {
+        "samples": 100,
+        "p50_ms": 8.510792002198286,
+        "p95_ms": 8.795958001428517,
+        "max_ms": 8.861999998771353
+      }
+    }
+  ],
+  "video_bytes": 6267913,
+  "video_sha256": "642c48a152ce56f013003ab0ced8f4f1e027ac67a0e90130fad36b1ae490f37f",
+  "range_bytes_exact": true,
+  "range_unsatisfiable_status": 416,
+  "head_without_body": true,
+  "image_condition_status": 304,
+  "assets": {
+    "asset_blobs": 0,
+    "item_assets": 0,
+    "person_assets": 0
+  },
+  "asset_files": 0
+}

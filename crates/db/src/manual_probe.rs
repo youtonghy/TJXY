@@ -549,7 +549,7 @@ async fn finish<T>(
 ) -> Result<T, ManualProbeError> {
     match result {
         Ok(value) => {
-            transaction.commit().await?;
+            crate::work_queue::commit_and_notify(transaction).await?;
             Ok(value)
         }
         Err(original) => match transaction.rollback().await {

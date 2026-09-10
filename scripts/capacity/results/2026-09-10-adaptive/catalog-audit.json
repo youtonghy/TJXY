@@ -1,0 +1,282 @@
+{
+  "validated-1-32": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        32
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-4-32": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        32
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-auto-32": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        32
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-1-128": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        128
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-4-128": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        128
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-auto-128": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        128
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-1-512": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        512
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-4-512": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        512
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-auto-512": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        512
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  },
+  "validated-auto-2740": {
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violations": [],
+    "parent_state_and_attempt_count": [
+      [
+        "Completed",
+        1
+      ],
+      [
+        "Completed",
+        1
+      ]
+    ],
+    "media_source_states": [
+      [
+        "Probed",
+        2740
+      ]
+    ],
+    "asset_rows": {
+      "asset_blobs": 0,
+      "item_assets": 0,
+      "person_assets": 0
+    },
+    "asset_files": 0
+  }
+}

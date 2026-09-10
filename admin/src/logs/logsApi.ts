@@ -1,12 +1,15 @@
 import { apiRequest, mediaBrowserTokenHeader } from '../api/httpClient';
 
-export type LogMode = 'Error' | 'Debug';
+export type LogMode = 'Error' | 'Info' | 'Debug';
 
 export interface LoggingSettings {
   mode: LogMode;
   retentionDays: number;
   revision: number;
   directory: string;
+  maxFileBytes?: number;
+  maxDirectoryBytes?: number;
+  debugExpiresAt?: string | null;
 }
 
 export interface LogFile {
@@ -34,6 +37,8 @@ export async function saveLoggingSettings(settings: LoggingSettings): Promise<Lo
     body: JSON.stringify({
       Mode: settings.mode,
       RetentionDays: settings.retentionDays,
+      MaxFileBytes: settings.maxFileBytes ?? 32 * 1024 * 1024,
+      MaxDirectoryBytes: settings.maxDirectoryBytes ?? 256 * 1024 * 1024,
       ...(settings.revision > 0 ? { Revision: settings.revision } : {}),
     }),
   }));
@@ -75,10 +80,13 @@ export async function downloadLogFile(date: string): Promise<void> {
 }
 
 function parseSettings(value: Record<string, unknown>): LoggingSettings {
-  if ((value.Mode !== 'Error' && value.Mode !== 'Debug') || typeof value.RetentionDays !== 'number' || typeof value.Revision !== 'number' || typeof value.Directory !== 'string') {
+  if ((value.Mode !== 'Error' && value.Mode !== 'Info' && value.Mode !== 'Debug') || typeof value.RetentionDays !== 'number' || typeof value.Revision !== 'number' || typeof value.Directory !== 'string') {
     throw new Error('Invalid logging settings response');
   }
-  return { mode: value.Mode, retentionDays: value.RetentionDays, revision: value.Revision, directory: value.Directory };
+  if ((value.MaxFileBytes !== undefined && (!Number.isSafeInteger(value.MaxFileBytes) || Number(value.MaxFileBytes) < 1024 * 1024))
+    || (value.MaxDirectoryBytes !== undefined && (!Number.isSafeInteger(value.MaxDirectoryBytes) || Number(value.MaxDirectoryBytes) < Number(value.MaxFileBytes ?? 32 * 1024 * 1024)))
+    || (value.DebugExpiresAt != null && (typeof value.DebugExpiresAt !== 'string' || !Number.isFinite(Date.parse(value.DebugExpiresAt))))) throw new Error('Invalid logging capacity response');
+  return { maxFileBytes: Number(value.MaxFileBytes ?? 32 * 1024 * 1024), maxDirectoryBytes: Number(value.MaxDirectoryBytes ?? 256 * 1024 * 1024), debugExpiresAt: typeof value.DebugExpiresAt === 'string' ? value.DebugExpiresAt : null, mode: value.Mode, retentionDays: value.RetentionDays, revision: value.Revision, directory: value.Directory };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
