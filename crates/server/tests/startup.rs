@@ -1,4 +1,5 @@
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode, header},
 };
@@ -837,6 +838,51 @@ async fn media_browser_opens_server_root_without_configuration() {
     assert_server_root_browser(false).await;
 }
 
+async fn authenticate(app: &Router, username: &str, password: &str) -> String {
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Users/AuthenticateByName")
+                .header(
+                    header::AUTHORIZATION,
+                    r#"MediaBrowser Client="Test", Device="Test", DeviceId="startup", Version="1""#,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"Username": username, "Pw": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let login: Value =
+        serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    login["AccessToken"].as_str().unwrap().to_owned()
+}
+
+async fn admin_filesystem_get(app: &Router, uri: String, token: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, body)
+}
+
 async fn assert_server_root_browser(legacy_configuration: bool) {
     let database = reconnectable_test_database().await.unwrap();
     tjxy_db::Migrator::up(database.connection(), None)
@@ -867,67 +913,24 @@ async fn assert_server_root_browser(legacy_configuration: bool) {
     .await
     .unwrap();
     let app = build_router(state);
-    let login = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/Users/AuthenticateByName")
-                .header(
-                    header::AUTHORIZATION,
-                    r#"MediaBrowser Client="Test", Device="Test", DeviceId="startup", Version="1""#,
-                )
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"Username": "Admin", "Pw": "first password"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let login: Value =
-        serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let token = login["AccessToken"].as_str().unwrap();
-    let roots = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/Admin/Filesystem/Roots")
-                .header(
-                    header::AUTHORIZATION,
-                    format!(r#"MediaBrowser Token="{token}""#),
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let roots: Value =
-        serde_json::from_slice(&roots.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(roots.as_array().unwrap().len(), 1);
+    let token = authenticate(&app, "Admin", "first password").await;
+    let roots = admin_filesystem_get(&app, "/Admin/Filesystem/Roots".into(), &token).await;
+    assert_eq!(roots.0, StatusCode::OK);
+    let roots = roots.1.as_array().unwrap();
+    assert_eq!(roots.len(), 1);
     assert_eq!(roots[0]["Path"], "/");
 
-    let directories = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/Admin/Filesystem/Directories?RootId={}",
-                    roots[0]["Id"].as_str().unwrap()
-                ))
-                .header(
-                    header::AUTHORIZATION,
-                    format!(r#"MediaBrowser Token="{token}""#),
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(directories.status(), StatusCode::OK);
-    let directories: Value =
-        serde_json::from_slice(&directories.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
-    assert!(!directories["Items"].as_array().unwrap().is_empty());
+    let directories = admin_filesystem_get(
+        &app,
+        format!(
+            "/Admin/Filesystem/Directories?RootId={}",
+            roots[0]["Id"].as_str().unwrap()
+        ),
+        &token,
+    )
+    .await;
+    assert_eq!(directories.0, StatusCode::OK);
+    assert!(!directories.1["Items"].as_array().unwrap().is_empty());
 
     let settings = SystemSettingsInput {
         media_browser_roots: vec![format!("/definitely/missing/tjxy-{}", Uuid::new_v4())],
