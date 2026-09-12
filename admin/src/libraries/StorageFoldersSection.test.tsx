@@ -3,10 +3,10 @@ import userEvent from '@testing-library/user-event';
 
 import { renderWithAdmin } from '../test/renderWithAdmin';
 import type { LibraryOption } from './libraryApi';
-import { listFolderContents, listLibraryFolders, type FolderContents } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders, type FolderContents } from './libraryFoldersApi';
 import { StorageFoldersSection } from './StorageFoldersSection';
 
-vi.mock('./libraryFoldersApi', () => ({ listLibraryFolders: vi.fn(), listFolderContents: vi.fn() }));
+vi.mock('./libraryFoldersApi', () => ({ listLibraryFolders: vi.fn(), listFolderContents: vi.fn(), detachLibraryFolder: vi.fn() }));
 const library: LibraryOption = {
   id: 'library-1', name: 'Movies', collectionType: 'movies', locations: ['tjxy://storage-root/root-1'],
   enabled: true, scanProfile: 'Lazy', profileVersion: 1, objectSelectionScope: 'title_layer',
@@ -19,14 +19,16 @@ const rootContents: FolderContents = { indexed: false, items: [
 ] };
 const foldersMock = vi.mocked(listLibraryFolders);
 const contentsMock = vi.mocked(listFolderContents);
+const detachMock = vi.mocked(detachLibraryFolder);
 
 beforeEach(() => {
   foldersMock.mockReset().mockResolvedValue([{ id: 'root-1', name: 'Media', path: '/mnt/media', provider: 'filesystem' }]);
   contentsMock.mockReset().mockResolvedValue(rootContents);
+  detachMock.mockReset().mockResolvedValue(undefined);
 });
 
 function renderFolders() {
-  return renderWithAdmin(<StorageFoldersSection isPending={false} library={library} onOpen={vi.fn()} />, { strict: true });
+  return renderWithAdmin(<StorageFoldersSection isPending={false} library={library} onChanged={vi.fn()} onOpen={vi.fn()} />, { strict: true });
 }
 
 it('shows real paths and counts, then previews folders before files and navigates back', async () => {
@@ -82,4 +84,39 @@ it('reports a directory limit without presenting a partial list as a total', asy
   await user.click(await screen.findByRole('button', { name: 'Preview folder /mnt/media' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('10,000-entry preview limit');
   expect(screen.queryByText('0 folders · 0 files')).not.toBeInTheDocument();
+});
+
+it('removes a folder after confirmation and refreshes the library state', async () => {
+  const onChanged = vi.fn();
+  foldersMock.mockResolvedValueOnce([{ id: 'root-1', name: 'Media', path: '/mnt/media', provider: 'filesystem' }]).mockResolvedValue([]);
+  renderWithAdmin(<StorageFoldersSection isPending={false} library={library} onChanged={onChanged} onOpen={vi.fn()} />, { strict: true });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: 'Remove folder /mnt/media' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Remove media folder?' });
+  expect(dialog).toHaveTextContent('Media files on disk are not deleted');
+  await user.click(within(dialog).getByRole('button', { name: 'Remove folder' }));
+  expect(detachMock).toHaveBeenCalledWith('Movies', 'root-1');
+  await waitFor(() => { expect(onChanged).toHaveBeenCalled(); });
+  expect(await screen.findByText('No media folders attached.')).toBeVisible();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(contentsMock).not.toHaveBeenCalled();
+});
+
+it('keeps the folder when removal is cancelled and reports a removal failure', async () => {
+  renderFolders();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: 'Remove folder /mnt/media' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Remove media folder?' });
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); });
+  expect(detachMock).not.toHaveBeenCalled();
+
+  detachMock.mockRejectedValueOnce(new Error('unavailable'));
+  await user.click(await screen.findByRole('button', { name: 'Remove folder /mnt/media' }));
+  const retry = await screen.findByRole('dialog', { name: 'Remove media folder?' });
+  await user.click(within(retry).getByRole('button', { name: 'Remove folder' }));
+  expect(await within(retry).findByRole('alert')).toBeVisible();
+  await user.click(within(retry).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); });
+  expect(screen.getByRole('button', { name: 'Preview folder /mnt/media' })).toBeInTheDocument();
 });

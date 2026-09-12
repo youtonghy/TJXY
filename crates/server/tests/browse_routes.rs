@@ -7585,6 +7585,16 @@ async fn administrator_can_persist_rename_and_safely_detach_a_filesystem_root() 
         .try_get::<String>("", "status")
         .unwrap();
     assert_eq!(status, "Disabled");
+    let library_id = folders[0]["ItemId"].as_str().unwrap();
+    let response = get(
+        &app.router,
+        &format!("/Admin/Libraries/{library_id}/Folders"),
+        Some(&token),
+    )
+    .await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(folders.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

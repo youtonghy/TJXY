@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
+use chrono::Utc;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Expr, JoinType, Order, Query},
+    sea_query::{Alias, CaseStatement, Condition, Expr, JoinType, Order, Query, SelectStatement},
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -480,9 +481,13 @@ impl<'connection> LibraryRepository<'connection> {
         Ok(())
     }
 
-    /// Removes one root membership and disables an orphaned storage runtime configuration.
+    /// Removes one root membership and clears the scanned footprint it contributed.
     ///
-    /// Durable storage objects are retained for later reattachment or explicit purge.
+    /// Item memberships that were reachable only through the detached root are
+    /// released, direct-metadata references for the pair are dropped, and a
+    /// fully unbound root's inventory is marked absent so its locations detach
+    /// and its items tombstone. Durable storage objects, catalog rows, and user
+    /// data are retained for later reattachment or explicit purge.
     ///
     /// # Errors
     ///
@@ -509,6 +514,18 @@ impl<'connection> LibraryRepository<'connection> {
         {
             return Err(LibraryRepositoryError::RootNotAttached);
         }
+        release_unreachable_memberships(&transaction, library_id, root_id).await?;
+        transaction
+            .execute(
+                transaction.get_database_backend().build(
+                    Query::delete()
+                        .from_table(Alias::new("direct_metadata_refs"))
+                        .and_where(Expr::col(Alias::new("library_id")).eq(library_id))
+                        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid())),
+                ),
+            )
+            .await?;
+        retire_unbound_root(&transaction, root_id).await?;
         let disabled =
             disable_orphaned_storage_accounts(&transaction, &[root_id.as_uuid()]).await?;
         crate::advance_catalog_generation(&transaction).await?;
@@ -1346,6 +1363,356 @@ async fn enqueue_filesystem_sync(
     .await?
     .job()
     .id())
+}
+
+/// Releases this library's membership rows for items that were reached only
+/// through the detached root. Items matched or projected through a root that
+/// remains attached to the library keep their membership, and items that were
+/// never reached through the detached root (imports, other roots) are
+/// untouched.
+async fn release_unreachable_memberships(
+    transaction: &DatabaseTransaction,
+    library_id: Uuid,
+    root_id: StorageRootId,
+) -> Result<(), DbErr> {
+    let membership = Alias::new("library_catalog_items");
+    let detached_direct = {
+        let identity = Alias::new("detached_identity");
+        let relation = Alias::new("detached_relation");
+        Query::select()
+            .expr(Expr::val(1_i32))
+            .from_as(Alias::new("identity_matches"), identity.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_root_objects"),
+                relation.clone(),
+                Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                    .equals((identity.clone(), Alias::new("storage_object_id"))),
+            )
+            .and_where(
+                Expr::col((identity.clone(), Alias::new("candidate_catalog_item_id")))
+                    .equals((membership.clone(), Alias::new("catalog_item_id"))),
+            )
+            .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
+            .and_where(Expr::col((relation, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
+            .to_owned()
+    };
+    let detached_projected =
+        projected_membership_query(&membership, |query, projection, _binding| {
+            query.and_where(
+                Expr::col((projection, Alias::new("storage_root_id"))).eq(root_id.as_uuid()),
+            );
+        });
+    let kept_direct = {
+        let identity = Alias::new("kept_identity");
+        let relation = Alias::new("kept_relation");
+        let binding = Alias::new("kept_binding");
+        Query::select()
+            .expr(Expr::val(1_i32))
+            .from_as(Alias::new("identity_matches"), identity.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_root_objects"),
+                relation.clone(),
+                Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                    .equals((identity.clone(), Alias::new("storage_object_id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("library_storage_roots"),
+                binding.clone(),
+                Expr::col((binding.clone(), Alias::new("storage_root_id")))
+                    .equals((relation.clone(), Alias::new("storage_root_id")))
+                    .and(
+                        Expr::col((binding, Alias::new("library_id")))
+                            .equals((membership.clone(), Alias::new("library_id"))),
+                    ),
+            )
+            .and_where(
+                Expr::col((identity.clone(), Alias::new("candidate_catalog_item_id")))
+                    .equals((membership.clone(), Alias::new("catalog_item_id"))),
+            )
+            .and_where(Expr::col((identity, Alias::new("state"))).eq("Matched"))
+            .and_where(
+                Expr::col((relation, Alias::new("presence_state")))
+                    .is_in(["Present", "TemporarilyUnavailable"]),
+            )
+            .to_owned()
+    };
+    let kept_projected = projected_membership_query(&membership, |query, projection, binding| {
+        query.join_as(
+            JoinType::InnerJoin,
+            Alias::new("library_storage_roots"),
+            binding.clone(),
+            Expr::col((binding.clone(), Alias::new("storage_root_id")))
+                .equals((projection.clone(), Alias::new("storage_root_id")))
+                .and(
+                    Expr::col((binding, Alias::new("library_id")))
+                        .equals((membership.clone(), Alias::new("library_id"))),
+                ),
+        );
+    });
+    let delete = Query::delete()
+        .from_table(membership.clone())
+        .and_where(Expr::col((membership.clone(), Alias::new("library_id"))).eq(library_id))
+        .cond_where(
+            Condition::any()
+                .add(Expr::exists(detached_direct))
+                .add(Expr::exists(detached_projected)),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::exists(kept_direct).not())
+                .add(Expr::exists(kept_projected).not()),
+        )
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&delete))
+        .await?;
+    Ok(())
+}
+
+/// Selects items projected by an active structure publication owned by its
+/// current pointer. `bind` receives the projection and binding aliases so the
+/// caller can scope the subquery to a root or to still-attached roots.
+fn projected_membership_query(
+    membership: &Alias,
+    bind: impl Fn(&mut SelectStatement, Alias, Alias),
+) -> SelectStatement {
+    let projection = Alias::new("membership_projection");
+    let publication = Alias::new("membership_publication");
+    let owner = Alias::new("membership_owner");
+    let binding = Alias::new("membership_binding");
+    let mut query = Query::select();
+    query
+        .expr(Expr::val(1_i32))
+        .from_as(Alias::new("publication_catalog_items"), projection.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_publications"),
+            publication.clone(),
+            Expr::col((publication.clone(), Alias::new("id")))
+                .equals((projection.clone(), Alias::new("publication_id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            owner.clone(),
+            Expr::col((owner, Alias::new("active_structure_publication_id")))
+                .equals((publication.clone(), Alias::new("id"))),
+        )
+        .and_where(
+            Expr::col((projection.clone(), Alias::new("catalog_item_id")))
+                .equals((membership.clone(), Alias::new("catalog_item_id"))),
+        )
+        .and_where(Expr::col((publication.clone(), Alias::new("publication_kind"))).eq("Structure"))
+        .and_where(Expr::col((publication, Alias::new("state"))).eq("Active"));
+    bind(&mut query, projection, binding);
+    query
+}
+
+/// Marks a root's synchronized inventory absent once no library binds it, so
+/// dependent locations detach and affected items tombstone. Objects still
+/// present through another root keep their state.
+async fn retire_unbound_root(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let bound = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("library_storage_roots"))
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .limit(1)
+        .to_owned();
+    if transaction
+        .query_one(backend.build(&bound))
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    mark_detached_inventory_absent(transaction, root_id).await?;
+    detach_root_locations(transaction, root_id).await?;
+    let clear_choices = Query::delete()
+        .from_table(Alias::new("nfo_choices"))
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .to_owned();
+    transaction.execute(backend.build(&clear_choices)).await?;
+    Ok(())
+}
+
+fn root_object_ids(root_id: StorageRootId) -> SelectStatement {
+    Query::select()
+        .column(Alias::new("storage_object_id"))
+        .from(Alias::new("storage_root_objects"))
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .to_owned()
+}
+
+/// Marks the root's relations and the objects no other root still presents as
+/// `ConfirmedAbsent`.
+async fn mark_detached_inventory_absent(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let now = Utc::now();
+    let retire_relations = Query::update()
+        .table(Alias::new("storage_root_objects"))
+        .value(Alias::new("presence_state"), "ConfirmedAbsent")
+        .value(Alias::new("availability_reason"), "root-detached")
+        .value(Alias::new("children_indexed"), false)
+        .value(Alias::new("last_listed_at"), now)
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("presence_state")).ne("ConfirmedAbsent"))
+        .to_owned();
+    transaction
+        .execute(backend.build(&retire_relations))
+        .await?;
+
+    let object = Alias::new("storage_objects");
+    let live_elsewhere = {
+        let relation = Alias::new("retired_live_relation");
+        Query::select()
+            .expr(Expr::val(1_i32))
+            .from_as(Alias::new("storage_root_objects"), relation.clone())
+            .and_where(
+                Expr::col((relation.clone(), Alias::new("storage_object_id")))
+                    .equals((object.clone(), Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((relation, Alias::new("presence_state")))
+                    .is_in(["Present", "TemporarilyUnavailable"]),
+            )
+            .to_owned()
+    };
+    let retire_objects = Query::update()
+        .table(object.clone())
+        .value(Alias::new("presence_state"), "ConfirmedAbsent")
+        .value(
+            Alias::new("facts_observed_storage_root_id"),
+            root_id.as_uuid(),
+        )
+        .value(Alias::new("last_listed_at"), now)
+        .and_where(
+            Expr::col((object.clone(), Alias::new("id"))).in_subquery(root_object_ids(root_id)),
+        )
+        .and_where(Expr::exists(live_elsewhere).not())
+        .and_where(Expr::col((object, Alias::new("presence_state"))).ne("ConfirmedAbsent"))
+        .to_owned();
+    transaction.execute(backend.build(&retire_objects)).await?;
+    Ok(())
+}
+
+/// Recomputes location availability over the root's objects, stales dependent
+/// probe results, and tombstones items that lost their last live location.
+async fn detach_root_locations(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let location = Alias::new("media_locations");
+    let present = presence_relation(&location, "Present");
+    let unavailable = presence_relation(&location, "TemporarilyUnavailable");
+    let recompute_locations = Query::update()
+        .table(location.clone())
+        .value(
+            Alias::new("availability_state"),
+            CaseStatement::new()
+                .case(Expr::exists(present), "Available")
+                .case(Expr::exists(unavailable), "TemporarilyUnavailable")
+                .finally("ConfirmedAbsent"),
+        )
+        .and_where(
+            Expr::col((location, Alias::new("storage_object_id")))
+                .in_subquery(root_object_ids(root_id)),
+        )
+        .to_owned();
+    transaction
+        .execute(backend.build(&recompute_locations))
+        .await?;
+
+    let affected_sources = Query::select()
+        .column(Alias::new("media_source_id"))
+        .from(Alias::new("media_locations"))
+        .and_where(Expr::col(Alias::new("storage_object_id")).in_subquery(root_object_ids(root_id)))
+        .to_owned();
+    let stale_sources = Query::update()
+        .table(Alias::new("media_sources"))
+        .value(Alias::new("probe_state"), "Stale")
+        .and_where(Expr::col(Alias::new("probe_state")).is_not_in(["NotProbed", "Stale"]))
+        .and_where(Expr::col(Alias::new("id")).in_subquery(affected_sources))
+        .to_owned();
+    transaction.execute(backend.build(&stale_sources)).await?;
+
+    let item = Alias::new("catalog_items");
+    let available_elsewhere = {
+        let source = Alias::new("tombstone_live_source");
+        let live = Alias::new("tombstone_live_location");
+        Query::select()
+            .expr(Expr::val(1_i32))
+            .from_as(Alias::new("media_sources"), source.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("media_locations"),
+                live.clone(),
+                Expr::col((live.clone(), Alias::new("media_source_id")))
+                    .equals((source.clone(), Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((source, Alias::new("catalog_item_id")))
+                    .equals((item.clone(), Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((live, Alias::new("availability_state")))
+                    .is_in(["Available", "TemporarilyUnavailable"]),
+            )
+            .to_owned()
+    };
+    let affected_items = {
+        let source = Alias::new("tombstone_source");
+        let affected = Alias::new("tombstone_location");
+        Query::select()
+            .expr_as(
+                Expr::col((source.clone(), Alias::new("catalog_item_id"))),
+                Alias::new("catalog_item_id"),
+            )
+            .from_as(Alias::new("media_sources"), source.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("media_locations"),
+                affected.clone(),
+                Expr::col((affected.clone(), Alias::new("media_source_id")))
+                    .equals((source, Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((affected, Alias::new("storage_object_id")))
+                    .in_subquery(root_object_ids(root_id)),
+            )
+            .to_owned()
+    };
+    let tombstone_items = Query::update()
+        .table(item.clone())
+        .value(Alias::new("is_present"), false)
+        .and_where(Expr::col((item.clone(), Alias::new("is_present"))).eq(true))
+        .and_where(Expr::col((item, Alias::new("id"))).in_subquery(affected_items))
+        .and_where(Expr::exists(available_elsewhere).not())
+        .to_owned();
+    transaction.execute(backend.build(&tombstone_items)).await?;
+    Ok(())
+}
+
+fn presence_relation(location: &Alias, state: &'static str) -> SelectStatement {
+    Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("storage_root_objects"))
+        .and_where(
+            Expr::col(Alias::new("storage_object_id"))
+                .equals((location.clone(), Alias::new("storage_object_id"))),
+        )
+        .and_where(Expr::col(Alias::new("presence_state")).eq(state))
+        .to_owned()
 }
 
 async fn disable_orphaned_storage_accounts(

@@ -1,5 +1,5 @@
 import { apiRequest } from '../api/httpClient';
-import { listFolderContents, listLibraryFolders } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders } from './libraryFoldersApi';
 
 vi.mock('../api/httpClient', async (importOriginal) => ({
   ...await importOriginal<typeof import('../api/httpClient')>(), apiRequest: vi.fn(),
@@ -17,6 +17,23 @@ it('preserves physical paths while keeping cloud paths explicitly unavailable', 
     { id: 'remote', name: 'Cloud', path: null, provider: 'onedrive' },
   ]);
 });
+
+it('detaches a folder through the virtual folders path contract', async () => {
+  requestMock.mockResolvedValue(undefined);
+  await detachLibraryFolder('Movies', 'root-1');
+  expect(requestMock).toHaveBeenCalledWith(
+    '/Library/VirtualFolders/Paths?name=Movies&path=tjxy%3A%2F%2Fstorage-root%2Froot-1&refreshLibrary=false',
+    { method: 'DELETE' },
+  );
+});
+
+it.each([{ name: '', root: 'root-1' }, { name: 'Movies', root: '' }])(
+  'rejects detach requests without a complete binding reference',
+  async ({ name, root }) => {
+    await expect(detachLibraryFolder(name, root)).rejects.toMatchObject({ category: 'validation' });
+    expect(requestMock).not.toHaveBeenCalled();
+  },
+);
 
 it('encodes a selected path as query data and forwards cancellation', async () => {
   requestMock.mockResolvedValue({ Indexed: false, Items: [

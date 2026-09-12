@@ -478,6 +478,630 @@ async fn filesystem_root_binding_is_restartable_and_last_detach_disables_without
     assert_eq!(catalog_generation(&database).await, 3);
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps membership, presence, and artifact assertions in one scenario.
+async fn detaching_a_root_releases_unreachable_memberships_and_retires_orphaned_inventory() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let repository = LibraryRepository::new(&database);
+    let policy = LibraryPolicyUpdate::new(
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+        true,
+    )
+    .unwrap();
+    let root = FilesystemRootDraft::new("/srv/media", "root-object-id", "media").unwrap();
+    let created = repository
+        .create_with_filesystem_root("Movies", "movies", &policy, &root)
+        .await
+        .unwrap();
+
+    let file_id = Uuid::new_v4();
+    seed_root_object(
+        &database,
+        created.account_id(),
+        created.root_id().as_uuid(),
+        file_id,
+        "file-one",
+        "Movie One.mkv",
+    )
+    .await;
+    let movie_id = seed_presented_item(&database, created.library_id().as_uuid(), file_id).await;
+    // A membership without storage reachability (for example an imported item)
+    // survives the detach.
+    let external_id = Uuid::new_v4();
+    seed_catalog_item(&database, external_id).await;
+    seed_membership(&database, created.library_id().as_uuid(), external_id).await;
+
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("nfo_choices"))
+                    .columns([
+                        Alias::new("catalog_item_id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("fingerprint"),
+                        Alias::new("metadata_revision"),
+                        Alias::new("input_sync_revision"),
+                        Alias::new("candidates"),
+                        Alias::new("conflict_fields"),
+                        Alias::new("status"),
+                        Alias::new("updated_at"),
+                    ])
+                    .values_panic([
+                        movie_id.into(),
+                        created.root_id().as_uuid().into(),
+                        "fingerprint".into(),
+                        1_i64.into(),
+                        1_i64.into(),
+                        json!([]).into(),
+                        json!([]).into(),
+                        "Resolved".into(),
+                        Utc::now().into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("direct_metadata_refs"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("catalog_item_id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("resource_kind"),
+                        Alias::new("priority"),
+                        Alias::new("input_revision"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        created.library_id().as_uuid().into(),
+                        movie_id.into(),
+                        created.root_id().as_uuid().into(),
+                        file_id.into(),
+                        "Nfo".into(),
+                        0_i32.into(),
+                        1_i64.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let disabled = repository
+        .detach_root_by_name("Movies", created.root_id())
+        .await
+        .unwrap();
+    assert_eq!(disabled.len(), 1);
+    assert_eq!(disabled[0].account_id(), created.account_id());
+
+    assert_eq!(
+        count_rows(&database, "library_storage_roots", "id").await,
+        0
+    );
+    let remaining_membership = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("catalog_item_id"))
+                    .from(Alias::new("library_catalog_items"))
+                    .and_where(
+                        Expr::col(Alias::new("library_id")).eq(created.library_id().as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        remaining_membership
+            .try_get::<Uuid>("", "catalog_item_id")
+            .unwrap(),
+        external_id,
+        "membership of the detached root's item must be released"
+    );
+    for (table, column, expected) in [
+        ("storage_root_objects", "presence_state", "ConfirmedAbsent"),
+        ("storage_objects", "presence_state", "ConfirmedAbsent"),
+        ("media_locations", "availability_state", "ConfirmedAbsent"),
+        ("media_sources", "probe_state", "Stale"),
+    ] {
+        for state in query_column(&database, table, column).await {
+            assert_eq!(state, expected, "{table}.{column}");
+        }
+    }
+    let movie_present: bool = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("is_present"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(movie_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "is_present")
+        .unwrap();
+    assert!(!movie_present, "the detached item must tombstone");
+    let external_present: bool = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("is_present"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(external_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "is_present")
+        .unwrap();
+    assert!(external_present);
+    assert_eq!(
+        count_rows(&database, "nfo_choices", "catalog_item_id").await,
+        0
+    );
+    assert_eq!(count_rows(&database, "direct_metadata_refs", "id").await, 0);
+    let account_status: String = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("status"))
+                    .from(Alias::new("storage_accounts"))
+                    .and_where(Expr::col(Alias::new("id")).eq(created.account_id())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "status")
+        .unwrap();
+    assert_eq!(account_status, "Disabled");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps the two-library fixture and its assertions in one scenario.
+async fn detaching_a_shared_root_only_releases_the_detached_library() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let repository = LibraryRepository::new(&database);
+    let policy = LibraryPolicyUpdate::new(
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+        true,
+    )
+    .unwrap();
+    let root = FilesystemRootDraft::new("/srv/media", "root-object-id", "media").unwrap();
+    let movies = repository
+        .create_with_filesystem_root("Movies", "movies", &policy, &root)
+        .await
+        .unwrap();
+    let archive_id = repository
+        .create("Archive", "movies", &policy)
+        .await
+        .unwrap();
+    let bound = repository
+        .attach_filesystem_root(archive_id, &root)
+        .await
+        .unwrap();
+    assert_eq!(bound.root_id(), movies.root_id());
+
+    let file_id = Uuid::new_v4();
+    seed_root_object(
+        &database,
+        movies.account_id(),
+        movies.root_id().as_uuid(),
+        file_id,
+        "file-one",
+        "Movie One.mkv",
+    )
+    .await;
+    let movie_id = seed_presented_item(&database, movies.library_id().as_uuid(), file_id).await;
+    seed_membership(&database, archive_id.as_uuid(), movie_id).await;
+
+    let backend = database.get_database_backend();
+    for library in [movies.library_id().as_uuid(), archive_id.as_uuid()] {
+        database
+            .execute(
+                backend.build(
+                    Query::insert()
+                        .into_table(Alias::new("direct_metadata_refs"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("library_id"),
+                            Alias::new("catalog_item_id"),
+                            Alias::new("storage_root_id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("resource_kind"),
+                            Alias::new("priority"),
+                            Alias::new("input_revision"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            library.into(),
+                            movie_id.into(),
+                            movies.root_id().as_uuid().into(),
+                            file_id.into(),
+                            "Nfo".into(),
+                            0_i32.into(),
+                            1_i64.into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("nfo_choices"))
+                    .columns([
+                        Alias::new("catalog_item_id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("fingerprint"),
+                        Alias::new("metadata_revision"),
+                        Alias::new("input_sync_revision"),
+                        Alias::new("candidates"),
+                        Alias::new("conflict_fields"),
+                        Alias::new("status"),
+                        Alias::new("updated_at"),
+                    ])
+                    .values_panic([
+                        movie_id.into(),
+                        movies.root_id().as_uuid().into(),
+                        "fingerprint".into(),
+                        1_i64.into(),
+                        1_i64.into(),
+                        json!([]).into(),
+                        json!([]).into(),
+                        "Resolved".into(),
+                        Utc::now().into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let disabled = repository
+        .detach_root_by_name("Movies", movies.root_id())
+        .await
+        .unwrap();
+    assert!(disabled.is_empty(), "a shared root stays attached");
+
+    let bindings: i64 = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("count"))
+                    .from(Alias::new("library_storage_roots")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "count")
+        .unwrap();
+    assert_eq!(bindings, 1);
+    let members = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("library_id"))
+                    .from(Alias::new("library_catalog_items"))
+                    .and_where(Expr::col(Alias::new("catalog_item_id")).eq(movie_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        members[0].try_get::<Uuid>("", "library_id").unwrap(),
+        archive_id.as_uuid()
+    );
+    for (table, column, expected) in [
+        ("storage_objects", "presence_state", "Present"),
+        ("media_locations", "availability_state", "Available"),
+        ("media_sources", "probe_state", "Probed"),
+    ] {
+        for state in query_column(&database, table, column).await {
+            assert_eq!(state, expected, "{table}.{column}");
+        }
+    }
+    // The shared root's relation rows stay present for the other library; NFO
+    // choices belong to the root and stay, while direct refs are released per
+    // binding.
+    assert_eq!(
+        count_rows(&database, "nfo_choices", "catalog_item_id").await,
+        1
+    );
+    let remaining_refs = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("library_id"))
+                    .from(Alias::new("direct_metadata_refs")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remaining_refs.len(), 1);
+    assert_eq!(
+        remaining_refs[0].try_get::<Uuid>("", "library_id").unwrap(),
+        archive_id.as_uuid()
+    );
+    let account_status: String = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("status"))
+                    .from(Alias::new("storage_accounts"))
+                    .and_where(Expr::col(Alias::new("id")).eq(movies.account_id())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "status")
+        .unwrap();
+    assert_eq!(account_status, "Active");
+}
+
+async fn seed_catalog_item(database: &sea_orm::DatabaseConnection, item_id: Uuid) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("metadata_state"),
+                        Alias::new("classification_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("metadata_revision"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item_id.into(),
+                        "Movie".into(),
+                        "Movie".into(),
+                        "movie".into(),
+                        "Ready".into(),
+                        "Matched".into(),
+                        "NotApplicable".into(),
+                        "Indexed".into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_membership(database: &sea_orm::DatabaseConnection, library_id: Uuid, item_id: Uuid) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("library_catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("library_id"),
+                        Alias::new("catalog_item_id"),
+                    ])
+                    .values_panic([Uuid::new_v4().into(), library_id.into(), item_id.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_root_object(
+    database: &sea_orm::DatabaseConnection,
+    account_id: Uuid,
+    root_id: Uuid,
+    object_id: Uuid,
+    provider_object_id: &str,
+    name: &str,
+) {
+    let backend = database.get_database_backend();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("storage_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_drive_id"),
+                Alias::new("provider_object_id"),
+                Alias::new("identity_key"),
+                Alias::new("name"),
+                Alias::new("normalized_name"),
+                Alias::new("object_type"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("facts_observed_storage_root_id"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("identity_quality"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                object_id.into(),
+                account_id.into(),
+                "local".into(),
+                provider_object_id.into(),
+                Uuid::new_v4().into_bytes().to_vec().into(),
+                name.into(),
+                name.to_lowercase().into(),
+                "File".into(),
+                1_i64.into(),
+                root_id.into(),
+                false.into(),
+                0_i64.into(),
+                "ProviderStableId".into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_root_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_root_id"),
+                Alias::new("storage_object_id"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                root_id.into(),
+                object_id.into(),
+                1_i64.into(),
+                false.into(),
+                0_i64.into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+    ] {
+        database.execute(backend.build(&statement)).await.unwrap();
+    }
+}
+
+async fn seed_presented_item(
+    database: &sea_orm::DatabaseConnection,
+    library_id: Uuid,
+    object_id: Uuid,
+) -> Uuid {
+    let item_id = Uuid::new_v4();
+    let source_id = Uuid::new_v4();
+    seed_catalog_item(database, item_id).await;
+    seed_membership(database, library_id, item_id).await;
+    let backend = database.get_database_backend();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("identity_matches"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_object_id"),
+                Alias::new("candidate_catalog_item_id"),
+                Alias::new("confidence"),
+                Alias::new("state"),
+                Alias::new("evidence"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                object_id.into(),
+                item_id.into(),
+                1.0.into(),
+                "Matched".into(),
+                json!({"kind":"fixture"}).into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("media_sources"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("catalog_item_id"),
+                Alias::new("presentation_key"),
+                Alias::new("probe_state"),
+                Alias::new("probe_revision"),
+            ])
+            .values_panic([
+                source_id.into(),
+                item_id.into(),
+                Uuid::new_v4().into(),
+                "Probed".into(),
+                0_i64.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("media_locations"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("media_source_id"),
+                Alias::new("storage_object_id"),
+                Alias::new("availability_state"),
+                Alias::new("priority"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                source_id.into(),
+                object_id.into(),
+                "Available".into(),
+                0_i32.into(),
+            ])
+            .to_owned(),
+    ] {
+        database.execute(backend.build(&statement)).await.unwrap();
+    }
+    item_id
+}
+
+async fn count_rows(database: &sea_orm::DatabaseConnection, table: &str, column: &str) -> i64 {
+    let backend = database.get_database_backend();
+    database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new(column)).count(), Alias::new("count"))
+                    .from(Alias::new(table)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "count")
+        .unwrap()
+}
+
+async fn query_column(
+    database: &sea_orm::DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Vec<String> {
+    let backend = database.get_database_backend();
+    database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new(column))
+                    .from(Alias::new(table)),
+            ),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.try_get::<String>("", column).unwrap())
+        .collect()
+}
+
 async fn seed_import_reference(database: &sea_orm::DatabaseConnection, library_id: LibraryId) {
     let username = Username::parse("Importer").unwrap();
     let user = AuthRepository::new(database)

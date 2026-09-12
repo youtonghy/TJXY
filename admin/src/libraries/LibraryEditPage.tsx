@@ -304,6 +304,7 @@ function LibraryEditPageContent({ id }: { id: string }) {
             <StorageFoldersSection
               isPending={attachPending}
               library={library}
+              onChanged={reloadAll}
               onOpen={() => { setFolderPath(''); setFolderSelection(null); setFolderPickerOpen(true); }}
             />
             <DangerZone

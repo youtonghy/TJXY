@@ -1,20 +1,38 @@
 import { Button, Modal } from '@heroui/react';
-import { ArrowLeft, ChevronRight, File, Folder, FolderOpen, FolderPlus, RefreshCw } from 'lucide-react';
-import { useLogoutIfAccessDenied } from 'ra-core';
+import { ArrowLeft, ChevronRight, File, Folder, FolderOpen, FolderPlus, RefreshCw, Trash2 } from 'lucide-react';
+import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
 import { useEffect, useState } from 'react';
 
 import { useTranslate } from '../settings/i18n';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import type { LibraryOption } from './libraryApi';
-import { listFolderContents, listLibraryFolders, type FolderContents, type LibraryFolder } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders, type FolderContents, type LibraryFolder } from './libraryFoldersApi';
 
-export function StorageFoldersSection({ isPending, library, onOpen }: { isPending: boolean; library: LibraryOption; onOpen: () => void }) {
+export function StorageFoldersSection({ isPending, library, onChanged, onOpen }: { isPending: boolean; library: LibraryOption; onChanged: () => void; onOpen: () => void }) {
   const tr = useTranslate();
+  const notify = useNotify();
   const logoutIfAccessDenied = useLogoutIfAccessDenied();
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState<LibraryFolder | null>(null);
+  const [detaching, setDetaching] = useState(false);
+  const removeFolder = async (folder: LibraryFolder) => {
+    setDetaching(true);
+    try {
+      await detachLibraryFolder(library.name, folder.id);
+      setSelected((current) => (current?.id === folder.id ? null : current));
+      setRevision((value) => value + 1);
+      onChanged();
+      notify(tr('Media folder removed.', '媒体文件夹已移除。'), { type: 'success' });
+    } catch (error: unknown) {
+      if (await logoutIfAccessDenied(error)) return;
+      throw error;
+    } finally {
+      setDetaching(false);
+    }
+  };
   useEffect(() => {
     const controller = new AbortController();
     const isCurrent = () => !controller.signal.aborted;
@@ -50,14 +68,38 @@ export function StorageFoldersSection({ isPending, library, onOpen }: { isPendin
       ) : folders.length === 0 ? <p className="rounded-xl border border-dashed border-border py-8 text-center text-sm text-muted">{tr('No media folders attached.', '尚未添加媒体文件夹。')}</p> : (
         <ul aria-label={tr('Attached media folders', '已添加的媒体文件夹')} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {folders.map((folder) => (
-            <li className="min-w-0" key={folder.id}>
+            <li className="relative min-w-0" key={folder.id}>
               <Button aria-label={`${tr('Preview folder', '预览文件夹')} ${folder.path ?? folder.name}`} className="h-full min-h-36 w-full items-start justify-start whitespace-normal rounded-2xl border border-border bg-surface p-5 text-left shadow-sm" onPress={() => { setSelected(folder); }} variant="tertiary">
                 <span className="flex min-w-0 flex-1 flex-col gap-3">
-                  <span className="flex items-center gap-3"><Folder aria-hidden="true" className="size-6 shrink-0 text-accent" /><span className="min-w-0 flex-1 break-words font-semibold">{folder.name}</span><ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted" /></span>
+                  <span className="flex items-center gap-3 pr-9"><Folder aria-hidden="true" className="size-6 shrink-0 text-accent" /><span className="min-w-0 flex-1 break-words font-semibold">{folder.name}</span><ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted" /></span>
                   <span className="break-all font-mono text-xs font-normal leading-relaxed text-muted">{folder.path ?? folder.name}</span>
                   <span className="text-xs font-normal text-muted">{providerLabel(folder.provider, tr)}{library.unavailableLocations?.includes(`tjxy://storage-root/${folder.id}`) ? ` · ${tr('Unavailable', '不可用')}` : ''}</span>
                 </span>
               </Button>
+              <ConfirmDialog
+                confirmLabel={tr('Remove folder', '移除文件夹')}
+                description={(
+                  <>
+                    {tr('Remove', '将 ')}<strong className="break-all font-semibold text-foreground">{folder.path ?? folder.name}</strong>
+                    {tr(' from this library? Items scanned from this folder, including their NFO metadata and images, will be removed from the catalog. Media files on disk are not deleted.', ' 从此媒体库中移除？该文件夹扫描入库的条目及其 NFO 元数据和图片将从目录中移除，但不会删除磁盘上的媒体文件。')}
+                  </>
+                )}
+                isPending={detaching}
+                onConfirm={() => removeFolder(folder)}
+                title={tr('Remove media folder?', '移除媒体文件夹？')}
+                trigger={(
+                  <Button
+                    aria-label={`${tr('Remove folder', '移除文件夹')} ${folder.path ?? folder.name}`}
+                    className="absolute right-3 top-3"
+                    isDisabled={isPending || detaching}
+                    isIconOnly
+                    size="sm"
+                    variant="danger-soft"
+                  >
+                    <Trash2 aria-hidden="true" className="size-4" />
+                  </Button>
+                )}
+              />
             </li>
           ))}
         </ul>

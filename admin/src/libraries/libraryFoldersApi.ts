@@ -14,6 +14,18 @@ export async function listLibraryFolders(libraryId: string, signal?: AbortSignal
   });
 }
 
+export async function detachLibraryFolder(libraryName: string, rootId: string): Promise<void> {
+  if (!text(libraryName) || !text(rootId)) {
+    throw new ApiError(400, 'validation', 'A library name and folder identifier are required.');
+  }
+  const query = new URLSearchParams({
+    name: libraryName,
+    path: `tjxy://storage-root/${rootId}`,
+    refreshLibrary: 'false',
+  });
+  await apiRequest(`/Library/VirtualFolders/Paths?${query.toString()}`, { method: 'DELETE' });
+}
+
 export async function listFolderContents(libraryId: string, rootId: string, path: string, signal?: AbortSignal): Promise<FolderContents> {
   const query = new URLSearchParams({ Path: path });
   const value = await apiRequest<unknown>(`${base(libraryId)}/${encodeURIComponent(rootId)}/Contents?${query.toString()}`, { signal });
