@@ -5,10 +5,10 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
-use tjxy_common::{LibraryId, SortKey, Username};
+use tjxy_common::{LibraryId, SortKey, StorageRootId, Username};
 use tjxy_db::{
-    AuthRepository, FilesystemRootDraft, LibraryPolicyUpdate, LibraryRepository,
-    LibraryRepositoryError, Migrator, WorkJobRepository, WorkTaskKind,
+    AuthRepository, FilesystemRootDraft, LibraryFolderRepository, LibraryPolicyUpdate,
+    LibraryRepository, LibraryRepositoryError, Migrator, WorkJobRepository, WorkTaskKind,
 };
 use tjxy_test_support::test_database;
 use uuid::Uuid;
@@ -861,6 +861,257 @@ async fn detaching_a_shared_root_only_releases_the_detached_library() {
         .try_get("", "status")
         .unwrap();
     assert_eq!(account_status, "Active");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keeps binding, retarget, and conflict assertions in one scenario.
+async fn retargeting_a_filesystem_root_moves_the_path_and_preserves_identity() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let repository = LibraryRepository::new(&database);
+    let folders = LibraryFolderRepository::new(&database);
+    let policy = LibraryPolicyUpdate::new(
+        "Lazy",
+        "title_layer",
+        "basic",
+        "on_browse",
+        "on_playback",
+        true,
+    )
+    .unwrap();
+    let root =
+        FilesystemRootDraft::new("/srv/media", "root-namespace/root-namespace", "media").unwrap();
+    let created = repository
+        .create_with_filesystem_root("Movies", "movies", &policy, &root)
+        .await
+        .unwrap();
+
+    assert!(
+        folders
+            .binding(Uuid::new_v4(), created.root_id().as_uuid())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let binding = folders
+        .binding(created.library_id().as_uuid(), created.root_id().as_uuid())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.provider.as_deref(), Some("filesystem"));
+    assert_eq!(binding.account_id, Some(created.account_id()));
+    assert_eq!(binding.root_path.as_deref(), Some("/srv/media"));
+    assert_eq!(binding.provider_root_id, "root-namespace/root-namespace");
+
+    let backend = database.get_database_backend();
+    let previous_identity: String = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("account_identity"))
+                    .from(Alias::new("storage_accounts"))
+                    .and_where(Expr::col(Alias::new("id")).eq(created.account_id())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "account_identity")
+        .unwrap();
+
+    assert!(matches!(
+        repository
+            .retarget_filesystem_root(
+                created.library_id(),
+                created.root_id(),
+                "relative/path",
+                "archive",
+            )
+            .await,
+        Err(LibraryRepositoryError::InvalidFilesystemRoot)
+    ));
+    assert!(matches!(
+        repository
+            .retarget_filesystem_root(
+                created.library_id(),
+                StorageRootId::new(),
+                "/srv/archive",
+                "archive",
+            )
+            .await,
+        Err(LibraryRepositoryError::RootNotAttached)
+    ));
+
+    let retargeted = repository
+        .retarget_filesystem_root(
+            created.library_id(),
+            created.root_id(),
+            "/srv/archive",
+            "archive",
+        )
+        .await
+        .unwrap();
+    assert!(retargeted.changed());
+    assert_eq!(retargeted.account_id(), created.account_id());
+
+    let binding = folders
+        .binding(created.library_id().as_uuid(), created.root_id().as_uuid())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.root_path.as_deref(), Some("/srv/archive"));
+    let account = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("account_identity"))
+                    .column(Alias::new("display_name"))
+                    .from(Alias::new("storage_accounts"))
+                    .and_where(Expr::col(Alias::new("id")).eq(created.account_id())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = account.try_get::<String>("", "account_identity").unwrap();
+    assert!(identity.starts_with("filesystem:"));
+    assert_eq!(identity.len(), "filesystem:".len() + 64);
+    assert_ne!(identity, previous_identity);
+    assert_eq!(
+        account.try_get::<String>("", "display_name").unwrap(),
+        "archive"
+    );
+    let object_name: String = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("name"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(
+                        Expr::col(Alias::new("provider_object_id"))
+                            .eq("root-namespace/root-namespace"),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "name")
+        .unwrap();
+    assert_eq!(object_name, "archive");
+    let configs = repository.active_filesystem_roots().await.unwrap();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].root_path(), "/srv/archive");
+    assert_eq!(configs[0].root_id(), created.root_id());
+
+    let unchanged = repository
+        .retarget_filesystem_root(
+            created.library_id(),
+            created.root_id(),
+            "/srv/archive",
+            "archive",
+        )
+        .await
+        .unwrap();
+    assert!(!unchanged.changed());
+
+    let other =
+        FilesystemRootDraft::new("/srv/other", "other-namespace/other-namespace", "other").unwrap();
+    let second = repository
+        .create_with_filesystem_root("Shows", "movies", &policy, &other)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository
+            .retarget_filesystem_root(
+                created.library_id(),
+                created.root_id(),
+                "/srv/other",
+                "other",
+            )
+            .await,
+        Err(LibraryRepositoryError::FilesystemRootConflict)
+    ));
+    assert!(matches!(
+        repository
+            .retarget_filesystem_root(second.library_id(), created.root_id(), "/srv/new", "new",)
+            .await,
+        Err(LibraryRepositoryError::RootNotAttached)
+    ));
+
+    let cloud_account = Uuid::new_v4();
+    let cloud_root = Uuid::new_v4();
+    for statement in [
+        Query::insert()
+            .into_table(Alias::new("storage_accounts"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("provider"),
+                Alias::new("display_name"),
+                Alias::new("account_identity"),
+                Alias::new("credential_ref"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                cloud_account.into(),
+                "google-drive".into(),
+                "Cloud".into(),
+                "google-drive-cloud".into(),
+                "credential-cloud".into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_root_id"),
+                Alias::new("sync_revision"),
+                Alias::new("reconciled_sync_revision"),
+            ])
+            .values_panic([
+                cloud_root.into(),
+                cloud_account.into(),
+                "cloud-root".into(),
+                0_i64.into(),
+                0_i64.into(),
+            ])
+            .to_owned(),
+        Query::insert()
+            .into_table(Alias::new("library_storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("library_id"),
+                Alias::new("storage_root_id"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                second.library_id().as_uuid().into(),
+                cloud_root.into(),
+            ])
+            .to_owned(),
+    ] {
+        database.execute(backend.build(&statement)).await.unwrap();
+    }
+    let binding = folders
+        .binding(second.library_id().as_uuid(), cloud_root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.provider.as_deref(), Some("google-drive"));
+    assert_eq!(binding.root_path, None);
+    assert!(matches!(
+        repository
+            .retarget_filesystem_root(
+                second.library_id(),
+                StorageRootId::from_uuid(cloud_root),
+                "/srv/cloud",
+                "cloud",
+            )
+            .await,
+        Err(LibraryRepositoryError::RootNotFilesystem)
+    ));
 }
 
 async fn seed_catalog_item(database: &sea_orm::DatabaseConnection, item_id: Uuid) {

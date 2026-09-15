@@ -4249,6 +4249,29 @@ async fn post(
         .unwrap()
 }
 
+async fn patch(
+    router: &axum::Router,
+    uri: &str,
+    token: Option<&str>,
+    body: impl Into<Body>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{token}""#),
+        );
+    }
+    router
+        .clone()
+        .oneshot(request.body(body.into()).unwrap())
+        .await
+        .unwrap()
+}
+
 async fn put(
     router: &axum::Router,
     uri: &str,
@@ -9396,6 +9419,113 @@ async fn administrator_previews_attached_filesystem_folders_without_scanning() {
     assert_eq!(
         get(&app.router, &unrelated, Some(&token)).await.status(),
         StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn administrator_retargets_a_filesystem_folder_to_a_new_path() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let original = TempDir::new().unwrap();
+    let moved = TempDir::new().unwrap();
+    let response = post(
+        &app.router,
+        "/Library/VirtualFolders?name=Local&collectionType=movies",
+        &token,
+        json!({"Path": original.path().to_str().unwrap()}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(&app.router, "/Library/VirtualFolders", Some(&token)).await;
+    let libraries: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let library_id = libraries[0]["ItemId"].as_str().unwrap();
+    let base = format!("/Admin/Libraries/{library_id}/Folders");
+    let response = get(&app.router, &base, Some(&token)).await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let root_id = folders[0]["Id"].as_str().unwrap();
+    let url = format!("{base}/{root_id}");
+
+    assert_eq!(
+        patch(&app.router, &url, None, "{}").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        patch(&app.router, &url, Some(&token), "{}").await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        patch(
+            &app.router,
+            &url,
+            Some(&token),
+            json!({"Path": "/definitely/missing/path"}).to_string()
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unrelated = format!("/Admin/Libraries/{}/Folders/{root_id}", Uuid::new_v4());
+    assert_eq!(
+        patch(
+            &app.router,
+            &unrelated,
+            Some(&token),
+            json!({"Path": moved.path().to_str().unwrap()}).to_string()
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let response = patch(
+        &app.router,
+        &url,
+        Some(&token),
+        json!({"Path": moved.path().to_str().unwrap()}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = get(&app.router, &base, Some(&token)).await;
+    let folders: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(folders[0]["Id"], root_id);
+    assert_eq!(
+        folders[0]["Path"],
+        moved.path().canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        patch(
+            &app.router,
+            &url,
+            Some(&token),
+            json!({"Path": moved.path().to_str().unwrap()}).to_string()
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let occupied = TempDir::new().unwrap();
+    let response = post(
+        &app.router,
+        "/Library/VirtualFolders?name=Second&collectionType=movies",
+        &token,
+        json!({"Path": occupied.path().to_str().unwrap()}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        patch(
+            &app.router,
+            &url,
+            Some(&token),
+            json!({"Path": occupied.path().to_str().unwrap()}).to_string()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
     );
 }
 

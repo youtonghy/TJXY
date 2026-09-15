@@ -31,7 +31,9 @@ mod import_runtime;
 mod installation;
 mod library;
 mod library_folders;
-pub use library_folders::{LibraryFolder, LibraryFolderEntry, LibraryFolderRepository};
+pub use library_folders::{
+    LibraryFolder, LibraryFolderBinding, LibraryFolderEntry, LibraryFolderRepository,
+};
 mod logging_settings;
 mod manual_probe;
 mod media_collection;
@@ -153,7 +155,7 @@ pub use installation::{
 pub use library::{
     CreatedFilesystemLibrary, DisabledStorageRuntime, FilesystemRootConfiguration,
     FilesystemRootDraft, LibraryPolicyUpdate, LibraryRepository, LibraryRepositoryError,
-    VirtualFolderRecord, VirtualFolderRoot,
+    RetargetedFilesystemRoot, VirtualFolderRecord, VirtualFolderRoot,
 };
 pub use logging_settings::{
     DEFAULT_LOG_RETENTION_DAYS, LogBudget, LogMode, LoggingSettingsInput, LoggingSettingsRecord,

@@ -1,12 +1,24 @@
+import { Modal } from '@heroui/react';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { renderWithAdmin } from '../test/renderWithAdmin';
 import type { LibraryOption } from './libraryApi';
-import { detachLibraryFolder, listFolderContents, listLibraryFolders, type FolderContents } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders, updateLibraryFolder, type FolderContents } from './libraryFoldersApi';
 import { StorageFoldersSection } from './StorageFoldersSection';
 
-vi.mock('./libraryFoldersApi', () => ({ listLibraryFolders: vi.fn(), listFolderContents: vi.fn(), detachLibraryFolder: vi.fn() }));
+vi.mock('./libraryFoldersApi', () => ({ listLibraryFolders: vi.fn(), listFolderContents: vi.fn(), detachLibraryFolder: vi.fn(), updateLibraryFolder: vi.fn() }));
+vi.mock('./FolderPickerDialog', () => ({
+  FolderPickerDialog: ({ isOpen, onSelect }: {
+    isOpen: boolean;
+    onSelect: (selection: { rootId: string; relativePath: string }, displayPath: string) => void;
+  }) => isOpen ? (
+    <Modal isOpen><Modal.Backdrop><Modal.Container><Modal.Dialog>
+      <Modal.Header><Modal.Heading>Fixture picker</Modal.Heading></Modal.Header>
+      <Modal.Body><button onClick={() => { onSelect({ rootId: 'fs-root', relativePath: 'Archive' }, '/srv/archive'); }} type="button">Pick fixture folder</button></Modal.Body>
+    </Modal.Dialog></Modal.Container></Modal.Backdrop></Modal>
+  ) : null,
+}));
 const library: LibraryOption = {
   id: 'library-1', name: 'Movies', collectionType: 'movies', locations: ['tjxy://storage-root/root-1'],
   enabled: true, scanProfile: 'Lazy', profileVersion: 1, objectSelectionScope: 'title_layer',
@@ -20,11 +32,13 @@ const rootContents: FolderContents = { indexed: false, items: [
 const foldersMock = vi.mocked(listLibraryFolders);
 const contentsMock = vi.mocked(listFolderContents);
 const detachMock = vi.mocked(detachLibraryFolder);
+const updateMock = vi.mocked(updateLibraryFolder);
 
 beforeEach(() => {
   foldersMock.mockReset().mockResolvedValue([{ id: 'root-1', name: 'Media', path: '/mnt/media', provider: 'filesystem' }]);
   contentsMock.mockReset().mockResolvedValue(rootContents);
   detachMock.mockReset().mockResolvedValue(undefined);
+  updateMock.mockReset().mockResolvedValue(undefined);
 });
 
 function renderFolders() {
@@ -119,4 +133,50 @@ it('keeps the folder when removal is cancelled and reports a removal failure', a
   await user.click(within(retry).getByRole('button', { name: 'Cancel' }));
   await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); });
   expect(screen.getByRole('button', { name: 'Preview folder /mnt/media' })).toBeInTheDocument();
+});
+
+it('retargets a filesystem folder through the server folder picker and refreshes', async () => {
+  const onChanged = vi.fn();
+  foldersMock
+    .mockResolvedValueOnce([{ id: 'root-1', name: 'Media', path: '/mnt/media', provider: 'filesystem' }])
+    .mockResolvedValue([{ id: 'root-1', name: 'Archive', path: '/srv/archive', provider: 'filesystem' }]);
+  renderWithAdmin(<StorageFoldersSection isPending={false} library={library} onChanged={onChanged} onOpen={vi.fn()} />, { strict: true });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: 'Edit folder path /mnt/media' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Edit media folder' });
+  const input = within(dialog).getByLabelText('Server path');
+  expect(input).toHaveValue('/mnt/media');
+  expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+  await user.click(within(dialog).getByRole('button', { name: 'Browse server folders' }));
+  await user.click(await screen.findByRole('button', { name: 'Pick fixture folder' }));
+  await waitFor(() => { expect(input).toHaveValue('/srv/archive'); });
+  await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+  expect(updateMock).toHaveBeenCalledWith('library-1', 'root-1', { rootId: 'fs-root', relativePath: 'Archive' });
+  await waitFor(() => { expect(onChanged).toHaveBeenCalled(); });
+  await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); });
+  expect(await screen.findByText('/srv/archive')).toBeVisible();
+});
+
+it('sends a typed path and keeps the editor open on failure', async () => {
+  renderFolders();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: 'Edit folder path /mnt/media' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Edit media folder' });
+  const input = within(dialog).getByLabelText('Server path');
+  await user.clear(input);
+  await user.type(input, '/mnt/elsewhere');
+  updateMock.mockRejectedValueOnce(new Error('unavailable'));
+  await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+  expect(updateMock).toHaveBeenCalledWith('library-1', 'root-1', '/mnt/elsewhere');
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('could not be updated');
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => { expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); });
+  expect(screen.getByRole('button', { name: 'Preview folder /mnt/media' })).toBeInTheDocument();
+});
+
+it('does not offer path editing for cloud folders', async () => {
+  foldersMock.mockResolvedValue([{ id: 'root-9', name: 'Cloud Movies', path: null, provider: 'google-drive' }]);
+  renderFolders();
+  expect(await screen.findByRole('button', { name: 'Remove folder Cloud Movies' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Edit folder path/u })).not.toBeInTheDocument();
 });

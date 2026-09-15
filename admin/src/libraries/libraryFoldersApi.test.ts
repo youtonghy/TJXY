@@ -1,5 +1,5 @@
 import { apiRequest } from '../api/httpClient';
-import { detachLibraryFolder, listFolderContents, listLibraryFolders } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders, updateLibraryFolder } from './libraryFoldersApi';
 
 vi.mock('../api/httpClient', async (importOriginal) => ({
   ...await importOriginal<typeof import('../api/httpClient')>(), apiRequest: vi.fn(),
@@ -34,6 +34,34 @@ it.each([{ name: '', root: 'root-1' }, { name: 'Movies', root: '' }])(
     expect(requestMock).not.toHaveBeenCalled();
   },
 );
+
+it('retargets a folder through an opaque filesystem selection', async () => {
+  requestMock.mockResolvedValue(undefined);
+  await updateLibraryFolder('library-1', 'root/1', { rootId: 'fs-1', relativePath: 'Archive' });
+  expect(requestMock).toHaveBeenCalledWith('/Admin/Libraries/library-1/Folders/root%2F1', {
+    method: 'PATCH',
+    body: JSON.stringify({ FilesystemSelection: { RootId: 'fs-1', RelativePath: 'Archive' } }),
+  });
+});
+
+it('retargets a folder with a literal server path', async () => {
+  requestMock.mockResolvedValue(undefined);
+  await updateLibraryFolder('library-1', 'root-1', '/mnt/archive');
+  expect(requestMock).toHaveBeenCalledWith('/Admin/Libraries/library-1/Folders/root-1', {
+    method: 'PATCH',
+    body: JSON.stringify({ Path: '/mnt/archive' }),
+  });
+});
+
+it.each([
+  { library: '', root: 'root-1', selection: '/mnt/x' },
+  { library: 'library-1', root: '', selection: '/mnt/x' },
+  { library: 'library-1', root: 'root-1', selection: '' },
+  { library: 'library-1', root: 'root-1', selection: { rootId: '', relativePath: '' } },
+])('rejects update requests without a complete binding reference', async ({ library, root, selection }) => {
+  await expect(updateLibraryFolder(library, root, selection)).rejects.toMatchObject({ category: 'validation' });
+  expect(requestMock).not.toHaveBeenCalled();
+});
 
 it('encodes a selected path as query data and forwards cancellation', async () => {
   requestMock.mockResolvedValue({ Indexed: false, Items: [

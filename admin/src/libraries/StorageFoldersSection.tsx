@@ -1,12 +1,14 @@
-import { Button, Modal } from '@heroui/react';
-import { ArrowLeft, ChevronRight, File, Folder, FolderOpen, FolderPlus, RefreshCw, Trash2 } from 'lucide-react';
+import { Button, Input, Label, Modal, TextField } from '@heroui/react';
+import { ArrowLeft, ChevronRight, File, Folder, FolderOpen, FolderPlus, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import { useLogoutIfAccessDenied, useNotify } from 'ra-core';
 import { useEffect, useState } from 'react';
 
 import { useTranslate } from '../settings/i18n';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import type { FilesystemSelection } from './filesystemApi';
+import { FolderPickerDialog } from './FolderPickerDialog';
 import type { LibraryOption } from './libraryApi';
-import { detachLibraryFolder, listFolderContents, listLibraryFolders, type FolderContents, type LibraryFolder } from './libraryFoldersApi';
+import { detachLibraryFolder, listFolderContents, listLibraryFolders, updateLibraryFolder, type FolderContents, type LibraryFolder } from './libraryFoldersApi';
 
 export function StorageFoldersSection({ isPending, library, onChanged, onOpen }: { isPending: boolean; library: LibraryOption; onChanged: () => void; onOpen: () => void }) {
   const tr = useTranslate();
@@ -18,6 +20,43 @@ export function StorageFoldersSection({ isPending, library, onChanged, onOpen }:
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState<LibraryFolder | null>(null);
   const [detaching, setDetaching] = useState(false);
+  const [editing, setEditing] = useState<LibraryFolder | null>(null);
+  const [editPath, setEditPath] = useState('');
+  const [editSelection, setEditSelection] = useState<FilesystemSelection | null>(null);
+  const [editPickerOpen, setEditPickerOpen] = useState(false);
+  const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState(false);
+  const openEditor = (folder: LibraryFolder) => {
+    setEditing(folder);
+    setEditPath(folder.path ?? '');
+    setEditSelection(null);
+    setEditError(false);
+  };
+  const closeEditor = () => {
+    setEditing(null);
+    setEditPath('');
+    setEditSelection(null);
+    setEditError(false);
+  };
+  const saveEdit = async (folder: LibraryFolder) => {
+    const path = editPath.trim();
+    if (!path || editPending || detaching) return;
+    setEditPending(true);
+    setEditError(false);
+    try {
+      await updateLibraryFolder(library.id, folder.id, editSelection ?? path);
+      setSelected((current) => (current?.id === folder.id ? null : current));
+      closeEditor();
+      setRevision((value) => value + 1);
+      onChanged();
+      notify(tr('Media folder updated.', '媒体文件夹已更新。'), { type: 'success' });
+    } catch (error: unknown) {
+      if (await logoutIfAccessDenied(error)) return;
+      setEditError(true);
+    } finally {
+      setEditPending(false);
+    }
+  };
   const removeFolder = async (folder: LibraryFolder) => {
     setDetaching(true);
     try {
@@ -71,40 +110,80 @@ export function StorageFoldersSection({ isPending, library, onChanged, onOpen }:
             <li className="relative min-w-0" key={folder.id}>
               <Button aria-label={`${tr('Preview folder', '预览文件夹')} ${folder.path ?? folder.name}`} className="h-full min-h-36 w-full items-start justify-start whitespace-normal rounded-2xl border border-border bg-surface p-5 text-left shadow-sm" onPress={() => { setSelected(folder); }} variant="tertiary">
                 <span className="flex min-w-0 flex-1 flex-col gap-3">
-                  <span className="flex items-center gap-3 pr-9"><Folder aria-hidden="true" className="size-6 shrink-0 text-accent" /><span className="min-w-0 flex-1 break-words font-semibold">{folder.name}</span><ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted" /></span>
+                  <span className="flex items-center gap-3 pr-20"><Folder aria-hidden="true" className="size-6 shrink-0 text-accent" /><span className="min-w-0 flex-1 break-words font-semibold">{folder.name}</span><ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted" /></span>
                   <span className="break-all font-mono text-xs font-normal leading-relaxed text-muted">{folder.path ?? folder.name}</span>
                   <span className="text-xs font-normal text-muted">{providerLabel(folder.provider, tr)}{library.unavailableLocations?.includes(`tjxy://storage-root/${folder.id}`) ? ` · ${tr('Unavailable', '不可用')}` : ''}</span>
                 </span>
               </Button>
-              <ConfirmDialog
-                confirmLabel={tr('Remove folder', '移除文件夹')}
-                description={(
-                  <>
-                    {tr('Remove', '将 ')}<strong className="break-all font-semibold text-foreground">{folder.path ?? folder.name}</strong>
-                    {tr(' from this library? Items scanned from this folder, including their NFO metadata and images, will be removed from the catalog. Media files on disk are not deleted.', ' 从此媒体库中移除？该文件夹扫描入库的条目及其 NFO 元数据和图片将从目录中移除，但不会删除磁盘上的媒体文件。')}
-                  </>
-                )}
-                isPending={detaching}
-                onConfirm={() => removeFolder(folder)}
-                title={tr('Remove media folder?', '移除媒体文件夹？')}
-                trigger={(
+              <div className="absolute right-3 top-3 flex items-center gap-1">
+                {folder.provider === 'filesystem' && (
                   <Button
-                    aria-label={`${tr('Remove folder', '移除文件夹')} ${folder.path ?? folder.name}`}
-                    className="absolute right-3 top-3"
-                    isDisabled={isPending || detaching}
+                    aria-label={`${tr('Edit folder path', '编辑文件夹路径')} ${folder.path ?? folder.name}`}
+                    isDisabled={isPending || detaching || editPending}
                     isIconOnly
+                    onPress={() => { openEditor(folder); }}
                     size="sm"
-                    variant="danger-soft"
+                    variant="secondary"
                   >
-                    <Trash2 aria-hidden="true" className="size-4" />
+                    <Pencil aria-hidden="true" className="size-4" />
                   </Button>
                 )}
-              />
+                <ConfirmDialog
+                  confirmLabel={tr('Remove folder', '移除文件夹')}
+                  description={(
+                    <>
+                      {tr('Remove', '将 ')}<strong className="break-all font-semibold text-foreground">{folder.path ?? folder.name}</strong>
+                      {tr(' from this library? Items scanned from this folder, including their NFO metadata and images, will be removed from the catalog. Media files on disk are not deleted.', ' 从此媒体库中移除？该文件夹扫描入库的条目及其 NFO 元数据和图片将从目录中移除，但不会删除磁盘上的媒体文件。')}
+                    </>
+                  )}
+                  isPending={detaching}
+                  onConfirm={() => removeFolder(folder)}
+                  title={tr('Remove media folder?', '移除媒体文件夹？')}
+                  trigger={(
+                    <Button
+                      aria-label={`${tr('Remove folder', '移除文件夹')} ${folder.path ?? folder.name}`}
+                      isDisabled={isPending || detaching || editPending}
+                      isIconOnly
+                      size="sm"
+                      variant="danger-soft"
+                    >
+                      <Trash2 aria-hidden="true" className="size-4" />
+                    </Button>
+                  )}
+                />
+              </div>
             </li>
           ))}
         </ul>
       )}
       {selected !== null && <FolderPreview folder={selected} key={selected.id} libraryId={library.id} onClose={() => { setSelected(null); }} />}
+      <Modal isOpen={editing !== null} onOpenChange={(open) => { if (!open && !editPending) closeEditor(); }}>
+        <Modal.Backdrop isDismissable={!editPending} isKeyboardDismissDisabled={editPending}>
+          <Modal.Container size="sm"><Modal.Dialog>
+            <Modal.CloseTrigger aria-label={tr('Close', '关闭')} isDisabled={editPending} />
+            <Modal.Header>
+              <Modal.Heading>{tr('Edit media folder', '编辑媒体文件夹')}</Modal.Heading>
+              <p className="break-all font-mono text-xs text-muted">{editing?.path ?? editing?.name ?? ''}</p>
+            </Modal.Header>
+            <Modal.Body>
+              <p className="text-sm text-muted">{tr('Point this folder at a different server directory. Items already scanned from it are checked against the new path; media files on disk are not moved or deleted.', '将此文件夹指向另一个服务器目录。已扫描入库的条目将与新路径内容重新核对，磁盘上的媒体文件不会被移动或删除。')}</p>
+              <TextField fullWidth isRequired>
+                <Label>{tr('Server path', '服务器路径')}</Label>
+                <div className="relative">
+                  <Input autoFocus className="pr-12" disabled={editPending} maxLength={4096} placeholder="/mnt/media" value={editPath} onChange={(event) => { setEditPath(event.currentTarget.value); setEditSelection(null); }} />
+                  <Button aria-label={tr('Browse server folders', '浏览服务器文件夹')} className="absolute right-1 top-1/2 -translate-y-1/2" isDisabled={editPending} isIconOnly onPress={() => { setEditPickerOpen(true); }} size="sm" variant="ghost"><FolderOpen aria-hidden="true" className="size-4" /></Button>
+                </div>
+              </TextField>
+              {editError && <div role="alert" className="text-sm text-danger">{tr('The folder path could not be updated. Check that the new path exists and is not already used by another folder.', '无法更新文件夹路径，请检查新路径是否存在且未被其他文件夹使用。')}</div>}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button isDisabled={editPending} onPress={closeEditor} variant="tertiary">{tr('Cancel', '取消')}</Button>
+              <Button isDisabled={!editPath.trim() || editPath.trim() === (editing?.path ?? '')} isPending={editPending} onPress={() => { if (editing !== null) void saveEdit(editing); }}>{tr('Save', '保存')}</Button>
+            </Modal.Footer>
+          </Modal.Dialog></Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+      <FolderPickerDialog isOpen={editPickerOpen} isDisabled={editPending} onClose={() => { setEditPickerOpen(false); }} onSelect={(selection, displayPath) => { setEditSelection(selection); setEditPath(displayPath); setEditPickerOpen(false); }} />
     </section>
   );
 }

@@ -181,6 +181,27 @@ impl AttachVirtualFolderPathDto {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
+pub struct UpdateLibraryFolderPathDto {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    filesystem_selection: Option<FilesystemSelectionDto>,
+}
+
+impl UpdateLibraryFolderPathDto {
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn filesystem_selection(&self) -> Option<&FilesystemSelectionDto> {
+        self.filesystem_selection.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct CreateLibraryOptions {
     #[serde(default = "default_true")]
     enabled: bool,

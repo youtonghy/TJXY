@@ -1,4 +1,5 @@
 import { ApiError, apiRequest } from '../api/httpClient';
+import type { FilesystemSelection } from './filesystemApi';
 
 export interface LibraryFolder { id: string; name: string; path: string | null; provider: string }
 export interface FolderEntry { name: string; path: string; isDirectory: boolean; size: number | null; modifiedAt: string | null }
@@ -24,6 +25,25 @@ export async function detachLibraryFolder(libraryName: string, rootId: string): 
     refreshLibrary: 'false',
   });
   await apiRequest(`/Library/VirtualFolders/Paths?${query.toString()}`, { method: 'DELETE' });
+}
+
+export async function updateLibraryFolder(
+  libraryId: string,
+  rootId: string,
+  selection: FilesystemSelection | string,
+): Promise<void> {
+  const selectionValid = typeof selection === 'string'
+    ? text(selection)
+    : text(selection.rootId) && typeof selection.relativePath === 'string';
+  if (!text(libraryId) || !text(rootId) || !selectionValid) {
+    throw new ApiError(400, 'validation', 'A library, folder identifier, and target path are required.');
+  }
+  await apiRequest(`${base(libraryId)}/${encodeURIComponent(rootId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(typeof selection === 'string'
+      ? { Path: selection }
+      : { FilesystemSelection: { RootId: selection.rootId, RelativePath: selection.relativePath } }),
+  });
 }
 
 export async function listFolderContents(libraryId: string, rootId: string, path: string, signal?: AbortSignal): Promise<FolderContents> {

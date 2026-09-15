@@ -30,7 +30,8 @@ pub use filesystem_browser::{
 };
 pub use library::{
     AddVirtualFolderDto, AttachVirtualFolderPathDto, CreateLibraryOptions, FilesystemSelectionDto,
-    LibraryOptionsDto, UpdateLibraryOptions, UpdateLibraryOptionsDto, VirtualFolderInfo,
+    LibraryOptionsDto, UpdateLibraryFolderPathDto, UpdateLibraryOptions, UpdateLibraryOptionsDto,
+    VirtualFolderInfo,
 };
 pub use playback::{
     DeliveryMethod, MediaProtocol, MediaSourceInfo, MediaStream, MediaStreamType,

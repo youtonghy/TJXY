@@ -23,6 +23,14 @@ pub struct LibraryFolderEntry {
     pub modified_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LibraryFolderBinding {
+    pub provider: Option<String>,
+    pub account_id: Option<Uuid>,
+    pub root_path: Option<String>,
+    pub provider_root_id: String,
+}
+
 pub struct LibraryFolderRepository<'connection> {
     database: &'connection DatabaseConnection,
 }
@@ -113,6 +121,75 @@ impl<'connection> LibraryFolderRepository<'connection> {
                 })
             })
             .collect()
+    }
+
+    /// Reads one attached root's provider binding for administrative edits.
+    /// # Errors
+    /// Returns a database error if the read model is unavailable.
+    pub async fn binding(
+        &self,
+        library_id: Uuid,
+        root_id: Uuid,
+    ) -> Result<Option<LibraryFolderBinding>, DbErr> {
+        let mapping = Alias::new("binding_mapping");
+        let root = Alias::new("binding_root");
+        let account = Alias::new("binding_account");
+        let config = Alias::new("binding_config");
+        let query = Query::select()
+            .expr_as(
+                Expr::col((account.clone(), Alias::new("provider"))),
+                Alias::new("provider"),
+            )
+            .expr_as(
+                Expr::col((account.clone(), Alias::new("id"))),
+                Alias::new("account_id"),
+            )
+            .expr_as(
+                Expr::col((config.clone(), Alias::new("root_path"))),
+                Alias::new("root_path"),
+            )
+            .expr_as(
+                Expr::col((root.clone(), Alias::new("provider_root_id"))),
+                Alias::new("provider_root_id"),
+            )
+            .from_as(Alias::new("library_storage_roots"), mapping.clone())
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("storage_roots"),
+                root.clone(),
+                Expr::col((root.clone(), Alias::new("id")))
+                    .equals((mapping.clone(), Alias::new("storage_root_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("storage_accounts"),
+                account.clone(),
+                Expr::col((account.clone(), Alias::new("id")))
+                    .equals((root.clone(), Alias::new("storage_account_id"))),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                Alias::new("filesystem_storage_configs"),
+                config.clone(),
+                Expr::col((config, Alias::new("storage_account_id")))
+                    .equals((account, Alias::new("id"))),
+            )
+            .and_where(Expr::col((mapping, Alias::new("library_id"))).eq(library_id))
+            .and_where(Expr::col((root, Alias::new("id"))).eq(root_id))
+            .limit(1)
+            .to_owned();
+        self.database
+            .query_one(self.database.get_database_backend().build(&query))
+            .await?
+            .map(|row| {
+                Ok(LibraryFolderBinding {
+                    provider: row.try_get("", "provider")?,
+                    account_id: row.try_get("", "account_id")?,
+                    root_path: row.try_get("", "root_path")?,
+                    provider_root_id: row.try_get("", "provider_root_id")?,
+                })
+            })
+            .transpose()
     }
 
     /// Reads one bounded level of the synchronized remote folder inventory.

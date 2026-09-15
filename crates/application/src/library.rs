@@ -154,6 +154,40 @@ impl LibraryService {
             .map_err(Into::into)
     }
 
+    /// Reads one attached root's provider binding for an administrative path edit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error if the read model is unavailable.
+    pub async fn filesystem_root_binding(
+        &self,
+        library_id: uuid::Uuid,
+        root_id: uuid::Uuid,
+    ) -> Result<Option<tjxy_db::LibraryFolderBinding>, sea_orm::DbErr> {
+        tjxy_db::LibraryFolderRepository::new(&self.database)
+            .binding(library_id, root_id)
+            .await
+    }
+
+    /// Rebinds one attached filesystem root to a different canonical path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryServiceError`] when the membership is missing, the root is
+    /// not filesystem-backed, the path is bound elsewhere, or persistence fails.
+    pub async fn retarget_filesystem_root(
+        &self,
+        library_id: LibraryId,
+        root_id: StorageRootId,
+        root_path: &str,
+        display_name: &str,
+    ) -> Result<tjxy_db::RetargetedFilesystemRoot, LibraryServiceError> {
+        LibraryRepository::new(&self.database)
+            .retarget_filesystem_root(library_id, root_id, root_path, display_name)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Detaches one opaque storage root and disables an orphaned storage runtime binding.
     ///
     /// # Errors

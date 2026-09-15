@@ -604,7 +604,7 @@ pub(crate) async fn update_library_options(
     }
 }
 
-fn library_error_response(error: &LibraryServiceError) -> Response {
+pub(crate) fn library_error_response(error: &LibraryServiceError) -> Response {
     match error {
         LibraryServiceError::InvalidProfile
         | LibraryServiceError::Repository(
@@ -613,6 +613,7 @@ fn library_error_response(error: &LibraryServiceError) -> Response {
             | LibraryRepositoryError::InvalidFilesystemRoot
             | LibraryRepositoryError::InvalidProfileVersion
             | LibraryRepositoryError::InvalidStoredPolicy
+            | LibraryRepositoryError::RootNotFilesystem
             | LibraryRepositoryError::DirectRequiresFilesystemRoot,
         ) => StatusCode::BAD_REQUEST.into_response(),
         LibraryServiceError::Repository(
@@ -622,6 +623,7 @@ fn library_error_response(error: &LibraryServiceError) -> Response {
             LibraryRepositoryError::StaleProfile
             | LibraryRepositoryError::NameConflict
             | LibraryRepositoryError::FilesystemRootIdentityChanged
+            | LibraryRepositoryError::FilesystemRootConflict
             | LibraryRepositoryError::Referenced,
         ) => StatusCode::CONFLICT.into_response(),
         LibraryServiceError::Repository(

@@ -57,6 +57,24 @@ pub struct CreatedFilesystemLibrary {
     initial_sync_job: WorkJobId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetargetedFilesystemRoot {
+    account: Uuid,
+    changed: bool,
+}
+
+impl RetargetedFilesystemRoot {
+    #[must_use]
+    pub const fn account_id(&self) -> Uuid {
+        self.account
+    }
+
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        self.changed
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisabledStorageRuntime {
     account_id: Uuid,
@@ -531,6 +549,72 @@ impl<'connection> LibraryRepository<'connection> {
         crate::advance_catalog_generation(&transaction).await?;
         crate::work_queue::commit_and_notify(transaction).await?;
         Ok(disabled)
+    }
+
+    /// Rebinds one attached filesystem root to a different canonical path atomically.
+    ///
+    /// The durable root identity is retained; only the configured path, account
+    /// identity, and display names move. The unique filesystem path index is
+    /// checked first so a retarget cannot merge two roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryRepositoryError::RootNotAttached`] when the membership is
+    /// missing, [`LibraryRepositoryError::RootNotFilesystem`] when the root is not
+    /// filesystem-backed, [`LibraryRepositoryError::FilesystemRootConflict`] when
+    /// the path is already bound to another root, or another repository error for
+    /// invalid input and persistence failures.
+    pub async fn retarget_filesystem_root(
+        &self,
+        library_id: LibraryId,
+        root_id: StorageRootId,
+        root_path: &str,
+        display_name: &str,
+    ) -> Result<RetargetedFilesystemRoot, LibraryRepositoryError> {
+        if !std::path::Path::new(root_path).is_absolute()
+            || !valid_bounded(root_path, 4096)
+            || !valid_bounded(display_name, 2048)
+        {
+            return Err(LibraryRepositoryError::InvalidFilesystemRoot);
+        }
+        let transaction = self.database.begin().await?;
+        lock_library_mutations(&transaction).await?;
+        if !root_membership_exists(&transaction, library_id, root_id).await? {
+            return Err(LibraryRepositoryError::RootNotAttached);
+        }
+        let Some(state) = filesystem_root_state(&transaction, root_id).await? else {
+            return Err(LibraryRepositoryError::NotFound);
+        };
+        if state.provider != "filesystem" || state.root_path.is_none() {
+            return Err(LibraryRepositoryError::RootNotFilesystem);
+        }
+        if state.root_path.as_deref() == Some(root_path) {
+            crate::work_queue::commit_and_notify(transaction).await?;
+            return Ok(RetargetedFilesystemRoot {
+                account: state.account_id,
+                changed: false,
+            });
+        }
+        if existing_filesystem_root(&transaction, root_path)
+            .await?
+            .is_some()
+        {
+            return Err(LibraryRepositoryError::FilesystemRootConflict);
+        }
+        apply_filesystem_retarget(
+            &transaction,
+            state.account_id,
+            root_id,
+            root_path,
+            display_name,
+        )
+        .await?;
+        crate::advance_catalog_generation(&transaction).await?;
+        crate::work_queue::commit_and_notify(transaction).await?;
+        Ok(RetargetedFilesystemRoot {
+            account: state.account_id,
+            changed: true,
+        })
     }
 
     /// Loads active persisted filesystem runtime roots without exposing them through DTOs.
@@ -1343,6 +1427,138 @@ async fn existing_filesystem_root(
         .transpose()
 }
 
+async fn root_membership_exists(
+    transaction: &DatabaseTransaction,
+    library_id: LibraryId,
+    root_id: StorageRootId,
+) -> Result<bool, DbErr> {
+    let membership = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("library_storage_roots"))
+        .and_where(Expr::col(Alias::new("library_id")).eq(library_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .limit(1)
+        .to_owned();
+    Ok(transaction
+        .query_one(transaction.get_database_backend().build(&membership))
+        .await?
+        .is_some())
+}
+
+struct FilesystemRootState {
+    account_id: Uuid,
+    provider: String,
+    root_path: Option<String>,
+}
+
+async fn filesystem_root_state(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+) -> Result<Option<FilesystemRootState>, DbErr> {
+    let root = Alias::new("retarget_root");
+    let account = Alias::new("retarget_account");
+    let config = Alias::new("retarget_config");
+    let query = Query::select()
+        .expr_as(
+            Expr::col((account.clone(), Alias::new("id"))),
+            Alias::new("account_id"),
+        )
+        .expr_as(
+            Expr::col((account.clone(), Alias::new("provider"))),
+            Alias::new("provider"),
+        )
+        .expr_as(
+            Expr::col((config.clone(), Alias::new("root_path"))),
+            Alias::new("root_path"),
+        )
+        .from_as(Alias::new("storage_roots"), root.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("storage_accounts"),
+            account.clone(),
+            Expr::col((account.clone(), Alias::new("id")))
+                .equals((root.clone(), Alias::new("storage_account_id"))),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("filesystem_storage_configs"),
+            config.clone(),
+            Expr::col((config, Alias::new("storage_account_id")))
+                .equals((account, Alias::new("id"))),
+        )
+        .and_where(Expr::col((root, Alias::new("id"))).eq(root_id.as_uuid()))
+        .limit(1)
+        .to_owned();
+    transaction
+        .query_one(transaction.get_database_backend().build(&query))
+        .await?
+        .as_ref()
+        .map(|row| {
+            Ok(FilesystemRootState {
+                account_id: row.try_get("", "account_id")?,
+                provider: row.try_get("", "provider")?,
+                root_path: row.try_get("", "root_path")?,
+            })
+        })
+        .transpose()
+}
+
+async fn apply_filesystem_retarget(
+    transaction: &DatabaseTransaction,
+    account_id: Uuid,
+    root_id: StorageRootId,
+    root_path: &str,
+    display_name: &str,
+) -> Result<(), DbErr> {
+    let backend = transaction.get_database_backend();
+    let config_update = if backend == sea_orm::DbBackend::MySql {
+        Query::update()
+            .table(Alias::new("filesystem_storage_configs"))
+            .value(Alias::new("root_path"), root_path)
+            .value(Alias::new("root_path_key"), natural_key::hash(&[root_path]))
+            .and_where(Expr::col(Alias::new("storage_account_id")).eq(account_id))
+            .to_owned()
+    } else {
+        Query::update()
+            .table(Alias::new("filesystem_storage_configs"))
+            .value(Alias::new("root_path"), root_path)
+            .and_where(Expr::col(Alias::new("storage_account_id")).eq(account_id))
+            .to_owned()
+    };
+    let account_update = Query::update()
+        .table(Alias::new("storage_accounts"))
+        .value(
+            Alias::new("account_identity"),
+            format!("filesystem:{:x}", Sha256::digest(root_path.as_bytes())),
+        )
+        .value(Alias::new("display_name"), display_name)
+        .and_where(Expr::col(Alias::new("id")).eq(account_id))
+        .to_owned();
+    let object_update = Query::update()
+        .table(Alias::new("storage_objects"))
+        .value(Alias::new("name"), display_name)
+        .value(
+            Alias::new("normalized_name"),
+            String::from_utf8(SortKey::from_text(display_name).into_bytes())
+                .map_err(|_| DbErr::Custom("filesystem sort key is invalid UTF-8".into()))?,
+        )
+        .and_where(
+            Expr::col(Alias::new("id")).in_subquery(
+                Query::select()
+                    .column(Alias::new("storage_object_id"))
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+                    .and_where(Expr::col(Alias::new("parent_storage_object_id")).is_null())
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    for statement in [config_update, account_update, object_update] {
+        transaction.execute(backend.build(&statement)).await?;
+    }
+    Ok(())
+}
+
 async fn enqueue_filesystem_sync(
     transaction: &DatabaseTransaction,
     root_id: StorageRootId,
@@ -2011,6 +2227,10 @@ pub enum LibraryRepositoryError {
     InvalidFilesystemRoot,
     #[error("filesystem root identity changed at the configured path")]
     FilesystemRootIdentityChanged,
+    #[error("filesystem path is already bound to another storage root")]
+    FilesystemRootConflict,
+    #[error("storage root is not filesystem-backed")]
+    RootNotFilesystem,
     #[error("library name already exists")]
     NameConflict,
     #[error("library is referenced by an import source")]

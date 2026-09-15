@@ -66,7 +66,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use tjxy_api::{BrandingConfiguration, EndpointInfo, PublicSystemInfo};
 use tjxy_application::{
@@ -1177,6 +1177,10 @@ fn admin_filesystem_routes() -> Router<AppState> {
         .route(
             "/Admin/Libraries/{library_id}/Folders",
             get(library_folders_admin::folders),
+        )
+        .route(
+            "/Admin/Libraries/{library_id}/Folders/{root_id}",
+            patch(library_folders_admin::update_folder),
         )
         .route(
             "/Admin/Libraries/{library_id}/Folders/{root_id}/Contents",
