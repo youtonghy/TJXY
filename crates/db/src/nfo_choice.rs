@@ -308,10 +308,13 @@ async fn enqueue_selection_resolution(
     Ok(submission)
 }
 
+/// Returns true while a persisted `NeedsSelection` conflict still matches the NFO
+/// inventory this specification would resolve against, so duplicate metadata work
+/// stays suppressed. A changed candidate set produces a different fingerprint and
+/// lets a fresh resolution run; explicit selections bypass this check entirely.
 pub(crate) async fn awaiting_selection(
     connection: &impl ConnectionTrait,
     spec: &crate::WorkJobSpec,
-    now: chrono::DateTime<Utc>,
 ) -> Result<bool, DbErr> {
     if spec.task_kind() != crate::WorkTaskKind::ResolveMetadata {
         return Ok(false);
@@ -324,19 +327,27 @@ pub(crate) async fn awaiting_selection(
     };
     let mut query = Query::select();
     query
-        .expr(Expr::val(1_i32))
+        .columns([Alias::new("storage_root_id"), Alias::new("fingerprint")])
         .from(Alias::new("nfo_choices"))
         .and_where(Expr::col(Alias::new("catalog_item_id")).eq(item.as_uuid()))
         .and_where(Expr::col(Alias::new("metadata_revision")).eq(spec.expected_revision()))
-        .and_where(Expr::col(Alias::new("input_sync_revision")).eq(input_revision))
-        .and_where(Expr::col(Alias::new("status")).eq("NeedsSelection"))
-        .and_where(Expr::col(Alias::new("updated_at")).gt(now - chrono::Duration::minutes(5)))
-        .limit(1);
+        .and_where(Expr::col(Alias::new("status")).eq("NeedsSelection"));
     if let Some(root) = spec.storage_root_affinity() {
         query.and_where(Expr::col(Alias::new("storage_root_id")).eq(root.as_uuid()));
     }
-    Ok(connection
-        .query_one(connection.get_database_backend().build(&query))
-        .await?
-        .is_some())
+    let rows = connection
+        .query_all(connection.get_database_backend().build(&query))
+        .await?;
+    for row in &rows {
+        let root = StorageRootId::from_uuid(row.try_get("", "storage_root_id")?);
+        let fingerprint: String = row.try_get("", "fingerprint")?;
+        let current =
+            crate::metadata_work::nfo_fingerprint_at(connection, item, root, input_revision)
+                .await
+                .map_err(|error| DbErr::Custom(format!("NFO fingerprint unavailable: {error}")))?;
+        if current.as_deref() == Some(fingerprint.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

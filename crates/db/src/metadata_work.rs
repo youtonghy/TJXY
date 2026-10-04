@@ -319,30 +319,14 @@ impl<'connection> MetadataWorkRepository<'connection> {
         } else {
             None
         };
-        let rows = self
-            .database
-            .query_all(
-                self.database
-                    .get_database_backend()
-                    .build(&sibling_file_query(
-                        item_id,
-                        scope,
-                        input_revision,
-                        SiblingFileKind::Nfo,
-                    )),
-            )
-            .await?;
-        let mut candidates = rows
-            .iter()
-            .map(sidecar_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        if let Some(stem) = &flat_file_stem {
-            candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
-        }
-        candidates.retain(|candidate| candidate.size != 0);
-        if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
-            return Err(MetadataWorkError::TooManySidecars);
-        }
+        let candidates = collect_nfo_candidates(
+            self.database,
+            item_id,
+            scope,
+            input_revision,
+            flat_file_stem.as_deref(),
+        )
+        .await?;
         let video_names = if kind == MetadataItemKind::Movie {
             movie_video_names(self.database, item_id, scope, input_revision).await?
         } else if kind == MetadataItemKind::Episode {
@@ -1017,31 +1001,19 @@ async fn revalidate_metadata_snapshot(
     input_revision: i64,
     snapshot: &MetadataWorkSnapshot,
 ) -> Result<(), MetadataWorkError> {
-    let rows = transaction
-        .query_all(
-            transaction
-                .get_database_backend()
-                .build(&sibling_file_query(
-                    item_id,
-                    scope,
-                    input_revision,
-                    SiblingFileKind::Nfo,
-                )),
-        )
-        .await?;
-    let mut candidates = rows
-        .iter()
-        .map(sidecar_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    if scope.is_file()
-        && let Some(stem) = storage_object_stem(transaction, scope.storage_object_id()).await?
-    {
-        candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, &stem));
-    }
-    candidates.retain(|candidate| candidate.size != 0);
-    if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
-        return Err(MetadataWorkError::TooManySidecars);
-    }
+    let flat_file_stem = if scope.is_file() {
+        storage_object_stem(transaction, scope.storage_object_id()).await?
+    } else {
+        None
+    };
+    let candidates = collect_nfo_candidates(
+        transaction,
+        item_id,
+        scope,
+        input_revision,
+        flat_file_stem.as_deref(),
+    )
+    .await?;
     let video_names = if snapshot.lookup.kind() == MetadataItemKind::Movie {
         movie_video_names(transaction, item_id, scope, input_revision).await?
     } else if snapshot.lookup.kind() == MetadataItemKind::Episode {
@@ -1273,6 +1245,57 @@ pub(crate) async fn metadata_storage_scope(
             }
         })?
         .ok_or(MetadataWorkError::StaleOrUnavailable)
+}
+
+/// Recomputes the NFO candidate fingerprint `snapshot` would produce for `item` under
+/// `root` at `input_revision`. Returns `None` when the scope or inventory can no
+/// longer be shaped into candidates, so callers only match a live conflict.
+///
+/// # Errors
+///
+/// Returns [`MetadataWorkError::Database`] when the inventory queries fail.
+pub(crate) async fn nfo_fingerprint_at(
+    connection: &impl ConnectionTrait,
+    item: CatalogItemId,
+    root: StorageRootId,
+    input_revision: i64,
+) -> Result<Option<String>, MetadataWorkError> {
+    let scope = match crate::catalog_storage_scope::resolve_catalog_storage_scope(
+        connection,
+        item,
+        Some(root),
+    )
+    .await
+    {
+        Ok(Some(scope)) => scope,
+        Ok(None) | Err(crate::catalog_storage_scope::CatalogStorageScopeError::Ambiguous) => {
+            return Ok(None);
+        }
+        Err(crate::catalog_storage_scope::CatalogStorageScopeError::Database(error)) => {
+            return Err(MetadataWorkError::Database(error));
+        }
+    };
+    let flat_file_stem = if scope.is_file() {
+        storage_object_stem(connection, scope.storage_object_id()).await?
+    } else {
+        None
+    };
+    let mut candidates = match collect_nfo_candidates(
+        connection,
+        item,
+        scope,
+        input_revision,
+        flat_file_stem.as_deref(),
+    )
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(MetadataWorkError::Database(error)) => {
+            return Err(MetadataWorkError::Database(error));
+        }
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(nfo_fingerprint(&mut candidates)))
 }
 
 pub(crate) fn metadata_schedule_query(
@@ -1678,6 +1701,50 @@ fn parse_kind(value: &str) -> Result<MetadataItemKind, MetadataWorkError> {
     }
 }
 
+async fn collect_nfo_candidates(
+    connection: &impl ConnectionTrait,
+    item: CatalogItemId,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+    input_revision: i64,
+    flat_file_stem: Option<&str>,
+) -> Result<Vec<MetadataSidecarCandidate>, MetadataWorkError> {
+    let rows = connection
+        .query_all(connection.get_database_backend().build(&sibling_file_query(
+            item,
+            scope,
+            input_revision,
+            SiblingFileKind::Nfo,
+        )))
+        .await?;
+    let mut candidates = rows
+        .iter()
+        .map(sidecar_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(stem) = flat_file_stem {
+        candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
+    }
+    candidates.retain(|candidate| candidate.size != 0);
+    if u64::try_from(candidates.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES {
+        return Err(MetadataWorkError::TooManySidecars);
+    }
+    Ok(candidates)
+}
+
+fn nfo_fingerprint(candidates: &mut [MetadataSidecarCandidate]) -> String {
+    candidates.sort_by_key(|file| file.record_id.as_uuid());
+    let mut hash = Sha256::new();
+    for file in &*candidates {
+        hash.update(
+            format!(
+                "{:?}:{:?}:{}:{:?}\n",
+                file.record_id, file.name, file.size, file.remote_revision
+            )
+            .as_bytes(),
+        );
+    }
+    format!("{:x}", hash.finalize())
+}
+
 async fn select_for_item(
     connection: &impl sea_orm::ConnectionTrait,
     item: CatalogItemId,
@@ -1693,18 +1760,7 @@ async fn select_for_item(
     ),
     MetadataWorkError,
 > {
-    candidates.sort_by_key(|file| file.record_id.as_uuid());
-    let mut hash = Sha256::new();
-    for file in &candidates {
-        hash.update(
-            format!(
-                "{:?}:{:?}:{}:{:?}\n",
-                file.record_id, file.name, file.size, file.remote_revision
-            )
-            .as_bytes(),
-        );
-    }
-    let fingerprint = format!("{:x}", hash.finalize());
+    let fingerprint = nfo_fingerprint(&mut candidates);
     let selection = crate::nfo_choice::saved_selection(connection, item, root, &fingerprint)
         .await?
         .filter(|(id, _)| {

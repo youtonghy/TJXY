@@ -2596,3 +2596,91 @@ async fn conflicting_versions_remain_actionable_and_explicit_choice_is_content_f
         Err(MetadataResolveError::NfoSelectionRequired)
     ));
 }
+
+#[tokio::test]
+async fn a_single_invalid_local_nfo_records_a_choice_and_suppresses_duplicate_work() {
+    let mut fixture = fixture().await;
+    let sql = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .value(
+                        Alias::new("local_metadata_access_mode"),
+                        "import_metadata_only",
+                    ),
+            ),
+        )
+        .await
+        .unwrap();
+    let declared_size = fixture.backend.bytes.len();
+    let mut malformed = b"<movie><title>broken".to_vec();
+    malformed.resize(declared_size, b' ');
+    Arc::get_mut(&mut fixture.backend).unwrap().bytes = malformed;
+    let service = MetadataResolveService::new(fixture.database.clone()).with_backend(
+        fixture.account,
+        "local",
+        Arc::clone(&fixture.backend),
+    );
+    let claimed = claim_local_metadata(&fixture).await;
+    assert!(matches!(
+        service.execute(&claimed).await,
+        Err(MetadataResolveError::Metadata(_))
+    ));
+    let repository = MetadataWorkRepository::new(&fixture.database);
+    let choices = repository.nfo_choices(0).await.unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].conflict_fields, vec!["invalid_nfo"]);
+    WorkJobRepository::new(&fixture.database)
+        .fail_terminal(&claimed, "metadata document is invalid")
+        .await
+        .unwrap();
+    let automatic = WorkJobSpec::new(
+        WorkTaskKind::ResolveMetadata,
+        WorkScope::CatalogItem(fixture.item),
+        claimed.job().expected_revision(),
+        0,
+    )
+    .unwrap()
+    .with_metadata_requirement(MetadataRequirement::Full)
+    .unwrap()
+    .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+    .unwrap()
+    .with_local_metadata_access_mode(LocalMetadataAccessMode::ImportMetadataOnly)
+    .unwrap()
+    .with_storage_root_affinity(fixture.root)
+    .unwrap()
+    .with_input_sync_revision(claimed.job().input_sync_revision().unwrap())
+    .unwrap();
+    assert!(
+        WorkJobRepository::new(&fixture.database)
+            .enqueue_lazy_metadata_or_join(&automatic)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unchanged invalid NFO must not keep scheduling failing detail work"
+    );
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("remote_revision"), "nfo-r2")
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.nfo_record.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        WorkJobRepository::new(&fixture.database)
+            .enqueue_lazy_metadata_or_join(&automatic)
+            .await
+            .unwrap()
+            .is_some(),
+        "a changed candidate inventory must unlock a fresh resolution attempt"
+    );
+}

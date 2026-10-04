@@ -557,7 +557,19 @@ impl MetadataResolveService {
                 .unwrap_or_else(|| format!("storage-object:{}", file.record_id()));
             match NfoDocument::parse(&bytes, &reference) {
                 Ok(document) => documents.push((file.record_id().as_uuid(), document)),
-                Err(error) if files.len() == 1 => return Err(error.into()),
+                Err(error) if files.len() == 1 => {
+                    if claimed.job().metadata_source_mode() == Some(MetadataSourceMode::LocalOnly) {
+                        repository
+                            .record_nfo_conflict(
+                                claimed,
+                                snapshot,
+                                &info,
+                                &["invalid_nfo".to_owned()],
+                            )
+                            .await?;
+                    }
+                    return Err(error.into());
+                }
                 Err(_) => conflicts.push("invalid_nfo".to_owned()),
             }
         }

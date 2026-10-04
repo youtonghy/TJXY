@@ -1592,6 +1592,109 @@ async fn lazy_enqueue_skips_a_revision_that_is_already_published() {
 }
 
 #[tokio::test]
+async fn full_scan_discovery_children_skip_empty_scopes_and_join_active_siblings() {
+    let database = database().await;
+    let backend = database.get_database_backend();
+    let library = LibraryId::new();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("libraries"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("name"),
+                        Alias::new("scan_profile"),
+                        Alias::new("object_selection_scope"),
+                        Alias::new("metadata_policy"),
+                        Alias::new("expansion_policy"),
+                        Alias::new("probe_policy"),
+                        Alias::new("profile_version"),
+                        Alias::new("collection_type"),
+                        Alias::new("sort_key"),
+                    ])
+                    .values_panic([
+                        library.as_uuid().into(),
+                        "Movies".into(),
+                        "Full".into(),
+                        "all_synced_objects".into(),
+                        "full".into(),
+                        "eager".into(),
+                        "eager".into(),
+                        1_i64.into(),
+                        "movies".into(),
+                        SortKey::from_text("Movies").into_bytes().into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::FullMediaScan,
+            WorkScope::Library(library),
+            1,
+            50,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "full-scan-worker",
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let spec = WorkJobSpec::new(
+        WorkTaskKind::DiscoverTitles,
+        WorkScope::StorageRoot(StorageRootId::new()),
+        1,
+        20,
+    )
+    .unwrap();
+    assert_eq!(
+        jobs.enqueue_full_scan_child(&claimed, "DiscoverTitles:root:1", &spec)
+            .await
+            .unwrap(),
+        FullScanChildSubmission::Current,
+        "a discovery child without eligible libraries must not be persisted"
+    );
+    let discovery_jobs: i64 = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("job_count"))
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("DiscoverTitles")),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "job_count")
+        .unwrap();
+    assert_eq!(discovery_jobs, 0);
+    let sibling = jobs.enqueue_or_join(&spec).await.unwrap();
+    assert!(sibling.created());
+    match jobs
+        .enqueue_full_scan_child(&claimed, "DiscoverTitles:root:1", &spec)
+        .await
+        .unwrap()
+    {
+        FullScanChildSubmission::Job(joined) => {
+            assert!(!joined.created());
+            assert_eq!(joined.job().id(), sibling.job().id());
+        }
+        other => panic!("expected the parent to join the active sibling, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn full_scan_completion_is_fenced_by_the_library_profile_version() {
     let database = database().await;
     let backend = database.get_database_backend();

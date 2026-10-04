@@ -1996,7 +1996,9 @@ async fn publish_sources(
         if let Some(root_id) = claimed.job().storage_root_affinity() {
             spec = spec.with_storage_root_affinity(root_id)?;
         }
-        crate::work_job::enqueue_in_transaction(transaction, &spec, now).await?;
+        if !crate::nfo_choice::awaiting_selection(transaction, &spec).await? {
+            crate::work_job::enqueue_in_transaction(transaction, &spec, now).await?;
+        }
     }
     jobs.complete_in_transaction(
         transaction,

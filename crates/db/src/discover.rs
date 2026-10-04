@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use sea_orm::{
@@ -54,7 +54,7 @@ pub async fn enqueue_after_root_sync(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DiscoveryLibraryScope {
+pub(crate) struct DiscoveryLibraryScope {
     id: Uuid,
     profile_version: i32,
     naming_parser_version: i32,
@@ -364,6 +364,18 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                         input_sync_revision,
                     ));
             }
+            let pending_nfo_query = Query::select()
+                .column(Alias::new("catalog_item_id"))
+                .from(Alias::new("nfo_choices"))
+                .and_where(Expr::col(Alias::new("status")).eq("NeedsSelection"))
+                .to_owned();
+            let mut pending_nfo = HashSet::new();
+            for row in transaction
+                .query_all(transaction.get_database_backend().build(&pending_nfo_query))
+                .await?
+            {
+                pending_nfo.insert(row.try_get::<Uuid>("", "catalog_item_id")?);
+            }
             for (
                 item_id,
                 (metadata_revision, requirement, source_mode, access_mode, input_revision),
@@ -381,8 +393,12 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                     .with_local_metadata_access_mode(access_mode)?
                     .with_input_sync_revision(input_revision)?
                     .with_storage_root_affinity(snapshot.root_id)?;
-                    crate::work_job::enqueue_in_transaction(&transaction, &spec, Utc::now())
-                        .await?;
+                    if !pending_nfo.contains(&item_id.as_uuid())
+                        || !crate::nfo_choice::awaiting_selection(&transaction, &spec).await?
+                    {
+                        crate::work_job::enqueue_in_transaction(&transaction, &spec, Utc::now())
+                            .await?;
+                    }
                 }
             }
             advance_discovery_watermarks(&transaction, claimed, snapshot).await?;
@@ -579,7 +595,7 @@ where
     ))
 }
 
-async fn eligible_library_scopes<Connection>(
+pub(crate) async fn eligible_library_scopes<Connection>(
     connection: &Connection,
     root_id: StorageRootId,
     revision: i64,
@@ -673,7 +689,7 @@ where
         .collect()
 }
 
-async fn stage_discovery_libraries(
+pub(crate) async fn stage_discovery_libraries(
     transaction: &DatabaseTransaction,
     job_id: tjxy_common::WorkJobId,
     libraries: &[DiscoveryLibraryScope],
@@ -718,16 +734,6 @@ async fn stage_discovery_libraries(
         transaction.execute(backend.build(&insert)).await?;
     }
     Ok(())
-}
-
-pub(crate) async fn stage_discovery_root(
-    transaction: &DatabaseTransaction,
-    job_id: tjxy_common::WorkJobId,
-    root_id: StorageRootId,
-    revision: i64,
-) -> Result<(), WorkJobRepositoryError> {
-    let libraries = eligible_library_scopes(transaction, root_id, revision, false, None).await?;
-    stage_discovery_libraries(transaction, job_id, &libraries).await
 }
 
 pub(crate) async fn stage_discovery_binding(

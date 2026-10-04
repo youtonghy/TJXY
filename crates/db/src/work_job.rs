@@ -956,7 +956,7 @@ where
     ) -> Result<Option<WorkJobSubmission>, WorkJobRepositoryError> {
         let transaction = self.database.begin().await?;
         let result = async {
-            if crate::nfo_choice::awaiting_selection(&transaction, spec, self.now()).await? {
+            if crate::nfo_choice::awaiting_selection(&transaction, spec).await? {
                 return Ok(None);
             }
             match fence_metadata_item(&transaction, spec).await? {
@@ -988,7 +988,7 @@ where
             return Err(WorkJobRepositoryError::InvalidMetadataWork);
         };
         let transaction = self.database.begin().await?;
-        if crate::nfo_choice::awaiting_selection(&transaction, spec, self.now()).await? {
+        if crate::nfo_choice::awaiting_selection(&transaction, spec).await? {
             return finish(transaction, Ok(None)).await;
         }
         let backend = transaction.get_database_backend();
@@ -1535,6 +1535,32 @@ where
                 PublicationFence::Stale => return Ok(FullScanChildSubmission::Stale),
                 PublicationFence::NeedsWork => {}
             }
+            if crate::nfo_choice::awaiting_selection(&transaction, spec).await? {
+                return Ok(FullScanChildSubmission::Current);
+            }
+            let discovery_libraries = if spec.task_kind() == WorkTaskKind::DiscoverTitles
+                && let WorkScope::StorageRoot(root_id) = spec.scope()
+            {
+                let libraries = crate::discover::eligible_library_scopes(
+                    &transaction,
+                    root_id,
+                    spec.expected_revision(),
+                    false,
+                    None,
+                )
+                .await?;
+                if libraries.is_empty()
+                    && transaction
+                        .query_one(transaction.get_database_backend().build(&active_job(spec)))
+                        .await?
+                        .is_none()
+                {
+                    return Ok(FullScanChildSubmission::Current);
+                }
+                Some(libraries)
+            } else {
+                None
+            };
             let submission = enqueue_or_join(&transaction, spec, self.now()).await?;
             if spec.task_kind() == WorkTaskKind::DiscoverTitles {
                 match spec.scope() {
@@ -1547,12 +1573,11 @@ where
                         )
                         .await?;
                     }
-                    WorkScope::StorageRoot(root_id) => {
-                        crate::discover::stage_discovery_root(
+                    WorkScope::StorageRoot(_) => {
+                        crate::discover::stage_discovery_libraries(
                             &transaction,
                             submission.job().id(),
-                            root_id,
-                            spec.expected_revision(),
+                            &discovery_libraries.unwrap_or_default(),
                         )
                         .await?;
                     }
