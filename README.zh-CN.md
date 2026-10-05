@@ -123,6 +123,10 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 `host.docker.internal`，不能使用 `localhost`。Compose 已为 Linux 添加
 `host-gateway` 映射，同时兼容 Docker Desktop。
 
+TJXY 以启动参数的方式为 PostgreSQL 会话设置 `jit=off`：任务队列认领查询的
+JIT 编译耗时远高于查询本身。若在 PostgreSQL 前使用 PgBouncer 等连接池，
+需要允许该参数，例如配置 `ignore_startup_parameters = options`。
+
 ### 存储目录与端口
 
 | 参数 | 默认值 | 容器路径或行为 |

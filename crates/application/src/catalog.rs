@@ -1355,6 +1355,15 @@ impl CatalogQueryService {
         let Some(scope) = target.storage_scope() else {
             return Ok(());
         };
+        // Resolved-but-Partial automatic metadata is already displayable, so its retry
+        // runs in the background and the detail page polls for it. Without this, every
+        // view of an unmatched title blocked on another provider lookup.
+        let background_refresh = !target.needs_metadata_resolution(requirement)
+            && target.local_metadata_access_mode().imports_metadata()
+            && matches!(
+                target.metadata_source_mode(),
+                MetadataSourceMode::AutomaticScrape
+            );
         let jobs = WorkJobRepository::new(&self.database);
         let deadline = Instant::now() + self.lazy_wait_timeout;
         let mut spec = if scope.is_ready() {
@@ -1377,8 +1386,9 @@ impl CatalogQueryService {
                     .with_storage_root_affinity(scope.storage_root_id())?,
                 )
                 .await?;
-            if self.wait_for_job(&jobs, sync.job().id(), deadline).await?
-                != LazyWaitOutcome::Completed
+            if background_refresh
+                || self.wait_for_job(&jobs, sync.job().id(), deadline).await?
+                    != LazyWaitOutcome::Completed
             {
                 return Ok(());
             }
@@ -1398,12 +1408,7 @@ impl CatalogQueryService {
             .with_metadata_source_mode(target.metadata_source_mode())?
             .with_local_metadata_access_mode(target.local_metadata_access_mode())?
             .with_storage_root_affinity(scope.storage_root_id())?;
-        let submission = if !target.needs_metadata_resolution(requirement)
-            && target.local_metadata_access_mode().imports_metadata()
-            && matches!(
-                target.metadata_source_mode(),
-                MetadataSourceMode::AutomaticScrape
-            ) {
+        let submission = if background_refresh {
             jobs.enqueue_metadata_retry_or_join(&spec).await
         } else {
             jobs.enqueue_lazy_metadata_or_join(&spec).await
@@ -1432,9 +1437,11 @@ impl CatalogQueryService {
             created = submission.created(),
             "lazy metadata work enqueued or joined"
         );
-        let _ = self
-            .wait_for_job(&jobs, submission.job().id(), deadline)
-            .await?;
+        if !background_refresh {
+            let _ = self
+                .wait_for_job(&jobs, submission.job().id(), deadline)
+                .await?;
+        }
         Ok(())
     }
 

@@ -150,6 +150,11 @@ Docker host must be addressed as `host.docker.internal`, not `localhost`. The
 Compose configuration adds the Linux `host-gateway` mapping and also works with
 Docker Desktop.
 
+TJXY opens PostgreSQL sessions with `jit=off`, sent as a startup option, because
+JIT compilation of the work-queue claim costs far more than the query itself. A
+connection pooler in front of PostgreSQL, such as PgBouncer, must accept that
+option, for example with `ignore_startup_parameters = options`.
+
 ### Storage and Ports
 
 | Option | Default | Container path / behavior |

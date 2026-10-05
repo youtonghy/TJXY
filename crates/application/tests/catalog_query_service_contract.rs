@@ -1672,6 +1672,51 @@ async fn lazy_item_detail_retries_partial_automatic_metadata() {
 }
 
 #[tokio::test]
+async fn lazy_item_detail_does_not_block_on_partial_metadata_refresh() {
+    // A series skips the source-index wait, isolating the metadata refresh path.
+    let (service, database, item, user) = lazy_service("Series", true).await;
+    let service = service.with_lazy_wait_timeout(Duration::from_secs(5));
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_state"), "Partial")
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_requirement"), 2_i32)
+                    .value(Alias::new("metadata_payload_version"), 1_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let detail = service.item_detail(user, None, item).await.unwrap();
+
+    assert!(detail.is_some());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "partial metadata refresh must not hold the detail response"
+    );
+    let pending = database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ResolveMetadata"))
+                    .and_where(Expr::col(Alias::new("state")).eq("Pending")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+}
+
+#[tokio::test]
 async fn lazy_item_detail_enqueues_stale_local_metadata_import() {
     let (service, database, item, user) = lazy_service("Movie", true).await;
     let backend = database.get_database_backend();

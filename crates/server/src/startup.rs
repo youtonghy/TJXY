@@ -1,7 +1,10 @@
 use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 
 use chrono::Duration;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement,
+    sqlx::postgres::PgConnectOptions,
+};
 use thiserror::Error;
 use tjxy_application::{
     AssetReadError, AssetReadService, AssetWriteError, AssetWriteService, AuthError, AuthService,
@@ -525,7 +528,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let musicbrainz_environment_fallback = options.musicbrainz_environment_fallback.clone();
     let musicbrainz_provider_factory = Arc::clone(&options.musicbrainz_provider_factory);
     validate_storage_backends(&options.storage_backends)?;
-    let mut database = Database::connect(&options.database_url).await?;
+    let mut database = Database::connect(runtime_connect_options(&options.database_url)).await?;
     if database.get_database_backend() == DbBackend::Sqlite {
         database
             .execute(Statement::from_string(
@@ -537,7 +540,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     tjxy_db::migrate_database(&database).await?;
     if database.get_database_backend() == DbBackend::MySql {
         database.close().await?;
-        database = Database::connect(&options.database_url).await?;
+        database = Database::connect(runtime_connect_options(&options.database_url)).await?;
     }
     let scan_pressure = Arc::new(crate::scan_concurrency::ScanPressure::default());
     let sql_pressure = Arc::clone(&scan_pressure);
@@ -1260,6 +1263,20 @@ async fn configure_storage(
     Ok((media, direct_metadata, runtime))
 }
 
+/// Builds the runtime pool options. Postgres JIT is disabled per session: the
+/// queue claim's dependency subquery inflates plan cost far past `jit_above_cost`,
+/// so every claim spent about a second compiling a plan that executes in under a
+/// millisecond, saturating the shared pool that request handlers wait on.
+fn runtime_connect_options(database_url: &str) -> ConnectOptions {
+    let mut options = ConnectOptions::new(database_url);
+    options.map_sqlx_postgres_opts(disable_postgres_jit);
+    options
+}
+
+fn disable_postgres_jit(options: PgConnectOptions) -> PgConnectOptions {
+    options.options([("jit", "off")])
+}
+
 fn validate_storage_backends(
     configured: &[ConfiguredStorageBackend],
 ) -> Result<(), InitializationError> {
@@ -1443,9 +1460,22 @@ mod tests {
 
     use super::{
         ApiKeyValidationError, FilesystemBackendConfiguration, InitializationError,
-        api_key_validation_error, load_google_backends, load_onedrive_backends,
-        prepare_filesystem_backends,
+        api_key_validation_error, disable_postgres_jit, load_google_backends,
+        load_onedrive_backends, prepare_filesystem_backends,
     };
+
+    #[test]
+    fn postgres_sessions_start_with_jit_disabled() {
+        let options = disable_postgres_jit(
+            "postgres://tjxy@localhost/tjxy?options=-c%20statement_timeout%3D5min"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            options.get_options(),
+            Some("-c statement_timeout=5min -c jit=off")
+        );
+    }
 
     #[test]
     fn api_key_validation_categories_distinguish_keyring_cipher_and_stored_type_errors() {
