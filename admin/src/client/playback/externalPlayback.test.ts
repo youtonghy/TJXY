@@ -5,6 +5,7 @@ import {
   externalPlayersForPlatform,
   ExternalPlaybackUnavailableError,
 } from './externalPlayback';
+import { clearPlaybackInfoCache } from './playbackInfoCache';
 
 const playback = vi.hoisted(() => ({
   getPlaybackInfo: vi.fn(),
@@ -14,6 +15,7 @@ const playback = vi.hoisted(() => ({
 vi.mock('../api/playbackApi', () => playback);
 
 beforeEach(() => {
+  clearPlaybackInfoCache();
   playback.getPlaybackInfo.mockReset();
   playback.issuePlaybackTicket.mockReset();
 });

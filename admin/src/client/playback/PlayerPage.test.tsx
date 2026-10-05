@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { PlayerPage } from './PlayerPage';
+import { clearPlaybackInfoCache } from './playbackInfoCache';
 
 const catalog = vi.hoisted(() => ({
   getItem: vi.fn(),
@@ -29,6 +30,8 @@ vi.mock('../auth/ClientAuthContext', () => auth);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearPlaybackInfoCache();
+  playback.getPlaybackInfo.mockResolvedValue({ PlaySessionId: 'session-1', MediaSources: [] });
   Object.defineProperty(globalThis.crypto, 'randomUUID', {
     configurable: true,
     value: vi.fn(() => 'session-2'),
@@ -59,13 +62,14 @@ function renderPlayer(initialEntry = '/app/play/movie-1') {
   );
 }
 
-it('shows a neutral no-source state without requesting playback', async () => {
+it('shows a neutral no-source state and cancels the speculative playback request', async () => {
   catalog.getItem.mockResolvedValue({
     Id: 'movie-1',
     Name: 'Arrival',
     Type: 'Movie',
     HasMediaSources: false,
   });
+  playback.getPlaybackInfo.mockReturnValue(new Promise(() => undefined));
 
   renderPlayer();
 
@@ -73,8 +77,36 @@ it('shows a neutral no-source state without requesting playback', async () => {
   expect(screen.queryByText(/demo/i)).not.toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Back to details' })).toHaveAttribute('href', '/app/items/movie-1');
   expect(document.querySelector('video')).toBeNull();
-  expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
+  const requestSignal = playback.getPlaybackInfo.mock.calls[0]?.[1] as AbortSignal | undefined;
+  expect(requestSignal?.aborted).toBe(true);
   expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+});
+
+it('requests the item and playback info concurrently', async () => {
+  let resolveItem!: (value: unknown) => void;
+  catalog.getItem.mockReturnValue(new Promise((resolve) => { resolveItem = resolve; }));
+  playback.getPlaybackInfo.mockResolvedValue({
+    PlaySessionId: 'session-1',
+    MediaSources: [{
+      Id: 'source-1080',
+      Container: 'mp4',
+      IsDefault: true,
+      SupportsDirectPlay: true,
+      DirectStreamUrl: '/Videos/movie-1/stream',
+      MediaStreams: [{ Type: 'Video', Codec: 'h264' }],
+    }],
+  });
+  playback.issuePlaybackTicket.mockResolvedValue({ Id: 'ticket-1080', StreamUrl: '/stream/1080' });
+
+  renderPlayer();
+
+  await waitFor(() => { expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1', expect.any(AbortSignal)); });
+  expect(catalog.getItem).toHaveBeenCalledWith('movie-1');
+  expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+  resolveItem({ Id: 'movie-1', Name: 'Arrival', Type: 'Movie', HasMediaSources: true });
+
+  expect(await screen.findByLabelText('Playing Arrival')).toHaveAttribute('src', '/stream/1080');
+  expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
 });
 
 it('keeps library context on the back-to-details link', async () => {

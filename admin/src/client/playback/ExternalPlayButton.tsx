@@ -11,6 +11,7 @@ import {
   openExternalPlayer,
   type ExternalPlaybackLink,
 } from './externalPlayback';
+import { prefetchPlaybackInfo } from './playbackInfoCache';
 
 type PreparationState = 'idle' | 'loading' | 'ready' | 'no-source' | 'error';
 const EXPIRY_BUFFER_MS = 30_000;
@@ -20,11 +21,14 @@ export function ExternalPlayButton({
   itemTitle,
   isExternalPlaybackDisabled = false,
   onPlay,
+  prefetchOnMount = false,
 }: {
   itemId: string;
   itemTitle: string;
   isExternalPlaybackDisabled?: boolean;
   onPlay: () => void;
+  /** Start PlaybackInfo immediately, e.g. when the item's sources still need a server-side probe. */
+  prefetchOnMount?: boolean;
 }) {
   const tr = useTranslate();
   const platform = useMemo(() => detectExternalPlayerPlatform(), []);
@@ -36,6 +40,20 @@ export function ExternalPlayButton({
   useEffect(() => () => {
     requestIdRef.current += 1;
   }, []);
+
+  useEffect(() => {
+    if (!prefetchOnMount || isExternalPlaybackDisabled) return;
+    // Unprobed sources make the first PlaybackInfo wait for a probe, so start it
+    // on load. A 503 "preparing" answer keeps retrying inside the shared bounded
+    // retry. The request is tied to this page and cancelled on unmount, unless
+    // user intent (hover/focus/press) pinned it. Failed entries are evicted, so
+    // the play path simply retries.
+    const controller = new AbortController();
+    prefetchPlaybackInfo(itemId, controller.signal);
+    return () => {
+      controller.abort();
+    };
+  }, [isExternalPlaybackDisabled, itemId, prefetchOnMount]);
 
   const prepare = async () => {
     if (isExternalPlaybackDisabled || preparationState === 'loading') return;
@@ -56,6 +74,11 @@ export function ExternalPlayButton({
       setPlaybackLink(undefined);
       setPreparationState(error instanceof ExternalPlaybackUnavailableError ? 'no-source' : 'error');
     }
+  };
+
+  // Warm PlaybackInfo (never a ticket) once the user shows intent to play.
+  const prefetch = () => {
+    if (!isExternalPlaybackDisabled) prefetchPlaybackInfo(itemId);
   };
 
   const handleAction = async (key: React.Key) => {
@@ -84,7 +107,7 @@ export function ExternalPlayButton({
 
   return (
     <ButtonGroup>
-      <Button onPress={onPlay}>
+      <Button onFocus={prefetch} onHoverStart={prefetch} onPress={() => { prefetch(); onPlay(); }}>
         <Play aria-hidden="true" className="size-4" />
         {tr('Play', '播放')}
       </Button>
@@ -93,6 +116,8 @@ export function ExternalPlayButton({
           aria-label={tr('More playback options', '更多播放选项')}
           isDisabled={isExternalPlaybackDisabled}
           isIconOnly
+          onFocus={prefetch}
+          onHoverStart={prefetch}
         >
           <ButtonGroup.Separator />
           <ChevronDown aria-hidden="true" className="size-4" />

@@ -1,5 +1,6 @@
 import { resolveApiUrl } from '../api/apiBase';
-import { getPlaybackInfo, issuePlaybackTicket } from '../api/playbackApi';
+import { issuePlaybackTicket } from '../api/playbackApi';
+import { takePlaybackInfo } from './playbackInfoCache';
 import { selectNativeSource } from './sourceSelection';
 
 export type ExternalPlayerId = 'potplayer' | 'vlc' | 'iina' | 'infuse' | 'nplayer';
@@ -40,7 +41,7 @@ export class ExternalPlaybackUnavailableError extends Error {
 }
 
 export async function createExternalPlaybackLink(itemId: string): Promise<ExternalPlaybackLink> {
-  const playback = await getPlaybackInfo(itemId);
+  const playback = await takePlaybackInfo(itemId);
   const source = selectNativeSource(playback.MediaSources ?? []);
   if (!source || !playback.PlaySessionId) throw new ExternalPlaybackUnavailableError();
   const ticket = await issuePlaybackTicket(itemId, source.Id, playback.PlaySessionId);

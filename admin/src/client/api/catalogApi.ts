@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/restrict-template-expressions */
 import { clientRequest } from './clientApi';
+import type { PlaybackSource } from './playbackApi';
 
 export interface MediaNamedCode { Code: string; Name: string; }
 export interface MediaPerson { Id: string; Name: string; Role?: string; Type?: string; }
@@ -31,6 +32,8 @@ export interface MediaItem {
   People?: MediaPerson[];
   ProviderIds?: Record<string, string>;
   HasMediaSources?: boolean;
+  /** Playable (already probed) sources; only present on item detail responses. */
+  MediaSources?: PlaybackSource[];
   MetadataState?: 'Partial' | 'Complete';
   PrimaryImageTag?: string;
   ImageTags?: Record<string, string>;

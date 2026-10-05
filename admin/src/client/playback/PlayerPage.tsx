@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { getItem, togglePlayed, type MediaItem } from '../api/catalogApi';
 import {
-  getPlaybackInfo,
   getSubtitleBlob,
   issuePlaybackTicket,
   reportPlaybackProgress,
@@ -23,6 +22,7 @@ import { browserSources, nativeSources, selectBrowserSource, selectNativeSource,
 import { useTranslate } from '../../settings/i18n';
 import { randomUuid } from '../../utils/uuid';
 import { attachHlsSource, isHlsSource } from './hlsPlayback';
+import { takePlaybackInfo } from './playbackInfoCache';
 import { DesktopPlayerSurface } from './DesktopPlayerSurface';
 import { WebPlayerSurface } from './WebPlayerSurface';
 
@@ -92,6 +92,7 @@ export function PlayerPage() {
   useEffect(() => {
     if (!id) return;
     let active = true;
+    const controller = new AbortController();
     void Promise.resolve()
       .then(() => {
         setState('loading');
@@ -101,19 +102,24 @@ export function PlayerPage() {
         setPlaySessionId(undefined);
         setTicket(undefined);
         setPlaybackError(undefined);
-        return getItem(id);
+        // PlaybackInfo does not need the item response, so both requests run
+        // concurrently. The item still decides whether the result is used.
+        const playbackRequest = takePlaybackInfo(id, controller.signal);
+        void playbackRequest.catch(() => undefined);
+        return getItem(id).then((nextItem) => ({ nextItem, playbackRequest }));
       })
-      .then(async (nextItem) => {
+      .then(async ({ nextItem, playbackRequest }) => {
         if (!active) return;
         setItem(nextItem);
         resumeTicksRef.current = nextItem.UserData?.PlaybackPositionTicks ?? 0;
         setDesktopStartTicks(resumeTicksRef.current);
         positionTicksRef.current = resumeTicksRef.current;
         if (nextItem.HasMediaSources === false) {
+          controller.abort();
           setState('no-source');
           return;
         }
-        const playback = await getPlaybackInfo(id);
+        const playback = await playbackRequest;
         if (!playback.PlaySessionId) throw new Error('missing playback session');
         const desktop = isDesktopShell();
         const compatible = desktop
@@ -129,10 +135,12 @@ export function PlayerPage() {
         setPlaySessionId(playback.PlaySessionId);
       })
       .catch(() => {
+        controller.abort();
         if (active) setState('error');
       });
     return () => {
       active = false;
+      controller.abort();
     };
   }, [id]);
 

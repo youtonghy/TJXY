@@ -4,7 +4,12 @@ import { clientIdentityHeader, clearClientToken, getClientToken } from '../auth/
 export type ClientErrorKind = 'network' | 'authentication' | 'authorization' | 'not-found' | 'validation' | 'unavailable' | 'invalid-response' | 'unexpected';
 
 export class ClientApiError extends Error {
-  constructor(public readonly status: number, public readonly kind: ClientErrorKind) {
+  constructor(
+    public readonly status: number,
+    public readonly kind: ClientErrorKind,
+    /** Raw `Retry-After` response header, when the server sent one. */
+    public readonly retryAfter?: string,
+  ) {
     super(kind === 'authentication' ? 'Please sign in again.' : kind === 'authorization' ? 'You do not have access to this content.' : kind === 'not-found' ? 'This content is no longer available.' : 'The request could not be completed.');
     this.name = 'ClientApiError';
   }
@@ -14,7 +19,7 @@ export const CLIENT_AUTH_INVALIDATED_EVENT = 'tjxy-client-auth-invalidated';
 
 export async function clientRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await clientFetch(path, options);
-  if (!response.ok) throw new ClientApiError(response.status, errorKind(response.status));
+  if (!response.ok) throw new ClientApiError(response.status, errorKind(response.status), response.headers.get('Retry-After') ?? undefined);
   if (response.status === 204) return undefined as T;
   const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
   if (!contentType?.includes('json')) throw new ClientApiError(response.status, 'invalid-response');

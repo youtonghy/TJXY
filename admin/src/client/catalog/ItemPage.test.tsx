@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ItemPage } from './ItemPage';
+import { clearPlaybackInfoCache } from '../playback/playbackInfoCache';
 
 const api = vi.hoisted(() => ({
   getChildren: vi.fn(),
@@ -78,6 +79,7 @@ beforeEach(() => {
         { Id: 'episode-2', Name: 'Please Remain Calm', Type: 'Episode', IndexNumber: 2, Overview: 'Second episode.', ImageTags: { Primary: 'still-2' } },
         { Id: 'episode-1', Name: '1:23:45', Type: 'Episode', IndexNumber: 1, Overview: 'First episode.', ImageTags: { Primary: 'still-1' } },
       ]));
+  clearPlaybackInfoCache();
   playback.getPlaybackInfo.mockReset();
   playback.getPlaybackInfo.mockResolvedValue({
     PlaySessionId: 'session-1',
@@ -349,6 +351,78 @@ it('keeps the primary split-button action on the built-in player', async () => {
   await user.click(await screen.findByRole('button', { name: 'Play' }));
 
   expect(await screen.findByText('Built-in player destination')).toBeVisible();
+  expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+});
+
+it('prefetches playback info on load, but never a ticket, when sources still need a probe', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Playable Movie', Type: 'Movie', IsFolder: false, HasMediaSources: true });
+  api.getChildren.mockResolvedValueOnce([]);
+  const user = userEvent.setup();
+  renderItem('movie-1');
+
+  const play = await screen.findByRole('button', { name: 'Play' });
+  await waitFor(() => { expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1', expect.any(AbortSignal)); });
+  await user.hover(play);
+  act(() => { screen.getByRole('button', { name: 'More playback options' }).focus(); });
+
+  expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
+  expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+});
+
+it('cancels the on-load prefetch when the detail page closes without a play action', async () => {
+  playback.getPlaybackInfo.mockReturnValue(new Promise(() => undefined));
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Playable Movie', Type: 'Movie', IsFolder: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  const rendered = renderItem('movie-1');
+
+  await screen.findByRole('button', { name: 'Play' });
+  await waitFor(() => { expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1); });
+  const requestSignal = playback.getPlaybackInfo.mock.calls[0]?.[1] as AbortSignal;
+  rendered.unmount();
+
+  expect(requestSignal.aborted).toBe(true);
+});
+
+it('waits for hover or focus before prefetching when probed sources are already known', async () => {
+  api.getItem.mockResolvedValueOnce({
+    Id: 'movie-1',
+    Name: 'Playable Movie',
+    Type: 'Movie',
+    IsFolder: false,
+    HasMediaSources: true,
+    MediaSources: [{ Id: 'source-1' }],
+  });
+  api.getChildren.mockResolvedValueOnce([]);
+  const user = userEvent.setup();
+  renderItem('movie-1');
+
+  const play = await screen.findByRole('button', { name: 'Play' });
+  expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
+  await user.hover(play);
+  expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
+  act(() => { screen.getByRole('button', { name: 'More playback options' }).focus(); });
+
+  expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
+  expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1', expect.any(AbortSignal));
+  expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
+});
+
+it('does not prefetch playback info for a series', async () => {
+  api.getItem.mockResolvedValueOnce({ ...series, HasMediaSources: true });
+  renderItem('series-1');
+
+  expect(await screen.findByRole('heading', { name: 'Chernobyl' })).toBeInTheDocument();
+  expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
+});
+
+it('does not prefetch playback info when the title has no media source', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Missing File', Type: 'Movie', IsFolder: false, HasMediaSources: false });
+  api.getChildren.mockResolvedValueOnce([]);
+  const user = userEvent.setup();
+  renderItem('movie-1');
+
+  await user.hover(await screen.findByRole('button', { name: 'Play' }));
+
   expect(playback.getPlaybackInfo).not.toHaveBeenCalled();
 });
 
@@ -359,10 +433,12 @@ it('prepares and copies a temporary playback link from the split-button menu', a
   const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
   renderItem('movie-1');
 
+  await user.hover(await screen.findByRole('button', { name: 'Play' }));
   await user.click(await screen.findByRole('button', { name: 'More playback options' }));
   await user.click(await screen.findByRole('menuitem', { name: 'Copy temporary playback link' }));
 
-  expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1');
+  expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
+  expect(playback.getPlaybackInfo).toHaveBeenCalledWith('movie-1', expect.any(AbortSignal));
   expect(playback.issuePlaybackTicket).toHaveBeenCalledWith('movie-1', 'source-1', 'session-1');
   expect(writeText).toHaveBeenCalledWith(
     'http://localhost:3000/Videos/movie-1/stream?PlaybackTicket=ticket-value',

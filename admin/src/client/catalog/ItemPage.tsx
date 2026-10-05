@@ -251,6 +251,7 @@ export function ItemPage() {
                 itemId={id}
                 itemTitle={item.Name}
                 key={id}
+                prefetchOnMount={!item.IsFolder && !item.MediaSources?.length}
                 onPlay={() => navigate(`/app/play/${id}${libraryId ? `?libraryId=${encodeURIComponent(libraryId)}` : ''}`)}
               />
             )}
