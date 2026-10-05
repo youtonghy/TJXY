@@ -4,15 +4,18 @@ import { defineConfig, loadEnv } from 'vite';
 export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, process.cwd(), 'TJXY_');
   const target = environment.TJXY_DEV_SERVER ?? 'http://127.0.0.1:8096';
+  // The mobile WebView renders a single inlined html string, so the bundle must
+  // not contain lazily-imported chunks.
+  const singleFile = process.env.VITE_TJXY_SHELL === 'mobile';
 
   return {
-    base: '/',
+    base: singleFile ? './' : '/',
     plugins: [react()],
     build: {
       outDir: 'dist',
       emptyOutDir: true,
       rolldownOptions: {
-        output: {
+        output: singleFile ? { inlineDynamicImports: true } : {
           codeSplitting: {
             groups: [
               { name: 'charts', test: /node_modules[\\/](recharts|victory-vendor|@reduxjs[\\/]toolkit|react-redux|redux|reselect|immer|decimal\.js-light|es-toolkit|eventemitter3|react-smooth)[\\/]/ },
