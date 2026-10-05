@@ -1003,6 +1003,39 @@ impl CatalogPublicationRepository<'_> {
         playback_storage_accounts(self.database, owner).await
     }
 
+    /// Narrows the playback-eligible accounts to the ones that can resolve one
+    /// local (STRM) reference from the descriptor.
+    ///
+    /// A filesystem account can resolve a reference only when its inventory
+    /// holds the descriptor object under the `local` drive; for an absolute
+    /// reference the account root must also prefix the target path. Accounts
+    /// failing these necessary checks can only error during resolution, so
+    /// callers skip their per-account sweep cost instead of spending probe
+    /// budget on guaranteed misses. Accounts without a persisted filesystem
+    /// configuration are kept because their root cannot be checked. Non
+    /// filesystem descriptors have no index-based prefilter and keep the full
+    /// list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError`] for database failures.
+    pub async fn local_reference_accounts(
+        &self,
+        owner: CatalogItemId,
+        provider: &str,
+        provider_object_id: &str,
+        reference: &str,
+    ) -> Result<Vec<Uuid>, CatalogPublicationError> {
+        local_reference_accounts(
+            self.database,
+            owner,
+            provider,
+            provider_object_id,
+            reference,
+        )
+        .await
+    }
+
     /// Resolves one active external subtitle by stable presentation and delivery index.
     ///
     /// # Errors
@@ -1099,6 +1132,74 @@ async fn playback_storage_accounts(
         .iter()
         .map(|row| row.try_get("", "storage_account_id").map_err(Into::into))
         .collect()
+}
+
+async fn local_reference_accounts(
+    database: &sea_orm::DatabaseConnection,
+    owner: CatalogItemId,
+    provider: &str,
+    provider_object_id: &str,
+    reference: &str,
+) -> Result<Vec<Uuid>, CatalogPublicationError> {
+    let allowed = playback_storage_accounts(database, owner).await?;
+    if provider != "filesystem" || allowed.len() < 2 {
+        return Ok(allowed);
+    }
+    let backend = database.get_database_backend();
+    let holders: HashSet<Uuid> = database
+        .query_all(
+            backend.build(
+                &Query::select()
+                    .distinct()
+                    .column(Alias::new("storage_account_id"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(Expr::col(Alias::new("provider_object_id")).eq(provider_object_id))
+                    .and_where(Expr::col(Alias::new("provider_drive_id")).eq("local"))
+                    .and_where(
+                        Expr::col(Alias::new("storage_account_id")).is_in(allowed.iter().copied()),
+                    )
+                    .to_owned(),
+            ),
+        )
+        .await?
+        .iter()
+        .map(|row| row.try_get("", "storage_account_id"))
+        .collect::<Result<_, DbErr>>()?;
+    let mut candidates: Vec<Uuid> = allowed
+        .into_iter()
+        .filter(|account| holders.contains(account))
+        .collect();
+    if std::path::Path::new(reference).is_absolute() && !candidates.is_empty() {
+        let roots: HashMap<Uuid, String> = database
+            .query_all(
+                backend.build(
+                    &Query::select()
+                        .columns([Alias::new("storage_account_id"), Alias::new("root_path")])
+                        .from(Alias::new("filesystem_storage_configs"))
+                        .and_where(
+                            Expr::col(Alias::new("storage_account_id"))
+                                .is_in(candidates.iter().copied()),
+                        )
+                        .to_owned(),
+                ),
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<Uuid>("", "storage_account_id")?,
+                    row.try_get::<String>("", "root_path")?,
+                ))
+            })
+            .collect::<Result<_, DbErr>>()?;
+        let reference_path = std::path::Path::new(reference);
+        candidates.retain(|account| {
+            roots
+                .get(account)
+                .is_none_or(|root| reference_path.starts_with(root))
+        });
+    }
+    Ok(candidates)
 }
 
 async fn set_source_playback_policy(

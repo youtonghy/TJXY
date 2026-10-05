@@ -1327,7 +1327,12 @@ impl ProbeService {
                 "STRM target resolved with redacted reference"
             );
             let allowed_accounts = CatalogPublicationRepository::new(&self.database)
-                .playback_storage_accounts(candidate.item_id())
+                .local_reference_accounts(
+                    candidate.item_id(),
+                    candidate.provider(),
+                    candidate.provider_object_id(),
+                    target,
+                )
                 .await?;
             let resolved = match self
                 .backends

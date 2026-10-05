@@ -200,7 +200,12 @@ impl MediaReadService {
         }
         let target = parse_strm(&bytes).map_err(|error| MediaReadError::Strm(error.to_string()))?;
         let allowed_accounts = CatalogPublicationRepository::new(&self.database)
-            .playback_storage_accounts(item_id)
+            .local_reference_accounts(
+                item_id,
+                location.provider(),
+                location.provider_object_id(),
+                target,
+            )
             .await?;
         let resolved = self
             .backends

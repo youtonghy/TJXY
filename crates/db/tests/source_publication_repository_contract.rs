@@ -2202,3 +2202,148 @@ async fn series_structure_pointer_atomically_publishes_episode_sources() {
         aggregate_key
     );
 }
+
+async fn authorize_new_account(
+    database: &DatabaseConnection,
+    owner: CatalogItemId,
+    suffix: &str,
+) -> Uuid {
+    let object = seed_storage_object(database, suffix).await;
+    let backend = database.get_database_backend();
+    let account: Uuid = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("storage_account_id"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(Expr::col(Alias::new("id")).eq(object.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "storage_account_id")
+        .unwrap();
+    authorize_storage_object(database, owner, object).await;
+    account
+}
+
+async fn seed_local_object(database: &DatabaseConnection, account: Uuid, provider_object_id: &str) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("size"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        account.into(),
+                        "local".into(),
+                        provider_object_id.into(),
+                        "descriptor.strm".into(),
+                        "descriptor.strm".into(),
+                        "File".into(),
+                        64_i64.into(),
+                        1_i64.into(),
+                        false.into(),
+                        0_i64.into(),
+                        "ProviderStable".into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_filesystem_config(database: &DatabaseConnection, account: Uuid, root_path: &str) {
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("filesystem_storage_configs"))
+                    .columns([Alias::new("storage_account_id"), Alias::new("root_path")])
+                    .values_panic([account.into(), root_path.into()]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn local_reference_accounts_keep_only_accounts_that_can_resolve() {
+    let database = database().await;
+    let owner = seed_movie(&database, 1).await;
+    // Holder whose configured root prefixes the absolute STRM target.
+    let matching = authorize_new_account(&database, owner, "match").await;
+    seed_local_object(&database, matching, "descriptor-1").await;
+    seed_filesystem_config(&database, matching, "/media/films").await;
+    // Holder whose configured root does not prefix the absolute target.
+    let other_root = authorize_new_account(&database, owner, "other-root").await;
+    seed_local_object(&database, other_root, "descriptor-1").await;
+    seed_filesystem_config(&database, other_root, "/elsewhere").await;
+    // Holder without a persisted filesystem config: the root is unknown, so
+    // the account cannot be ruled out for absolute references.
+    let unconfigured = authorize_new_account(&database, owner, "unconfigured").await;
+    seed_local_object(&database, unconfigured, "descriptor-1").await;
+    // Allowed account that does not index the descriptor at all.
+    let non_holder = authorize_new_account(&database, owner, "non-holder").await;
+
+    let publications = CatalogPublicationRepository::new(&database);
+    let sorted = |mut accounts: Vec<Uuid>| {
+        accounts.sort();
+        accounts
+    };
+
+    let relative = publications
+        .local_reference_accounts(owner, "filesystem", "descriptor-1", "clip.mkv")
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted(relative),
+        sorted(vec![matching, other_root, unconfigured])
+    );
+
+    let absolute = publications
+        .local_reference_accounts(owner, "filesystem", "descriptor-1", "/media/films/clip.mkv")
+        .await
+        .unwrap();
+    assert_eq!(sorted(absolute), sorted(vec![matching, unconfigured]));
+
+    let outside = publications
+        .local_reference_accounts(owner, "filesystem", "descriptor-1", "/nowhere/clip.mkv")
+        .await
+        .unwrap();
+    assert_eq!(sorted(outside), sorted(vec![unconfigured]));
+
+    let foreign = publications
+        .local_reference_accounts(owner, "google-drive", "descriptor-1", "clip.mkv")
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted(foreign),
+        sorted(vec![matching, other_root, unconfigured, non_holder])
+    );
+
+    let missing = publications
+        .local_reference_accounts(owner, "filesystem", "desc-missing", "clip.mkv")
+        .await
+        .unwrap();
+    assert!(missing.is_empty());
+}
