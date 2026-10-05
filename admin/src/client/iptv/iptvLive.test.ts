@@ -1,6 +1,6 @@
 import type { IptvChannel } from './iptvChannels';
 import { JceDeadHostError } from './iptvJce';
-import { IptvLiveSession } from './iptvLive';
+import { IptvLiveSession, resolveIptvReplay } from './iptvLive';
 
 const channel: IptvChannel = {
   defn: 'fhd',
@@ -98,6 +98,24 @@ describe('IptvLiveSession', () => {
       resolveBk: () => Promise.reject(new Error('bk down')),
     });
     await expect(session.manifest()).rejects.toThrow();
+  });
+
+  it('renders a replay window as a seekable VOD playlist', async () => {
+    const playlist = await resolveIptvReplay(channel, 1791213382, 1791213682, {
+      fetchImpl: () =>
+        Promise.resolve(
+          textResponse(
+            windowPlaylist([
+              ['2026-10-05T19:00:00Z', 'rel/a.ts'],
+              ['2026-10-05T19:00:06Z', 'http://cdn/b.ts'],
+            ]),
+          ),
+        ),
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+    expect(playlist).toContain('#EXT-X-ENDLIST');
+    expect(playlist).toContain('http://cdn/rel/a.ts');
+    expect(playlist).toContain('http://cdn/b.ts');
   });
 
   it('uses bk mode directly for channels without timeshift coverage', async () => {

@@ -290,19 +290,54 @@ export class IptvLiveSession {
       .map((key) => this.segments.get(key))
       .filter((segment): segment is StoredSegment => segment !== undefined);
     if (!segments.length) return '';
-    const target = Math.max(6, ...segments.map((segment) => Math.floor(segment.dur + 0.5)));
-    const lines = [
-      '#EXTM3U',
-      '#EXT-X-VERSION:3',
-      `#EXT-X-TARGETDURATION:${String(target)}`,
-      `#EXT-X-MEDIA-SEQUENCE:${String(segments[0]?.seq ?? 0)}`,
-    ];
-    for (const segment of segments) {
-      if (segment.pdt) lines.push(`#EXT-X-PROGRAM-DATE-TIME:${segment.pdt}`);
-      lines.push(`#EXTINF:${segment.dur.toFixed(3)},`, segment.url);
-    }
-    return `${lines.join('\n')}\n`;
+    return renderPlaylist(segments, false);
   }
+}
+
+function renderPlaylist(segments: StoredSegment[], endlist: boolean): string {
+  const target = Math.max(6, ...segments.map((segment) => Math.floor(segment.dur + 0.5)));
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${String(target)}`,
+    `#EXT-X-MEDIA-SEQUENCE:${String(segments[0]?.seq ?? 0)}`,
+  ];
+  for (const segment of segments) {
+    if (segment.pdt) lines.push(`#EXT-X-PROGRAM-DATE-TIME:${segment.pdt}`);
+    lines.push(`#EXTINF:${segment.dur.toFixed(3)},`, segment.url);
+  }
+  if (endlist) lines.push('#EXT-X-ENDLIST');
+  return `${lines.join('\n')}\n`;
+}
+
+interface IptvReplayDeps {
+  fetchImpl?: FetchLike;
+  timeshiftUrl?: IptvLiveDeps['timeshiftUrl'];
+}
+
+/**
+ * Resolves a finished programme's catchup window through the JCE timeshift
+ * API and returns it as a static VOD playlist (absolute segment URLs and
+ * `#EXT-X-ENDLIST`), which hls.js can seek like any recorded asset.
+ */
+export async function resolveIptvReplay(
+  channel: IptvChannel,
+  startSec: number,
+  endSec: number,
+  deps: IptvReplayDeps = {},
+): Promise<string> {
+  const timeshiftUrl = deps.timeshiftUrl ?? jceTimeshiftUrl;
+  const fetchImpl = deps.fetchImpl ?? desktopAwareFetch;
+  const m3u8Url = await timeshiftUrl(channel.pid, channel.sid, startSec, endSec, channel.defn);
+  const response = await fetchImpl(m3u8Url, { headers: JCE_PLAYLIST_HEADERS });
+  if (!response.ok) throw new IptvResolveError(`replay playlist http ${String(response.status)}`);
+  const text = await response.text();
+  const segments = parseWindowPlaylist(text, response.url || m3u8Url);
+  if (!segments.length) throw new IptvResolveError('empty replay playlist');
+  return renderPlaylist(
+    segments.map((segment, index) => ({ ...segment, seq: index })),
+    true,
+  );
 }
 
 // hls.js plumbing: a custom loader lets the rolling session answer playlist
@@ -334,7 +369,7 @@ function makeStats(): LoaderStats {
   };
 }
 
-function createLoader(session: IptvLiveSession) {
+function createLoader(manifestProvider: () => Promise<string>) {
   return class IptvLoader {
     context: LoaderContext | null = null;
     stats: LoaderStats = makeStats();
@@ -396,7 +431,7 @@ function createLoader(session: IptvLiveSession) {
 
     private async fetch(context: LoaderContext, signal: AbortSignal): Promise<LoaderResponse> {
       if (!SEGMENT_CONTEXT_TYPES.has(context.type)) {
-        const body = await session.manifest();
+        const body = await manifestProvider();
         this.stats.loading.first = performance.now();
         return { url: context.url, data: body };
       }
@@ -418,21 +453,13 @@ class HttpError extends Error {
   }
 }
 
-/**
- * Attaches a live channel to the video element through hls.js and the rolling
- * JCE playlist session. Returns `undefined` when MediaSource/hls.js is
- * unavailable so the caller can fall back to native playback.
- */
-export async function attachIptvLive(
+function attachWithProvider(
+  Hls: HlsModule['default'],
   video: HTMLVideoElement,
-  channel: IptvChannel,
+  manifestProvider: () => Promise<string>,
   onFatalError: () => void,
-): Promise<(() => void) | undefined> {
-  const hlsModule: HlsModule = await import('hls.js');
-  const Hls = hlsModule.default;
-  if (!Hls.isSupported()) return undefined;
-  const session = new IptvLiveSession(channel);
-  const hls = new Hls({ enableWorker: false, loader: createLoader(session) });
+): () => void {
+  const hls = new Hls({ enableWorker: false, loader: createLoader(manifestProvider) });
   let mediaRecoveries = 0;
   let networkRecoveries = 0;
   hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -456,4 +483,48 @@ export async function attachIptvLive(
     video.removeAttribute('src');
     video.load();
   };
+}
+
+/**
+ * Attaches a live channel to the video element through hls.js and the rolling
+ * JCE playlist session. Returns `undefined` when MediaSource/hls.js is
+ * unavailable so the caller can fall back to native playback.
+ */
+export async function attachIptvLive(
+  video: HTMLVideoElement,
+  channel: IptvChannel,
+  onFatalError: () => void,
+): Promise<(() => void) | undefined> {
+  const hlsModule: HlsModule = await import('hls.js');
+  const Hls = hlsModule.default;
+  if (!Hls.isSupported()) return undefined;
+  const session = new IptvLiveSession(channel);
+  return attachWithProvider(Hls, video, () => session.manifest(), onFatalError);
+}
+
+/**
+ * Attaches a finished programme's catchup window as on-demand playback.
+ * Without MediaSource the element falls back to playing the raw catchup
+ * URL natively, which works because the playlist is a static window.
+ */
+export async function attachIptvReplay(
+  video: HTMLVideoElement,
+  channel: IptvChannel,
+  programme: { start: number; stop: number },
+  onFatalError: () => void,
+): Promise<() => void> {
+  const hlsModule: HlsModule = await import('hls.js');
+  const Hls = hlsModule.default;
+  const startSec = Math.floor(programme.start / 1000);
+  const endSec = Math.floor(programme.stop / 1000);
+  if (!Hls.isSupported()) {
+    const url = await jceTimeshiftUrl(channel.pid, channel.sid, startSec, endSec, channel.defn);
+    video.src = url;
+    return () => {
+      video.removeAttribute('src');
+      video.load();
+    };
+  }
+  const playlist = resolveIptvReplay(channel, startSec, endSec);
+  return attachWithProvider(Hls, video, () => playlist, onFatalError);
 }

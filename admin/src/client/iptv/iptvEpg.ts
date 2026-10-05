@@ -16,44 +16,81 @@ export interface IptvProgramme {
 
 interface CachedGuide {
   at: number;
-  programmes: Map<string, IptvProgramme>;
+  schedules: Map<string, IptvProgramme[]>;
 }
 
 let cached: CachedGuide | undefined;
-let pending: Promise<Map<string, IptvProgramme>> | undefined;
+let pending: Promise<Map<string, IptvProgramme[]>> | undefined;
 
-export async function loadIptvGuide(options: { fetchImpl?: typeof desktopAwareFetch; now?: number } = {}): Promise<Map<string, IptvProgramme>> {
+/** Full programme list per channel id, sorted by start time. */
+export async function loadIptvProgrammes(
+  options: { fetchImpl?: typeof desktopAwareFetch; now?: number } = {},
+): Promise<Map<string, IptvProgramme[]>> {
   const now = options.now ?? Date.now();
-  if (cached && now - cached.at < EPG_TTL_MS) return cached.programmes;
+  if (cached && now - cached.at < EPG_TTL_MS) return cached.schedules;
   pending ??= fetchGuide(options.fetchImpl ?? desktopAwareFetch)
-    .then((xml) => currentProgrammes(xml, now))
-    .then((programmes) => {
-      cached = { at: now, programmes };
-      return programmes;
+    .then(parseProgrammes)
+    .then((schedules) => {
+      cached = { at: now, schedules };
+      return schedules;
     })
-    .catch(() => new Map<string, IptvProgramme>())
+    .catch(() => new Map<string, IptvProgramme[]>())
     .finally(() => {
       pending = undefined;
     });
   return pending;
 }
 
+export async function loadIptvGuide(
+  options: { fetchImpl?: typeof desktopAwareFetch; now?: number } = {},
+): Promise<Map<string, IptvProgramme>> {
+  const now = options.now ?? Date.now();
+  const schedules = await loadIptvProgrammes(options);
+  const current = new Map<string, IptvProgramme>();
+  for (const [channel, programmes] of schedules) {
+    for (let i = programmes.length - 1; i >= 0; i--) {
+      const programme = programmes[i];
+      if (programme && now >= programme.start && now < programme.stop) {
+        current.set(channel, programme);
+        break;
+      }
+    }
+  }
+  return current;
+}
+
 export function currentProgrammes(xml: string, now: number): Map<string, IptvProgramme> {
-  const programmes = new Map<string, IptvProgramme>();
+  const current = new Map<string, IptvProgramme>();
+  for (const [channel, programmes] of parseProgrammes(xml)) {
+    for (let i = programmes.length - 1; i >= 0; i--) {
+      const programme = programmes[i];
+      if (programme && now >= programme.start && now < programme.stop) {
+        current.set(channel, programme);
+        break;
+      }
+    }
+  }
+  return current;
+}
+
+export function parseProgrammes(xml: string): Map<string, IptvProgramme[]> {
+  const schedules = new Map<string, IptvProgramme[]>();
   const programmeRe = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/g;
   for (const match of xml.matchAll(programmeRe)) {
     const attrs = match[1] ?? '';
     const start = parseXmltvTime(attr(attrs, 'start'));
     const stop = parseXmltvTime(attr(attrs, 'stop'));
-    if (!Number.isFinite(start) || !Number.isFinite(stop) || now < start || now >= stop) continue;
+    if (!Number.isFinite(start) || !Number.isFinite(stop)) continue;
     const channel = attr(attrs, 'channel');
     if (!channel) continue;
     const title = decodeEntities(/<title\b[^>]*>([\s\S]*?)<\/title>/.exec(match[2] ?? '')?.[1] ?? '');
     if (!title) continue;
-    const existing = programmes.get(channel);
-    if (!existing || start > existing.start) programmes.set(channel, { title, start, stop });
+    const list = schedules.get(channel) ?? [];
+    list.push({ title, start, stop });
+    schedules.set(channel, list);
   }
-  return programmes;
+  for (const list of schedules.values()) list.sort((a, b) => a.start - b.start);
+  return schedules;
 }
 
 async function fetchGuide(fetchImpl: typeof desktopAwareFetch): Promise<string> {

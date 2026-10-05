@@ -1,4 +1,4 @@
-import { currentProgrammes } from './iptvEpg';
+import { currentProgrammes, parseProgrammes } from './iptvEpg';
 
 const XML = `<?xml version="1.0"?>
 <tv>
@@ -31,4 +31,16 @@ it('ignores malformed or future programmes', () => {
   const now = Date.UTC(2025, 0, 1, 10, 30);
   const guide = currentProgrammes('<tv><programme channel="X" start="bad" stop="20250101190000 +0800"><title>T</title></programme></tv>', now);
   expect(guide.size).toBe(0);
+});
+
+describe('parseProgrammes', () => {
+  it('groups every programme by channel sorted by start time', () => {
+    const schedules = parseProgrammes(XML);
+    const cctv1 = schedules.get('CCTV1');
+    expect(cctv1?.length).toBe(2);
+    expect(cctv1?.[0]?.title).toBe('晚间新闻');
+    expect(cctv1?.[1]?.title).toBe('联播 & 天气');
+    expect(cctv1?.[0]?.start).toBeLessThan(cctv1?.[1]?.start ?? 0);
+    expect(schedules.get('北京卫视')?.[0]?.title).toBe('Beijing News');
+  });
 });

@@ -1,5 +1,5 @@
 import { Alert, Button, Chip, Spinner } from '@heroui/react';
-import { ArrowLeft, History, RotateCcw, Tv } from 'lucide-react';
+import { ArrowLeft, History, Play, RotateCcw, Tv } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslate } from '../../settings/i18n';
@@ -7,8 +7,12 @@ import { attachHlsSource } from '../playback/hlsPlayback';
 import { WebPlayerSurface } from '../playback/WebPlayerSurface';
 import { isIptvSupportedShell, resolveIptvChannelCached } from './iptvApi';
 import { getIptvChannel, IPTV_LOGO_BASE, iptvChannelGroup, type IptvChannel } from './iptvChannels';
-import { loadIptvGuide } from './iptvEpg';
-import { attachIptvLive, isIptvJceChannel } from './iptvLive';
+import { loadIptvGuide, loadIptvProgrammes, type IptvProgramme } from './iptvEpg';
+import { attachIptvLive, attachIptvReplay, isIptvJceChannel } from './iptvLive';
+
+interface ReplayTarget {
+  programme: IptvProgramme;
+}
 
 type PlayerState = 'loading' | 'ready' | 'failed' | 'unsupported';
 type FailureKind = 'resolve' | 'playback';
@@ -29,6 +33,8 @@ export function IptvPlayerPage() {
   const jceEligible = channel !== undefined && isIptvJceChannel(channel);
   const [jceExhaustedFor, setJceExhaustedFor] = useState<string>();
   const jceExhausted = jceExhaustedFor === channel?.slug;
+  const [replayTarget, setReplayTarget] = useState<(ReplayTarget & { slug: string }) | null>(null);
+  const replay = replayTarget?.slug === channel?.slug ? replayTarget : null;
   const [state, setState] = useState<PlayerState>(() =>
     channel && supported && isIptvJceChannel(channel) ? 'ready' : 'loading',
   );
@@ -96,7 +102,25 @@ export function IptvPlayerPage() {
         };
       });
     };
-    if (jceEligible && !jceExhausted) {
+    if (replay) {
+      void attachIptvReplay(video, channel, replay.programme, () => {
+        if (!disposed) {
+          setFailure('playback');
+          setState('failed');
+        }
+      }).then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        detach = cleanup;
+      }, () => {
+        if (!disposed) {
+          setFailure('playback');
+          setState('failed');
+        }
+      });
+    } else if (jceEligible && !jceExhausted) {
       // `undefined` means MSE is unavailable; drop to the raw URL chain so a
       // native-HLS engine still gets a source. A fatal session error falls
       // back the same way.
@@ -120,7 +144,7 @@ export function IptvPlayerPage() {
       disposed = true;
       detach?.();
     };
-  }, [channel, urls, state, jceEligible, jceExhausted]);
+  }, [channel, urls, state, jceEligible, jceExhausted, replay]);
 
   if (!channel) {
     return (
@@ -216,7 +240,32 @@ export function IptvPlayerPage() {
         </Alert>
       )}
 
+      {replay && (
+        <div className="flex items-center gap-3 rounded-xl border border-accent/30 bg-surface px-4 py-3">
+          <History aria-hidden="true" className="size-4 shrink-0 text-accent" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-foreground">{replay.programme.title}</p>
+            <p className="text-xs text-muted">
+              {formatTime(replay.programme.start)} – {formatTime(replay.programme.stop)}
+            </p>
+          </div>
+          <Button
+            onPress={() => { setReplayTarget(null); }}
+            size="sm"
+            variant="secondary"
+          >
+            {tr('Back to live', '返回直播')}
+          </Button>
+        </div>
+      )}
+
       <ChannelMeta channel={channel} nowPlaying={nowPlaying} />
+
+      <ProgrammeGuide
+        channel={channel}
+        onReplay={(target) => { setReplayTarget(target && { ...target, slug: channel.slug }); }}
+        replay={replay}
+      />
     </div>
   );
 }
@@ -262,6 +311,115 @@ function ChannelMeta({ channel, nowPlaying }: { channel: IptvChannel; nowPlaying
         </p>
       )}
     </div>
+  );
+}
+
+function formatTime(ms: number): string {
+  const date = new Date(ms);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function localDayStart(at: number): number {
+  const date = new Date(at);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function dayLabel(start: number, todayStart: number, tr: (en: string, zh: string) => string): string {
+  const day = new Date(start);
+  day.setHours(0, 0, 0, 0);
+  const offset = Math.round((day.getTime() - todayStart) / 86_400_000);
+  if (offset === -1) return tr('Yesterday', '昨天');
+  if (offset === 0) return tr('Today', '今天');
+  if (offset === 1) return tr('Tomorrow', '明天');
+  const date = new Date(start);
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function ProgrammeGuide({
+  channel,
+  onReplay,
+  replay,
+}: {
+  channel: IptvChannel;
+  onReplay: (target: ReplayTarget | null) => void;
+  replay: ReplayTarget | null;
+}) {
+  const tr = useTranslate();
+  const [loaded, setLoaded] = useState<{ at: number; programmes: IptvProgramme[] }>();
+  useEffect(() => {
+    const tvgId = channel.tvgId;
+    if (!tvgId) return;
+    let active = true;
+    void loadIptvProgrammes().then((schedules) => {
+      if (active) setLoaded({ at: Date.now(), programmes: schedules.get(tvgId) ?? [] });
+    });
+    return () => { active = false; };
+  }, [channel.tvgId]);
+
+  if (!channel.tvgId || !loaded?.programmes.length) return null;
+  const now = loaded.at;
+  const todayStart = localDayStart(now);
+  const visible = loaded.programmes.filter((programme) => programme.stop > todayStart - 86_400_000);
+  if (!visible.length) return null;
+  const canReplay = isIptvJceChannel(channel);
+  const replayStart = replay?.programme.start;
+
+  return (
+    <section className="space-y-3">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+        <History aria-hidden="true" className="size-4 text-muted" />
+        {tr('Programme guide', '节目单')}
+      </h2>
+      <div className="overflow-hidden rounded-xl border border-default/20">
+        {visible.map((programme, index) => {
+          const airing = now >= programme.start && now < programme.stop;
+          const ended = programme.stop <= now;
+          const active = replayStart === programme.start;
+          const clickable = airing || (ended && canReplay);
+          const label = dayLabel(programme.start, todayStart, tr);
+          const previous = visible[index - 1];
+          const divider =
+            !previous || dayLabel(previous.start, todayStart, tr) !== label ? label : undefined;
+          const row = (
+            <button
+              className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                active
+                  ? 'bg-accent/10'
+                  : ended && canReplay
+                    ? 'hover:bg-surface-secondary'
+                    : 'cursor-default'
+              }`}
+              disabled={!clickable}
+              key={programme.start}
+              onClick={() => {
+                if (airing) onReplay(null);
+                else if (ended && canReplay) onReplay({ programme });
+              }}
+              type="button"
+            >
+              <span className="w-11 shrink-0 font-mono text-xs text-muted">{formatTime(programme.start)}</span>
+              <span className={`min-w-0 flex-1 truncate text-sm ${ended || airing ? 'text-foreground' : 'text-muted'}`}>
+                {programme.title}
+              </span>
+              {active && <Chip size="sm" variant="soft">{tr('Replaying', '回放中')}</Chip>}
+              {airing && !active && <Chip size="sm" variant="soft">{tr('Live', '直播')}</Chip>}
+              {ended && canReplay && !active && (
+                <Play aria-hidden="true" className="size-3.5 shrink-0 text-muted" />
+              )}
+            </button>
+          );
+          return (
+            <div className="border-t border-default/20 first:border-t-0" key={programme.start}>
+              {divider && (
+                <p className="bg-surface-secondary px-4 py-1 text-xs font-medium text-muted">{divider}</p>
+              )}
+              {row}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
