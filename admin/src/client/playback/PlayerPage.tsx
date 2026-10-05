@@ -21,6 +21,7 @@ import { useClientAuth } from '../auth/ClientAuthContext';
 import { getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../api/apiBase';
 import { browserSources, nativeSources, selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
 import { useTranslate } from '../../settings/i18n';
+import { randomUuid } from '../../utils/uuid';
 import { attachHlsSource, isHlsSource } from './hlsPlayback';
 import { DesktopPlayerSurface } from './DesktopPlayerSurface';
 import { WebPlayerSurface } from './WebPlayerSurface';
@@ -311,7 +312,7 @@ export function PlayerPage() {
     if (startedRef.current) void stopPlayback(playbackState(resumeTicksRef.current));
     startedRef.current = false;
     lastProgressTicksRef.current = resumeTicksRef.current;
-    setPlaySessionId(crypto.randomUUID());
+    setPlaySessionId(randomUuid());
     setSelectedSourceId(sourceId);
   };
   const nextSource = sources[(sources.findIndex((source) => source.Id === selectedSource.Id) + 1) % sources.length];

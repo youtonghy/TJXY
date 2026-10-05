@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { validUuid } from '../../api/responseValidation';
 import { useTranslate } from '../../settings/i18n';
+import { randomUuid } from '../../utils/uuid';
 import { ClientApiError } from '../api/clientApi';
 import { deleteAiConversation, getAiConversation, getAiModels, listAiConversations, streamAiChat } from './aiApi';
 import type { AiConversationSummary, AiMessage, AiModel, AiSource } from './aiTypes';
@@ -131,9 +132,9 @@ export function AiChatPage() {
   const send = async () => {
     const message = prompt.trim();
     if (message.length === 0 || selectedModel.length === 0 || recovering || status === 'submitted' || status === 'streaming') return;
-    const userMessage: AiMessage = { id: crypto.randomUUID(), role: 'user', content: message, sources: [], createdAt: new Date().toISOString() };
-    const assistantId = crypto.randomUUID();
-    const turnConversationId = conversationId ?? crypto.randomUUID();
+    const userMessage: AiMessage = { id: randomUuid(), role: 'user', content: message, sources: [], createdAt: new Date().toISOString() };
+    const assistantId = randomUuid();
+    const turnConversationId = conversationId ?? randomUuid();
     const newConversationId = conversationId === null ? turnConversationId : null;
     const rollback = messages;
     const abort = new AbortController();

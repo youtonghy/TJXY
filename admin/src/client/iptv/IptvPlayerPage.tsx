@@ -10,6 +10,7 @@ import { getIptvChannel, IPTV_LOGO_BASE, iptvChannelGroup, type IptvChannel } fr
 import { loadIptvGuide } from './iptvEpg';
 
 type PlayerState = 'loading' | 'ready' | 'failed' | 'unsupported';
+type FailureKind = 'resolve' | 'playback';
 
 export function IptvPlayerPage() {
   const tr = useTranslate();
@@ -19,6 +20,7 @@ export function IptvPlayerPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [urls, setUrls] = useState<string[]>();
   const [state, setState] = useState<PlayerState>('loading');
+  const [failure, setFailure] = useState<FailureKind>('resolve');
   const [reloadKey, setReloadKey] = useState(0);
   const [nowPlaying, setNowPlaying] = useState<string>();
 
@@ -31,7 +33,11 @@ export function IptvPlayerPage() {
         setUrls(resolved);
         setState('ready');
       })
-      .catch(() => { if (active) setState('failed'); });
+      .catch(() => {
+        if (!active) return;
+        setFailure('resolve');
+        setState('failed');
+      });
     return () => { active = false; };
   }, [channel, supported, reloadKey]);
 
@@ -55,6 +61,7 @@ export function IptvPlayerPage() {
       const url = urls[index];
       if (disposed) return;
       if (!url) {
+        setFailure('playback');
         setState('failed');
         return;
       }
@@ -163,9 +170,15 @@ export function IptvPlayerPage() {
         <Alert role="alert" status="danger">
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>{tr('Unable to resolve the live stream', '无法解析直播地址')}</Alert.Title>
+            <Alert.Title>
+              {failure === 'resolve'
+                ? tr('Unable to resolve the live stream', '无法解析直播地址')
+                : tr('The resolved streams could not be played', '直播地址解析成功，但所有流均无法播放')}
+            </Alert.Title>
             <Alert.Description>
-              {tr('The upstream source may be temporarily unavailable. Try again later.', '上游直播源可能暂时不可用，请稍后重试。')}
+              {failure === 'resolve'
+                ? tr('The upstream source may be temporarily unavailable. Try again later.', '上游直播源可能暂时不可用，请稍后重试。')
+                : tr('The stream CDN may be unreachable from this network. Try another channel or network.', '当前网络可能无法访问该直播 CDN，请更换频道或网络后重试。')}
             </Alert.Description>
           </Alert.Content>
         </Alert>

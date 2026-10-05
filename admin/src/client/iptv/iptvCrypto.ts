@@ -180,7 +180,9 @@ function base64UrlEncode(bytes: Uint8Array): string {
 }
 
 function randomUuidHex(): string {
-  return crypto.randomUUID().replaceAll('-', '').toUpperCase();
+  // crypto.randomUUID is secure-context only; the embedded WebView pages run on
+  // a plain http origin where it is undefined.
+  return toHex(defaultRandom(16)).toUpperCase();
 }
 
 function defaultRandom(length: number): Uint8Array {

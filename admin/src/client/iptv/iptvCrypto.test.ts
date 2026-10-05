@@ -38,3 +38,14 @@ it('produces url-safe tokens without padding', () => {
   expect(token.guid).toMatch(/^[0-9a-f]{32}$/);
   expect(token.flowId).toMatch(/^[0-9A-F]{32}_4330403$/);
 });
+
+// The embedded shells serve the bundle from a plain http origin, which is not a
+// secure context: crypto.randomUUID is undefined there. Token generation must
+// only rely on crypto.getRandomValues.
+it('generates tokens where crypto.randomUUID is unavailable', () => {
+  const getRandomValues = crypto.getRandomValues.bind(crypto);
+  vi.stubGlobal('crypto', { getRandomValues });
+  const token = makeIptvCkey('2024078201');
+  expect(token.flowId).toMatch(/^[0-9A-F]{32}_4330403$/);
+  vi.unstubAllGlobals();
+});
