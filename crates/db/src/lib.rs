@@ -132,7 +132,9 @@ pub use discover::{
 pub use display_preferences::{DisplayPreferencesRepository, DisplayPreferencesRepositoryError};
 pub use filesystem_index::{FilesystemIndexRepository, FilesystemIndexState};
 pub use filesystem_path::{FilesystemObjectPath, FilesystemPathRepository};
-pub use full_scan::{FullScanPolicy, FullScanRepository, FullScanRepositoryError, FullScanRoot};
+pub use full_scan::{
+    FullScanPolicy, FullScanProgress, FullScanRepository, FullScanRepositoryError, FullScanRoot,
+};
 pub use hybrid_candidate::{
     HybridCandidateError, HybridCandidateMutation, HybridCandidatePage, HybridCandidateRecord,
     HybridCandidateRepository,

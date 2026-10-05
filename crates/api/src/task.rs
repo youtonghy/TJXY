@@ -8,11 +8,12 @@ pub enum ScheduledTaskState {
     Running,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ScheduledTaskInfo {
     name: String,
     state: ScheduledTaskState,
+    current_progress: Option<f64>,
     id: Uuid,
     triggers: Vec<ScheduledTaskTrigger>,
     description: String,
@@ -22,8 +23,10 @@ pub struct ScheduledTaskInfo {
 }
 
 impl ScheduledTaskInfo {
+    /// `current_progress` is a 0-100 percentage; `None` while a running scan has not staged
+    /// measurable child work yet.
     #[must_use]
-    pub fn full_media_scan(id: Uuid, active: bool) -> Self {
+    pub fn full_media_scan(id: Uuid, active: bool, current_progress: Option<f64>) -> Self {
         Self {
             name: "Scan Media Library".to_owned(),
             state: if active {
@@ -31,6 +34,7 @@ impl ScheduledTaskInfo {
             } else {
                 ScheduledTaskState::Idle
             },
+            current_progress,
             id,
             triggers: Vec::new(),
             description: "Scans all enabled media libraries".to_owned(),

@@ -13,7 +13,7 @@ use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, Statement,
+    ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 use sea_orm_migration::MigratorTrait;
@@ -7171,6 +7171,7 @@ async fn manual_root_full_scan_enqueues_a_library_root_binding_job() {
     assert_eq!(row.try_get::<i64>("", "expected_revision").unwrap(), 1);
 }
 
+#[allow(clippy::too_many_lines)] // Keeps the start/progress/cancel lifecycle in one HTTP contract.
 #[tokio::test]
 async fn scheduled_tasks_expose_start_and_cancel_for_full_library_scans() {
     let app = test_app().await;
@@ -7188,6 +7189,7 @@ async fn scheduled_tasks_expose_start_and_cancel_for_full_library_scans() {
     assert_eq!(tasks.as_array().unwrap().len(), 1);
     assert_eq!(tasks[0]["Key"], "FullMediaScan");
     assert_eq!(tasks[0]["State"], "Idle");
+    assert_eq!(tasks[0]["CurrentProgress"], Value::Null);
     let task_id = tasks[0]["Id"].as_str().unwrap();
 
     assert_eq!(
@@ -7209,6 +7211,80 @@ async fn scheduled_tasks_expose_start_and_cancel_for_full_library_scans() {
     let body = running.into_body().collect().await.unwrap().to_bytes();
     let running: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(running["State"], "Running");
+    assert_eq!(running["CurrentProgress"], Value::Null);
+
+    let jobs = tjxy_db::WorkJobRepository::new(&app.database);
+    let parent = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::FullMediaScan],
+            "scan-worker",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let child = jobs
+        .enqueue_or_join(
+            &tjxy_db::WorkJobSpec::new(
+                tjxy_db::WorkTaskKind::ExpandItem,
+                tjxy_db::WorkScope::CatalogItem(CatalogItemId::new()),
+                1,
+                20,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    jobs.stage_batch(
+        &parent,
+        parent.id().as_uuid(),
+        &[tjxy_db::WorkStagingRow::new(
+            "FullScanChild",
+            "ExpandItem:item:1",
+            json!({"job_id": child.job().id().as_uuid().to_string(), "created": true}),
+            "Required",
+        )
+        .unwrap()],
+    )
+    .await
+    .unwrap();
+    let staged = get(
+        &app.router,
+        &format!("/ScheduledTasks/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    let body = staged.into_body().collect().await.unwrap().to_bytes();
+    let staged: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(staged["CurrentProgress"], json!(0.0));
+
+    let claimed_child = jobs
+        .claim_next(
+            &[tjxy_db::WorkTaskKind::ExpandItem],
+            "child-worker",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let transaction = app.database.begin().await.unwrap();
+    jobs.complete_in_transaction(
+        &transaction,
+        &claimed_child,
+        tjxy_db::WorkJobResult::success(json!({}), Vec::new()),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let finished = get(
+        &app.router,
+        &format!("/ScheduledTasks/{task_id}"),
+        Some(&token),
+    )
+    .await;
+    let body = finished.into_body().collect().await.unwrap().to_bytes();
+    let finished: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(finished["CurrentProgress"], json!(100.0));
 
     assert_eq!(
         delete_empty(
@@ -7229,11 +7305,12 @@ async fn scheduled_tasks_expose_start_and_cancel_for_full_library_scans() {
     let body = stopped.into_body().collect().await.unwrap().to_bytes();
     let stopped: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(stopped["State"], "Idle");
+    assert_eq!(stopped["CurrentProgress"], Value::Null);
     let cancelled = app
         .database
         .query_one(Statement::from_string(
             app.database.get_database_backend(),
-            "SELECT j.state, r.error_summary FROM work_jobs j JOIN work_results r ON r.job_id = j.id"
+            "SELECT j.state, r.error_summary FROM work_jobs j JOIN work_results r ON r.job_id = j.id WHERE r.error_summary IS NOT NULL"
                 .to_owned(),
         ))
         .await

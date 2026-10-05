@@ -3,11 +3,11 @@ use thiserror::Error;
 use tjxy_common::{CatalogItemId, LibraryId, StorageRootId, UserId};
 use tjxy_db::{
     ADMIN_CANCELLED_ERROR, CatalogItemType, CatalogQueryError, CatalogQueryRepository,
-    DiscoverTitlesError, DiscoverTitlesRepository, FullScanRepository, FullScanRepositoryError,
-    ManualProbeError, ManualProbeRepository, ManualProbeSubmission, MetadataWorkError,
-    MetadataWorkRepository, StorageSyncRepository, StorageSyncRepositoryError, WorkJobAdminRecord,
-    WorkJobRepository, WorkJobRepositoryError, WorkJobSpec, WorkJobSubmission, WorkScope,
-    WorkTaskKind,
+    DiscoverTitlesError, DiscoverTitlesRepository, FullScanProgress, FullScanRepository,
+    FullScanRepositoryError, ManualProbeError, ManualProbeRepository, ManualProbeSubmission,
+    MetadataWorkError, MetadataWorkRepository, StorageSyncRepository, StorageSyncRepositoryError,
+    WorkJobAdminRecord, WorkJobRepository, WorkJobRepositoryError, WorkJobSpec, WorkJobSubmission,
+    WorkScope, WorkTaskKind,
 };
 
 const MANUAL_REFRESH_PRIORITY: i32 = 20;
@@ -192,14 +192,16 @@ impl TaskService {
             .map_err(Into::into)
     }
 
-    /// Reports whether the full media scan task has pending or running work.
+    /// Reports durable child completion while the full media scan task has active work.
     ///
     /// # Errors
     ///
     /// Returns [`TaskServiceError`] when task state cannot be read.
-    pub async fn full_media_scan_active(&self) -> Result<bool, TaskServiceError> {
-        WorkJobRepository::new(&self.database)
-            .has_active_task(WorkTaskKind::FullMediaScan)
+    pub async fn full_media_scan_progress(
+        &self,
+    ) -> Result<Option<FullScanProgress>, TaskServiceError> {
+        FullScanRepository::new(&self.database)
+            .media_scan_progress()
             .await
             .map_err(Into::into)
     }

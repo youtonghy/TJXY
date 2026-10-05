@@ -9,6 +9,7 @@ export interface ScheduledTask {
   id: string;
   name: string;
   state: ScheduledTaskState;
+  currentProgress: number | null;
   description: string;
   category: string;
   key: string;
@@ -137,11 +138,13 @@ function toScheduledTask(value: unknown): ScheduledTask {
     || !validText(value.Description)
     || !validText(value.Category)
     || !validText(value.Key)
+    || !(value.CurrentProgress == null || validPercent(value.CurrentProgress))
   ) throw invalidResponse('scheduled task');
   return {
     id: value.Id,
     name: value.Name,
     state: value.State,
+    currentProgress: value.CurrentProgress ?? null,
     description: value.Description,
     category: value.Category,
     key: value.Key,
@@ -205,6 +208,10 @@ function validId(value: unknown): value is string {
 
 function validText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 512;
+}
+
+function validPercent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
 }
 
 function validDate(value: unknown): value is string | null {

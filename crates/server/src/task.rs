@@ -439,9 +439,15 @@ async fn full_media_scan(state: &AppState) -> Result<ScheduledTaskInfo, Response
         return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     tasks
-        .full_media_scan_active()
+        .full_media_scan_progress()
         .await
-        .map(|active| ScheduledTaskInfo::full_media_scan(FULL_MEDIA_SCAN_TASK_ID, active))
+        .map(|progress| {
+            ScheduledTaskInfo::full_media_scan(
+                FULL_MEDIA_SCAN_TASK_ID,
+                progress.is_some(),
+                progress.and_then(tjxy_db::FullScanProgress::percent),
+            )
+        })
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
 

@@ -9,9 +9,10 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use tjxy_common::{CatalogItemId, LibraryId, SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_db::{
-    ClaimedWorkJob, FullScanChildSubmission, MetadataRequirement, WorkJobAdminOutcome,
-    WorkJobAdminStatus, WorkJobClock, WorkJobRepository, WorkJobRepositoryError, WorkJobResult,
-    WorkJobSpec, WorkJobState, WorkScope, WorkStagingRow, WorkTaskKind,
+    ClaimedWorkJob, FullScanChildSubmission, FullScanRepository, MetadataRequirement,
+    WorkJobAdminOutcome, WorkJobAdminStatus, WorkJobClock, WorkJobRepository,
+    WorkJobRepositoryError, WorkJobResult, WorkJobSpec, WorkJobState, WorkScope, WorkStagingRow,
+    WorkTaskKind,
 };
 use tjxy_domain::MetadataSourceMode;
 use tjxy_test_support::test_database;
@@ -2206,4 +2207,135 @@ async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backo
         );
         assert_eq!(record.job().state(), WorkJobState::Pending);
     }
+}
+
+#[allow(clippy::too_many_lines)] // Two parents, a retried duplicate child, and terminal states form one contract.
+#[tokio::test]
+async fn media_scan_progress_counts_terminal_children_once_across_parents() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 0).unwrap();
+    let (jobs, _clock) = repository(&database, now);
+    let scans = FullScanRepository::new(&database);
+
+    assert_eq!(scans.media_scan_progress().await.unwrap(), None);
+
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::FullMediaScan,
+            WorkScope::Library(LibraryId::new()),
+            1,
+            20,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let parent = jobs
+        .claim_next(&[WorkTaskKind::FullMediaScan], "scan", Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let empty = scans.media_scan_progress().await.unwrap().unwrap();
+    assert_eq!(empty.scheduled(), 0);
+    assert_eq!(empty.finished(), 0);
+    assert_eq!(empty.percent(), None);
+
+    for index in 0..3_u8 {
+        let child = jobs
+            .enqueue_or_join(
+                &WorkJobSpec::new(
+                    WorkTaskKind::ExpandItem,
+                    WorkScope::CatalogItem(CatalogItemId::new()),
+                    1,
+                    20,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        jobs.stage_batch(
+            &parent,
+            parent.id().as_uuid(),
+            &[WorkStagingRow::new(
+                "FullScanChild",
+                format!("ExpandItem:item:{index}"),
+                json!({"job_id": child.job().id().as_uuid().to_string(), "created": true}),
+                "Required",
+            )
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    }
+    let first = jobs
+        .claim_next(&[WorkTaskKind::ExpandItem], "worker", Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    complete_with_result(
+        &jobs,
+        &database,
+        &first,
+        WorkJobResult::success(json!({}), Vec::new()),
+    )
+    .await;
+    let second = jobs
+        .claim_next(&[WorkTaskKind::ExpandItem], "worker", Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    jobs.fail_terminal(&second, "fixture failure")
+        .await
+        .unwrap();
+
+    let progress = scans.media_scan_progress().await.unwrap().unwrap();
+    assert_eq!(progress.scheduled(), 3);
+    assert_eq!(progress.finished(), 2);
+    let percent = progress.percent().unwrap();
+    assert!((percent - 200.0 / 3.0).abs() < 0.001, "percent={percent}");
+
+    // A second library scan joining the same pending child must not double-count it.
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::FullMediaScan,
+            WorkScope::Library(LibraryId::new()),
+            1,
+            20,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let sibling_parent = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "scan-2",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let remaining = jobs
+        .claim_next(&[WorkTaskKind::ExpandItem], "worker", Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    jobs.stage_batch(
+        &sibling_parent,
+        sibling_parent.id().as_uuid(),
+        &[WorkStagingRow::new(
+            "FullScanChild",
+            "ExpandItem:item:shared",
+            json!({"job_id": remaining.id().as_uuid().to_string(), "created": false}),
+            "Required",
+        )
+        .unwrap()],
+    )
+    .await
+    .unwrap();
+
+    let shared = scans.media_scan_progress().await.unwrap().unwrap();
+    assert_eq!(shared.scheduled(), 3);
+    assert_eq!(shared.finished(), 2);
 }

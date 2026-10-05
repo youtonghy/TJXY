@@ -12,6 +12,7 @@ use tjxy_common::{
     CatalogItemId, LibraryId, LibraryRootBindingId, StorageObjectRecordId, StorageRootId, WorkJobId,
 };
 use tjxy_domain::{LocalMetadataAccessMode, MetadataSourceMode};
+use uuid::Uuid;
 
 use crate::{
     ClaimedWorkJob, WorkJobRepository, WorkJobSpec, WorkJobSubmission, WorkScope, WorkStagingRow,
@@ -20,6 +21,40 @@ use crate::{
 
 const HYBRID_BATCH_ENTITY_KIND: &str = "FullScanHybridCandidate";
 const HYBRID_BATCH_MARKER_ENTITY_KIND: &str = "FullScanHybridBatch";
+const ACTIVE_SCAN_STATES: [&str; 2] = ["Pending", "Running"];
+const TERMINAL_JOB_STATES: [&str; 2] = ["Completed", "Failed"];
+const PROGRESS_COUNT_CHUNK: usize = 512;
+
+/// Durable child-work completion observed for the library-wide media scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FullScanProgress {
+    scheduled: u64,
+    finished: u64,
+}
+
+impl FullScanProgress {
+    /// Distinct child jobs staged by every active Full Media Scan parent.
+    #[must_use]
+    pub const fn scheduled(self) -> u64 {
+        self.scheduled
+    }
+
+    /// Staged children that reached a terminal state.
+    #[must_use]
+    pub const fn finished(self) -> u64 {
+        self.finished
+    }
+
+    /// Completion percentage, or `None` while no child work is staged yet.
+    #[must_use]
+    pub fn percent(self) -> Option<f64> {
+        (self.scheduled > 0).then(|| {
+            #[allow(clippy::cast_precision_loss)]
+            let percent = self.finished as f64 * 100.0 / self.scheduled as f64;
+            percent.clamp(0.0, 100.0)
+        })
+    }
+}
 
 pub struct FullScanRepository<'connection> {
     database: &'connection DatabaseConnection,
@@ -387,6 +422,100 @@ impl<'connection> FullScanRepository<'connection> {
             })
             .collect::<Result<Vec<_>, DbErr>>()
             .map_err(Into::into)
+    }
+
+    /// Counts terminal and total child jobs staged by active Full Media Scan parents.
+    ///
+    /// Returns `None` while no Full Media Scan is pending or running. Child jobs joined by
+    /// several parents count once; joined children started outside a scan still count, since
+    /// the parents wait for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FullScanRepositoryError`] for corrupt staged payloads or SQL failures.
+    pub async fn media_scan_progress(
+        &self,
+    ) -> Result<Option<FullScanProgress>, FullScanRepositoryError> {
+        let backend = self.database.get_database_backend();
+        let parents = self
+            .database
+            .query_all(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("id"))
+                        .from(Alias::new("work_jobs"))
+                        .and_where(
+                            Expr::col(Alias::new("task_kind"))
+                                .eq(WorkTaskKind::FullMediaScan.as_str()),
+                        )
+                        .and_where(Expr::col(Alias::new("state")).is_in(ACTIVE_SCAN_STATES)),
+                ),
+            )
+            .await?
+            .iter()
+            .map(|row| row.try_get::<Uuid>("", "id"))
+            .collect::<Result<Vec<_>, DbErr>>()?;
+        if parents.is_empty() {
+            return Ok(None);
+        }
+        let staged = self
+            .database
+            .query_all(
+                backend.build(
+                    Query::select()
+                        .column(Alias::new("payload"))
+                        .from(Alias::new("work_staging_rows"))
+                        .and_where(Expr::col(Alias::new("job_id")).is_in(parents))
+                        .and_where(Expr::col(Alias::new("entity_kind")).eq("FullScanChild")),
+                ),
+            )
+            .await?;
+        let mut children = HashSet::new();
+        for row in &staged {
+            let payload: serde_json::Value = row.try_get("", "payload")?;
+            let child = payload
+                .get("job_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or(FullScanRepositoryError::CorruptRootDependency {
+                    entity_kind: "FullScanChild",
+                })?;
+            children.insert(child);
+        }
+        let mut scheduled = 0_u64;
+        let mut finished = 0_u64;
+        let children = children.into_iter().collect::<Vec<_>>();
+        for chunk in children.chunks(PROGRESS_COUNT_CHUNK) {
+            let counts = self
+                .database
+                .query_all(
+                    backend.build(
+                        Query::select()
+                            .column(Alias::new("state"))
+                            .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("job_count"))
+                            .from(Alias::new("work_jobs"))
+                            .and_where(Expr::col(Alias::new("id")).is_in(chunk.iter().copied()))
+                            .group_by_col(Alias::new("state")),
+                    ),
+                )
+                .await?;
+            for row in &counts {
+                let state: String = row.try_get("", "state")?;
+                let count = u64::try_from(row.try_get::<i64>("", "job_count")?).map_err(|_| {
+                    FullScanRepositoryError::CorruptRootDependency {
+                        entity_kind: "FullScanChild",
+                    }
+                })?;
+                scheduled += count;
+                if TERMINAL_JOB_STATES.contains(&state.as_str()) {
+                    finished += count;
+                }
+            }
+        }
+        Ok(Some(FullScanProgress {
+            scheduled,
+            finished,
+        }))
     }
 
     /// Returns the durable validation child recorded for one root in this Full scan.

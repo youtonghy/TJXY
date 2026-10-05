@@ -49,6 +49,7 @@ it('loads and validates scheduled tasks, recent jobs, and reusable library roots
       Id: taskId,
       Name: 'Scan Media Library',
       State: 'Idle',
+      CurrentProgress: null,
       Description: 'Scans libraries',
       Category: 'Library',
       Key: 'FullMediaScan',
@@ -68,7 +69,7 @@ it('loads and validates scheduled tasks, recent jobs, and reusable library roots
     }]);
 
   await expect(getTaskSnapshot()).resolves.toEqual({
-    scheduled: [expect.objectContaining({ id: taskId, key: 'FullMediaScan', state: 'Idle' })],
+    scheduled: [expect.objectContaining({ id: taskId, key: 'FullMediaScan', state: 'Idle', currentProgress: null })],
     jobs: [expect.objectContaining({
       id: jobId,
       status: 'Completed',
@@ -84,6 +85,30 @@ it('loads and validates scheduled tasks, recent jobs, and reusable library roots
   });
   expect(requestMock).toHaveBeenNthCalledWith(1, '/ScheduledTasks', {});
   expect(requestMock).toHaveBeenNthCalledWith(2, '/Admin/Tasks/Jobs?Limit=50', {});
+});
+
+it('parses bounded scheduled task progress and rejects malformed values', async () => {
+  const record = {
+    Id: taskId,
+    Name: 'Scan Media Library',
+    State: 'Running',
+    CurrentProgress: 42.5,
+    Description: 'Scans libraries',
+    Category: 'Library',
+    Key: 'FullMediaScan',
+  };
+  requestMock
+    .mockResolvedValueOnce([record])
+    .mockResolvedValueOnce([]);
+  const snapshot = await getTaskSnapshot();
+  expect(snapshot.scheduled[0]).toMatchObject({ state: 'Running', currentProgress: 42.5 });
+
+  for (const malformed of ['42', -1, 101, Number.NaN]) {
+    requestMock
+      .mockResolvedValueOnce([{ ...record, CurrentProgress: malformed }])
+      .mockResolvedValueOnce([]);
+    await expect(getTaskSnapshot()).rejects.toMatchObject({ category: 'invalid-response' });
+  }
 });
 
 it('uses exact pessimistic task commands and validates returned job identifiers', async () => {

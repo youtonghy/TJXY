@@ -54,6 +54,7 @@ const idleTask: ScheduledTask = {
   id: taskId,
   name: 'Scan Media Library',
   state: 'Idle',
+  currentProgress: null,
   description: 'Scans libraries',
   category: 'Library',
   key: 'FullMediaScan',
@@ -279,6 +280,29 @@ it('keeps records visible and preserves reload focus while a manual refresh is p
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Reload tasks' })).not.toHaveAttribute('data-pending');
   });
+});
+
+it('renders a progress bar only while a scheduled task is running', async () => {
+  const runningTask: ScheduledTask = { ...idleTask, state: 'Running', currentProgress: 42 };
+  snapshotMock.mockResolvedValue({ ...snapshot, scheduled: [idleTask, { ...runningTask, id: runningTaskId }] });
+  renderTasks();
+
+  const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
+  const bars = within(scheduled).getAllByRole('progressbar');
+  expect(bars).toHaveLength(1);
+  expect(bars[0]).toHaveAccessibleName('Scan Media Library progress');
+  expect(bars[0]).toHaveAttribute('aria-valuenow', '42');
+  expect(within(scheduled).getByText('42%')).toBeVisible();
+});
+
+it('renders an indeterminate progress bar while a running scan has no measurable work', async () => {
+  const runningTask: ScheduledTask = { ...idleTask, state: 'Running', currentProgress: null };
+  snapshotMock.mockResolvedValue({ ...snapshot, scheduled: [runningTask] });
+  renderTasks();
+
+  const scheduled = await screen.findByRole('list', { name: 'Scheduled tasks' });
+  const bar = within(scheduled).getByRole('progressbar');
+  expect(bar).not.toHaveAttribute('aria-valuenow');
 });
 
 it('starts idle scheduled work and refreshes authoritative state', async () => {

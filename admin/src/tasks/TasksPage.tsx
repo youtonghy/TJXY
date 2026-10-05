@@ -7,6 +7,7 @@ import {
   Input,
   Label,
   ListBox,
+  ProgressBar,
   Select,
   Skeleton,
   Table,
@@ -276,6 +277,9 @@ function ScheduledTasks({
                   <p className="break-words font-semibold text-foreground">{task.name}</p>
                   <p className="mt-1 break-words text-sm text-muted">{task.description}</p>
                   <p className="mt-1 break-all font-mono text-xs text-muted">{task.key}</p>
+                  {task.state === 'Running' && (
+                    <ScanTaskProgress name={task.name} value={task.currentProgress} />
+                  )}
                 </div>
                 <LabeledValue label={tr('Category', '类别')}>{task.category}</LabeledValue>
                 <LabeledValue label={tr('Status', '状态')}><TaskStatus state={task.state} /></LabeledValue>
@@ -648,6 +652,28 @@ function LabeledValue({ label, children }: { label: string; children: ReactNode 
     <div className="grid grid-cols-[6rem_minmax(0,1fr)] items-center gap-3 text-sm md:block">
       <span className="font-medium text-muted md:sr-only">{label}</span>
       <span className="min-w-0 text-foreground">{children}</span>
+    </div>
+  );
+}
+
+function ScanTaskProgress({ name, value }: { name: string; value: number | null }) {
+  const tr = useTranslate();
+  return (
+    <div className="mt-3 max-w-md">
+      <ProgressBar
+        aria-label={`${name} ${tr('progress', '进度')}`}
+        color="accent"
+        isIndeterminate={value === null}
+        size="sm"
+        value={value ?? 0}
+      >
+        <ProgressBar.Track>
+          <ProgressBar.Fill />
+        </ProgressBar.Track>
+      </ProgressBar>
+      {value !== null && (
+        <span className="mt-1 block text-xs tabular-nums text-muted">{Math.round(value)}%</span>
+      )}
     </div>
   );
 }
