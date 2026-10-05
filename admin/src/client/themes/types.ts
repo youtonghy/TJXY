@@ -24,7 +24,7 @@ export type ThemeOptionField =
   };
 
 export interface ThemeNavigationItem {
-  id: 'home' | 'libraries' | 'search' | 'rankings' | 'ai';
+  id: 'home' | 'libraries' | 'iptv' | 'search' | 'rankings' | 'ai';
   to: string;
   label: string;
   icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;

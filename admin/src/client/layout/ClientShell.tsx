@@ -1,4 +1,4 @@
-import { Home, Library, Search, Sparkles, Trophy } from 'lucide-react';
+import { Home, Library, Search, Sparkles, Trophy, Tv } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ClientAnnouncements } from '../../announcements/ClientAnnouncements';
@@ -6,12 +6,14 @@ import { useSystemLocale } from '../../settings/SystemLocaleProvider';
 import { useTranslate } from '../../settings/i18n';
 import { getAiModels } from '../ai/aiApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
+import { isIptvSupportedShell } from '../iptv/iptvApi';
 import { useActiveClientTheme } from '../themes/ThemeRuntime';
 import type { ThemeNavigationItem } from '../themes/types';
 
 const navigationItems = [
   { id: 'home', to: '/app/', label: 'Home', chineseLabel: '首页', icon: Home },
   { id: 'libraries', to: '/app/libraries', label: 'Libraries', chineseLabel: '媒体库', icon: Library },
+  { id: 'iptv', to: '/app/iptv', label: 'IPTV', chineseLabel: 'IPTV', icon: Tv },
   { id: 'search', to: '/app/search', label: 'Search', chineseLabel: '搜索', icon: Search },
   { id: 'rankings', to: '/app/rankings', label: 'Rankings', chineseLabel: '排行榜', icon: Trophy },
   { id: 'ai', to: '/app/ai', label: 'AI assistant', chineseLabel: 'AI 助手', icon: Sparkles },
@@ -35,7 +37,7 @@ export function ClientShell({ children }: { children: ReactNode }) {
   }, []);
 
   const navigation = useMemo<ThemeNavigationItem[]>(() => navigationItems
-    .filter(({ id }) => id !== 'ai' || aiAvailable)
+    .filter(({ id }) => (id !== 'ai' || aiAvailable) && (id !== 'iptv' || isIptvSupportedShell()))
     .map(({ id, to, label, chineseLabel, icon }) => ({
       id, to, icon, label: tr(label, chineseLabel),
     })), [aiAvailable, tr]);
