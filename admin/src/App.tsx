@@ -87,6 +87,8 @@ function ApplicationRoutes() {
   if (isDesktopShell()) {
     return (
       <Routes>
+        <Route element={<ClientThemeRuntime><ClientAuthProvider><ClientLoginPage /></ClientAuthProvider></ClientThemeRuntime>} path="/login" />
+        <Route element={<Navigate replace to="/login" />} path="/app/login" />
         <Route element={<ClientApp />} path="/app/*" />
         <Route element={<NavigateToApp />} path="*" />
       </Routes>

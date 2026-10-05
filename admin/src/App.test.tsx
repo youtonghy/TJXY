@@ -110,6 +110,7 @@ vi.mock('./dashboard/DashboardPage', async () => {
 });
 
 beforeEach(() => {
+  vi.unstubAllEnvs();
   window.localStorage.setItem('tjxy-system-locale', 'en-US');
   authControl.state.authenticated = true;
   authControl.login.mockClear();
@@ -138,6 +139,16 @@ it('redirects the legacy administrator login URL to the shared login', async () 
   expect(await screen.findByRole('heading', { name: 'Welcome back' }, { timeout: 10_000 })).toBeVisible();
   expect(window.location.pathname).toBe('/login');
   expect(window.location.search).toBe('?redirect=%2Fadmin');
+});
+
+it('routes the desktop shell to the standalone login page', async () => {
+  vi.stubEnv('VITE_TJXY_SHELL', 'desktop');
+  window.localStorage.removeItem('tjxy.api.baseUrl');
+  renderRoute('/app/', false);
+
+  expect(await screen.findByRole('heading', { name: 'Welcome back' }, { timeout: 10_000 })).toBeVisible();
+  expect(window.location.pathname).toBe('/login');
+  expect(screen.getByLabelText('Server address')).toBeVisible();
 });
 
 it('renders the ordinary HeroUI client without mounting the administrator shell', async () => {
