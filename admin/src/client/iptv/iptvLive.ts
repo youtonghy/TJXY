@@ -1,6 +1,7 @@
 import { desktopAwareFetch } from '../api/apiBase';
 import { IptvResolveError, resolveIptvChannel } from './iptvApi';
 import type { IptvChannel } from './iptvChannels';
+import { getIptvDeviceEngine } from './iptvDevice';
 import { JceDeadHostError, jceTimeshiftUrl } from './iptvJce';
 
 // Port of the rolling-window playlist engine from the upstream ysp-live.py
@@ -108,6 +109,7 @@ interface IptvLiveDeps {
   fetchImpl?: FetchLike;
   timeshiftUrl?: (pid: string, sid: string, start: number, end: number, stream: string) => Promise<string>;
   resolveBk?: (channel: IptvChannel) => Promise<string[]>;
+  deviceEngine?: Pick<ReturnType<typeof getIptvDeviceEngine>, 'fetchPlaylist' | 'segmentHeaders'>;
 }
 
 async function fetchAbsPlaylist(fetchImpl: FetchLike, url: string, depth = 0): Promise<string> {
@@ -140,6 +142,8 @@ async function fetchAbsPlaylist(fetchImpl: FetchLike, url: string, depth = 0): P
 /**
  * Holds the rolling live state for one channel: the merged JCE catchup
  * window, or a resolved bkliveinfo playlist for channels without timeshift.
+ * Channels carrying an upstream `liveId` additionally try the high-bitrate
+ * device-protocol path first, exactly like upstream's do_GET ordering.
  */
 export class IptvLiveSession {
   private mode: 'jce' | 'bk';
@@ -154,11 +158,14 @@ export class IptvLiveSession {
   private bkUrlsAt = 0;
   private bkPlaylist = '';
   private bkPlaylistAt = 0;
+  private devicePlaylist = '';
+  private windowRefreshedAt = 0;
   private lastError = '';
   private readonly now: () => number;
   private readonly fetchImpl: FetchLike;
   private readonly timeshiftUrl: NonNullable<IptvLiveDeps['timeshiftUrl']>;
   private readonly resolveBk: NonNullable<IptvLiveDeps['resolveBk']>;
+  private readonly deviceEngine: NonNullable<IptvLiveDeps['deviceEngine']>;
 
   constructor(
     private readonly channel: IptvChannel,
@@ -169,6 +176,7 @@ export class IptvLiveSession {
     this.fetchImpl = deps.fetchImpl ?? desktopAwareFetch;
     this.timeshiftUrl = deps.timeshiftUrl ?? jceTimeshiftUrl;
     this.resolveBk = deps.resolveBk ?? resolveIptvChannel;
+    this.deviceEngine = deps.deviceEngine ?? getIptvDeviceEngine();
   }
 
   /** Returns the current media playlist, refreshing the window when stale. */
@@ -188,7 +196,13 @@ export class IptvLiveSession {
     return playlist;
   }
 
+  /** Headers a segment request should carry for the active playlist source. */
+  segmentHeaders(url: string): Record<string, string> {
+    return this.devicePlaylist ? this.deviceEngine.segmentHeaders(url) : SEGMENT_HEADERS;
+  }
+
   private hasContent(): boolean {
+    if (this.devicePlaylist) return true;
     return this.mode === 'bk' ? this.bkPlaylist.length > 0 : this.order.length > 0;
   }
 
@@ -204,9 +218,23 @@ export class IptvLiveSession {
   }
 
   private async refreshOnce(): Promise<void> {
-    // lastRefresh only advances on success, so a gap this long means the
-    // merged window is stale: reseed instead of extending a dead timeline.
-    if (this.lastRefresh > 0 && this.now() - this.lastRefresh > STALE_RESET_MS) {
+    // Device path first (upstream serves the high-bitrate CDN playlist
+    // whenever the channel has a liveId and the session is healthy).
+    if (this.channel.liveId) {
+      try {
+        this.devicePlaylist = await this.deviceEngine.fetchPlaylist(this.channel);
+        this.lastError = '';
+        return;
+      } catch (error) {
+        this.devicePlaylist = '';
+        this.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    // windowRefreshedAt only advances on a successful JCE/bk merge, so a gap
+    // this long means the merged window is stale: reseed instead of
+    // extending a dead timeline. (devicePlaylist refreshes don't count —
+    // they never touched the window.)
+    if (this.windowRefreshedAt > 0 && this.now() - this.windowRefreshedAt > STALE_RESET_MS) {
       this.segments.clear();
       this.order.length = 0;
       this.lastPdt = '';
@@ -228,6 +256,7 @@ export class IptvLiveSession {
       }
       if (this.mode === 'bk') await this.bkRefresh();
       this.lastError = '';
+      this.windowRefreshedAt = this.now();
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
       throw error;
@@ -315,6 +344,7 @@ export class IptvLiveSession {
   }
 
   private buildPlaylist(): string {
+    if (this.devicePlaylist) return this.devicePlaylist;
     if (this.mode === 'bk') return this.bkPlaylist || '';
     const keys = this.order.slice(-VISIBLE_SEGMENTS);
     const segments = keys
@@ -400,7 +430,7 @@ function makeStats(): LoaderStats {
   };
 }
 
-function createLoader(manifestProvider: () => Promise<string>) {
+function createLoader(manifestProvider: () => Promise<string>, segmentHeaders: (url: string) => Record<string, string>) {
   return class IptvLoader {
     context: LoaderContext | null = null;
     stats: LoaderStats = makeStats();
@@ -467,7 +497,7 @@ function createLoader(manifestProvider: () => Promise<string>) {
         return { url: context.url, data: body };
       }
       const response = await desktopAwareFetch(context.url, {
-        headers: SEGMENT_HEADERS,
+        headers: segmentHeaders(context.url),
         signal,
       });
       if (!response.ok) throw new HttpError(response.status);
@@ -488,9 +518,10 @@ function attachWithProvider(
   Hls: HlsModule['default'],
   video: HTMLVideoElement,
   manifestProvider: () => Promise<string>,
+  segmentHeaders: (url: string) => Record<string, string>,
   onFatalError: () => void,
 ): () => void {
-  const hls = new Hls({ enableWorker: false, loader: createLoader(manifestProvider) });
+  const hls = new Hls({ enableWorker: false, loader: createLoader(manifestProvider, segmentHeaders) });
   let mediaRecoveries = 0;
   let networkRecoveries = 0;
   hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -530,7 +561,7 @@ export async function attachIptvLive(
   const Hls = hlsModule.default;
   if (!Hls.isSupported()) return undefined;
   const session = new IptvLiveSession(channel);
-  return attachWithProvider(Hls, video, () => session.manifest(), onFatalError);
+  return attachWithProvider(Hls, video, () => session.manifest(), (url) => session.segmentHeaders(url), onFatalError);
 }
 
 /**
@@ -557,5 +588,5 @@ export async function attachIptvReplay(
     };
   }
   const playlist = resolveIptvReplay(channel, startSec, endSec);
-  return attachWithProvider(Hls, video, () => playlist, onFatalError);
+  return attachWithProvider(Hls, video, () => playlist, () => SEGMENT_HEADERS, onFatalError);
 }

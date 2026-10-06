@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import type { IptvChannel } from './iptvChannels';
 import { JceDeadHostError } from './iptvJce';
 import { IptvLiveSession, resolveIptvReplay } from './iptvLive';
@@ -159,5 +160,77 @@ describe('IptvLiveSession', () => {
       timeshiftUrl: () => Promise.reject(new Error('must not be called')),
     });
     expect(await session.manifest()).toContain('http://cdn/seg.ts');
+  });
+
+  it('prefers the device-protocol playlist for channels with a liveId', async () => {
+    const deviceChannel: IptvChannel = { ...channel, liveId: 'Live1' };
+    const devicePlaylist = '#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nhttp://hbr/seg1.ts\n';
+    const jceFetch = vi.fn(() => Promise.resolve(textResponse(windowPlaylist([['2026-10-21T08:00:00Z', 'http://cdn/a.ts']]))));
+    const deviceEngine = {
+      fetchPlaylist: vi.fn(() => Promise.resolve(devicePlaylist)),
+      segmentHeaders: vi.fn(() => ({ APPID: 'ak', APPSIGN: 'sig' })),
+    };
+    const session = new IptvLiveSession(deviceChannel, {
+      deviceEngine,
+      fetchImpl: jceFetch,
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+    expect(await session.manifest()).toBe(devicePlaylist);
+    expect(jceFetch).not.toHaveBeenCalled();
+    expect(session.segmentHeaders('http://hbr/seg1.ts')).toEqual({ APPID: 'ak', APPSIGN: 'sig' });
+    expect(deviceEngine.segmentHeaders).toHaveBeenCalledWith('http://hbr/seg1.ts');
+  });
+
+  it('falls back to the JCE window when the device path fails', async () => {
+    const deviceChannel: IptvChannel = { ...channel, liveId: 'Live1' };
+    const deviceEngine = {
+      fetchPlaylist: vi.fn(() => Promise.reject(new Error('device down'))),
+      segmentHeaders: vi.fn(() => ({})),
+    };
+    const session = new IptvLiveSession(deviceChannel, {
+      deviceEngine,
+      fetchImpl: () => Promise.resolve(textResponse(windowPlaylist([['2026-10-21T08:00:00Z', 'http://cdn/a.ts']]))),
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+    const playlist = await session.manifest();
+    expect(playlist).toContain('http://cdn/a.ts');
+    // JCE-mode segments keep the anonymous playback headers.
+    expect(session.segmentHeaders('http://cdn/a.ts').UID).toBe('0000000000000000');
+  });
+
+  it('recovers the JCE window after the device path drops mid-stream', async () => {
+    const deviceChannel: IptvChannel = { ...channel, liveId: 'Live1' };
+    let deviceOk = true;
+    const deviceEngine = {
+      fetchPlaylist: vi.fn(() =>
+        deviceOk
+          ? Promise.resolve('#EXTM3U\n#EXTINF:4.0,\nhttp://hbr/seg.ts\n')
+          : Promise.reject(new Error('session lost')),
+      ),
+      segmentHeaders: vi.fn(() => ({})),
+    };
+    const session = new IptvLiveSession(deviceChannel, {
+      deviceEngine,
+      fetchImpl: () => Promise.resolve(textResponse(windowPlaylist([['2026-10-21T08:00:00Z', 'http://cdn/a.ts']]))),
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+    expect(await session.manifest()).toContain('http://hbr/seg.ts');
+    deviceOk = false;
+    (session as unknown as { lastRefresh: number }).lastRefresh = 0;
+    expect(await session.manifest()).toContain('http://cdn/a.ts');
+  });
+
+  it('never touches the device engine for channels without a liveId', async () => {
+    const deviceEngine = {
+      fetchPlaylist: vi.fn(() => Promise.resolve('x')),
+      segmentHeaders: vi.fn(() => ({})),
+    };
+    const session = new IptvLiveSession(channel, {
+      deviceEngine,
+      fetchImpl: () => Promise.resolve(textResponse(windowPlaylist([['2026-10-21T08:00:00Z', 'http://cdn/a.ts']]))),
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+    await session.manifest();
+    expect(deviceEngine.fetchPlaylist).not.toHaveBeenCalled();
   });
 });

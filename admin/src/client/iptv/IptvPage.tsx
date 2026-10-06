@@ -7,6 +7,7 @@ import { useTranslate } from '../../settings/i18n';
 import { PageHeader } from '../../ui/PageHeader';
 import { isIptvSupportedShell } from './iptvApi';
 import { IPTV_CHANNELS, IPTV_LOGO_BASE, iptvChannelGroup, type IptvChannel } from './iptvChannels';
+import { getIptvDeviceEngine } from './iptvDevice';
 import { loadIptvGuide, type IptvProgramme } from './iptvEpg';
 
 type IptvGroup = 'cctv' | 'satellite' | 'digital';
@@ -36,6 +37,9 @@ export function IptvPage() {
     void loadIptvGuide().then((programmes) => {
       if (active) setGuide(programmes);
     });
+    // Warm the device-protocol session (~15 paced requests) while the user
+    // browses the grid so the first playback starts instantly.
+    getIptvDeviceEngine().prewarm();
     return () => { active = false; };
   }, [supported]);
 
