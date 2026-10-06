@@ -103,23 +103,18 @@ export function IptvPlayerPage() {
       });
     };
     if (replay) {
-      void attachIptvReplay(video, channel, replay.programme, () => {
-        if (!disposed) {
-          setFailure('playback');
-          setState('failed');
-        }
-      }).then((cleanup) => {
+      // Upstream degrades a failed catchup request to the live stream instead
+      // of erroring; dropping the replay target re-attaches the live session.
+      const degrade = () => {
+        if (!disposed) setReplayTarget(null);
+      };
+      void attachIptvReplay(video, channel, replay.programme, degrade).then((cleanup) => {
         if (disposed) {
           cleanup();
           return;
         }
         detach = cleanup;
-      }, () => {
-        if (!disposed) {
-          setFailure('playback');
-          setState('failed');
-        }
-      });
+      }, degrade);
     } else if (jceEligible && !jceExhausted) {
       // `undefined` means MSE is unavailable; drop to the raw URL chain so a
       // native-HLS engine still gets a source. A fatal session error falls

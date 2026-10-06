@@ -54,12 +54,45 @@ describe('IptvLiveSession', () => {
     (session as unknown as { lastRefresh: number }).lastRefresh = 0;
     tick = 1;
     const second = await session.manifest();
-    // b.ts deduped by PDT key and its URL refreshed; a.ts still visible.
+    // b.ts sits at the consumed timeline edge (pdt <= lastPdt), so the
+    // monotonic guard skips it entirely — its URL is not refreshed upstream
+    // either; a.ts still visible, c.ts appended.
     expect(second).toContain('http://cdn/a.ts');
-    expect(second).toContain('http://cdn/b.ts?new=1');
+    expect(second).toContain('http://cdn/b.ts?old=1');
     expect(second).toContain('http://cdn/c.ts');
     expect(second.match(/#EXTINF/g)?.length).toBe(3);
     expect(second).toContain('#EXT-X-MEDIA-SEQUENCE:1');
+  });
+
+  it('never re-appends consumed segments when windows overlap (v7.4 guard)', async () => {
+    const pdtOf = (t: number) => new Date(Date.UTC(2026, 9, 21, 8) + t * 6000).toISOString();
+    const windowOf = (from: number, to: number): [string, string][] =>
+      Array.from({ length: to - from + 1 }, (_, i) => {
+        const t = from + i;
+        return [pdtOf(t), `http://cdn/seg-${String(t)}.ts`];
+      });
+    let window = windowOf(0, 74);
+    const session = new IptvLiveSession(channel, {
+      fetchImpl: () => Promise.resolve(textResponse(windowPlaylist(window))),
+      timeshiftUrl: () => Promise.resolve('http://cdn/win.m3u8'),
+    });
+
+    const first = await session.manifest();
+    // Only the newest 25 of the 75-segment window are seeded.
+    expect(first).not.toContain('seg-59.ts');
+    expect(first).toContain('seg-60.ts');
+    expect(first).toContain('seg-74.ts');
+
+    // The window slides: t45..59 predate the seeded range and must not be
+    // re-queued behind newer segments (that rewinds the PDT timeline).
+    window = windowOf(45, 79);
+    (session as unknown as { lastRefresh: number }).lastRefresh = 0;
+    const second = await session.manifest();
+    const pdts = [...second.matchAll(/#EXT-X-PROGRAM-DATE-TIME:(\S+)/g)].map((match) => match[1]);
+    expect(pdts).toEqual([...pdts].sort());
+    expect(second).not.toContain('seg-45.ts');
+    expect(second).not.toContain('seg-59.ts');
+    expect(second).toContain('seg-79.ts');
   });
 
   it('falls back to bkliveinfo when the JCE host is dead', async () => {

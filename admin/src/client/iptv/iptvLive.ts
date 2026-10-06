@@ -13,9 +13,15 @@ import { JceDeadHostError, jceTimeshiftUrl } from './iptvJce';
 // `desktopAwareFetch`, which reaches the native networking bridge in the app
 // shells (bypassing CORS and mixed-content limits).
 const JCE_WINDOW_SECONDS = 300;
-const MAX_SEGMENTS = 60;
+// Upstream v7.4 keeps 120 segments; the ~75-segment timeshift window must fit
+// entirely or evicted segments re-enter the queue and rewind the timeline.
+const MAX_SEGMENTS = 120;
+const INITIAL_SEGMENTS = 25;
 const VISIBLE_SEGMENTS = 15;
 const REFRESH_INTERVAL_MS = 10_000;
+// Upstream discards a window with no successful refresh for 30s so a rewound
+// upstream timeline can never wedge the monotonic guard.
+const STALE_RESET_MS = 30_000;
 const BK_URL_TTL_MS = 300_000;
 const JCE_MAX_FAILURES = 3;
 
@@ -143,6 +149,7 @@ export class IptvLiveSession {
   private lastRefresh = 0;
   private refreshing?: Promise<void>;
   private jceFailures = 0;
+  private lastPdt = '';
   private bkUrls: string[] = [];
   private bkUrlsAt = 0;
   private bkPlaylist = '';
@@ -197,6 +204,14 @@ export class IptvLiveSession {
   }
 
   private async refreshOnce(): Promise<void> {
+    // lastRefresh only advances on success, so a gap this long means the
+    // merged window is stale: reseed instead of extending a dead timeline.
+    if (this.lastRefresh > 0 && this.now() - this.lastRefresh > STALE_RESET_MS) {
+      this.segments.clear();
+      this.order.length = 0;
+      this.lastPdt = '';
+      this.bkPlaylist = '';
+    }
     try {
       if (this.mode === 'jce') {
         try {
@@ -233,16 +248,32 @@ export class IptvLiveSession {
     const text = await response.text();
     const windowSegments = parseWindowPlaylist(text, response.url || m3u8Url);
     if (!windowSegments.length) throw new IptvResolveError('empty window playlist');
-    for (const segment of windowSegments) {
-      const key = segmentKey(segment.url, segment.pdt);
-      const existing = this.segments.get(key);
-      if (existing) {
-        existing.url = segment.url;
-        continue;
+    if (!this.order.length) {
+      // Seed only the newest slice of the first window (upstream: last 25).
+      for (const segment of windowSegments.slice(-INITIAL_SEGMENTS)) {
+        const key = segmentKey(segment.url, segment.pdt);
+        this.seq += 1;
+        this.segments.set(key, { ...segment, seq: this.seq });
+        this.order.push(key);
+        if (segment.pdt) this.lastPdt = segment.pdt;
       }
-      this.seq += 1;
-      this.segments.set(key, { ...segment, seq: this.seq });
-      this.order.push(key);
+    } else {
+      for (const segment of windowSegments) {
+        // Monotonic timeline guard: segments at or below the last consumed
+        // PDT were already served; re-appending them rewinds the playlist
+        // timeline and stalls the decoder (upstream v7.4 fix).
+        if (segment.pdt && this.lastPdt && segment.pdt <= this.lastPdt) continue;
+        const key = segmentKey(segment.url, segment.pdt);
+        const existing = this.segments.get(key);
+        if (existing) {
+          existing.url = segment.url;
+          continue;
+        }
+        this.seq += 1;
+        this.segments.set(key, { ...segment, seq: this.seq });
+        this.order.push(key);
+        if (segment.pdt) this.lastPdt = segment.pdt;
+      }
     }
     while (this.order.length > MAX_SEGMENTS) {
       const dropped = this.order.shift();

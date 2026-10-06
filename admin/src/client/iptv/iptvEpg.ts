@@ -2,8 +2,9 @@
 // source that may be unreachable; failures degrade to an empty guide so the
 // channel list still works without it.
 
+import { gunzipSync } from 'fflate';
 import { desktopAwareFetch } from '../api/apiBase';
-import { IPTV_EPG_URL } from './iptvChannels';
+import { IPTV_EPG_URLS } from './iptvChannels';
 
 const EPG_TTL_MS = 30 * 60 * 1000;
 const EPG_TIMEOUT_MS = 20_000;
@@ -28,8 +29,8 @@ export async function loadIptvProgrammes(
 ): Promise<Map<string, IptvProgramme[]>> {
   const now = options.now ?? Date.now();
   if (cached && now - cached.at < EPG_TTL_MS) return cached.schedules;
-  pending ??= fetchGuide(options.fetchImpl ?? desktopAwareFetch)
-    .then(parseProgrammes)
+  pending ??= fetchGuides(options.fetchImpl ?? desktopAwareFetch)
+    .then((texts) => mergeSchedules(texts.map(parseProgrammes)))
     .then((schedules) => {
       cached = { at: now, schedules };
       return schedules;
@@ -93,10 +94,50 @@ export function parseProgrammes(xml: string): Map<string, IptvProgramme[]> {
   return schedules;
 }
 
-async function fetchGuide(fetchImpl: typeof desktopAwareFetch): Promise<string> {
-  const response = await fetchImpl(IPTV_EPG_URL, { signal: AbortSignal.timeout(EPG_TIMEOUT_MS) });
+// The upstream url-tvg list mixes plain and gzip-compressed sources; a dead
+// source must not take down the rest of the guide.
+async function fetchGuides(fetchImpl: typeof desktopAwareFetch): Promise<string[]> {
+  const texts = await Promise.all(
+    IPTV_EPG_URLS.map((url) => fetchGuide(fetchImpl, url).catch(() => '')),
+  );
+  return texts.filter(Boolean);
+}
+
+async function fetchGuide(fetchImpl: typeof desktopAwareFetch, url: string): Promise<string> {
+  const response = await fetchImpl(url, { signal: AbortSignal.timeout(EPG_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`epg http ${String(response.status)}`);
-  return response.text();
+  return decodeEpgBody(await response.arrayBuffer());
+}
+
+// .gz sources arrive as opaque file content (no transport Content-Encoding),
+// so sniff the gzip magic instead of trusting the extension.
+export function decodeEpgBody(body: ArrayBuffer): string {
+  const bytes = new Uint8Array(body);
+  const data = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
+  return new TextDecoder().decode(data);
+}
+
+export function mergeSchedules(
+  sources: Map<string, IptvProgramme[]>[],
+): Map<string, IptvProgramme[]> {
+  const merged = new Map<string, IptvProgramme[]>();
+  const seen = new Map<string, Set<string>>();
+  for (const source of sources) {
+    for (const [channel, programmes] of source) {
+      const list = merged.get(channel) ?? [];
+      const keys = seen.get(channel) ?? new Set<string>();
+      for (const programme of programmes) {
+        const key = `${String(programme.start)}:${String(programme.stop)}:${programme.title}`;
+        if (keys.has(key)) continue;
+        keys.add(key);
+        list.push(programme);
+      }
+      merged.set(channel, list);
+      seen.set(channel, keys);
+    }
+  }
+  for (const list of merged.values()) list.sort((a, b) => a.start - b.start);
+  return merged;
 }
 
 function attr(source: string, name: string): string {

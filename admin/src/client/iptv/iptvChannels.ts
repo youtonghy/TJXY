@@ -12,7 +12,7 @@ export interface IptvChannel {
 }
 
 export const IPTV_LOGO_BASE = "https://garysclub.sharewithyou.dpdns.org/logos/ysp-live-logos";
-export const IPTV_EPG_URL = "https://live.fanmingming.com/e.xml";
+export const IPTV_EPG_URLS: readonly string[] = ["https://live.fanmingming.com/e.xml","https://epg.112114.xyz/pp.xml.gz"];
 
 export const IPTV_CHANNELS: readonly IptvChannel[] = [
   {"slug":"cctv1","name":"CCTV-1 综合","sid":"2024078201","pid":"600001859","defn":"fhd","tvgId":"CCTV1","timeshift":true},
@@ -35,16 +35,16 @@ export const IPTV_CHANNELS: readonly IptvChannel[] = [
   {"slug":"cctv164k","name":"CCTV-16 4K","sid":"2027249301","pid":"600099502","defn":"fhd","tvgId":"CCTV16","timeshift":false},
   {"slug":"cctv17","name":"CCTV-17 农业农村","sid":"2027249401","pid":"600001810","defn":"fhd","tvgId":"CCTV17","timeshift":false},
   {"slug":"cctv4k","name":"CCTV-4K 超高清","sid":"2029810301","pid":"600002264","defn":"fhd","tvgId":"CCTV4K","timeshift":false},
-  {"slug":"cctv8k","name":"CCTV-8K 超高清","sid":"2026774101","pid":"600156816","defn":"fhd","tvgId":"CCTV-8K","timeshift":false},
+  {"slug":"cctv8k","name":"CCTV-8K 超高清","sid":"2026774101","pid":"600156816","defn":"fhd","tvgId":"CCTV-8K","timeshift":true},
   {"slug":"cgtn","name":"CGTN","sid":"2024181701","pid":"600014550","defn":"fhd","tvgId":"CGTN英语","timeshift":true},
   {"slug":"cgtnfr","name":"CGTN 法语","sid":"2024181801","pid":"600084704","defn":"fhd","tvgId":"CGTN法语","timeshift":true},
   {"slug":"cgtnru","name":"CGTN 俄语","sid":"2024181901","pid":"600084758","defn":"fhd","tvgId":"CGTN俄语","timeshift":true},
   {"slug":"cgtnar","name":"CGTN 阿拉伯语","sid":"2024182001","pid":"600084782","defn":"fhd","tvgId":"CGTN阿语","timeshift":true},
   {"slug":"cgtnes","name":"CGTN 西班牙语","sid":"2024182101","pid":"600084744","defn":"fhd","tvgId":"CGTN西语","timeshift":true},
   {"slug":"cgtndoc","name":"CGTN 纪录","sid":"2024182301","pid":"600084781","defn":"fhd","tvgId":"CGTN纪录","timeshift":true},
-  {"slug":"cctvfyjc","name":"CCTV 风云剧场","sid":"2025637103","pid":"600099658","defn":"shd","tvgId":"CCTV风云剧场","timeshift":false},
-  {"slug":"cctvdyjc","name":"CCTV 第一剧场","sid":"2026874203","pid":"600099655","defn":"shd","tvgId":"CCTV第一剧场","timeshift":false},
-  {"slug":"cctvhjjc","name":"CCTV 怀旧剧场","sid":"2026874303","pid":"600099620","defn":"shd","tvgId":"CCTV怀旧剧场","timeshift":false},
+  {"slug":"cctvfyjc","name":"CCTV 风云剧场","sid":"2025637102","pid":"600099658","defn":"shd","tvgId":"CCTV风云剧场","timeshift":false},
+  {"slug":"cctvdyjc","name":"CCTV 第一剧场","sid":"2026874202","pid":"600099655","defn":"shd","tvgId":"CCTV第一剧场","timeshift":false},
+  {"slug":"cctvhjjc","name":"CCTV 怀旧剧场","sid":"2026874302","pid":"600099620","defn":"shd","tvgId":"CCTV怀旧剧场","timeshift":false},
   {"slug":"bjws","name":"北京卫视","sid":"2024052703","pid":"600002309","defn":"fhd","tvgId":"北京卫视","timeshift":true},
   {"slug":"jsws","name":"江苏卫视","sid":"2024171103","pid":"600002521","defn":"fhd","tvgId":"江苏卫视","timeshift":true},
   {"slug":"dfws","name":"东方卫视","sid":"2024054503","pid":"600002483","defn":"fhd","tvgId":"东方卫视","timeshift":true},
