@@ -926,11 +926,20 @@ impl CatalogPublicationRepository<'_> {
         &self,
         owner: CatalogItemId,
     ) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
-        let mut sources = projected_sources(self.database, owner, false).await?;
+        // One effective-publication read serves the projection and every location.
+        let Some(publication_id) = effective_source_publication(self.database, owner).await? else {
+            return Ok(Vec::new());
+        };
+        let mut sources = projected_sources_in(self.database, owner, publication_id, false).await?;
         let mut playable = Vec::with_capacity(sources.len());
         for mut source in sources.drain(..) {
-            let Some(location) =
-                playback_location(self.database, owner, source.presentation_key()).await?
+            let Some(location) = playback_location_in(
+                self.database,
+                owner,
+                source.presentation_key(),
+                publication_id,
+            )
+            .await?
             else {
                 continue;
             };
@@ -2739,10 +2748,20 @@ async fn projected_sources(
     owner: CatalogItemId,
     require_current_revision: bool,
 ) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
-    let backend = database.get_database_backend();
     let Some(publication_id) = effective_source_publication(database, owner).await? else {
         return Ok(Vec::new());
     };
+    projected_sources_in(database, owner, publication_id, require_current_revision).await
+}
+
+#[allow(clippy::too_many_lines)] // One projection query plus its batched attachments.
+async fn projected_sources_in(
+    database: &sea_orm::DatabaseConnection,
+    owner: CatalogItemId,
+    publication_id: Uuid,
+    require_current_revision: bool,
+) -> Result<Vec<PublishedMediaSource>, CatalogPublicationError> {
+    let backend = database.get_database_backend();
     let source = Alias::new("projected_source");
     let canonical = Alias::new("canonical_source");
     let publication = Alias::new("active_source_publication");
@@ -3118,7 +3137,6 @@ pub(crate) async fn active_presentation_exists(
         .map_err(Into::into)
 }
 
-#[allow(clippy::too_many_lines)] // One set-based query keeps authorization and active location selection atomic.
 pub(crate) async fn playback_location(
     database: &impl ConnectionTrait,
     owner: CatalogItemId,
@@ -3127,6 +3145,19 @@ pub(crate) async fn playback_location(
     let Some(publication_id) = effective_source_publication(database, owner).await? else {
         return Ok(None);
     };
+    playback_location_in(database, owner, presentation_key, publication_id).await
+}
+
+/// Resolves a location inside a source publication the caller already selected.
+/// The query re-checks that the publication is still effective and visible, so a
+/// publication switched since selection yields `None` rather than a stale grant.
+#[allow(clippy::too_many_lines)] // One set-based query keeps authorization and active location selection atomic.
+async fn playback_location_in(
+    database: &impl ConnectionTrait,
+    owner: CatalogItemId,
+    presentation_key: PresentationKey,
+    publication_id: Uuid,
+) -> Result<Option<PlaybackLocation>, CatalogPublicationError> {
     let source = Alias::new("playback_source");
     let canonical_source = Alias::new("playback_canonical_source");
     let location = Alias::new("playback_location");

@@ -153,7 +153,9 @@ Docker Desktop.
 TJXY opens PostgreSQL sessions with `jit=off`, sent as a startup option, because
 JIT compilation of the work-queue claim costs far more than the query itself. A
 connection pooler in front of PostgreSQL, such as PgBouncer, must accept that
-option, for example with `ignore_startup_parameters = options`.
+option, for example with `ignore_startup_parameters = options`. Each pooled
+connection also keeps up to 512 prepared statements, so wide catalog queries
+reuse their plans; budget PostgreSQL memory for a few tens of MB per connection.
 
 ### Storage and Ports
 

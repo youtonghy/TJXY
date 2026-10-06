@@ -568,11 +568,10 @@ pub(crate) async fn item_detail(
     {
         Ok(Some(item)) => {
             let sources = match catalog
-                .available_playback_sources(principal.user().id(), requested_user, item_id)
+                .available_playback_sources_for(principal.user().id(), requested_user, item.item())
                 .await
             {
-                Ok(Some(sources)) => sources,
-                Ok(None) => return error(StatusCode::NOT_FOUND, "catalog item was not found"),
+                Ok(sources) => sources,
                 Err(error) => return service_error(&error),
             };
             let media_sources = sources

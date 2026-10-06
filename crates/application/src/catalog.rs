@@ -840,13 +840,18 @@ impl CatalogQueryService {
     ) -> Result<Option<CatalogItemDetailRecord>, CatalogServiceError> {
         authorize_user(principal, requested_user)?;
         let repository = CatalogQueryRepository::new(&self.database);
-        if let Some(target) = repository.lazy_work_target(principal, item_id).await?
+        let lazy_target = repository.lazy_work_target(principal, item_id).await?;
+        // Reused by the source-index check below unless a metadata retry ran in
+        // between and may have changed the item.
+        let mut known_target = KnownLazyTarget::Read(lazy_target);
+        if let Some(target) = lazy_target
             && matches!(
                 target.item_type(),
                 CatalogItemType::Movie | CatalogItemType::Series | CatalogItemType::Episode
             )
             && target.should_retry_metadata()
         {
+            known_target = KnownLazyTarget::Stale;
             tracing::debug!(
                 trigger = "lazy_click",
                 task_kind = WorkTaskKind::ResolveMetadata.as_str(),
@@ -859,7 +864,7 @@ impl CatalogQueryService {
         }
         let Some(cache) = &self.cache else {
             let mut item = self
-                .read_item_detail_with_lazy(&repository, principal, item_id)
+                .read_item_detail_with_lazy(&repository, principal, item_id, known_target)
                 .await?;
             self.apply_direct_metadata(item_id, &mut item).await;
             return Ok(item);
@@ -880,14 +885,14 @@ impl CatalogQueryService {
             }
             CacheLookup::Fallback => {
                 let mut item = self
-                    .read_item_detail_with_lazy(&repository, principal, item_id)
+                    .read_item_detail_with_lazy(&repository, principal, item_id, known_target)
                     .await?;
                 self.apply_direct_metadata(item_id, &mut item).await;
                 Ok(item)
             }
             CacheLookup::Leader(_leader) => {
                 let item = self
-                    .read_item_detail_with_lazy(&repository, principal, item_id)
+                    .read_item_detail_with_lazy(&repository, principal, item_id, known_target)
                     .await?;
                 let ttl = if item.is_some() {
                     cache.item_ttl
@@ -943,9 +948,30 @@ impl CatalogQueryService {
         principal: UserId,
         item_id: CatalogItemId,
     ) -> Result<Option<CatalogItemRecord>, CatalogServiceError> {
+        self.read_item_with_known_lazy(repository, principal, item_id, KnownLazyTarget::Stale)
+            .await
+            .map(|(item, _)| item)
+    }
+
+    /// Reads the item and joins a missing source index. `known_target` carries a
+    /// lazy target already read in this request; the flag reports whether index
+    /// work was awaited, in which case the returned item may be stale.
+    async fn read_item_with_known_lazy(
+        &self,
+        repository: &CatalogQueryRepository<'_>,
+        principal: UserId,
+        item_id: CatalogItemId,
+        known_target: KnownLazyTarget,
+    ) -> Result<(Option<CatalogItemRecord>, bool), CatalogServiceError> {
         let item = repository.item(principal, item_id).await?;
-        if item.is_some()
-            && let Some(target) = repository.lazy_work_target(principal, item_id).await?
+        if item.is_none() {
+            return Ok((None, false));
+        }
+        let target = match known_target {
+            KnownLazyTarget::Read(target) => target,
+            KnownLazyTarget::Stale => repository.lazy_work_target(principal, item_id).await?,
+        };
+        if let Some(target) = target
             && matches!(
                 target.item_type(),
                 CatalogItemType::Movie | CatalogItemType::Audio
@@ -954,8 +980,9 @@ impl CatalogQueryService {
         {
             self.enqueue_and_wait(target, item_id, WorkTaskKind::IndexMediaSources)
                 .await?;
+            return Ok((item, true));
         }
-        Ok(item)
+        Ok((item, false))
     }
 
     async fn read_item_detail_with_lazy(
@@ -963,18 +990,21 @@ impl CatalogQueryService {
         repository: &CatalogQueryRepository<'_>,
         principal: UserId,
         item_id: CatalogItemId,
+        known_target: KnownLazyTarget,
     ) -> Result<Option<CatalogItemDetailRecord>, CatalogServiceError> {
-        if self
-            .read_item_with_lazy(repository, principal, item_id)
-            .await?
-            .is_none()
-        {
+        let (item, waited) = self
+            .read_item_with_known_lazy(repository, principal, item_id, known_target)
+            .await?;
+        let Some(item) = item else {
             return Ok(None);
-        }
-        repository
-            .item_detail(principal, item_id)
-            .await
-            .map_err(Into::into)
+        };
+        // Awaited index work may have published sources; read the item again then.
+        let detail = if waited {
+            repository.item_detail(principal, item_id).await
+        } else {
+            repository.item_detail_for(item).await
+        };
+        detail.map_err(Into::into)
     }
 
     /// Returns only probed, currently available sources suitable for direct playback.
@@ -1107,16 +1137,19 @@ impl CatalogQueryService {
         let last_used = PlaystateRepository::new(&self.database)
             .last_presentation_key(principal, item_id)
             .await?;
+        // Without probe work nothing can change before the first check, so the sources
+        // just read are reused instead of being read again immediately.
+        let mut unchanged_sources = probe_jobs.is_empty().then_some(sources);
         let mut delay = Duration::from_millis(50);
         let outcome = loop {
             // Read jobs before the final source refresh: a completion published during
             // the state read must still be eligible for this response, even at the deadline.
             let (pending, failed) = self.playback_job_states(&probe_jobs).await?;
-            let mut playable = playable_sources(
-                publications.playable_sources(item_id).await?,
-                last_used,
-                item.item_type() == "Audio",
-            );
+            let current = match unchanged_sources.take() {
+                Some(sources) => sources,
+                None => publications.playable_sources(item_id).await?,
+            };
+            let mut playable = playable_sources(current, last_used, item.item_type() == "Audio");
             playable.retain(|source| {
                 requested_source.is_none_or(|key| key == source.presentation_key())
             });
@@ -1220,17 +1253,35 @@ impl CatalogQueryService {
         let Some(item) = query.item(principal, item_id).await? else {
             return Ok(None);
         };
+        self.available_playback_sources_for(principal, requested_user, &item)
+            .await
+            .map(Some)
+    }
+
+    /// Same as [`Self::available_playback_sources`] for an item the caller already
+    /// read for this principal in the current request, skipping a repeated read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogServiceError`] for authorization or query failures.
+    pub async fn available_playback_sources_for(
+        &self,
+        principal: UserId,
+        requested_user: Option<UserId>,
+        item: &CatalogItemRecord,
+    ) -> Result<Vec<PlaybackSource>, CatalogServiceError> {
+        authorize_user(principal, requested_user)?;
         let sources = CatalogPublicationRepository::new(&self.database)
-            .playable_sources(item_id)
+            .playable_sources(item.id())
             .await?;
         let last_used = PlaystateRepository::new(&self.database)
-            .last_presentation_key(principal, item_id)
+            .last_presentation_key(principal, item.id())
             .await?;
-        Ok(Some(playable_sources(
+        Ok(playable_sources(
             sources,
             last_used,
             item.item_type() == "Audio",
-        )))
+        ))
     }
 
     /// Updates the administrator policy for a stable media source identity.
@@ -1541,6 +1592,14 @@ fn playback_probe_digest(sources: &[tjxy_db::PublishedMediaSource]) -> PlaybackP
     }
     PlaybackProbeDigest::new(format!("{:x}", digest.finalize()))
         .expect("SHA-256 digest is a valid Redis key segment")
+}
+
+/// A lazy work target already read in the current request, or a marker that it
+/// must be read again because work since then may have changed the item.
+#[derive(Clone, Copy)]
+enum KnownLazyTarget {
+    Read(Option<LazyCatalogWorkTarget>),
+    Stale,
 }
 
 fn playable_sources(

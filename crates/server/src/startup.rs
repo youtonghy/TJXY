@@ -1269,12 +1269,21 @@ async fn configure_storage(
 /// millisecond, saturating the shared pool that request handlers wait on.
 fn runtime_connect_options(database_url: &str) -> ConnectOptions {
     let mut options = ConnectOptions::new(database_url);
-    options.map_sqlx_postgres_opts(disable_postgres_jit);
+    options.map_sqlx_postgres_opts(tune_postgres_session);
     options
 }
 
-fn disable_postgres_jit(options: PgConnectOptions) -> PgConnectOptions {
-    options.options([("jit", "off")])
+/// Prepared statements cached per pooled connection. The default of 100 is below
+/// the number of distinct statements the server issues, so wide catalog queries
+/// were evicted and re-prepared; each re-prepare paid ~100 ms of custom planning
+/// before Postgres switched back to a reusable generic plan. The largest cached
+/// plans take about 1 MB of backend memory.
+const POSTGRES_STATEMENT_CACHE_CAPACITY: usize = 512;
+
+fn tune_postgres_session(options: PgConnectOptions) -> PgConnectOptions {
+    options
+        .options([("jit", "off")])
+        .statement_cache_capacity(POSTGRES_STATEMENT_CACHE_CAPACITY)
 }
 
 fn validate_storage_backends(
@@ -1460,13 +1469,13 @@ mod tests {
 
     use super::{
         ApiKeyValidationError, FilesystemBackendConfiguration, InitializationError,
-        api_key_validation_error, disable_postgres_jit, load_google_backends,
-        load_onedrive_backends, prepare_filesystem_backends,
+        POSTGRES_STATEMENT_CACHE_CAPACITY, api_key_validation_error, load_google_backends,
+        load_onedrive_backends, prepare_filesystem_backends, tune_postgres_session,
     };
 
     #[test]
-    fn postgres_sessions_start_with_jit_disabled() {
-        let options = disable_postgres_jit(
+    fn postgres_sessions_disable_jit_and_keep_a_large_statement_cache() {
+        let options = tune_postgres_session(
             "postgres://tjxy@localhost/tjxy?options=-c%20statement_timeout%3D5min"
                 .parse()
                 .unwrap(),
@@ -1475,6 +1484,10 @@ mod tests {
             options.get_options(),
             Some("-c statement_timeout=5min -c jit=off")
         );
+        // sqlx exposes no getter for the statement cache capacity.
+        assert!(format!("{options:?}").contains(&format!(
+            "statement_cache_capacity: {POSTGRES_STATEMENT_CACHE_CAPACITY}"
+        )));
     }
 
     #[test]

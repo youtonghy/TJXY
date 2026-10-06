@@ -713,6 +713,83 @@ async fn concurrent_user_view_misses_share_one_bounded_cache_fill() {
     assert_eq!(cache.puts.load(Ordering::SeqCst), 1);
 }
 
+/// Records every SQL statement the returned service issues.
+fn recording_service(
+    mut database: DatabaseConnection,
+) -> (CatalogQueryService, Arc<Mutex<Vec<String>>>) {
+    let statements = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&statements);
+    database.set_metric_callback(move |info| {
+        sink.lock().unwrap().push(info.statement.sql.clone());
+    });
+    (CatalogQueryService::new(database), statements)
+}
+
+fn count_mentions(statements: &Mutex<Vec<String>>, alias: &str) -> usize {
+    let quoted = format!("\"{alias}\"");
+    statements
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sql| sql.contains(&quoted))
+        .count()
+}
+
+#[tokio::test]
+async fn item_detail_with_sources_reads_the_item_and_source_publication_once() {
+    let (_, database) = service_fixture().await;
+    let item = seed_playback_cache_fixture(&database).await;
+    // Current resolved metadata: no lazy retry runs, which is the common detail view.
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_revision"), 11_i64)
+                    .value(Alias::new("metadata_resolved_requirement"), 2_i32)
+                    .value(Alias::new("metadata_payload_version"), 1_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    let (service, statements) = recording_service(database);
+    let user = UserId::new();
+
+    let detail = service
+        .item_detail(user, None, item)
+        .await
+        .unwrap()
+        .unwrap();
+    let sources = service
+        .available_playback_sources_for(user, None, detail.item())
+        .await
+        .unwrap();
+
+    assert_eq!(sources.len(), 1);
+    // Item visibility, lazy work and the effective source publication are each read
+    // once per detail request; repeating them dominated the request's SQL count.
+    assert_eq!(count_mentions(&statements, "active_publication"), 1);
+    assert_eq!(count_mentions(&statements, "lazy_policy_item"), 1);
+    assert_eq!(count_mentions(&statements, "source_structure_owner"), 1);
+}
+
+#[tokio::test]
+async fn ready_playback_preparation_projects_sources_once() {
+    let (_, database) = service_fixture().await;
+    let item = seed_playback_cache_fixture(&database).await;
+    let (service, statements) = recording_service(database);
+
+    let prepared = service
+        .prepare_playback(UserId::new(), None, item, None)
+        .await
+        .unwrap();
+
+    assert!(matches!(prepared, Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1));
+    assert_eq!(count_mentions(&statements, "projected_source"), 1);
+}
+
 #[tokio::test]
 async fn playback_sources_cache_by_catalog_user_and_probe_revisions() {
     let (service, database) = service_fixture().await;

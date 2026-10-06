@@ -2023,6 +2023,20 @@ impl<'connection> CatalogQueryRepository<'connection> {
         let Some(item) = self.item(user_id, item_id).await? else {
             return Ok(None);
         };
+        self.item_detail_for(item).await
+    }
+
+    /// Completes rich metadata for an item the caller already read through [`Self::item`]
+    /// in the same request, avoiding a second visibility and image-tag read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogQueryError`] when SQL execution or row decoding fails.
+    pub async fn item_detail_for(
+        &self,
+        item: CatalogItemRecord,
+    ) -> Result<Option<CatalogItemDetailRecord>, CatalogQueryError> {
+        let item_id = item.id();
         let Some(facts) = rich_item_facts(self.database, item_id).await? else {
             return Ok(None);
         };

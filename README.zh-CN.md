@@ -125,7 +125,9 @@ PostgreSQL 密码会自动生成并保存在 `.tjxy/postgres-password`，不会�
 
 TJXY 以启动参数的方式为 PostgreSQL 会话设置 `jit=off`：任务队列认领查询的
 JIT 编译耗时远高于查询本身。若在 PostgreSQL 前使用 PgBouncer 等连接池，
-需要允许该参数，例如配置 `ignore_startup_parameters = options`。
+需要允许该参数，例如配置 `ignore_startup_parameters = options`。每个连接最多
+缓存 512 条预备语句，使复杂的目录查询复用执行计划；请为每个连接预留几十 MB 的
+PostgreSQL 内存。
 
 ### 存储目录与端口
 
