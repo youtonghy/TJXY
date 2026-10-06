@@ -71,15 +71,9 @@ export async function probeServer(origin: string, signal?: AbortSignal): Promise
 }
 
 export async function desktopAwareFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  if (!isDesktopShell()) return fetch(url, options);
-  const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
-  const headers = serializeHeaders(options.headers);
-  return tauriFetch(url, { ...options, headers });
-}
-
-function serializeHeaders(headers: HeadersInit | undefined): Record<string, string> | undefined {
-  if (!headers) return undefined;
-  if (headers instanceof Headers) return Object.fromEntries(headers.entries());
-  if (Array.isArray(headers)) return Object.fromEntries(headers);
-  return { ...headers };
+  // Desktop builds (Electron) patch window.fetch in a preload so http(s)
+  // calls ride the native network stack with a persisted cookie jar;
+  // mobile builds do the same inside the WebView bridge. Plain fetch is the
+  // right call on every shell.
+  return fetch(url, options);
 }
