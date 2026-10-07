@@ -2,7 +2,7 @@ import { isDesktopShell } from './client/api/apiBase';
 import { Spinner } from '@heroui/react';
 import { CoreAdmin, CustomRoutes, Resource } from 'ra-core';
 import { lazy, Suspense, type ComponentType } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { dataProvider } from './api/dataProvider';
 import { authProvider } from './auth/authProvider';
@@ -46,10 +46,12 @@ const DashboardPage = lazy(async () => {
 });
 
 export function App() {
+  const isFileDocument = typeof window !== 'undefined' && window.location.protocol === 'file:';
+  const Router = import.meta.env.VITE_TJXY_SHELL === 'mobile' || isFileDocument ? HashRouter : BrowserRouter;
   return (
-    <BrowserRouter>
+    <Router>
       <Suspense fallback={<RouteLoading />}><RouteBoundary /></Suspense>
-    </BrowserRouter>
+    </Router>
   );
 }
 

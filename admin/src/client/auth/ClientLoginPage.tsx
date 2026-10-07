@@ -122,7 +122,7 @@ export function ClientLoginPage() {
             required
             value={server}
             onChange={(next) => { setServer(next); setServerOk(false); setServerError(undefined); }}
-            onSave={() => { void connectServer(); }}
+            onSave={connectServer}
           />
         </div>
       )}

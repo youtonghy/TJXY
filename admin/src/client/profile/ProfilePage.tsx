@@ -139,7 +139,7 @@ export function ProfilePage() {
               onSave={() => {
                 setServerPending(true);
                 setServerError(undefined);
-                void probeServer(server)
+                return probeServer(server)
                   .then(async (origin) => {
                     setApiBaseUrl(origin);
                     setServer(origin);
@@ -149,6 +149,7 @@ export function ProfilePage() {
                   })
                   .catch(() => {
                     setServerError(tr('Could not reach that server.', '无法连接到该服务器。'));
+                    throw new Error('unreachable');
                   })
                   .finally(() => { setServerPending(false); });
               }}
