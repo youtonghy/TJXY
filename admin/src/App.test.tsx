@@ -148,6 +148,9 @@ it('routes the desktop shell to the standalone login page', async () => {
 
   expect(await screen.findByRole('heading', { name: 'Welcome back' }, { timeout: 10_000 })).toBeVisible();
   expect(window.location.pathname).toBe('/login');
+  expect(screen.getByRole('button', { name: /Server/ })).toBeVisible();
+  expect(screen.queryByLabelText('Server address')).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Add server' }));
   expect(screen.getByLabelText('Server address')).toBeVisible();
 });
 
