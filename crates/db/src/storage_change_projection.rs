@@ -31,16 +31,22 @@ impl<'connection> StorageChangeProjectionRepository<'connection> {
     ) -> Result<OutboxCompletion, StorageChangeProjectionError> {
         validate_event(claimed)?;
         let transaction = self.database.begin().await?;
+        let unchanged = observed_without_change(claimed);
         let result = async {
             let mut catalog_changed = false;
             if matches!(
                 claimed.event_type(),
                 "Upserted" | "MovedOut" | "Removed" | "AncestorMovedOut" | "AncestorRemoved"
             ) {
-                catalog_changed |= project_changed_relation(&transaction, claimed).await?;
-                catalog_changed |= project_structure_scope(&transaction, claimed).await?;
+                // Periodic re-validation re-observes unchanged objects. Those observations must
+                // not invalidate the catalog projection, otherwise every scheduled scan re-indexes
+                // and re-resolves the whole library, and every probe is invalidated again.
+                if !unchanged {
+                    catalog_changed |= project_changed_relation(&transaction, claimed).await?;
+                    catalog_changed |= project_structure_scope(&transaction, claimed).await?;
+                }
                 catalog_changed |=
-                    project_location_and_catalog(&transaction, claimed, true).await?;
+                    project_location_and_catalog(&transaction, claimed, !unchanged).await?;
             } else if claimed.event_type() == "AvailabilityChanged" {
                 catalog_changed |=
                     project_location_and_catalog(&transaction, claimed, false).await?;
@@ -226,6 +232,24 @@ async fn project_structure_scope(
             == 1;
     }
     Ok(changed)
+}
+
+/// Reports whether an `Upserted` event re-observed the stored object revision.
+///
+/// The inventory pipeline emits an `Upserted` event for every object it observes, including
+/// objects it finds unchanged since the previous pass. Such an observation still confirms
+/// presence and availability, but it carries no content change, so it must not advance catalog
+/// revisions or invalidate probes.
+fn observed_without_change(claimed: &ClaimedOutboxEvent) -> bool {
+    claimed.event_type() == "Upserted" && payload_revision_unchanged(claimed.payload())
+}
+
+fn payload_revision_unchanged(payload: &serde_json::Value) -> bool {
+    let revision = |pointer: &str| payload.pointer(pointer).and_then(serde_json::Value::as_str);
+    matches!(
+        (revision("/before/remote_revision"), revision("/after/remote_revision")),
+        (Some(before), Some(after)) if before == after
+    )
 }
 
 fn validate_event(claimed: &ClaimedOutboxEvent) -> Result<(), StorageChangeProjectionError> {
@@ -555,9 +579,13 @@ pub enum StorageChangeProjectionError {
 #[cfg(test)]
 mod tests {
     use sea_orm::DbBackend;
+    use serde_json::json;
     use uuid::Uuid;
 
-    use super::{catalog_presence_query, location_context_query, storage_presence_query};
+    use super::{
+        catalog_presence_query, location_context_query, payload_revision_unchanged,
+        storage_presence_query,
+    };
 
     #[test]
     fn projection_queries_use_backend_specific_bind_markers() {
@@ -577,5 +605,21 @@ mod tests {
             assert!(postgres.sql.contains("$1"));
             assert!(!postgres.sql.contains('?'));
         }
+    }
+
+    #[test]
+    fn only_a_matching_remote_revision_counts_as_unchanged() {
+        let observed = |before: serde_json::Value, after: serde_json::Value| {
+            payload_revision_unchanged(&json!({
+                "before": {"remote_revision": before},
+                "after": {"remote_revision": after},
+            }))
+        };
+        assert!(observed(json!("7"), json!("7")));
+        assert!(!observed(json!("7"), json!("8")));
+        // A first observation has no stored revision to compare against.
+        assert!(!observed(json!(null), json!("8")));
+        assert!(!observed(json!(null), json!(null)));
+        assert!(!payload_revision_unchanged(&json!({})));
     }
 }

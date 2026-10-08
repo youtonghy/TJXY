@@ -9,6 +9,7 @@ use tjxy_application::{
 };
 use tjxy_common::{
     CatalogItemId, MEDIA_NAME_PARSER_VERSION, SortKey, StorageObjectRecordId, StorageRootId,
+    WorkJobId,
 };
 use tjxy_db::{
     CatalogPublicationRepository, DiscoverTitlesError, DiscoverTitlesRepository,
@@ -651,6 +652,172 @@ async fn metadata_none_discovers_titles_without_scheduling_resolution() {
         .unwrap()
         .is_none()
     );
+}
+
+#[tokio::test]
+async fn repeated_discovery_skips_current_metadata_resolution() {
+    let fixture = discovery_fixture("full").await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    let sql = fixture.database.get_database_backend();
+    DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+    let metadata = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "first-metadata",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let item_id = match metadata.job().scope() {
+        WorkScope::CatalogItem(item_id) => item_id,
+        scope => panic!("unexpected metadata scope {scope:?}"),
+    };
+    mark_metadata_resolved(&fixture, item_id, false).await;
+    terminate_job(&fixture, metadata.job().id()).await;
+
+    // An unpublished metadata payload still schedules one resolution per pass.
+    rediscover(&fixture).await;
+    let upgrade = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "payload-upgrade",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(upgrade.job().scope(), WorkScope::CatalogItem(item_id));
+    terminate_job(&fixture, upgrade.job().id()).await;
+
+    // Once the payload is published, repeat discovery has nothing left to resolve.
+    mark_metadata_resolved(&fixture, item_id, true).await;
+    rediscover(&fixture).await;
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "unexpected-repeat",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+
+    // A stale metadata revision still schedules resolution.
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(
+                        Alias::new("metadata_revision"),
+                        Expr::col(Alias::new("metadata_revision")).add(1_i64),
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    rediscover(&fixture).await;
+
+    let stale = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "stale-metadata",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.job().scope(), WorkScope::CatalogItem(item_id));
+    assert_eq!(
+        stale.job().metadata_requirement(),
+        Some(MetadataRequirement::Full)
+    );
+}
+
+async fn mark_metadata_resolved(
+    fixture: &DiscoveryFixture,
+    item_id: CatalogItemId,
+    publish_payload: bool,
+) {
+    let sql = fixture.database.get_database_backend();
+    let mut update = Query::update();
+    update
+        .table(Alias::new("catalog_items"))
+        .value(
+            Alias::new("metadata_resolved_revision"),
+            Expr::col(Alias::new("metadata_revision")),
+        )
+        .value(Alias::new("metadata_resolved_requirement"), 2_i32)
+        .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()));
+    if publish_payload {
+        // `1` is the current metadata payload version published by the worker.
+        update.value(Alias::new("metadata_payload_version"), 1_i32);
+    }
+    fixture.database.execute(sql.build(&update)).await.unwrap();
+}
+
+async fn terminate_job(fixture: &DiscoveryFixture, job_id: WorkJobId) {
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("work_jobs"))
+                    .value(Alias::new("state"), "Completed")
+                    .value(Alias::new("completed_at"), chrono::Utc::now())
+                    .and_where(Expr::col(Alias::new("id")).eq(job_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn rediscover(fixture: &DiscoveryFixture) {
+    let sql = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("storage_roots"))
+                    .value(
+                        Alias::new("sync_revision"),
+                        Expr::col(Alias::new("sync_revision")).add(1_i64),
+                    )
+                    .value(
+                        Alias::new("reconciled_sync_revision"),
+                        Expr::col(Alias::new("reconciled_sync_revision")).add(1_i64),
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.root.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    DiscoverTitlesRepository::new(&fixture.database)
+        .enqueue(fixture.root, 30)
+        .await
+        .unwrap();
+    let claimed = WorkJobRepository::new(&fixture.database)
+        .claim_next(
+            &[WorkTaskKind::DiscoverTitles],
+            "repeat-discover",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&claimed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

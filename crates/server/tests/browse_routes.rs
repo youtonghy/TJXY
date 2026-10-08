@@ -5741,7 +5741,9 @@ async fn cloud_multi_source_playback_is_complete_local_and_stable_across_reindex
         .unwrap();
     let reindex_generation = index_cloud_sources(&app.database, fixture.item, 2, 1).await;
     let after_publication = effective_source_publication(&app.database, fixture.item).await;
-    assert_ne!(before_publication.0, after_publication.0);
+    // The reindex rebuilds an identical manifest, so the active publication is reused and only
+    // its generation advances.
+    assert_eq!(before_publication.0, after_publication.0);
     assert!(after_publication.1 > before_publication.1);
     assert_eq!(reindex_generation, after_publication.1);
     let reindexed_presentations = cloud_presentations(&app, &fixture).await;

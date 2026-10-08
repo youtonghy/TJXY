@@ -16,8 +16,9 @@ use tjxy_domain::MetadataSourceMode;
 use uuid::Uuid;
 
 use crate::{
-    CatalogPublicationError, ClaimedWorkJob, MetadataRequirement, WorkJobRepository,
-    WorkJobRepositoryError, WorkJobResult, WorkJobSubmission, WorkScope, WorkTaskKind,
+    CatalogItemType, CatalogPublicationError, ClaimedWorkJob, MetadataRequirement,
+    WorkJobRepository, WorkJobRepositoryError, WorkJobResult, WorkJobSubmission, WorkScope,
+    WorkTaskKind,
 };
 
 const MAX_TITLES: u64 = 100_000;
@@ -81,7 +82,7 @@ pub struct DiscoveredTitle {
     item_id: CatalogItemId,
     library_id: Uuid,
     storage_object_id: StorageObjectRecordId,
-    item_type: String,
+    item_type: CatalogItemType,
     name: String,
     production_year: Option<i32>,
     metadata_requirement: Option<MetadataRequirement>,
@@ -89,6 +90,33 @@ pub struct DiscoveredTitle {
     local_metadata_access_mode: LocalMetadataAccessMode,
     children_indexed: bool,
     children_revision: i64,
+}
+
+/// Metadata state read back after a title upsert, before scheduling resolution.
+struct UpsertedTitle {
+    revision: i64,
+    resolved_revision: i64,
+    resolved_requirement: Option<MetadataRequirement>,
+    payload_version: i32,
+}
+
+impl UpsertedTitle {
+    fn resolution_state(
+        &self,
+        title: &DiscoveredTitle,
+        requirement: MetadataRequirement,
+    ) -> crate::catalog_query::MetadataResolutionState {
+        crate::catalog_query::MetadataResolutionState {
+            item_type: title.item_type,
+            revision: self.revision,
+            resolved_revision: self.resolved_revision,
+            resolved_requirement: self.resolved_requirement,
+            payload_version: self.payload_version,
+            requirement,
+            source_mode: title.metadata_source_mode,
+            access_mode: title.local_metadata_access_mode,
+        }
+    }
 }
 
 pub struct DiscoverTitlesRepository<'connection> {
@@ -240,17 +268,17 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
             let (item_type, name, production_year) = match collection.as_str() {
                 "movies" => {
                     let (name, year) = parse_title(&raw_name)?;
-                    ("Movie", name, year)
+                    (CatalogItemType::Movie, name, year)
                 }
                 "tvshows" | "shows" | "mixed" => {
                     let (name, year) = parse_title(&raw_name)?;
-                    ("Series", name, year)
+                    (CatalogItemType::Series, name, year)
                 }
                 "music" => {
                     let Some(name) = parse_audio_title(&raw_name) else {
                         continue;
                     };
-                    ("Audio", name, None)
+                    (CatalogItemType::Audio, name, None)
                 }
                 _ => return Err(DiscoverTitlesError::UnsupportedCollection),
             };
@@ -273,7 +301,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 item_id: derived_item(object),
                 library_id: row.try_get("", "library_id")?,
                 storage_object_id: object,
-                item_type: item_type.to_owned(),
+                item_type,
                 name,
                 production_year,
                 metadata_requirement,
@@ -326,7 +354,14 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 .await?;
             let mut metadata_jobs = HashMap::new();
             for title in &snapshot.titles {
-                let metadata_revision = upsert_title(&transaction, title).await?;
+                let item = upsert_title(&transaction, title).await?;
+                let metadata_revision = item.revision;
+                let Some(requirement) = title.metadata_requirement else {
+                    continue;
+                };
+                if !item.resolution_state(title, requirement).required() {
+                    continue;
+                }
                 let input_sync_revision = if title.children_indexed {
                     title.children_revision
                 } else {
@@ -993,14 +1028,17 @@ async fn advance_discovery_watermarks(
 async fn upsert_title(
     transaction: &sea_orm::DatabaseTransaction,
     title: &DiscoveredTitle,
-) -> Result<i64, DiscoverTitlesError> {
+) -> Result<UpsertedTitle, DiscoverTitlesError> {
     let backend = transaction.get_database_backend();
-    let structure_state = if title.item_type == "Series" {
+    let structure_state = if title.item_type == CatalogItemType::Series {
         "NotExpanded"
     } else {
         "NotApplicable"
     };
-    let source_state = if matches!(title.item_type.as_str(), "Movie" | "Audio") {
+    let source_state = if matches!(
+        title.item_type,
+        CatalogItemType::Movie | CatalogItemType::Audio
+    ) {
         "NotIndexed"
     } else {
         "Unknown"
@@ -1025,7 +1063,7 @@ async fn upsert_title(
         ])
         .values_panic([
             title.item_id.as_uuid().into(),
-            title.item_type.clone().into(),
+            title.item_type.as_database_value().into(),
             title.name.clone().into(),
             title.name.to_lowercase().into(),
             SortKey::from_text(&title.name).into_bytes().into(),
@@ -1060,7 +1098,7 @@ async fn upsert_title(
         .query_one(
             backend.build(
                 &Query::select()
-                    .columns([Alias::new("item_type"), Alias::new("metadata_revision")])
+                    .column(Alias::new("item_type"))
                     .from(Alias::new("catalog_items"))
                     .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid()))
                     .to_owned(),
@@ -1068,7 +1106,7 @@ async fn upsert_title(
         )
         .await?
         .ok_or(DiscoverTitlesError::IdentityConflict)?;
-    if row.try_get::<String>("", "item_type")? != title.item_type {
+    if row.try_get::<String>("", "item_type")? != title.item_type.as_database_value() {
         return Err(DiscoverTitlesError::IdentityConflict);
     }
     transaction
@@ -1124,14 +1162,28 @@ async fn upsert_title(
         .query_one(
             backend.build(
                 Query::select()
-                    .column(Alias::new("metadata_revision"))
+                    .columns([
+                        Alias::new("metadata_revision"),
+                        Alias::new("metadata_resolved_revision"),
+                        Alias::new("metadata_resolved_requirement"),
+                        Alias::new("metadata_payload_version"),
+                    ])
                     .from(Alias::new("catalog_items"))
                     .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid())),
             ),
         )
         .await?
         .ok_or(DiscoverTitlesError::IdentityConflict)?;
-    Ok(row.try_get("", "metadata_revision")?)
+    Ok(UpsertedTitle {
+        revision: row.try_get("", "metadata_revision")?,
+        resolved_revision: row.try_get("", "metadata_resolved_revision")?,
+        resolved_requirement: row
+            .try_get::<Option<i32>>("", "metadata_resolved_requirement")?
+            .map(MetadataRequirement::from_database)
+            .transpose()
+            .map_err(|_| DiscoverTitlesError::IdentityConflict)?,
+        payload_version: row.try_get("", "metadata_payload_version")?,
+    })
 }
 
 async fn refresh_title_naming(
@@ -1186,7 +1238,7 @@ async fn refresh_title_naming(
         .to_owned();
     transaction.execute(backend.build(&refresh)).await?;
 
-    let revision_column = if title.item_type == "Series" {
+    let revision_column = if title.item_type == CatalogItemType::Series {
         "structure_expansion_revision"
     } else {
         "source_index_revision"

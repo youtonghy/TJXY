@@ -8,6 +8,9 @@ use tjxy_common::WorkJobId;
 use crate::{WorkJobRepository, WorkJobRepositoryError, WorkTaskKind};
 
 const BATCH_SIZE: u64 = 100;
+/// Superseded metadata jobs removed per maintenance pass. Pending jobs own no history, so the
+/// batch is larger than the cancellation batch while still bounded within one transaction.
+const SUPERSEDED_BATCH_SIZE: u64 = 5_000;
 pub(crate) const INACTIVE_SCOPE_REASON: &str =
     "cancelled: storage account disabled or root unbound";
 
@@ -16,6 +19,7 @@ pub struct WorkMaintenanceReport {
     pub acquired: bool,
     pub reclaimed: u64,
     pub cancelled: u64,
+    pub superseded: u64,
 }
 
 impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
@@ -46,6 +50,7 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
             return Ok(WorkMaintenanceReport::default());
         }
         let cancelled = cancel_disabled_storage_work(&transaction, now).await?;
+        let superseded = purge_superseded_metadata_jobs(&transaction).await?;
         let reclaimed = crate::work_job::reclaim_expired_leases(&transaction, now).await?;
         crate::work_job::fail_terminal_dependents(
             &transaction,
@@ -73,8 +78,72 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
             acquired,
             reclaimed,
             cancelled,
+            superseded,
         })
     }
+}
+
+/// Deletes Pending metadata resolutions whose item has moved on to a newer metadata revision.
+///
+/// Enqueueing a newer revision already removes its predecessors; this drains the backlog created
+/// before that rule existed and any revision bump that happened outside an enqueue. A job whose
+/// revision is behind the item's can only fail as stale, so removing it changes no outcome.
+async fn purge_superseded_metadata_jobs(
+    transaction: &DatabaseTransaction,
+) -> Result<u64, WorkJobRepositoryError> {
+    let backend = transaction.get_database_backend();
+    let job = Alias::new("stale_job");
+    let item = Alias::new("stale_item");
+    let stale = Query::select()
+        .column((job.clone(), Alias::new("id")))
+        .from_as(Alias::new("work_jobs"), job.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("catalog_items"),
+            item.clone(),
+            Expr::col((item.clone(), Alias::new("id")))
+                .equals((job.clone(), Alias::new("scope_id"))),
+        )
+        .and_where(Expr::col((job.clone(), Alias::new("state"))).eq("Pending"))
+        .and_where(
+            Expr::col((job.clone(), Alias::new("task_kind")))
+                .eq(WorkTaskKind::ResolveMetadata.as_str()),
+        )
+        .and_where(Expr::col((job.clone(), Alias::new("scope_type"))).eq("CatalogItem"))
+        .and_where(
+            Expr::col((job.clone(), Alias::new("expected_revision")))
+                .lt(Expr::col((item, Alias::new("metadata_revision")))),
+        )
+        .and_where(crate::work_job::lacks_owned_rows(&job, "work_staging_rows"))
+        .and_where(crate::work_job::lacks_owned_rows(
+            &job,
+            "catalog_publications",
+        ))
+        .and_where(crate::work_job::lacks_owned_rows(&job, "work_results"))
+        .and_where(crate::work_job::lacks_owned_rows(
+            &job,
+            "storage_sync_pages",
+        ))
+        .limit(SUPERSEDED_BATCH_SIZE)
+        .to_owned();
+    let ids = transaction
+        .query_all(backend.build(&stale))
+        .await?
+        .iter()
+        .map(|row| row.try_get::<uuid::Uuid>("", "id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let delete = Query::delete()
+        .from_table(Alias::new("work_jobs"))
+        .and_where(Expr::col(Alias::new("id")).is_in(ids))
+        .and_where(Expr::col(Alias::new("state")).eq("Pending"))
+        .to_owned();
+    Ok(transaction
+        .execute(backend.build(&delete))
+        .await?
+        .rows_affected())
 }
 
 #[allow(clippy::too_many_lines)] // Keep the bounded cancellation query and its authorization predicates together.

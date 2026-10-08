@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, Timelike, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Cond, Expr, JoinType, OnConflict, Order, Query, SelectStatement},
+    sea_query::{
+        Alias, Cond, Expr, JoinType, LockBehavior, LockType, OnConflict, Order, Query,
+        SelectStatement,
+    },
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -2348,6 +2351,55 @@ async fn enqueue_enabled_library_scans(
     Ok(submissions)
 }
 
+/// Matches jobs that own no rows in `table`, which references the job through `job_id`.
+pub(crate) fn lacks_owned_rows(job: &Alias, table: &'static str) -> sea_orm::sea_query::SimpleExpr {
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1_i32))
+            .from(Alias::new(table))
+            .and_where(
+                Expr::col((Alias::new(table), Alias::new("job_id")))
+                    .equals((job.clone(), Alias::new("id"))),
+            )
+            .to_owned(),
+    )
+    .not()
+}
+
+/// Removes Pending metadata resolutions that a newer revision of the same item makes obsolete.
+///
+/// The active-job natural key includes `expected_revision`, so every revision bump would otherwise
+/// leave its predecessor queued. Such a job can only fail as stale once claimed, after paying for
+/// a claim, a snapshot, a failure write, a result row, and a retention row. A Pending job never ran,
+/// so deleting it loses no history; jobs that already own staged or published rows are kept.
+async fn supersede_stale_metadata_jobs(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<(), WorkJobRepositoryError> {
+    if spec.task_kind != WorkTaskKind::ResolveMetadata
+        || !matches!(spec.scope, WorkScope::CatalogItem(_))
+    {
+        return Ok(());
+    }
+    let owned_rows = |table: &'static str| lacks_owned_rows(&Alias::new("work_jobs"), table);
+    let delete = Query::delete()
+        .from_table(Alias::new("work_jobs"))
+        .and_where(Expr::col(Alias::new("task_kind")).eq(WorkTaskKind::ResolveMetadata.as_str()))
+        .and_where(Expr::col(Alias::new("scope_type")).eq(spec.scope.scope_type()))
+        .and_where(Expr::col(Alias::new("scope_id")).eq(spec.scope.id()))
+        .and_where(Expr::col(Alias::new("state")).eq(STATE_PENDING))
+        .and_where(Expr::col(Alias::new("expected_revision")).lt(spec.expected_revision))
+        .and_where(owned_rows("work_staging_rows"))
+        .and_where(owned_rows("catalog_publications"))
+        .and_where(owned_rows("work_results"))
+        .and_where(owned_rows("storage_sync_pages"))
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&delete))
+        .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Validates and inserts the durable natural key atomically.
 async fn enqueue_or_join(
     transaction: &DatabaseTransaction,
@@ -2405,6 +2457,7 @@ async fn enqueue_or_join(
             return Err(WorkJobRepositoryError::InvalidDependency);
         }
     }
+    supersede_stale_metadata_jobs(transaction, spec).await?;
     let id = WorkJobId::new();
     let backend = transaction.get_database_backend();
     let conflict = if backend == sea_orm::DbBackend::MySql {
@@ -2634,10 +2687,13 @@ async fn claim_next(
     let now = mysql_compatible_timestamp(backend, now);
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
     for _ in 0..8 {
-        let Some(row) = transaction
-            .query_one(backend.build(&claim_candidate(accepted_kinds, filter, now)))
-            .await?
-        else {
+        let mut candidate = claim_candidate(accepted_kinds, filter, now);
+        if backend == sea_orm::DbBackend::Postgres {
+            // Concurrent workers otherwise pick the same best row and queue on its lock until the
+            // winner commits, holding a pooled connection each while they wait.
+            candidate.lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+        }
+        let Some(row) = transaction.query_one(backend.build(&candidate)).await? else {
             return Ok(None);
         };
         let mut job = job_from_row(&row)?;

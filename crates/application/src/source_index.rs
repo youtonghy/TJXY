@@ -42,6 +42,13 @@ impl SourceIndexService {
             &graph.subtitles,
         )?;
         let publications = CatalogPublicationRepository::new(&self.database);
+        let jobs = WorkJobRepository::new(&self.database);
+        if let Some(generation) = publications
+            .reuse_unchanged_sources(&jobs, claimed, &manifest)
+            .await?
+        {
+            return Ok(generation);
+        }
         let publication = publications.begin_sources(claimed, &manifest).await?;
         publications
             .stage_source_batch(
@@ -54,11 +61,7 @@ impl SourceIndexService {
             .await?;
         publications.seal_sources(claimed, publication).await?;
         publications
-            .publish_sources(
-                &WorkJobRepository::new(&self.database),
-                claimed,
-                publication,
-            )
+            .publish_sources(&jobs, claimed, publication)
             .await
             .map_err(Into::into)
     }

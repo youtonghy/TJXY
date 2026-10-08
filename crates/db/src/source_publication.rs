@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::{
     catalog_publication::{
-        CatalogPublicationError, CatalogPublicationRepository, STATE_BUILDING, STATE_READY,
-        activate_publication, advance_generation, finish, insert_change_event,
+        CatalogPublicationError, CatalogPublicationRepository, STATE_ACTIVE, STATE_BUILDING,
+        STATE_READY, activate_publication, advance_generation, finish, insert_change_event,
     },
     catalog_visibility::projected_enabled_membership,
     work_job::{
@@ -778,6 +778,33 @@ impl PublishedMediaSource {
 }
 
 impl CatalogPublicationRepository<'_> {
+    /// Re-validates the active Source publication when a rebuild proves the projection unchanged.
+    ///
+    /// Scheduled scans re-enqueue source indexing whenever a storage observation advanced the
+    /// item's source revision, even when the resulting projection is byte-identical to the active
+    /// one. Building and activating an identical publication would advance the catalog generation,
+    /// invalidate every probe, and enqueue another metadata resolution, so this method instead
+    /// records that the active projection is current at the claimed revision and completes the job.
+    ///
+    /// Returns `Ok(None)` when no active publication matches the manifest, leaving the caller to
+    /// build a new publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPublicationError`] for invalid work, lost leases, or inconsistent rows.
+    pub async fn reuse_unchanged_sources(
+        &self,
+        jobs: &WorkJobRepository<'_>,
+        claimed: &ClaimedWorkJob,
+        manifest: &SourcePublicationManifest,
+    ) -> Result<Option<i64>, CatalogPublicationError> {
+        let owner = source_owner(claimed)?;
+        let transaction = self.database.begin().await?;
+        let result =
+            reuse_unchanged_sources(&transaction, jobs, claimed, owner, manifest, Utc::now()).await;
+        finish(transaction, result).await
+    }
+
     /// Creates or resumes a Source publication owned by a live Index job.
     ///
     /// # Errors
@@ -1317,6 +1344,97 @@ async fn stage_structure_source_batch(
         stage_subtitle_rows(transaction, publication_id, &group.subtitles).await?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keeps manifest verification, currentness bookkeeping, and completion atomic.
+async fn reuse_unchanged_sources(
+    transaction: &DatabaseTransaction,
+    jobs: &WorkJobRepository<'_>,
+    claimed: &ClaimedWorkJob,
+    owner: CatalogItemId,
+    manifest: &SourcePublicationManifest,
+    now: DateTime<Utc>,
+) -> Result<Option<i64>, CatalogPublicationError> {
+    ensure_live_claim(transaction, claimed, now).await?;
+    let backend = transaction.get_database_backend();
+    let owner_row = transaction
+        .query_one(backend.build(&source_owner_pointer(owner)))
+        .await?
+        .ok_or(CatalogPublicationError::StaleExpectedRevision)?;
+    let revision: i64 = owner_row.try_get("", "source_index_revision")?;
+    if revision != claimed.job().expected_revision() {
+        return Ok(None);
+    }
+    let Some(publication_id) =
+        owner_row.try_get::<Option<Uuid>>("", "active_source_publication_id")?
+    else {
+        return Ok(None);
+    };
+    let manifest_row = transaction
+        .query_one(backend.build(&source_publication_manifest(publication_id)))
+        .await?
+        .ok_or(CatalogPublicationError::InvalidPublication)?;
+    if manifest_row.try_get::<String>("", "publication_kind")? != PUBLICATION_KIND
+        || manifest_row.try_get::<String>("", "state")? != STATE_ACTIVE
+        || manifest_row.try_get::<Uuid>("", "owner_catalog_item_id")? != owner.as_uuid()
+        || manifest_row.try_get::<i32>("", "naming_parser_version")? != MEDIA_NAME_PARSER_VERSION
+        || manifest_row.try_get::<i64>("", "expected_row_count")? != manifest.expected_row_count
+        || manifest_row.try_get::<String>("", "manifest_sha256")? != manifest.sha256
+    {
+        return Ok(None);
+    }
+    let generation = advance_generation(transaction).await?;
+    let current = Query::update()
+        .table(Alias::new("catalog_items"))
+        .value(Alias::new("source_state"), "Indexed")
+        .value(Alias::new("last_error"), Option::<String>::None)
+        .and_where(Expr::col(Alias::new("id")).eq(owner.as_uuid()))
+        .and_where(Expr::col(Alias::new("source_index_revision")).eq(revision))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&current))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(CatalogPublicationError::StaleExpectedRevision);
+    }
+    let refresh = Query::update()
+        .table(Alias::new("catalog_publications"))
+        .value(
+            Alias::new("expected_revision"),
+            claimed.job().expected_revision(),
+        )
+        .value(
+            Alias::new("input_sync_revision"),
+            claimed.job().input_sync_revision(),
+        )
+        .value(Alias::new("activated_generation"), generation)
+        .value(Alias::new("published_at"), now)
+        .and_where(Expr::col(Alias::new("id")).eq(publication_id))
+        .and_where(Expr::col(Alias::new("state")).eq(STATE_ACTIVE))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&refresh))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(CatalogPublicationError::InvalidPublication);
+    }
+    jobs.complete_in_transaction(
+        transaction,
+        claimed,
+        WorkJobResult::success(
+            json!({
+                "reused_publication_id": publication_id,
+                "catalog_generation": generation,
+            }),
+            Vec::new(),
+        ),
+    )
+    .await?;
+    Ok(Some(generation))
 }
 
 async fn begin_sources(
@@ -4167,6 +4285,21 @@ fn publication_for_job(job_id: Uuid) -> sea_orm::sea_query::SelectStatement {
         ])
         .from(Alias::new("catalog_publications"))
         .and_where(Expr::col(Alias::new("job_id")).eq(job_id))
+        .to_owned()
+}
+
+fn source_publication_manifest(publication_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    Query::select()
+        .columns([
+            Alias::new("owner_catalog_item_id"),
+            Alias::new("publication_kind"),
+            Alias::new("state"),
+            Alias::new("expected_row_count"),
+            Alias::new("manifest_sha256"),
+            Alias::new("naming_parser_version"),
+        ])
+        .from(Alias::new("catalog_publications"))
+        .and_where(Expr::col(Alias::new("id")).eq(publication_id))
         .to_owned()
 }
 

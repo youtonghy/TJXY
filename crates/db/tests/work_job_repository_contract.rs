@@ -2339,3 +2339,143 @@ async fn media_scan_progress_counts_terminal_children_once_across_parents() {
     assert_eq!(shared.scheduled(), 3);
     assert_eq!(shared.finished(), 2);
 }
+
+fn metadata_spec(item_id: CatalogItemId, revision: i64) -> WorkJobSpec {
+    WorkJobSpec::new(
+        WorkTaskKind::ResolveMetadata,
+        WorkScope::CatalogItem(item_id),
+        revision,
+        10,
+    )
+    .unwrap()
+    .with_metadata_requirement(MetadataRequirement::Basic)
+    .unwrap()
+    .with_metadata_source_mode(MetadataSourceMode::LocalOnly)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn newer_metadata_revision_supersedes_pending_predecessors_only() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 10, 8, 9, 0, 0).unwrap();
+    let (repository, _) = repository(&database, now);
+    let item_id = CatalogItemId::new();
+    let other_item = CatalogItemId::new();
+
+    let first = repository
+        .enqueue_or_join(&metadata_spec(item_id, 3))
+        .await
+        .unwrap();
+    let unrelated = repository
+        .enqueue_or_join(&metadata_spec(other_item, 1))
+        .await
+        .unwrap();
+    // A claimed job is already executing and fences itself, so it is not removed.
+    let running = repository
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata-supersede-test",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let second = repository
+        .enqueue_or_join(&metadata_spec(item_id, 4))
+        .await
+        .unwrap();
+    let third = repository
+        .enqueue_or_join(&metadata_spec(item_id, 5))
+        .await
+        .unwrap();
+
+    assert!(second.created() && third.created());
+    assert!(
+        repository.get(second.job().id()).await.unwrap().is_none(),
+        "the revision 4 job is obsolete once revision 5 is queued"
+    );
+    assert!(repository.get(third.job().id()).await.unwrap().is_some());
+    assert!(
+        repository
+            .get(unrelated.job().id())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let claimed_id = running.job().id();
+    assert_eq!(
+        repository.get(claimed_id).await.unwrap().unwrap().state(),
+        WorkJobState::Running
+    );
+    if claimed_id != first.job().id() {
+        assert!(repository.get(first.job().id()).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn maintenance_drains_pending_metadata_behind_the_item_revision() {
+    let database = database().await;
+    let now = Utc.with_ymd_and_hms(2026, 10, 8, 9, 0, 0).unwrap();
+    let (repository, clock) = repository(&database, now);
+    let backend = database.get_database_backend();
+    let item_id = CatalogItemId::new();
+    database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("catalog_items"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("item_type"),
+                        Alias::new("name"),
+                        Alias::new("sort_name"),
+                        Alias::new("sort_key"),
+                        Alias::new("classification_state"),
+                        Alias::new("metadata_state"),
+                        Alias::new("structure_state"),
+                        Alias::new("source_state"),
+                        Alias::new("structure_expansion_revision"),
+                        Alias::new("source_index_revision"),
+                        Alias::new("metadata_revision"),
+                        Alias::new("is_present"),
+                    ])
+                    .values_panic([
+                        item_id.as_uuid().into(),
+                        "Movie".into(),
+                        "Backlog".into(),
+                        "backlog".into(),
+                        SortKey::from_text("Backlog").into_bytes().into(),
+                        "Matched".into(),
+                        "Ready".into(),
+                        "NotApplicable".into(),
+                        "Indexed".into(),
+                        0_i64.into(),
+                        0_i64.into(),
+                        9_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    // Revision 9 matches the item's current revision, so it must survive maintenance. Enqueueing
+    // an older revision afterwards does not supersede anything, which recreates the backlog that
+    // older versions left behind.
+    let fresh = repository
+        .enqueue_or_join(&metadata_spec(item_id, 9))
+        .await
+        .unwrap();
+    let stale = repository
+        .enqueue_or_join(&metadata_spec(item_id, 7))
+        .await
+        .unwrap();
+    assert!(repository.get(stale.job().id()).await.unwrap().is_some());
+
+    clock.set(now + Duration::minutes(1));
+    let report = repository.maintain_queue().await.unwrap();
+
+    assert!(report.acquired);
+    assert_eq!(report.superseded, 1);
+    assert!(repository.get(stale.job().id()).await.unwrap().is_none());
+    assert!(repository.get(fresh.job().id()).await.unwrap().is_some());
+}
