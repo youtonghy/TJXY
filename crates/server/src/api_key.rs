@@ -6,7 +6,7 @@ use axum::{
 };
 use tjxy_api::{AuthenticationInfoDto, AuthenticationInfoQueryResult};
 
-use crate::{AppState, auth};
+use crate::{AppState, audit::Event, auth, login_guard::ClientAddr};
 
 pub(crate) async fn list(
     State(state): State<AppState>,
@@ -37,6 +37,7 @@ pub(crate) async fn list(
 
 pub(crate) async fn create(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
@@ -52,13 +53,20 @@ pub(crate) async fn create(
         return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     match service.create_api_key(&principal, &app_name).await {
-        Ok(()) => no_store(StatusCode::NO_CONTENT.into_response()),
+        Ok(()) => {
+            Event::new("api_key_created", "success", ip)
+                .actor(principal.user().name())
+                .target(&app_name)
+                .emit();
+            no_store(StatusCode::NO_CONTENT.into_response())
+        }
         Err(error) => no_store(auth::authentication_error_response(error)),
     }
 }
 
 pub(crate) async fn delete(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     path: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
@@ -78,7 +86,13 @@ pub(crate) async fn delete(
         return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     match service.delete_api_key(&principal, &raw_key).await {
-        Ok(()) => no_store(StatusCode::NO_CONTENT.into_response()),
+        Ok(()) => {
+            // The key value is a bearer secret and is deliberately not logged.
+            Event::new("api_key_deleted", "success", ip)
+                .actor(principal.user().name())
+                .emit();
+            no_store(StatusCode::NO_CONTENT.into_response())
+        }
         Err(error) => no_store(auth::authentication_error_response(error)),
     }
 }

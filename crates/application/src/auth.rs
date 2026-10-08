@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration as StdDuration};
 
 use argon2::{
     Argon2,
@@ -17,11 +17,17 @@ use tjxy_db::{
     AuthSessionRecord, AuthUser, AuthenticatedPrincipal, CredentialSnapshot, DeviceOptionsRecord,
     DeviceRecord, DeviceRepository, DeviceRepositoryError, SessionCapabilitiesDraft, SessionDraft,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const MAX_PASSWORD_BYTES: usize = 1_024;
+/// Minimum length, in characters, for any password that is newly set or changed.
+/// Stored credentials created under older rules continue to authenticate.
+pub const MIN_PASSWORD_CHARS: usize = 8;
+/// How long a password operation waits for a hashing slot before reporting
+/// [`AuthError::Busy`]; this queues bursts instead of rejecting them outright.
+const PASSWORD_QUEUE_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const MAX_CAPABILITY_VALUES: usize = 128;
 const MAX_CAPABILITY_VALUE_CHARS: usize = 128;
 const MAX_CAPABILITY_URL_CHARS: usize = 255;
@@ -291,16 +297,10 @@ where
         is_admin: bool,
     ) -> Result<AuthUser, AuthError> {
         let username = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
-        validate_password(password)?;
+        validate_new_password(password)?;
         let password_hash = hash_password(self.password_slots.clone(), password).await?;
         AuthRepository::new(&self.database)
-            .create_user(
-                &username,
-                &password_hash,
-                !password.is_empty(),
-                is_admin,
-                self.clock.now(),
-            )
+            .create_user(&username, &password_hash, true, is_admin, self.clock.now())
             .await
             .map_err(Into::into)
     }
@@ -316,10 +316,7 @@ where
         password: &str,
     ) -> Result<Option<AuthUser>, AuthError> {
         let username = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
-        if password.is_empty() {
-            return Err(AuthError::PasswordRequired);
-        }
-        validate_password(password)?;
+        validate_new_password(password)?;
         let password_hash = hash_password(self.password_slots.clone(), password).await?;
         AuthRepository::new(&self.database)
             .create_initial_admin(&username, &password_hash, self.clock.now())
@@ -462,7 +459,7 @@ where
         self.verify_user_password(user_id, current_password).await?;
         let parsed = Username::parse(username).map_err(|_| AuthError::InvalidUsername)?;
         let password_hash = if let Some(password) = new_password.filter(|value| !value.is_empty()) {
-            validate_password(password)?;
+            validate_new_password(password)?;
             Some(hash_password(self.password_slots.clone(), password).await?)
         } else {
             None
@@ -495,6 +492,18 @@ where
             .await
     }
 
+    /// Confirms the user's current password before a sensitive change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidCredentials`] when the password is wrong, or an
+    /// operational error such as [`AuthError::Busy`].
+    pub async fn confirm_password(&self, user_id: UserId, password: &str) -> Result<(), AuthError> {
+        self.verify_user_password(user_id, password)
+            .await
+            .map(|_| ())
+    }
+
     async fn verify_user_password(
         &self,
         user_id: UserId,
@@ -523,7 +532,11 @@ where
         Ok(current)
     }
 
-    /// Replaces or resets one local password and invalidates existing sessions.
+    /// Replaces one local password and invalidates existing sessions and passkeys.
+    ///
+    /// `reset_password` records an administrator reset request. A reset never
+    /// clears the credential: it must carry the replacement password, otherwise
+    /// [`AuthError::PasswordResetRequiresNewPassword`] is returned.
     ///
     /// # Errors
     ///
@@ -534,14 +547,13 @@ where
         new_password: &str,
         reset_password: bool,
     ) -> Result<AuthUser, AuthError> {
-        if !reset_password && new_password.is_empty() {
-            return Err(AuthError::PasswordRequired);
+        if reset_password && new_password.is_empty() {
+            return Err(AuthError::PasswordResetRequiresNewPassword);
         }
-        let password = if reset_password { "" } else { new_password };
-        validate_password(password)?;
-        let password_hash = hash_password(self.password_slots.clone(), password).await?;
+        validate_new_password(new_password)?;
+        let password_hash = hash_password(self.password_slots.clone(), new_password).await?;
         AuthRepository::new(&self.database)
-            .update_password(user_id, &password_hash, !reset_password, self.clock.now())
+            .update_password(user_id, &password_hash, true, self.clock.now())
             .await
             .map_err(Into::into)
     }
@@ -580,9 +592,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::InvalidCredentials`] for both unknown usernames and
-    /// wrong passwords, [`AuthError::Forbidden`] for disabled users, or an
-    /// operational error without exposing credentials.
+    /// Returns [`AuthError::InvalidCredentials`] for unknown usernames, wrong
+    /// passwords, and disabled accounts alike (so none of them is distinguishable),
+    /// or an operational error without exposing credentials.
     pub async fn authenticate(
         &self,
         username: &str,
@@ -634,7 +646,7 @@ where
             .issue_session(&credential, draft)
             .await
             .map_err(|error| match error {
-                AuthRepositoryError::CredentialChanged => AuthError::Forbidden,
+                AuthRepositoryError::CredentialChanged => AuthError::InvalidCredentials,
                 other => AuthError::Repository(other),
             })?;
         Ok(IssuedAuthentication {
@@ -774,8 +786,10 @@ where
         if !password_matches {
             return Err(AuthError::InvalidCredentials);
         }
+        // A disabled account must look exactly like a wrong password: the Argon2
+        // verification above already ran against the stored hash.
         if credential.user().is_disabled() {
-            return Err(AuthError::Forbidden);
+            return Err(AuthError::InvalidCredentials);
         }
         Ok(credential)
     }
@@ -1107,6 +1121,10 @@ pub enum AuthError {
     InvalidProfile,
     #[error("password must not be empty")]
     PasswordRequired,
+    #[error("password must be at least 8 characters")]
+    PasswordTooShort,
+    #[error("resetting a password requires a new password")]
+    PasswordResetRequiresNewPassword,
     #[error("client identity is invalid")]
     InvalidClientIdentity,
     #[error("session capabilities are invalid")]
@@ -1208,6 +1226,24 @@ fn validate_password(password: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Checks the policy for a password that is about to be set or changed.
+///
+/// # Errors
+///
+/// Returns [`AuthError::PasswordRequired`] for an empty value,
+/// [`AuthError::PasswordTooShort`] below [`MIN_PASSWORD_CHARS`] characters, and
+/// [`AuthError::InvalidPassword`] above the byte limit.
+pub fn validate_new_password(password: &str) -> Result<(), AuthError> {
+    if password.is_empty() {
+        return Err(AuthError::PasswordRequired);
+    }
+    validate_password(password)?;
+    if password.chars().count() < MIN_PASSWORD_CHARS {
+        return Err(AuthError::PasswordTooShort);
+    }
+    Ok(())
+}
+
 fn validate_capabilities(capabilities: &SessionCapabilities) -> Result<(), AuthError> {
     for values in [
         &capabilities.playable_media_types,
@@ -1244,8 +1280,20 @@ fn validate_capabilities(capabilities: &SessionCapabilities) -> Result<(), AuthE
     Ok(())
 }
 
+/// Waits (bounded) for a hashing slot so short bursts queue instead of failing.
+async fn acquire_password_slot(
+    slots: Arc<Semaphore>,
+    timeout: StdDuration,
+) -> Result<OwnedSemaphorePermit, AuthError> {
+    match tokio::time::timeout(timeout, slots.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(AuthError::PasswordWorker),
+        Err(_) => Err(AuthError::Busy),
+    }
+}
+
 async fn hash_password(slots: Arc<Semaphore>, password: &str) -> Result<String, AuthError> {
-    let permit = slots.try_acquire_owned().map_err(|_| AuthError::Busy)?;
+    let permit = acquire_password_slot(slots, PASSWORD_QUEUE_TIMEOUT).await?;
     let password = password.as_bytes().to_vec();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -1264,7 +1312,7 @@ async fn verify_password(
     password: &str,
     password_hash: &str,
 ) -> Result<bool, AuthError> {
-    let permit = slots.try_acquire_owned().map_err(|_| AuthError::Busy)?;
+    let permit = acquire_password_slot(slots, PASSWORD_QUEUE_TIMEOUT).await?;
     let password = password.as_bytes().to_vec();
     let password_hash = password_hash.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -1297,4 +1345,59 @@ pub(crate) fn generate_token() -> String {
 
 pub(crate) fn digest_token(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    #[test]
+    fn new_passwords_must_be_non_empty_and_at_least_eight_characters() {
+        assert_eq!(validate_new_password(""), Err(AuthError::PasswordRequired));
+        assert_eq!(
+            validate_new_password("short77"),
+            Err(AuthError::PasswordTooShort)
+        );
+        // Length is counted in characters, not bytes.
+        assert_eq!(
+            validate_new_password("密码密码密码密"),
+            Err(AuthError::PasswordTooShort)
+        );
+        assert_eq!(validate_new_password("密码密码密码密码"), Ok(()));
+        assert_eq!(validate_new_password("exactly8"), Ok(()));
+        assert_eq!(
+            validate_new_password(&"a".repeat(MAX_PASSWORD_BYTES + 1)),
+            Err(AuthError::InvalidPassword)
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_hash_slot_queues_instead_of_failing_immediately() {
+        let slots = Arc::new(Semaphore::new(2));
+        let first = slots.clone().acquire_owned().await.unwrap();
+        let second = slots.clone().acquire_owned().await.unwrap();
+        let third = tokio::spawn(acquire_password_slot(
+            slots.clone(),
+            StdDuration::from_secs(5),
+        ));
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert!(!third.is_finished(), "third caller must wait, not get Busy");
+        drop(first);
+        assert!(third.await.unwrap().is_ok());
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_hash_slot_eventually_reports_busy() {
+        let slots = Arc::new(Semaphore::new(1));
+        let _held = slots.clone().acquire_owned().await.unwrap();
+        let started = Instant::now();
+        let error = acquire_password_slot(slots, StdDuration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(error, AuthError::Busy);
+        assert!(started.elapsed() >= StdDuration::from_millis(50));
+    }
 }

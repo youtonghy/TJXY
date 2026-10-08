@@ -41,7 +41,7 @@ pub use asset::{
 };
 pub use auth::{
     AuthClock, AuthError, AuthService, ClientIdentity, IssuedAuthentication, SecretSessionToken,
-    SessionCapabilities, SessionListFilter, SystemClock,
+    SessionCapabilities, SessionListFilter, SystemClock, validate_new_password,
 };
 pub use cache_invalidation::{
     CacheInvalidationRun, CacheInvalidationService, CacheInvalidationServiceError,

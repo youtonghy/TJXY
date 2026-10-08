@@ -6,7 +6,8 @@ use tjxy_metadata::{
     MusicBrainzProvider, ReloadableMetadataProvider, TheAudioDbProvider, TmdbProvider,
 };
 use tjxy_server::{
-    AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin, DatabaseDraft,
+    AdminAssetsError, AiAdmissionConfig, AiAdmissionConfigError, BootstrapAdmin,
+    DEFAULT_DATABASE_ACQUIRE_TIMEOUT, DEFAULT_DATABASE_MAX_CONNECTIONS, DatabaseDraft,
     DatabaseTlsMode, GoogleDriveOAuthConfiguration, InitializationError, InstallationConfigError,
     InstallationConfigStore, InstallationState, LoggingRuntime,
     MicrosoftOneDriveOAuthConfiguration, SecretString, ServerIdentity, SetupCoordinator,
@@ -51,6 +52,8 @@ enum StartupError {
     IncompleteBootstrapAdmin,
     #[error("TJXY_LEGACY_AUTH must be true or false")]
     InvalidLegacyAuth,
+    #[error("TJXY_TRUSTED_PROXIES is invalid: {0}")]
+    InvalidTrustedProxies(#[source] tjxy_server::TrustedProxiesError),
     #[error("TJXY_ENABLE_REMOTE_PROVIDERS must be true or false")]
     InvalidRemoteProviders,
     #[error("TMDb provider configuration is invalid")]
@@ -63,6 +66,10 @@ enum StartupError {
     InvalidPlaybackWait,
     #[error("TJXY_MEDIA_REFRESH_INTERVAL_SECONDS must be an integer from 0 through 2592000")]
     InvalidMediaRefreshInterval,
+    #[error("TJXY_DATABASE_MAX_CONNECTIONS must be an integer from 2 through 200")]
+    InvalidDatabaseMaxConnections,
+    #[error("TJXY_DATABASE_ACQUIRE_TIMEOUT_SECONDS must be an integer from 1 through 300")]
+    InvalidDatabaseAcquireTimeout,
     #[error("TJXY_WORK_HISTORY_RETENTION_ENABLED must be true or false")]
     InvalidWorkHistoryRetentionEnabled,
     #[error("TJXY_WORK_HISTORY_RETENTION_DAYS must be an integer from 1 through 3650")]
@@ -73,6 +80,8 @@ enum StartupError {
     IncompleteFilesystemBackend,
     #[error("TJXY_FILESYSTEM_REALTIME must be true or false")]
     InvalidFilesystemRealtime,
+    #[error("TJXY_LOCAL_REFERENCE_ROOT must be an absolute path")]
+    InvalidLocalReferenceRoot,
     #[error("Redis cache configuration is invalid: {0}")]
     RedisConfiguration(#[from] CacheConfigurationError),
     #[error("{0} must be a positive integer")]
@@ -255,6 +264,10 @@ async fn serve_application(
             .ok_or(StartupError::InvalidLazyWait)?;
         startup = startup.with_lazy_wait_timeout(Duration::from_millis(milliseconds));
     }
+    startup = startup.with_database_pool(
+        database_max_connections(|| env::var("TJXY_DATABASE_MAX_CONNECTIONS"))?,
+        database_acquire_timeout(|| env::var("TJXY_DATABASE_ACQUIRE_TIMEOUT_SECONDS"))?,
+    );
     if let Some(timeout) = playback_wait_timeout(|| env::var("TJXY_PLAYBACK_WAIT_MS"))? {
         startup = startup.with_playback_wait_timeout(timeout);
     }
@@ -296,6 +309,13 @@ async fn serve_application(
         .map_or(Ok(true), |value| value.parse::<bool>())
         .map_err(|_| StartupError::InvalidFilesystemRealtime)?;
     startup = startup.with_filesystem_realtime_enabled(filesystem_realtime);
+    if let Ok(root) = env::var("TJXY_LOCAL_REFERENCE_ROOT") {
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            return Err(StartupError::InvalidLocalReferenceRoot);
+        }
+        startup = startup.with_local_reference_root(root);
+    }
     if let Ok(value) = env::var("TJXY_LEGACY_AUTH") {
         let enabled = value
             .parse::<bool>()
@@ -307,6 +327,12 @@ async fn serve_application(
             .parse::<bool>()
             .map_err(|_| StartupError::InvalidLegacyAuth)?;
         startup = startup.with_legacy_query_token_enabled(enabled);
+    }
+    if let Ok(value) = env::var("TJXY_TRUSTED_PROXIES") {
+        startup = startup.with_trusted_proxies(
+            tjxy_server::TrustedProxies::parse(&value)
+                .map_err(StartupError::InvalidTrustedProxies)?,
+        );
     }
     match (
         env::var("TJXY_BOOTSTRAP_ADMIN_USERNAME").ok(),
@@ -579,6 +605,35 @@ fn media_refresh_interval(
     Ok((seconds != 0).then(|| Duration::from_secs(seconds)))
 }
 
+fn database_max_connections(
+    lookup: impl FnOnce() -> Result<String, env::VarError>,
+) -> Result<u32, StartupError> {
+    match lookup() {
+        Ok(value) => value
+            .parse::<u32>()
+            .ok()
+            .filter(|value| (2..=200).contains(value))
+            .ok_or(StartupError::InvalidDatabaseMaxConnections),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_DATABASE_MAX_CONNECTIONS),
+        Err(env::VarError::NotUnicode(_)) => Err(StartupError::InvalidDatabaseMaxConnections),
+    }
+}
+
+fn database_acquire_timeout(
+    lookup: impl FnOnce() -> Result<String, env::VarError>,
+) -> Result<Duration, StartupError> {
+    match lookup() {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (1..=300).contains(value))
+            .map(Duration::from_secs)
+            .ok_or(StartupError::InvalidDatabaseAcquireTimeout),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_DATABASE_ACQUIRE_TIMEOUT),
+        Err(env::VarError::NotUnicode(_)) => Err(StartupError::InvalidDatabaseAcquireTimeout),
+    }
+}
+
 fn redis_number(name: &'static str, default: u64) -> Result<u64, StartupError> {
     match env::var(name) {
         Ok(value) => value
@@ -597,8 +652,10 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::{
-        admin_dist_dir, ai_admission_config, jellyfin_web_dist_dir, media_refresh_interval,
-        parse_credential_keyring, playback_wait_timeout, setup_postgres_tls,
+        DEFAULT_DATABASE_ACQUIRE_TIMEOUT, DEFAULT_DATABASE_MAX_CONNECTIONS, admin_dist_dir,
+        ai_admission_config, database_acquire_timeout, database_max_connections,
+        jellyfin_web_dist_dir, media_refresh_interval, parse_credential_keyring,
+        playback_wait_timeout, setup_postgres_tls,
     };
     use tjxy_server::DatabaseTlsMode;
 
@@ -718,6 +775,32 @@ mod tests {
         assert_eq!(media_refresh_interval(|| Ok("0".to_owned())).unwrap(), None);
         assert!(media_refresh_interval(|| Ok("invalid".to_owned())).is_err());
         assert!(media_refresh_interval(|| Ok("2592001".to_owned())).is_err());
+    }
+
+    #[test]
+    fn database_pool_settings_default_and_reject_out_of_range_values() {
+        assert_eq!(
+            database_max_connections(|| Err(VarError::NotPresent)).unwrap(),
+            DEFAULT_DATABASE_MAX_CONNECTIONS
+        );
+        assert_eq!(
+            database_max_connections(|| Ok("40".to_owned())).unwrap(),
+            40
+        );
+        for invalid in ["1", "201", "many", ""] {
+            assert!(database_max_connections(|| Ok(invalid.to_owned())).is_err());
+        }
+        assert_eq!(
+            database_acquire_timeout(|| Err(VarError::NotPresent)).unwrap(),
+            DEFAULT_DATABASE_ACQUIRE_TIMEOUT
+        );
+        assert_eq!(
+            database_acquire_timeout(|| Ok("5".to_owned())).unwrap(),
+            Duration::from_secs(5)
+        );
+        for invalid in ["0", "301", "soon"] {
+            assert!(database_acquire_timeout(|| Ok(invalid.to_owned())).is_err());
+        }
     }
 
     #[test]

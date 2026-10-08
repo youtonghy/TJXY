@@ -298,6 +298,33 @@ pressure protection; unavailable host samples fall back to 1. Restart after chan
 this setting. More concurrency does not guarantee higher throughput; SQLite writes
 remain serialized.
 
+Unchanged storage observations no longer advance catalog revisions, and a source rebuild whose
+manifest matches the active publication reuses it instead of re-indexing and re-resolving
+metadata. Enqueueing a newer `ResolveMetadata` revision removes the item's older Pending jobs,
+and queue maintenance drains Pending jobs left behind a newer revision (5,000 per pass).
+`TJXY_LOCAL_REFERENCE_ROOT` fences absolute local references such as STRM targets to one
+absolute directory; leave it unset to keep the file system root, and set it to the media mount
+in production so a library file cannot point at other files on the host.
+
+The database pool is shared by request handlers and background workers. It defaults to 20
+connections with a 10 second acquire timeout; adjust with `TJXY_DATABASE_MAX_CONNECTIONS`
+(2–200) and `TJXY_DATABASE_ACQUIRE_TIMEOUT_SECONDS` (1–300), and keep the total below the
+PostgreSQL `max_connections` shared with other applications. PostgreSQL sessions end
+transactions left idle for 60 seconds, and the work-notification listener uses its own
+connection outside the pool. Foreground media reads hold a storage admission slot only while
+the upstream connection is established and wait at most 5 seconds before answering 503 with
+`Retry-After`.
+
+Login attempts are limited per normalized account (10 failures in 15 minutes) and per client
+address (30 failures per minute), independent of the client-supplied `DeviceId`; authentication
+events are written to the structured `tjxy_server::audit` log target without credentials. Behind
+a reverse proxy set `TJXY_TRUSTED_PROXIES` to the proxy address or CIDR (for example `127.0.0.1`)
+so the client address is taken from `X-Forwarded-For`; unset, the peer address is used and every
+client behind the proxy shares one address budget. New passwords must be at least 8 characters,
+the administrator password reset requires a new password, and changing or resetting a password or
+disabling an account also removes that user's passkeys. Registering a passkey needs a session
+token and the current password.
+
 Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention

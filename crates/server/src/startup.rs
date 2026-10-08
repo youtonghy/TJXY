@@ -79,12 +79,16 @@ pub struct StartupOptions {
     legacy_query_token_enabled: bool,
     session_lifetime: Option<Duration>,
     max_concurrent_password_hashes: usize,
+    trusted_proxies: crate::TrustedProxies,
     assets_dir: PathBuf,
     assets_dir_source: &'static str,
     lazy_wait_timeout: StdDuration,
     playback_wait_timeout: StdDuration,
     filesystem_backends: Vec<FilesystemBackendConfiguration>,
     filesystem_realtime_enabled: bool,
+    local_reference_root: PathBuf,
+    database_max_connections: u32,
+    database_acquire_timeout: StdDuration,
     storage_backends: Vec<ConfiguredStorageBackend>,
     credential_cipher: Option<Arc<CredentialCipher>>,
     google_oauth: Option<crate::storage_admin::GoogleDriveOAuthConfiguration>,
@@ -151,6 +155,9 @@ impl fmt::Debug for StartupOptions {
                 "filesystem_realtime_enabled",
                 &self.filesystem_realtime_enabled,
             )
+            .field("local_reference_root", &self.local_reference_root)
+            .field("database_max_connections", &self.database_max_connections)
+            .field("database_acquire_timeout", &self.database_acquire_timeout)
             .field("storage_backend_count", &self.storage_backends.len())
             .field(
                 "credential_cipher_configured",
@@ -197,13 +204,17 @@ impl StartupOptions {
             legacy_auth_enabled: true,
             legacy_query_token_enabled: true,
             session_lifetime: Some(Duration::days(30)),
-            max_concurrent_password_hashes: 2,
+            max_concurrent_password_hashes: 4,
+            trusted_proxies: crate::TrustedProxies::default(),
             assets_dir: PathBuf::from("./data/assets"),
             assets_dir_source: "Default",
             lazy_wait_timeout: StdDuration::from_millis(2_500),
             playback_wait_timeout: StdDuration::from_secs(15),
             filesystem_backends: Vec::new(),
             filesystem_realtime_enabled: true,
+            local_reference_root: PathBuf::from("/"),
+            database_max_connections: DEFAULT_DATABASE_MAX_CONNECTIONS,
+            database_acquire_timeout: DEFAULT_DATABASE_ACQUIRE_TIMEOUT,
             storage_backends: Vec::new(),
             credential_cipher: None,
             google_oauth: None,
@@ -265,6 +276,13 @@ impl StartupOptions {
     #[must_use]
     pub fn with_bootstrap_admin(mut self, admin: BootstrapAdmin) -> Self {
         self.bootstrap_admin = Some(admin);
+        self
+    }
+
+    /// Sets the reverse proxies whose `X-Forwarded-For` header is believed.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, proxies: crate::TrustedProxies) -> Self {
+        self.trusted_proxies = proxies;
         self
     }
 
@@ -333,6 +351,27 @@ impl StartupOptions {
     #[must_use]
     pub const fn with_filesystem_realtime_enabled(mut self, enabled: bool) -> Self {
         self.filesystem_realtime_enabled = enabled;
+        self
+    }
+
+    /// Sizes the shared database pool used by request handlers and background workers.
+    #[must_use]
+    pub const fn with_database_pool(
+        mut self,
+        max_connections: u32,
+        acquire_timeout: StdDuration,
+    ) -> Self {
+        self.database_max_connections = max_connections;
+        self.database_acquire_timeout = acquire_timeout;
+        self
+    }
+
+    /// Fences absolute local references such as STRM targets to one directory tree.
+    ///
+    /// The default is the file system root, which keeps every absolute reference resolvable.
+    #[must_use]
+    pub fn with_local_reference_root(mut self, root: PathBuf) -> Self {
+        self.local_reference_root = root;
         self
     }
 
@@ -528,7 +567,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     let musicbrainz_environment_fallback = options.musicbrainz_environment_fallback.clone();
     let musicbrainz_provider_factory = Arc::clone(&options.musicbrainz_provider_factory);
     validate_storage_backends(&options.storage_backends)?;
-    let mut database = Database::connect(runtime_connect_options(&options.database_url)).await?;
+    let mut database = Database::connect(runtime_connect_options(&options)).await?;
     if database.get_database_backend() == DbBackend::Sqlite {
         database
             .execute(Statement::from_string(
@@ -540,7 +579,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     tjxy_db::migrate_database(&database).await?;
     if database.get_database_backend() == DbBackend::MySql {
         database.close().await?;
-        database = Database::connect(runtime_connect_options(&options.database_url)).await?;
+        database = Database::connect(runtime_connect_options(&options)).await?;
     }
     let scan_pressure = Arc::new(crate::scan_concurrency::ScanPressure::default());
     let sql_pressure = Arc::clone(&scan_pressure);
@@ -682,6 +721,9 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         if admin.password.is_empty() {
             return Err(InitializationError::EmptyBootstrapPassword);
         }
+        if tjxy_application::validate_new_password(&admin.password).is_err() {
+            return Err(InitializationError::WeakBootstrapPassword);
+        }
         auth.create_initial_admin(&admin.username, &admin.password)
             .await?;
     }
@@ -720,7 +762,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
         );
     }
     let local_reference_fallback: Arc<dyn tjxy_storage::StorageBackend> =
-        Arc::new(FilesystemBackend::new(std::path::Path::new("/")).await?);
+        Arc::new(FilesystemBackend::new(&options.local_reference_root).await?);
     let mut metadata_providers = options.metadata_providers;
     metadata_providers.insert(
         0,
@@ -781,7 +823,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
             "Could not reclaim expired work leases during startup"
         ),
     }
-    worker::spawn_work_lease_recovery_worker(database.clone());
+    worker::spawn_work_lease_recovery_worker(database.clone(), options.database_url.clone());
     worker::spawn_auth_session_retention_worker(database.clone());
     match tjxy_db::WorkJobRepository::new(&database)
         .retire_stale_discoveries()
@@ -880,6 +922,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)
     .with_realtime_events(realtime_events)
+    .with_trusted_proxies(options.trusted_proxies)
     .with_legacy_auth_enabled(options.legacy_auth_enabled)
     .with_legacy_query_token_enabled(options.legacy_query_token_enabled)
     .with_ready(true);
@@ -1267,11 +1310,27 @@ async fn configure_storage(
 /// queue claim's dependency subquery inflates plan cost far past `jit_above_cost`,
 /// so every claim spent about a second compiling a plan that executes in under a
 /// millisecond, saturating the shared pool that request handlers wait on.
-fn runtime_connect_options(database_url: &str) -> ConnectOptions {
-    let mut options = ConnectOptions::new(database_url);
+fn runtime_connect_options(startup: &StartupOptions) -> ConnectOptions {
+    let mut options = ConnectOptions::new(startup.database_url.as_str());
+    // SQLite serializes writers and its migrations assume the library's default pool, so only the
+    // networked databases get the configured sizing.
+    if database_backend_label(&startup.database_url) != "sqlite" {
+        options
+            .max_connections(startup.database_max_connections)
+            .acquire_timeout(startup.database_acquire_timeout);
+    }
     options.map_sqlx_postgres_opts(tune_postgres_session);
     options
 }
+
+/// Request handlers and every background worker share this pool. The sqlx default of 10 left
+/// about nine usable connections once the work-notification listener held one.
+pub const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 20;
+/// Fails a request instead of letting it queue behind a saturated pool for the sqlx default of 30s.
+pub const DEFAULT_DATABASE_ACQUIRE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+/// A session that opens a transaction and goes quiet holds its row locks and snapshot; `PostgreSQL`
+/// ends it instead of letting a dropped future pin them until the connection is reused.
+const POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT: &str = "60s";
 
 /// Prepared statements cached per pooled connection. The default of 100 is below
 /// the number of distinct statements the server issues, so wide catalog queries
@@ -1282,7 +1341,13 @@ const POSTGRES_STATEMENT_CACHE_CAPACITY: usize = 512;
 
 fn tune_postgres_session(options: PgConnectOptions) -> PgConnectOptions {
     options
-        .options([("jit", "off")])
+        .options([
+            ("jit", "off"),
+            (
+                "idle_in_transaction_session_timeout",
+                POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT,
+            ),
+        ])
         .statement_cache_capacity(POSTGRES_STATEMENT_CACHE_CAPACITY)
 }
 
@@ -1367,6 +1432,10 @@ pub enum InitializationError {
     MissingInitialAdministrator,
     #[error("the bootstrap administrator password must not be empty")]
     EmptyBootstrapPassword,
+    #[error(
+        "the bootstrap administrator password must be at least 8 characters and at most 1024 bytes"
+    )]
+    WeakBootstrapPassword,
     #[error("active encrypted storage accounts require a credential cipher")]
     MissingCredentialCipher,
     #[error("invalid storage backend configuration: {0}")]
@@ -1482,7 +1551,7 @@ mod tests {
         );
         assert_eq!(
             options.get_options(),
-            Some("-c statement_timeout=5min -c jit=off")
+            Some("-c statement_timeout=5min -c jit=off -c idle_in_transaction_session_timeout=60s")
         );
         // sqlx exposes no getter for the statement cache capacity.
         assert!(format!("{options:?}").contains(&format!(

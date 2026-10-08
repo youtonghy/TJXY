@@ -523,6 +523,7 @@ function PasskeyManager() {
   const [pending, setPending] = useState(false);
   const [deletingId, setDeletingId] = useState<string>();
   const [error, setError] = useState('');
+  const [registerPassword, setRegisterPassword] = useState('');
 
   const refresh = async () => {
     const items = await listPasskeys();
@@ -544,12 +545,18 @@ function PasskeyManager() {
           <p className="text-sm font-medium" id="passkey-heading">Passkey</p>
           <p className="mt-1 text-sm text-muted">{tr('Register this device for passwordless sign-in.', '为此设备注册 Passkey，之后可免密登录。')}</p>
         </div>
+        <TextField className="w-48" isRequired>
+          <Label>{tr('Current password', '当前密码')}</Label>
+          <Input autoComplete="current-password" type="password" value={registerPassword} onChange={(event) => { setRegisterPassword(event.currentTarget.value); }} />
+        </TextField>
         <Button
+          isDisabled={registerPassword.length === 0}
           isPending={pending}
           onPress={() => {
             setPending(true);
             setError('');
-            void registerPasskey()
+            void registerPasskey(registerPassword)
+              .then(() => { setRegisterPassword(''); })
               .then(refresh)
               .catch((reason: unknown) => { setError(`${tr('Passkey registration failed.', 'Passkey 注册失败。')} ${passkeyErrorMessage(reason)}`); })
               .finally(() => { setPending(false); });

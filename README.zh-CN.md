@@ -230,6 +230,25 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 可设置 `TJXY_SCAN_CONCURRENCY=1` 回退到单并发，或设置 2–8 作为固定目标上限；固定模式仍受
 负载保护，采样不可用时退回 1。修改环境变量后重启生效。并发增加不保证更快，SQLite 写入仍然串行。
 
+未变化的存储观察不再推进 catalog revision；来源重建的 manifest 与当前 publication 相同时会直接复用，
+不再重新索引和解析元数据。入队新的 `ResolveMetadata` revision 会删除同一条目更旧的 Pending 任务，
+队列维护每轮也会清理落后于条目当前 revision 的 Pending 任务（每轮最多 5,000 条）。
+`TJXY_LOCAL_REFERENCE_ROOT` 可把 STRM 目标这类绝对本地引用限制在一个绝对目录内；不设置时仍以文件系统根
+为边界，生产环境应设置为媒体挂载目录，避免媒体库中的文件指向宿主机上的其他文件。
+
+数据库连接池由请求处理与后台 worker 共用，默认 20 个连接、获取超时 10 秒；可通过
+`TJXY_DATABASE_MAX_CONNECTIONS`（2–200）和 `TJXY_DATABASE_ACQUIRE_TIMEOUT_SECONDS`（1–300）调整，
+总量应低于与其他应用共享的 PostgreSQL `max_connections`。PostgreSQL 会话会结束空闲超过 60 秒的事务，
+任务通知监听使用池外的独立连接。前台媒体读取只在建立上游连接时占用存储准入名额，最多等待 5 秒，
+超时返回带 `Retry-After` 的 503。
+
+登录尝试按规范化后的账户（15 分钟内失败 10 次）和客户端地址（每分钟失败 30 次）限流，与客户端自报的
+`DeviceId` 无关；认证事件以结构化日志（target 为 `tjxy_server::audit`）记录且不含凭据。部署在反向代理
+之后时，请把 `TJXY_TRUSTED_PROXIES` 设置为代理地址或 CIDR（例如 `127.0.0.1`），以便从 `X-Forwarded-For`
+取得客户端地址；未设置时使用对端地址，代理后的所有客户端将共用同一个地址额度。新密码至少 8 个字符，
+管理员重置密码必须提供新密码，修改或重置密码、禁用账户时会同时删除该用户的 passkey。注册 passkey
+需要会话令牌和当前密码。
+
 当前版本完成的工作任务默认保留 7 天。可将
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 每次最多登记 1,000 条旧版本

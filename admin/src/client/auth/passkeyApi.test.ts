@@ -45,8 +45,12 @@ it('unwraps the standard publicKey envelope for registration', async () => {
     .mockResolvedValueOnce({ ChallengeId: 'challenge-1', Options: { publicKey: { challenge: 'abc', user: { id: 'user' } } } })
     .mockResolvedValueOnce(undefined);
 
-  await registerPasskey();
+  await registerPasskey('current-password');
 
+  expect(requestMock).toHaveBeenNthCalledWith(1, '/Users/Me/Passkeys/Register/Start', {
+    method: 'POST',
+    body: JSON.stringify({ CurrentPassword: 'current-password' }),
+  });
   expect(registrationMock).not.toHaveBeenCalled();
 });
 

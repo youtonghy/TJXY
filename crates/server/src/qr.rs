@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tjxy_application::{AuthError, AuthenticatedPrincipal, ClientIdentity};
 use uuid::Uuid;
 
-use crate::{AppState, auth};
+use crate::{AppState, audit::Event, auth, login_guard::ClientAddr};
 
 const QR_TTL_SECONDS: i64 = 180;
 const MAX_ACTIVE_CHALLENGES: usize = 1024;
@@ -187,6 +187,7 @@ pub(crate) async fn connect(
 
 pub(crate) async fn authorize(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<QuickConnectQuery>,
@@ -208,20 +209,52 @@ pub(crate) async fn authorize(
     let Some(code) = code else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Short codes are guessable, so wrong guesses draw on the shared failure budget.
+    let actor = principal.user().name().to_owned();
+    let attempt = match auth::begin_attempt(&state, "quickconnect_authorize", ip, Some(&actor)) {
+        Ok(attempt) => attempt,
+        Err(response) => return response,
+    };
+    let status = approve_code(&state, principal, &code);
+    auth::finish_attempt(&state, &attempt, status == Err(StatusCode::NOT_FOUND));
+    match status {
+        Ok(()) => {
+            Event::new("quickconnect_authorized", "success", ip)
+                .actor(&actor)
+                .emit();
+            Json(true).into_response()
+        }
+        Err(status) => {
+            if status == StatusCode::NOT_FOUND {
+                Event::new("quickconnect_authorized", "failure", ip)
+                    .actor(&actor)
+                    .reason("unknown_code")
+                    .emit();
+            }
+            status.into_response()
+        }
+    }
+}
+
+fn approve_code(
+    state: &AppState,
+    principal: AuthenticatedPrincipal,
+    code: &str,
+) -> Result<(), StatusCode> {
     let Ok(mut challenges) = state.qr_login.0.lock() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let Some(challenge) = challenges
         .values_mut()
-        .find(|value| value.quick_connect_code.eq_ignore_ascii_case(&code))
+        .find(|value| value.quick_connect_code.eq_ignore_ascii_case(code))
     else {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND);
     };
     if challenge.expires_at <= Utc::now() || challenge.consumed || challenge.approved.is_some() {
-        return StatusCode::GONE.into_response();
+        return Err(StatusCode::GONE);
     }
     challenge.approved = Some(principal);
-    Json(true).into_response()
+    Ok(())
 }
 
 pub(crate) async fn authenticate(
@@ -301,6 +334,7 @@ pub(crate) async fn preview(
 
 pub(crate) async fn approve(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -332,6 +366,9 @@ pub(crate) async fn approve(
     if challenge.expires_at <= Utc::now() || challenge.consumed || challenge.approved.is_some() {
         return StatusCode::GONE.into_response();
     }
+    Event::new("qr_login_approved", "success", ip)
+        .actor(principal.user().name())
+        .emit();
     challenge.approved = Some(principal);
     StatusCode::NO_CONTENT.into_response()
 }

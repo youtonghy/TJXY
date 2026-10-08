@@ -94,8 +94,11 @@ export async function authenticateWithPasskey(username?: string): Promise<Passke
   return clientRequest('/Auth/Passkey/Authenticate/Finish', { method: 'POST', body: JSON.stringify({ challengeId: start.ChallengeId, response }) });
 }
 
-export async function registerPasskey(): Promise<void> {
-  const start = await clientRequest<CeremonyStart<PublicKeyCredentialCreationOptionsJSON>>('/Users/Me/Passkeys/Register/Start', { method: 'POST' });
+export async function registerPasskey(currentPassword: string): Promise<void> {
+  const start = await clientRequest<CeremonyStart<PublicKeyCredentialCreationOptionsJSON>>('/Users/Me/Passkeys/Register/Start', {
+    method: 'POST',
+    body: JSON.stringify({ CurrentPassword: currentPassword }),
+  });
   const response = await startRegistrationCompat(start.Options.publicKey);
   await clientRequest('/Users/Me/Passkeys/Register/Finish', { method: 'POST', body: JSON.stringify({ challengeId: start.ChallengeId, response }) });
 }

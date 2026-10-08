@@ -144,7 +144,10 @@ async fn password_auth_issues_redacted_token_and_token_auth_resolves_user() {
 #[tokio::test]
 async fn unknown_user_and_wrong_password_share_the_same_external_error() {
     let (service, _clock, _) = service().await;
-    service.create_user("alice", "right", false).await.unwrap();
+    service
+        .create_user("alice", "right-password", false)
+        .await
+        .unwrap();
 
     let wrong = service
         .authenticate("alice", "wrong", client())
@@ -192,7 +195,10 @@ async fn credential_verification_returns_the_user_without_creating_a_session() {
 #[tokio::test]
 async fn username_lookup_uses_normalized_names_without_creating_a_session() {
     let (service, _clock, database) = service().await;
-    let created = service.create_user("Ａlice", "right", false).await.unwrap();
+    let created = service
+        .create_user("Ａlice", "right-password", false)
+        .await
+        .unwrap();
 
     let found = service.find_user_by_name("alice").await.unwrap().unwrap();
 
@@ -225,11 +231,17 @@ async fn username_lookup_uses_normalized_names_without_creating_a_session() {
 }
 
 #[tokio::test]
-async fn empty_password_is_valid_and_session_expires_at_the_exact_boundary() {
+async fn session_expires_at_the_exact_boundary() {
     let (service, clock, _) = service().await;
-    service.create_user("alice", "", false).await.unwrap();
-    let issued = service.authenticate("alice", "", client()).await.unwrap();
-    assert!(!issued.user().has_password());
+    service
+        .create_user("alice", "long enough", false)
+        .await
+        .unwrap();
+    let issued = service
+        .authenticate("alice", "long enough", client())
+        .await
+        .unwrap();
+    assert!(issued.user().has_password());
 
     clock.set(issued.expires_at().unwrap());
 
@@ -238,6 +250,227 @@ async fn empty_password_is_valid_and_session_expires_at_the_exact_boundary() {
         .await
         .unwrap_err();
     assert_eq!(error, AuthError::InvalidToken);
+}
+
+#[tokio::test]
+async fn new_passwords_must_be_non_empty_and_at_least_eight_characters() {
+    let (service, _clock, _) = service().await;
+    assert_eq!(
+        service.create_user("empty", "", false).await.unwrap_err(),
+        AuthError::PasswordRequired
+    );
+    assert_eq!(
+        service
+            .create_user("short", "seven77", false)
+            .await
+            .unwrap_err(),
+        AuthError::PasswordTooShort
+    );
+    assert_eq!(
+        service
+            .create_initial_admin("admin", "seven77")
+            .await
+            .unwrap_err(),
+        AuthError::PasswordTooShort
+    );
+    let user = service
+        .create_user("alice", "eight888", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .update_user_password(user.id(), "", false)
+            .await
+            .unwrap_err(),
+        AuthError::PasswordRequired
+    );
+    assert_eq!(
+        service
+            .update_user_password(user.id(), "short", false)
+            .await
+            .unwrap_err(),
+        AuthError::PasswordTooShort
+    );
+    assert_eq!(
+        service
+            .update_self_password(user.id(), "eight888", "short")
+            .await
+            .unwrap_err(),
+        AuthError::PasswordTooShort
+    );
+    assert_eq!(
+        service
+            .update_self_account(user.id(), "alice", "", "eight888", Some("short"))
+            .await
+            .unwrap_err(),
+        AuthError::PasswordTooShort
+    );
+    // None of the rejected attempts changed the stored credential.
+    service
+        .authenticate("alice", "eight888", client())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn accounts_created_with_older_weaker_passwords_can_still_log_in() {
+    use argon2::{
+        Argon2,
+        password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+    };
+
+    let (service, _clock, database) = service().await;
+    // Stored credentials from before the policy: a 5-character password and an
+    // account whose password was reset to the empty string.
+    for (name, password) in [("legacy", "right"), ("blank", "")] {
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+            .unwrap()
+            .to_string();
+        tjxy_db::AuthRepository::new(&database)
+            .create_user(
+                &tjxy_common::Username::parse(name).unwrap(),
+                &hash,
+                !password.is_empty(),
+                false,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+    }
+
+    service
+        .authenticate("legacy", "right", client())
+        .await
+        .unwrap();
+    service.authenticate("blank", "", client()).await.unwrap();
+}
+
+#[tokio::test]
+async fn administrator_reset_requires_a_new_password_and_never_clears_the_credential() {
+    let (service, _clock, _) = service().await;
+    let user = service
+        .create_user("alice", "original password", false)
+        .await
+        .unwrap();
+    let session = service
+        .authenticate("alice", "original password", client())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service
+            .update_user_password(user.id(), "", true)
+            .await
+            .unwrap_err(),
+        AuthError::PasswordResetRequiresNewPassword
+    );
+    // The failed reset left the password and the existing session untouched.
+    service
+        .authenticate("alice", "original password", client())
+        .await
+        .unwrap();
+    service
+        .authenticate_token(session.access_token().expose_secret())
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .authenticate("alice", "", client())
+            .await
+            .unwrap_err(),
+        AuthError::InvalidCredentials
+    );
+
+    let updated = service
+        .update_user_password(user.id(), "administrator chosen", true)
+        .await
+        .unwrap();
+    assert!(updated.has_password());
+    assert_eq!(
+        service
+            .authenticate_token(session.access_token().expose_secret())
+            .await
+            .unwrap_err(),
+        AuthError::InvalidToken,
+        "existing sessions are revoked through the auth revision"
+    );
+    assert_eq!(
+        service
+            .authenticate("alice", "original password", client())
+            .await
+            .unwrap_err(),
+        AuthError::InvalidCredentials
+    );
+    service
+        .authenticate("alice", "administrator chosen", client())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn disabled_accounts_are_indistinguishable_from_wrong_passwords() {
+    let (service, _clock, _) = service().await;
+    service
+        .create_user("root", "admin password", true)
+        .await
+        .unwrap();
+    let user = service
+        .create_user("alice", "alice password", false)
+        .await
+        .unwrap();
+    service
+        .update_user_policy(user.id(), false, true)
+        .await
+        .unwrap();
+
+    let right = service
+        .authenticate("alice", "alice password", client())
+        .await
+        .unwrap_err();
+    let wrong = service
+        .authenticate("alice", "not the password", client())
+        .await
+        .unwrap_err();
+    let unknown = service
+        .authenticate("nobody", "alice password", client())
+        .await
+        .unwrap_err();
+
+    assert_eq!(right, AuthError::InvalidCredentials);
+    assert_eq!(wrong, AuthError::InvalidCredentials);
+    assert_eq!(unknown, AuthError::InvalidCredentials);
+    assert_eq!(
+        service
+            .verify_credentials("alice", "alice password")
+            .await
+            .unwrap_err(),
+        AuthError::InvalidCredentials
+    );
+}
+
+#[tokio::test]
+async fn concurrent_password_checks_queue_instead_of_failing_with_busy() {
+    let (service, _clock, _) = service().await;
+    service
+        .create_user("alice", "alice password", false)
+        .await
+        .unwrap();
+    let service = Arc::new(service);
+
+    // Four wrong-password attempts compete for two hashing slots.
+    let attempts = (0..4).map(|index| {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            service
+                .authenticate("alice", &format!("wrong password {index}"), client())
+                .await
+                .unwrap_err()
+        })
+    });
+    for attempt in attempts.collect::<Vec<_>>() {
+        assert_eq!(attempt.await.unwrap(), AuthError::InvalidCredentials);
+    }
 }
 
 #[tokio::test]

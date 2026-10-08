@@ -7,6 +7,7 @@ mod ai_provider;
 mod ai_settings;
 mod announcements;
 mod api_key;
+mod audit;
 mod auth;
 mod bounded_log;
 mod browse;
@@ -26,6 +27,7 @@ mod local_metadata_admin;
 mod log_record;
 mod logging_admin;
 mod logging_runtime;
+mod login_guard;
 mod media_collection;
 mod metadata_admin;
 mod metadata_settings_admin;
@@ -62,7 +64,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, RawQuery, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, RawQuery, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -95,6 +97,7 @@ pub use installation_config::{
     PendingInstallation, SecretString,
 };
 pub use logging_runtime::{LoggingRuntime, LoggingRuntimeError};
+pub use login_guard::{TrustedProxies, TrustedProxiesError};
 pub use runtime_storage::RuntimeStorageError;
 pub use setup::{
     CompleteSetupInput, DatabaseBackend, DatabaseDraft, DatabaseTestResult, SetupCompletion,
@@ -103,12 +106,17 @@ pub use setup::{
     build_setup_router_with_options,
 };
 pub use startup::{
-    ApiKeyValidationError, BootstrapAdmin, InitializationError, MetadataSettingsValidationError,
+    ApiKeyValidationError, BootstrapAdmin, DEFAULT_DATABASE_ACQUIRE_TIMEOUT,
+    DEFAULT_DATABASE_MAX_CONNECTIONS, InitializationError, MetadataSettingsValidationError,
     StartupOptions, initialize,
 };
 pub use storage_admin::{GoogleDriveOAuthConfiguration, MicrosoftOneDriveOAuthConfiguration};
 pub use system_settings::RestartController;
 
+/// Login bodies carry a username, password, and flag; 16 KiB is generous.
+const AUTH_BODY_LIMIT_BYTES: usize = 16 * 1024;
+/// `WebAuthn` assertions are larger than password logins but still small.
+const PASSKEY_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const JELLYFIN_API_COMPAT_VERSION: &str = "10.11.11";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,6 +205,8 @@ pub struct AppState {
     storage_runtime: Option<Arc<runtime_storage::RuntimeStorageManager>>,
     realtime_events: Arc<socket::RealtimeEvents>,
     qr_login: qr::QrLoginStore,
+    login_guard: Arc<login_guard::LoginGuard>,
+    trusted_proxies: Arc<TrustedProxies>,
     legacy_auth_enabled: bool,
     legacy_query_token_enabled: bool,
 }
@@ -238,6 +248,8 @@ impl AppState {
             storage_runtime: None,
             realtime_events: Arc::new(socket::RealtimeEvents::new()),
             qr_login: qr::QrLoginStore::default(),
+            login_guard: Arc::new(login_guard::LoginGuard::new()),
+            trusted_proxies: Arc::new(TrustedProxies::default()),
             legacy_auth_enabled: true,
             legacy_query_token_enabled: true,
         }
@@ -507,6 +519,14 @@ impl AppState {
         system_settings::persisted_bind_address(service).await
     }
 
+    /// Sets the reverse proxies whose `X-Forwarded-For` header is believed when
+    /// resolving the client address used for login throttling and audit logs.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = Arc::new(proxies);
+        self
+    }
+
     #[must_use]
     pub const fn with_legacy_auth_enabled(mut self, enabled: bool) -> Self {
         self.legacy_auth_enabled = enabled;
@@ -553,19 +573,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/Branding/Assets/{file}", get(system_settings::get_asset))
         .route(
             "/Users/AuthenticateByName",
-            post(auth::authenticate_by_name),
+            post(auth::authenticate_by_name).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)),
         )
         .route(
             "/Auth/Passkey/Authenticate/Start",
-            post(passkey::authenticate_start),
+            post(passkey::authenticate_start).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)),
         )
         .route(
             "/Auth/Passkey/Authenticate/Finish",
-            post(passkey::authenticate_finish),
+            post(passkey::authenticate_finish)
+                .layer(DefaultBodyLimit::max(PASSKEY_BODY_LIMIT_BYTES)),
         )
         .route(
             "/Users/authenticatebyname",
-            post(auth::authenticate_by_name),
+            post(auth::authenticate_by_name).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)),
         )
         .route(
             "/Users/AuthenticateWithQuickConnect",

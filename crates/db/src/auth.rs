@@ -504,7 +504,9 @@ impl<'connection> AuthRepository<'connection> {
             values.push((Alias::new("password_hash"), password_hash.into()));
             values.push((Alias::new("has_password"), true.into()));
         }
-        let result = update_user_fields(&transaction, user_id, values).await;
+        let result =
+            update_account_in_transaction(&transaction, user_id, values, password_hash.is_some())
+                .await;
         finish(transaction, result).await
     }
 
@@ -549,7 +551,7 @@ impl<'connection> AuthRepository<'connection> {
             return Err(AuthRepositoryError::EmptyPasswordHash);
         }
         let transaction = self.database.begin().await?;
-        let result = update_user_fields(
+        let result = update_account_in_transaction(
             &transaction,
             user_id,
             [
@@ -557,6 +559,7 @@ impl<'connection> AuthRepository<'connection> {
                 (Alias::new("has_password"), has_password.into()),
                 (Alias::new("updated_at"), now.into()),
             ],
+            true,
         )
         .await;
         finish(transaction, result).await
@@ -1350,7 +1353,41 @@ async fn update_policy_in_transaction(
     )
     .await?;
     ensure_admin_remains(transaction, &current, is_admin && !is_disabled).await?;
+    if is_disabled {
+        delete_passkeys_on(transaction, user_id).await?;
+    }
     Ok(updated)
+}
+
+/// Applies a field update and, when the credential changed, removes passkeys in
+/// the same transaction so a previously registered authenticator cannot outlive it.
+async fn update_account_in_transaction(
+    transaction: &DatabaseTransaction,
+    user_id: UserId,
+    values: impl IntoIterator<Item = (Alias, sea_orm::sea_query::SimpleExpr)>,
+    credential_changed: bool,
+) -> Result<AuthUser, AuthRepositoryError> {
+    let updated = update_user_fields(transaction, user_id, values).await?;
+    if credential_changed {
+        delete_passkeys_on(transaction, user_id).await?;
+    }
+    Ok(updated)
+}
+
+/// Removes registered passkeys and any pending ceremony state for one user.
+async fn delete_passkeys_on(
+    transaction: &DatabaseTransaction,
+    user_id: UserId,
+) -> Result<(), AuthRepositoryError> {
+    let backend = transaction.get_database_backend();
+    for table in ["passkey_credentials", "passkey_challenges"] {
+        let delete = Query::delete()
+            .from_table(Alias::new(table))
+            .and_where(Expr::col(Alias::new("user_id")).eq(user_id.as_uuid()))
+            .to_owned();
+        transaction.execute(backend.build(&delete)).await?;
+    }
+    Ok(())
 }
 
 async fn delete_user_in_transaction(

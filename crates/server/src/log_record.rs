@@ -24,6 +24,9 @@ pub(crate) fn sanitize(value: &mut Value) {
                     "authorization",
                     "cookie",
                     "credential",
+                    "key",
+                    "apikey",
+                    "api_key",
                 ]
                 .iter()
                 .any(|part| key.contains(part))
@@ -223,5 +226,15 @@ mod tests {
         assert!(!text.contains("password@example"));
         assert!(!text.contains("sig=secret"));
         assert!(!text.contains("Bearer private"));
+    }
+    #[test]
+    fn api_key_fields_are_redacted_by_name() {
+        let mut value = json!({"key":"k-1","apikey":"k-2","api_key":"k-3","ApiKey":"k-4","nested":{"x_api_key":"k-5"},"event":"api_key_created"});
+        sanitize(&mut value);
+        let text = value.to_string();
+        for leaked in ["k-1", "k-2", "k-3", "k-4", "k-5"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        assert_eq!(value["event"], "api_key_created");
     }
 }

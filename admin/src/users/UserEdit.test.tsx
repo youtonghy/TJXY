@@ -251,6 +251,17 @@ it('validates password confirmation, clears secrets after success, and never not
   expect(JSON.stringify(successToast.mock.calls)).not.toContain('new private password');
 });
 
+it('rejects passwords shorter than the server minimum before sending them', async () => {
+  const user = userEvent.setup();
+  renderEdit();
+  await user.type(await screen.findByLabelText('New password'), 'short');
+  await user.type(screen.getByLabelText('Confirm password'), 'short');
+  await user.click(screen.getByRole('button', { name: 'Save password' }));
+
+  expect(passwordMock).not.toHaveBeenCalled();
+  expect(screen.getByText('The new password must be at least 8 characters.')).toBeVisible();
+});
+
 it('updates only supported policy flags and refreshes authoritative data', async () => {
   const user = userEvent.setup();
   const getOne = vi.fn<GetOne>().mockResolvedValue({ data: record });

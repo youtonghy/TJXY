@@ -218,33 +218,34 @@ export function PolicyPanel({ record, onSaved }: PanelProps) {
   );
 }
 
+const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_TOO_SHORT = `The new password must be at least ${String(MIN_PASSWORD_LENGTH)} characters.`;
+
 export function PasswordPanel({ record, onSaved }: PanelProps) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
-  const [resetPassword, setResetPassword] = useState(false);
   const [validation, setValidation] = useState<string>();
   const notify = useNotify();
   const [state, run] = useSectionCommand();
 
   const submit = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => {
     event.preventDefault();
-    if (!resetPassword && newPassword !== confirmation) {
+    if (newPassword !== confirmation) {
       setValidation('Passwords do not match.');
       return;
     }
-    if (!resetPassword && newPassword.length === 0) {
-      setValidation('A new password is required.');
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      setValidation(PASSWORD_TOO_SHORT);
       return;
     }
     setValidation(undefined);
     void run(async () => {
       await updateUserPassword(record.id, {
-        newPassword: resetPassword ? '' : newPassword,
-        resetPassword,
+        newPassword,
+        resetPassword: false,
       });
       setNewPassword('');
       setConfirmation('');
-      setResetPassword(false);
       notify('User password updated.', { type: 'success' });
       await onSaved();
     });
@@ -252,7 +253,7 @@ export function PasswordPanel({ record, onSaved }: PanelProps) {
 
   return (
     <CommandSection
-      description="Replace the current credential or explicitly reset the account to an empty password."
+      description="Replace the current credential. Changing it signs the user out everywhere and removes their passkeys."
       icon={<KeyRound aria-hidden="true" className="size-4" />}
       title="Password"
     >
@@ -260,13 +261,13 @@ export function PasswordPanel({ record, onSaved }: PanelProps) {
         <TextField
           fullWidth
           isInvalid={validation !== undefined}
-          isRequired={!resetPassword}
+          isRequired
           name="new-password"
         >
           <Label>New password</Label>
           <Input
             autoComplete="new-password"
-            disabled={state.pending || resetPassword}
+            disabled={state.pending}
             onChange={(event) => {
               setNewPassword(event.currentTarget.value);
               setValidation(undefined);
@@ -278,13 +279,13 @@ export function PasswordPanel({ record, onSaved }: PanelProps) {
         <TextField
           fullWidth
           isInvalid={validation !== undefined}
-          isRequired={!resetPassword}
+          isRequired
           name="confirm-password"
         >
           <Label>Confirm password</Label>
           <Input
             autoComplete="new-password"
-            disabled={state.pending || resetPassword}
+            disabled={state.pending}
             onChange={(event) => {
               setConfirmation(event.currentTarget.value);
               setValidation(undefined);
@@ -294,19 +295,10 @@ export function PasswordPanel({ record, onSaved }: PanelProps) {
           />
           <FieldError>{validation}</FieldError>
         </TextField>
-        <PolicySwitch
-          isDisabled={state.pending}
-          isSelected={resetPassword}
-          label="Reset to an empty password"
-          onChange={(selected) => {
-            setResetPassword(selected);
-            setValidation(undefined);
-          }}
-        />
         <CommandError error={state.error} />
         <Button
           aria-busy={state.pending}
-          isDisabled={state.pending || (!resetPassword && newPassword.length === 0)}
+          isDisabled={state.pending || newPassword.length === 0}
           type="submit"
         >
           <Save aria-hidden="true" className="size-4" />

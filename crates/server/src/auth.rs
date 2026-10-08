@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Mutex, OnceLock},
-    time::{Duration as StdDuration, Instant},
-};
+use std::{collections::HashMap, net::IpAddr};
 
 use axum::{
     Json,
@@ -18,32 +14,94 @@ use tjxy_api::{
 };
 use tjxy_application::AuthenticatedPrincipal;
 use tjxy_application::{AuthError, ClientIdentity};
-use tjxy_common::UserId;
+use tjxy_common::{UserId, Username};
 use tjxy_db::{AuthRepositoryError, AuthUser};
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{
+    AppState,
+    audit::{self, Event},
+    login_guard::{AccountKey, Attempt, ClientAddr, Limited},
+};
 
 pub(crate) const SESSION_COOKIE: &str = "tjxy_session";
 pub(crate) const SESSION_COOKIE_MAX_AGE: i64 = 30 * 24 * 60 * 60;
 pub(crate) const REMEMBER_ME_MAX_AGE: i64 = 180 * 24 * 60 * 60;
-const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
-const MAX_LOGIN_FAILURES: usize = 10;
-static LOGIN_FAILURES: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> = OnceLock::new();
 
 pub(crate) async fn authenticate_by_name(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let client = match client_identity(&headers, state.legacy_auth_enabled) {
+    no_store(authenticate_by_name_inner(&state, ip, &headers, &body).await)
+}
+
+pub(crate) fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `429` for an exhausted failure budget, with the time until it reopens.
+pub(crate) fn rate_limited_response(limited: &Limited) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ErrorBody {
+            message: "too many failed authentication attempts",
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        axum::http::HeaderValue::from(limited.retry_after_seconds()),
+    );
+    response
+}
+
+/// Reserves a failure slot for a credential-bearing request, or answers `429`.
+///
+/// The slot counts as a failure unless [`finish_attempt`] releases it.
+#[allow(clippy::result_large_err)] // The error is the ready-to-send Axum response.
+pub(crate) fn begin_attempt(
+    state: &AppState,
+    action: &'static str,
+    ip: IpAddr,
+    account_name: Option<&str>,
+) -> Result<Attempt, Response> {
+    let account = account_name.and_then(AccountKey::from_name);
+    state
+        .login_guard
+        .begin(account.as_ref(), ip)
+        .map_err(|limited| {
+            audit::rate_limited(action, ip, account_name, &limited);
+            rate_limited_response(&limited)
+        })
+}
+
+/// Keeps the reserved slot when credentials were wrong; otherwise gives it back.
+pub(crate) fn finish_attempt(state: &AppState, attempt: &Attempt, credentials_failed: bool) {
+    if !credentials_failed {
+        state.login_guard.release(attempt);
+    }
+}
+
+async fn authenticate_by_name_inner(
+    state: &AppState,
+    ip: IpAddr,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response {
+    let client = match client_identity(headers, state.legacy_auth_enabled) {
         Ok(client) => client,
         Err(error) => return error.into_response(),
     };
-    if !is_json_content_type(&headers) {
+    if !is_json_content_type(headers) {
         return HttpAuthError::BadRequest.into_response();
     }
-    let payload: AuthenticateUserByName = match serde_json::from_slice(&body) {
+    let payload: AuthenticateUserByName = match serde_json::from_slice(body) {
         Ok(payload) => payload,
         Err(_) => return HttpAuthError::BadRequest.into_response(),
     };
@@ -55,21 +113,67 @@ pub(crate) async fn authenticate_by_name(
     } else {
         Some(chrono::Duration::days(30))
     };
-    let login_key = format!("{}:{}", payload.username, client.device_id());
-    if login_is_limited(&login_key) {
-        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "60")]).into_response();
-    }
+    let device_id = client.device_id().to_owned();
+    // Validate the name before touching the throttle tables: a name that cannot
+    // be an account is only charged to the client address and is never stored.
+    let Ok(username) = Username::parse(&payload.username) else {
+        return match state.login_guard.begin(None, ip) {
+            Ok(_attempt) => {
+                Event::new("login_failure", "failure", ip)
+                    .device(&device_id)
+                    .reason("invalid_username")
+                    .emit();
+                HttpAuthError::Unauthorized.into_response()
+            }
+            Err(limited) => {
+                audit::rate_limited("login", ip, None, &limited);
+                rate_limited_response(&limited)
+            }
+        };
+    };
+    let account = AccountKey::from_username(&username);
+    let normalized = String::from_utf8_lossy(account.as_bytes()).into_owned();
+    let attempt = match state.login_guard.begin(Some(&account), ip) {
+        Ok(attempt) => attempt,
+        Err(limited) => {
+            audit::rate_limited("login", ip, Some(&normalized), &limited);
+            return rate_limited_response(&limited);
+        }
+    };
     let issued = match auth
         .authenticate_with_lifetime(&payload.username, &payload.password, client, lifetime)
         .await
     {
         Ok(issued) => issued,
         Err(error) => {
-            record_login_failure(&login_key);
+            let credentials_failed = matches!(error, AuthError::InvalidCredentials);
+            finish_attempt(state, &attempt, credentials_failed);
+            Event::new("login_failure", "failure", ip)
+                .actor(&normalized)
+                .device(&device_id)
+                .reason(match error {
+                    AuthError::InvalidCredentials => "invalid_credentials",
+                    AuthError::Busy => "capacity_busy",
+                    _ => "internal_error",
+                })
+                .emit();
             return HttpAuthError::from(error).into_response();
         }
     };
-    clear_login_failures(&login_key);
+    state.login_guard.release(&attempt);
+    state.login_guard.clear_account(&account);
+    Event::new("login_success", "success", ip)
+        .actor(&normalized)
+        .device(&device_id)
+        .emit();
+    issued_response(state, &issued, payload.remember_me)
+}
+
+fn issued_response(
+    state: &AppState,
+    issued: &tjxy_application::IssuedAuthentication,
+    remember_me: bool,
+) -> Response {
     let user = user_dto(issued.user(), state.identity.id);
     let session = SessionInfoDto::active(
         issued.session_id(),
@@ -87,7 +191,7 @@ pub(crate) async fn authenticate_by_name(
         issued.access_token().expose_secret(),
         state.identity.id,
     ));
-    if payload.remember_me {
+    if remember_me {
         let mut response = result.into_response();
         if let Ok(value) = format!(
             "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
@@ -109,35 +213,6 @@ pub(crate) async fn authenticate_by_name(
                 .expect("valid cookie header"),
         );
         response
-    }
-}
-
-fn login_is_limited(key: &str) -> bool {
-    let now = Instant::now();
-    let store = LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()));
-    let Ok(mut failures) = store.lock() else {
-        return true;
-    };
-    let attempts = failures.entry(key.to_owned()).or_default();
-    attempts.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
-    attempts.len() >= MAX_LOGIN_FAILURES
-}
-
-fn record_login_failure(key: &str) {
-    let store = LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut failures) = store.lock() {
-        failures
-            .entry(key.to_owned())
-            .or_default()
-            .push_back(Instant::now());
-    }
-}
-
-fn clear_login_failures(key: &str) {
-    if let Some(store) = LOGIN_FAILURES.get()
-        && let Ok(mut failures) = store.lock()
-    {
-        failures.remove(key);
     }
 }
 
@@ -204,6 +279,7 @@ pub(crate) async fn current_user_profile(
 
 pub(crate) async fn update_current_user_profile(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -219,7 +295,16 @@ pub(crate) async fn update_current_user_profile(
     let Some(service) = state.auth.as_ref() else {
         return HttpAuthError::Unavailable.into_response();
     };
-    match service
+    let actor = principal.user().name().to_owned();
+    let attempt = match begin_attempt(&state, "profile_update", ip, Some(&actor)) {
+        Ok(attempt) => attempt,
+        Err(response) => return response,
+    };
+    let changes_password = payload
+        .new_password
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let result = service
         .update_self_account(
             principal.user().id(),
             &payload.username,
@@ -227,19 +312,47 @@ pub(crate) async fn update_current_user_profile(
             &payload.current_password,
             payload.new_password.as_deref(),
         )
-        .await
-    {
-        Ok((user, bio)) => Json(UserProfileDto {
-            username: user.name().to_owned(),
-            bio,
-        })
-        .into_response(),
-        Err(error) => HttpAuthError::from(error).into_response(),
+        .await;
+    finish_attempt(
+        &state,
+        &attempt,
+        matches!(result, Err(AuthError::InvalidCredentials)),
+    );
+    match result {
+        Ok((user, bio)) => {
+            let event = if changes_password {
+                "password_changed"
+            } else {
+                "profile_updated"
+            };
+            Event::new(event, "success", ip).actor(&actor).emit();
+            Json(UserProfileDto {
+                username: user.name().to_owned(),
+                bio,
+            })
+            .into_response()
+        }
+        Err(error) => {
+            audit_credential_failure("profile_update", ip, &actor, &error);
+            HttpAuthError::from(error).into_response()
+        }
+    }
+}
+
+/// Logs a failed sensitive self-service change without exposing why it failed.
+fn audit_credential_failure(action: &'static str, ip: IpAddr, actor: &str, error: &AuthError) {
+    if matches!(error, AuthError::InvalidCredentials) {
+        Event::new("password_verification_failed", "failure", ip)
+            .actor(actor)
+            .target(action)
+            .reason("invalid_credentials")
+            .emit();
     }
 }
 
 pub(crate) async fn update_current_user_password(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -255,16 +368,34 @@ pub(crate) async fn update_current_user_password(
     let Some(service) = state.auth.as_ref() else {
         return HttpAuthError::Unavailable.into_response();
     };
-    match service
+    let actor = principal.user().name().to_owned();
+    let attempt = match begin_attempt(&state, "password_change", ip, Some(&actor)) {
+        Ok(attempt) => attempt,
+        Err(response) => return response,
+    };
+    let result = service
         .update_self_password(
             principal.user().id(),
             &payload.current_password,
             &payload.new_password,
         )
-        .await
-    {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => HttpAuthError::from(error).into_response(),
+        .await;
+    finish_attempt(
+        &state,
+        &attempt,
+        matches!(result, Err(AuthError::InvalidCredentials)),
+    );
+    match result {
+        Ok(_) => {
+            Event::new("password_changed", "success", ip)
+                .actor(&actor)
+                .emit();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => {
+            audit_credential_failure("password_change", ip, &actor, &error);
+            HttpAuthError::from(error).into_response()
+        }
     }
 }
 
@@ -339,14 +470,15 @@ pub(crate) async fn user(
 
 pub(crate) async fn create_user(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
-    {
-        return response;
-    }
+    let admin = match authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let payload: CreateUserByName = match json_payload(&headers, &body) {
         Ok(payload) => payload,
         Err(status) => return status.into_response(),
@@ -358,7 +490,13 @@ pub(crate) async fn create_user(
         .create_user(&payload.name, &payload.password, false)
         .await
     {
-        Ok(user) => Json(user_dto(&user, state.identity.id)).into_response(),
+        Ok(user) => {
+            Event::new("user_created", "success", ip)
+                .actor(admin.user().name())
+                .target(&user.id().as_uuid().to_string())
+                .emit();
+            Json(user_dto(&user, state.identity.id)).into_response()
+        }
         Err(error) => admin_error_response(&error),
     }
 }
@@ -392,15 +530,16 @@ pub(crate) async fn update_user(
 
 pub(crate) async fn update_user_password(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     Path(user_id): Path<Uuid>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
-    {
-        return response;
-    }
+    let admin = match authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let payload: UpdateUserPassword = match json_payload(&headers, &body) {
         Ok(payload) => payload,
         Err(status) => return status.into_response(),
@@ -416,22 +555,34 @@ pub(crate) async fn update_user_password(
         )
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            let event = if payload.reset_password {
+                "password_reset_by_admin"
+            } else {
+                "password_changed_by_admin"
+            };
+            Event::new(event, "success", ip)
+                .actor(admin.user().name())
+                .target(&user_id.to_string())
+                .emit();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(error) => admin_error_response(&error),
     }
 }
 
 pub(crate) async fn update_user_policy(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     Path(user_id): Path<Uuid>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
-    {
-        return response;
-    }
+    let admin = match authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let payload: UpdateUserPolicy = match json_payload(&headers, &body) {
         Ok(payload) => payload,
         Err(status) => return status.into_response(),
@@ -456,26 +607,44 @@ pub(crate) async fn update_user_policy(
         )
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            let detail = format!(
+                "administrator={} disabled={}",
+                payload.is_administrator, payload.is_disabled
+            );
+            Event::new("user_policy_changed", "success", ip)
+                .actor(admin.user().name())
+                .target(&user_id.to_string())
+                .detail(&detail)
+                .emit();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(error) => admin_error_response(&error),
     }
 }
 
 pub(crate) async fn delete_user(
     State(state): State<AppState>,
+    ClientAddr(ip): ClientAddr,
     Path(user_id): Path<Uuid>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    if let Err(response) = authenticated_administrator(&state, &headers, raw_query.as_deref()).await
-    {
-        return response;
-    }
+    let admin = match authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let Some(service) = state.auth.as_ref() else {
         return HttpAuthError::Unavailable.into_response();
     };
     match service.delete_user(UserId::from_uuid(user_id)).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            Event::new("user_deleted", "success", ip)
+                .actor(admin.user().name())
+                .target(&user_id.to_string())
+                .emit();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(error) => admin_error_response(&error),
     }
 }
@@ -561,10 +730,14 @@ fn supported_provider(value: Option<&str>, expected: &str) -> bool {
 
 fn admin_error_response(error: &AuthError) -> Response {
     match error {
-        AuthError::InvalidUsername
-        | AuthError::InvalidPassword
-        | AuthError::InvalidProfile
-        | AuthError::PasswordRequired => StatusCode::BAD_REQUEST.into_response(),
+        AuthError::PasswordRequired => bad_request("password must not be empty"),
+        AuthError::PasswordTooShort => bad_request("password must be at least 8 characters"),
+        AuthError::PasswordResetRequiresNewPassword => {
+            bad_request("resetting a password requires a new password (NewPw)")
+        }
+        AuthError::InvalidUsername | AuthError::InvalidPassword | AuthError::InvalidProfile => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
         AuthError::Repository(AuthRepositoryError::UserNotFound) => {
             StatusCode::NOT_FOUND.into_response()
         }
@@ -576,6 +749,10 @@ fn admin_error_response(error: &AuthError) -> Response {
         AuthError::Forbidden => StatusCode::FORBIDDEN.into_response(),
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+fn bad_request(message: &'static str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(ErrorBody { message })).into_response()
 }
 
 #[allow(clippy::result_large_err)] // Axum responses are returned directly by all handler callers.
@@ -837,6 +1014,8 @@ impl From<AuthError> for HttpAuthError {
             | AuthError::InvalidPassword
             | AuthError::InvalidProfile
             | AuthError::PasswordRequired
+            | AuthError::PasswordTooShort
+            | AuthError::PasswordResetRequiresNewPassword
             | AuthError::InvalidClientIdentity
             | AuthError::InvalidCapabilities
             | AuthError::InvalidSessionFilter
@@ -897,12 +1076,91 @@ struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_parameters;
+    use std::{net::Ipv4Addr, sync::Arc};
+
+    use chrono::Duration;
+    use sea_orm_migration::MigratorTrait;
+    use tjxy_application::{AuthService, SystemClock};
+    use tjxy_test_support::test_database;
+
+    use super::*;
+    use crate::ServerIdentity;
+
+    const AUTHORIZATION_HEADER: &str =
+        r#"MediaBrowser Client="Test", Device="Phone", DeviceId="device-1", Version="1.0""#;
 
     #[test]
     fn parser_handles_quoted_commas_and_rejects_duplicates() {
         let parsed = parse_parameters(r#"Client="A, B", Device="Phone""#).unwrap();
         assert_eq!(parsed["Client"], "A, B");
         assert!(parse_parameters(r#"Client="A", Client="B""#).is_err());
+    }
+
+    async fn state() -> AppState {
+        let database = test_database().await.unwrap();
+        tjxy_db::Migrator::up(&database, None).await.unwrap();
+        let auth = AuthService::new(database, SystemClock, Some(Duration::days(30)), 2)
+            .await
+            .unwrap();
+        auth.create_user("Alice", "correct horse", false)
+            .await
+            .unwrap();
+        AppState::new(ServerIdentity::new(Uuid::new_v4(), "TJXY", "Linux"))
+            .with_auth(Arc::new(auth))
+    }
+
+    async fn login(state: &AppState, username: &str, password: &str) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, AUTHORIZATION_HEADER.parse().unwrap());
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let body = serde_json::json!({"Username": username, "Pw": password}).to_string();
+        authenticate_by_name_inner(
+            state,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            &headers,
+            body.as_bytes(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn unparseable_usernames_never_reach_the_account_table() {
+        let state = state().await;
+        for username in [
+            "x".repeat(2 * 1024 * 1024 / 8),
+            "y".repeat(129),
+            " padded".to_owned(),
+            "bad\u{0}name".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(
+                login(&state, &username, "whatever").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let (accounts, ips) = state.login_guard.table_sizes();
+        assert_eq!(accounts, 0, "malformed names must not create account keys");
+        assert_eq!(ips, 1, "they are charged to the client address only");
+    }
+
+    #[tokio::test]
+    async fn valid_names_share_one_bucket_across_case_and_a_successful_login_clears_it() {
+        let state = state().await;
+        for username in ["alice", "ALICE", "Alice", "ＡＬＩＣＥ"] {
+            assert_eq!(
+                login(&state, username, "wrong password").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(state.login_guard.table_sizes().0, 1);
+        assert_eq!(
+            login(&state, "alice", "correct horse").await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            state.login_guard.table_sizes(),
+            (0, 1),
+            "success forgets the account's failures; the address key remains"
+        );
     }
 }
