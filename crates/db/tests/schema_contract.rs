@@ -2716,6 +2716,38 @@ async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
     for (table, index) in indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
+    // The hot-path index migration sits above this one, so roll back both.
+    Migrator::down(&database, Some(2)).await.unwrap();
+    for (table, index) in indexes {
+        assert!(!schema.has_index(table, index).await.unwrap());
+    }
+    Migrator::up(&database, None).await.unwrap();
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
+    let database = test_database().await.unwrap();
+    Migrator::up(&database, None).await.unwrap();
+    let schema = SchemaManager::new(&database);
+    let indexes = [
+        ("people", "ix_people_name"),
+        (
+            "publication_catalog_items",
+            "ix_publication_catalog_items_item",
+        ),
+        (
+            "catalog_items",
+            "ix_catalog_items_active_structure_publication",
+        ),
+        ("work_jobs", "ix_work_jobs_required_sync_job"),
+        ("work_job_retention_queue", "ix_work_job_retention_terminal"),
+    ];
+    for (table, index) in indexes {
+        assert!(schema.has_index(table, index).await.unwrap());
+    }
     Migrator::down(&database, Some(1)).await.unwrap();
     for (table, index) in indexes {
         assert!(!schema.has_index(table, index).await.unwrap());

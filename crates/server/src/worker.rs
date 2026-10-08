@@ -453,15 +453,11 @@ pub(crate) fn spawn_queue_maintenance_worker(database: DatabaseConnection) {
     });
 }
 
-pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection) {
+pub(crate) fn spawn_work_lease_recovery_worker(database: DatabaseConnection, database_url: String) {
     if database.get_database_backend() == sea_orm::DbBackend::Postgres {
-        let notifications_database = database.clone();
         tokio::spawn(async move {
             loop {
-                if tjxy_db::listen_for_work(&notifications_database)
-                    .await
-                    .is_err()
-                {
+                if tjxy_db::listen_for_work(&database_url).await.is_err() {
                     tracing::warn!("Work notifications disconnected; workers continue polling");
                 }
                 tokio::time::sleep(StdDuration::from_secs(30)).await;

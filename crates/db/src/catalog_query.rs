@@ -230,7 +230,7 @@ impl CatalogSort {
 }
 
 impl CatalogItemType {
-    const fn as_database_value(self) -> &'static str {
+    pub(crate) const fn as_database_value(self) -> &'static str {
         match self {
             Self::Movie => "Movie",
             Self::Audio => "Audio",
@@ -871,6 +871,40 @@ pub struct LazyCatalogWorkTarget {
     storage_scope: Option<LazyStorageScope>,
 }
 
+/// Stored metadata facts together with the requirement a caller wants to resolve.
+///
+/// Discovery and scans share this predicate so a title that already resolved its
+/// metadata at the current revision is not resolved again on every pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MetadataResolutionState {
+    pub(crate) item_type: CatalogItemType,
+    pub(crate) revision: i64,
+    pub(crate) resolved_revision: i64,
+    pub(crate) resolved_requirement: Option<MetadataRequirement>,
+    pub(crate) payload_version: i32,
+    pub(crate) requirement: MetadataRequirement,
+    pub(crate) source_mode: MetadataSourceMode,
+    pub(crate) access_mode: LocalMetadataAccessMode,
+}
+
+impl MetadataResolutionState {
+    #[must_use]
+    pub(crate) const fn required(self) -> bool {
+        let payload_upgrade_required =
+            matches!(
+                self.item_type,
+                CatalogItemType::Movie | CatalogItemType::Series
+            ) && matches!(self.source_mode, MetadataSourceMode::AutomaticScrape)
+                && self.payload_version < crate::metadata::METADATA_PAYLOAD_VERSION;
+        (self.access_mode.imports_metadata() && payload_upgrade_required)
+            || self.resolved_revision < self.revision
+            || match self.resolved_requirement {
+                Some(current) => current.as_i32() < self.requirement.as_i32(),
+                None => true,
+            }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LazyStorageScope {
     storage_root_id: StorageRootId,
@@ -968,23 +1002,17 @@ impl LazyCatalogWorkTarget {
 
     #[must_use]
     pub const fn needs_metadata_resolution(self, requirement: MetadataRequirement) -> bool {
-        (self.local_metadata_access_mode.imports_metadata()
-            && self.requires_metadata_payload_upgrade())
-            || self.metadata_resolved_revision < self.metadata_revision
-            || match self.metadata_resolved_requirement {
-                Some(current) => current.as_i32() < requirement.as_i32(),
-                None => true,
-            }
-    }
-
-    const fn requires_metadata_payload_upgrade(self) -> bool {
-        matches!(
-            self.item_type,
-            CatalogItemType::Movie | CatalogItemType::Series
-        ) && matches!(
-            self.metadata_source_mode,
-            MetadataSourceMode::AutomaticScrape
-        ) && self.metadata_payload_version < crate::metadata::METADATA_PAYLOAD_VERSION
+        MetadataResolutionState {
+            item_type: self.item_type,
+            revision: self.metadata_revision,
+            resolved_revision: self.metadata_resolved_revision,
+            resolved_requirement: self.metadata_resolved_requirement,
+            payload_version: self.metadata_payload_version,
+            requirement,
+            source_mode: self.metadata_source_mode,
+            access_mode: self.local_metadata_access_mode,
+        }
+        .required()
     }
 
     #[must_use]
@@ -4198,22 +4226,39 @@ pub(crate) async fn lock_catalog_item_visibility(
         .and_where(Expr::col((owner.clone(), Alias::new("is_present"))).eq(true))
         .and_where(Expr::col((owner, Alias::new("classification_state"))).eq("Matched"))
         .to_owned();
-    let update = Query::update()
-        .table(library.clone())
-        .value(Alias::new("is_enabled"), true)
-        .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
-        .and_where(Expr::exists(visible_item(item_id)))
-        .cond_where(
-            Condition::any()
-                .add(Expr::exists(direct_membership))
-                .add(Expr::exists(projected_membership)),
-        )
-        .to_owned();
     let backend = transaction.get_database_backend();
+    let visible = Condition::any()
+        .add(Expr::exists(direct_membership))
+        .add(Expr::exists(projected_membership));
+    if backend == sea_orm::DbBackend::Sqlite {
+        // SQLite has no row locks; a write statement already serializes the transaction.
+        let update = Query::update()
+            .table(library.clone())
+            .value(Alias::new("is_enabled"), true)
+            .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
+            .and_where(Expr::exists(visible_item(item_id)))
+            .cond_where(visible)
+            .to_owned();
+        return transaction
+            .execute(backend.build(&update))
+            .await
+            .map(|result| result.rows_affected() > 0);
+    }
+    // A shared lock still blocks a concurrent disable or removal of the library until this
+    // transaction ends, but unlike the row update it lets every other viewer or progress report
+    // for the same library proceed in parallel instead of queueing on one exclusive row lock.
+    let locked = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(library.clone())
+        .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
+        .and_where(Expr::exists(visible_item(item_id)))
+        .cond_where(visible)
+        .lock_shared()
+        .to_owned();
     transaction
-        .execute(backend.build(&update))
+        .query_all(backend.build(&locked))
         .await
-        .map(|result| result.rows_affected() > 0)
+        .map(|rows| !rows.is_empty())
 }
 
 fn select_item_columns(query: &mut SelectStatement, source: ItemQuerySource) {

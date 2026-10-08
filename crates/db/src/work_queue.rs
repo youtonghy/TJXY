@@ -69,14 +69,11 @@ pub(crate) async fn commit_and_notify(transaction: DatabaseTransaction) -> Resul
 ///
 /// # Errors
 /// Returns connection/listener failures; callers should reconnect with backoff while polling continues.
-pub async fn listen_for_work(database: &DatabaseConnection) -> Result<(), DbErr> {
-    if database.get_database_backend() != DbBackend::Postgres {
-        return Ok(());
-    }
-    let mut listener =
-        sea_orm::sqlx::postgres::PgListener::connect_with(database.get_postgres_connection_pool())
-            .await
-            .map_err(|_| DbErr::Custom("work notification connection failed".to_owned()))?;
+pub async fn listen_for_work(database_url: &str) -> Result<(), DbErr> {
+    // A dedicated connection keeps the permanent LISTEN session out of the request pool.
+    let mut listener = sea_orm::sqlx::postgres::PgListener::connect(database_url)
+        .await
+        .map_err(|_| DbErr::Custom("work notification connection failed".to_owned()))?;
     listener
         .listen(CHANNEL)
         .await
