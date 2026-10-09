@@ -346,6 +346,25 @@ impl MediaInspector for AudioInspector {
     }
 }
 
+/// Reports whether STRM target resolution is pending rather than impossible.
+///
+/// A not-yet-indexed or rebuilding filesystem backend, a mount that timed out, or a rate limit
+/// resolves the same reference once the condition settles, so recording a permanent probe
+/// failure would hide a source that is about to become readable. The worker retries these
+/// outcomes instead.
+fn defers_probe_reference(error: &ProbeServiceError) -> bool {
+    matches!(
+        error,
+        ProbeServiceError::Storage(
+            BackendError::BackendNotReady { .. }
+                | BackendError::FilesystemIndexRebuilding
+                | BackendError::FilesystemIndexFailed
+                | BackendError::TemporarilyUnavailable { .. }
+                | BackendError::RateLimited { .. }
+        )
+    )
+}
+
 fn is_audio_container(input: &ProbeInput) -> bool {
     let Some(segment) = input
         .segments
@@ -1346,6 +1365,14 @@ impl ProbeService {
                 .await
             {
                 Ok(target) => target,
+                Err(error) if defers_probe_reference(&error) => {
+                    tracing::debug!(
+                        storage_object_id = %candidate.storage_object_id().as_uuid(),
+                        error = %error,
+                        "STRM target resolution is not ready; retrying instead of failing the source"
+                    );
+                    return Err(error);
+                }
                 Err(error) => {
                     let message = format!("STRM target is unavailable: {error}");
                     repository
@@ -2663,5 +2690,35 @@ mod tests {
         assert_eq!(result.streams().len(), 2);
         assert_eq!(result.streams()[0].profile(), Some("High"));
         assert_eq!(result.streams()[0].level(), Some(10));
+    }
+
+    #[test]
+    fn only_pending_storage_states_defer_strm_target_resolution() {
+        for error in [
+            BackendError::BackendNotReady {
+                message: "filesystem object path is not indexed".to_owned(),
+            },
+            BackendError::FilesystemIndexRebuilding,
+            BackendError::FilesystemIndexFailed,
+            BackendError::TemporarilyUnavailable {
+                message: "filesystem open timed out".to_owned(),
+            },
+            BackendError::RateLimited { retry_after: None },
+        ] {
+            assert!(defers_probe_reference(&ProbeServiceError::Storage(error)));
+        }
+
+        for error in [
+            BackendError::NotFound,
+            BackendError::InvalidValue {
+                message: "reference escapes the backend root".to_owned(),
+            },
+            BackendError::unsupported_capability("range reads"),
+        ] {
+            assert!(!defers_probe_reference(&ProbeServiceError::Storage(error)));
+        }
+        assert!(!defers_probe_reference(&ProbeServiceError::Inspection(
+            "invalid STRM target".to_owned()
+        )));
     }
 }

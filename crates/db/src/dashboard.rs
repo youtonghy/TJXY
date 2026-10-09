@@ -530,6 +530,7 @@ async fn attach_primary_image_tags(
     if items.is_empty() {
         return Ok(());
     }
+    let item_ids = items.iter().map(|item| item.item_id).collect::<Vec<_>>();
     let asset = Alias::new("asset");
     let blob = Alias::new("blob");
     let query = Query::select()
@@ -551,16 +552,41 @@ async fn attach_primary_image_tags(
         )
         .and_where(Expr::col((asset.clone(), Alias::new("image_type"))).eq("Primary"))
         .and_where(Expr::col((asset.clone(), Alias::new("priority"))).eq(0_i32))
-        .and_where(
-            Expr::col((asset, Alias::new("item_id"))).is_in(items.iter().map(|item| item.item_id)),
-        )
+        .and_where(Expr::col((asset, Alias::new("item_id"))).is_in(item_ids.iter().copied()))
         .to_owned();
-    let tags = database
+    let mut tags = database
         .query_all(database.get_database_backend().build(&query))
         .await?
         .iter()
         .map(|row| Ok((row.try_get("", "item_id")?, row.try_get("", "sha256")?)))
         .collect::<Result<HashMap<Uuid, String>, DbErr>>()?;
+    // Local sidecar posters are read directly from storage instead of being imported as
+    // blobs, so they never appear in `item_assets`. Catalog queries present them with the
+    // same derived tag; dashboard summaries need that fallback to keep client posters.
+    let direct = Alias::new("direct_image");
+    let direct_query = Query::select()
+        .columns([
+            (direct.clone(), Alias::new("catalog_item_id")),
+            (direct.clone(), Alias::new("storage_object_id")),
+            (direct.clone(), Alias::new("input_revision")),
+        ])
+        .from_as(Alias::new("direct_metadata_refs"), direct.clone())
+        .and_where(Expr::col((direct.clone(), Alias::new("resource_kind"))).eq("Primary"))
+        .and_where(Expr::col((direct.clone(), Alias::new("priority"))).eq(0_i32))
+        .and_where(
+            Expr::col((direct, Alias::new("catalog_item_id"))).is_in(item_ids.iter().copied()),
+        )
+        .to_owned();
+    for row in database
+        .query_all(database.get_database_backend().build(&direct_query))
+        .await?
+    {
+        let item_id: Uuid = row.try_get("", "catalog_item_id")?;
+        let object_id: Uuid = row.try_get("", "storage_object_id")?;
+        let revision: i64 = row.try_get("", "input_revision")?;
+        tags.entry(item_id)
+            .or_insert_with(|| format!("direct-{object_id}-{revision}"));
+    }
     for item in items {
         item.primary_image_tag = tags.get(&item.item_id).cloned();
     }

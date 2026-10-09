@@ -249,6 +249,13 @@ TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjx
 管理员重置密码必须提供新密码，修改或重置密码、禁用账户时会同时删除该用户的 passkey。注册 passkey
 需要会话令牌和当前密码。
 
+周期性校验在目录列表未变化时保持该目录的 children revision（元数据和来源索引任务据此校验）不变，
+对完全相同的再次观察不再产生变更事件；只有新增、修改、移动、恢复或移除的子项才会推进它。部署在
+Cloudflare 之后时，请让反向代理把连接地址替换为真实访客地址（例如 OpenResty 使用
+`real_ip_header CF-Connecting-IP` 并把 Cloudflare 公布的网段写入 `set_real_ip_from`），这样按地址的登录
+额度和审计日志记录的是访客而不是 Cloudflare 边缘节点。发送 `ResetPassword` 但不带 `NewPw` 的
+Jellyfin 客户端现在会收到 `400`，提示信息中指明 `NewPw`。
+
 当前版本完成的工作任务默认保留 7 天。可将
 `TJXY_WORK_HISTORY_RETENTION_DAYS` 设置为 1 至 3650，或通过
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` 暂停保留。保留 worker 每次最多登记 1,000 条旧版本

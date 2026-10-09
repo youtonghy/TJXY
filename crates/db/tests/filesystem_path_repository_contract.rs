@@ -246,3 +246,65 @@ async fn normalized_root_relations_resolve_and_follow_directory_renames() {
         std::path::Path::new("Films/poster.jpg")
     );
 }
+
+#[tokio::test]
+async fn unreconciled_observations_still_resolve_but_absent_relations_do_not() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let account_id = Uuid::new_v4();
+    let root_id = StorageRootId::new();
+    let root_object = StorageObjectRecordId::new();
+    let poster = StorageObjectRecordId::new();
+    insert_account_and_root(&database, account_id, root_id).await;
+    insert_object(
+        &database,
+        account_id,
+        root_object,
+        "root/root",
+        "Media",
+        "Directory",
+    )
+    .await;
+    insert_object(
+        &database,
+        account_id,
+        poster,
+        "root/poster",
+        "poster.jpg",
+        "File",
+    )
+    .await;
+    insert_relation(&database, root_id, root_object, None).await;
+    insert_relation(&database, root_id, poster, Some(root_object)).await;
+    let backend = database.get_database_backend();
+    let set_relation = |column: &'static str, value: sea_orm::Value| {
+        database.execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("storage_root_objects"))
+                    .value(Alias::new(column), value)
+                    .and_where(Expr::col(Alias::new("storage_object_id")).eq(poster.as_uuid())),
+            ),
+        )
+    };
+
+    // A validation observation newer than the reconciled revision is still the freshest fact.
+    set_relation("observed_sync_revision", 99_i64.into())
+        .await
+        .unwrap();
+    let repository = FilesystemPathRepository::new(&database);
+    assert_eq!(
+        repository
+            .resolve(account_id, "root/poster")
+            .await
+            .unwrap()
+            .unwrap()
+            .relative_path(),
+        std::path::Path::new("poster.jpg")
+    );
+
+    set_relation("presence_state", "TemporarilyUnavailable".into())
+        .await
+        .unwrap();
+    assert!(repository.resolve(account_id, "root/poster").await.is_err());
+}

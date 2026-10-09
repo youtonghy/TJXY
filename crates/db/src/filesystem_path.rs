@@ -49,11 +49,13 @@ impl<'connection> FilesystemPathRepository<'connection> {
     /// Resolves one persisted filesystem provider identity to a root-relative path.
     ///
     /// The normalized root relation is authoritative so directory renames do not require
-    /// rewriting every descendant path.
+    /// rewriting every descendant path. Every relation on the path must be currently
+    /// present; a not-yet-reconciled validation observation is still the freshest storage
+    /// fact, so byte reads are not blocked while the change reconciler catches up.
     ///
     /// # Errors
     ///
-    /// Returns a database error for ambiguous roots, cycles, stale relations, or invalid names.
+    /// Returns a database error for ambiguous roots, cycles, absent relations, or invalid names.
     pub async fn resolve(
         &self,
         account_id: Uuid,
@@ -120,11 +122,10 @@ async fn resolve_path(
     let mut path_rows = Vec::with_capacity(rows.len());
     for row in rows {
         let presence: String = row.try_get("", "presence_state")?;
-        let observed_revision: i64 = row.try_get("", "observed_sync_revision")?;
         let reconciled_revision: i64 = row.try_get("", "reconciled_sync_revision")?;
-        if presence != "Present" || observed_revision > reconciled_revision {
+        if presence != "Present" {
             return Err(DbErr::Custom(
-                "filesystem path relation is not reconciled and present".to_owned(),
+                "filesystem path relation is not present".to_owned(),
             ));
         }
         let depth: i64 = row.try_get("", "depth")?;

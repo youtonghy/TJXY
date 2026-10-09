@@ -325,6 +325,15 @@ the administrator password reset requires a new password, and changing or resett
 disabling an account also removes that user's passkeys. Registering a passkey needs a session
 token and the current password.
 
+Periodic validation keeps a directory's children revision (the value metadata and source
+indexing work is fenced on) unchanged while its listing is unchanged, and stops emitting change
+events for objects it re-observes identically; only new, modified, moved, restored or removed
+children advance it. Behind Cloudflare, make the reverse proxy replace the connecting address with
+the real client address (for example OpenResty `real_ip_header CF-Connecting-IP` with Cloudflare's
+published ranges in `set_real_ip_from`) so the per-address login budget and audit log see the
+visitor instead of a Cloudflare edge node. Jellyfin clients that send `ResetPassword` without a
+`NewPw` now receive `400` with a message naming `NewPw`.
+
 Work completed by the running version is retained for 7 days by default. Set
 `TJXY_WORK_HISTORY_RETENTION_DAYS` to a value from 1 through 3650, or set
 `TJXY_WORK_HISTORY_RETENTION_ENABLED=false` to suspend retention. The retention

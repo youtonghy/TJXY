@@ -32,6 +32,13 @@ export async function clientBlob(path: string, signal?: AbortSignal): Promise<Bl
   return response.blob();
 }
 
+/// Transient transport or server failures can succeed on a later attempt, unlike
+/// authorization or not-found responses.
+export function isRetryableClientError(error: unknown): boolean {
+  return error instanceof ClientApiError
+    && (error.status === 0 || error.status === 429 || error.status >= 500);
+}
+
 export async function clientFetch(path: string, options: RequestInit = {}): Promise<Response> {
   if (!path.startsWith('/') || path.startsWith('//')) throw new ClientApiError(0, 'validation');
   const headers = new Headers(options.headers);
