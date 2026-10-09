@@ -908,6 +908,9 @@ async fn delete_bounded_rows(
                     .column(Alias::new("id"))
                     .from(Alias::new(table))
                     .and_where(Expr::col(Alias::new(foreign_key)).is_in(parents.iter().copied()))
+                    // Leading with the foreign key lets Postgres walk the job_id indexes instead of
+                    // scanning the primary key in order and filtering millions of rows.
+                    .order_by(Alias::new(foreign_key), Order::Asc)
                     .order_by(Alias::new("id"), Order::Asc)
                     .limit(CHILD_ROW_BATCH_SIZE),
             ),

@@ -2861,3 +2861,113 @@ async fn change_page_atomically_updates_objects_removals_cursor_and_root_revisio
             .unwrap()
     );
 }
+
+async fn upserted_event_count(fixture: &Fixture) -> usize {
+    fixture
+        .database
+        .query_all(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("id"))
+                    .from(Alias::new("storage_change_outbox"))
+                    .and_where(Expr::col(Alias::new("event_type")).eq("Upserted")),
+            ),
+        )
+        .await
+        .unwrap()
+        .len()
+}
+
+async fn parent_children_revision(fixture: &Fixture) -> i64 {
+    fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("children_index_revision"))
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(
+                        Expr::col(Alias::new("storage_root_id")).eq(fixture.root_id.as_uuid()),
+                    )
+                    .and_where(
+                        Expr::col(Alias::new("storage_object_id")).eq(fixture.parent_id.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "children_index_revision")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn revalidating_an_unchanged_directory_keeps_its_children_revision_and_emits_nothing() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ValidateStorageRoot,
+            WorkScope::StorageRoot(fixture.root_id),
+            0,
+            10,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ValidateStorageRoot],
+            "validate-unchanged",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let repository = StorageSyncRepository::new(&fixture.database);
+    let commit = |identity: &'static str, revision: &'static str| {
+        let page = StorageSyncPage::new(
+            fixture.root_id,
+            fixture.parent_id,
+            "fixture-drive",
+            identity,
+            vec![object_revision("movie", "Movie.mkv", revision)],
+            true,
+        )
+        .unwrap();
+        let claimed = &claimed;
+        let repository = &repository;
+        async move {
+            repository
+                .commit_inventory_page(claimed, page)
+                .await
+                .unwrap()
+        }
+    };
+
+    let first = commit("pass-1", "revision-1").await;
+    let indexed_at = parent_children_revision(&fixture).await;
+    assert_eq!(indexed_at, first.sync_revision());
+    assert_eq!(upserted_event_count(&fixture).await, 1);
+
+    let second = commit("pass-2", "revision-1").await;
+    assert!(second.sync_revision() > first.sync_revision());
+    assert_eq!(
+        parent_children_revision(&fixture).await,
+        indexed_at,
+        "an unchanged listing must not invalidate work fenced on the children revision"
+    );
+    assert_eq!(
+        upserted_event_count(&fixture).await,
+        1,
+        "re-observing an identical object must not emit another change event"
+    );
+
+    let third = commit("pass-3", "revision-2").await;
+    assert_eq!(
+        parent_children_revision(&fixture).await,
+        third.sync_revision()
+    );
+    assert_eq!(upserted_event_count(&fixture).await, 2);
+}

@@ -911,26 +911,55 @@ async fn fence_discovery_snapshot(
         }
     }
     for library in &snapshot.libraries {
+        if !fence_library_profile(transaction, library.id, library.profile_version).await? {
+            return Err(DiscoverTitlesError::StaleLibraryPolicy);
+        }
+    }
+    Ok(())
+}
+
+/// Confirms the library still has the profile the snapshot was built from and keeps it that way
+/// until the transaction ends.
+///
+/// Concurrent discovery and scan transactions all fence the same library row. An exclusive
+/// no-op update made them queue on each other while also waiting on each other's work-job
+/// inserts, which `PostgreSQL` resolved by aborting one as a deadlock; a shared lock still blocks
+/// profile edits but lets the fencing transactions proceed side by side.
+async fn fence_library_profile(
+    transaction: &DatabaseTransaction,
+    library_id: Uuid,
+    profile_version: i32,
+) -> Result<bool, DbErr> {
+    let backend = transaction.get_database_backend();
+    if backend == sea_orm::DbBackend::Sqlite {
         let fence = Query::update()
             .table(Alias::new("libraries"))
             .value(
                 Alias::new("profile_version"),
                 Expr::col(Alias::new("profile_version")),
             )
-            .and_where(Expr::col(Alias::new("id")).eq(library.id))
-            .and_where(Expr::col(Alias::new("profile_version")).eq(library.profile_version))
+            .and_where(Expr::col(Alias::new("id")).eq(library_id))
+            .and_where(Expr::col(Alias::new("profile_version")).eq(profile_version))
             .and_where(Expr::col(Alias::new("is_enabled")).eq(true))
             .to_owned();
-        if transaction
+        return Ok(transaction
             .execute(backend.build(&fence))
             .await?
             .rows_affected()
-            != 1
-        {
-            return Err(DiscoverTitlesError::StaleLibraryPolicy);
-        }
+            == 1);
     }
-    Ok(())
+    let fence = Query::select()
+        .expr(Expr::val(1_i32))
+        .from(Alias::new("libraries"))
+        .and_where(Expr::col(Alias::new("id")).eq(library_id))
+        .and_where(Expr::col(Alias::new("profile_version")).eq(profile_version))
+        .and_where(Expr::col(Alias::new("is_enabled")).eq(true))
+        .lock_shared()
+        .to_owned();
+    Ok(transaction
+        .query_one(backend.build(&fence))
+        .await?
+        .is_some())
 }
 
 async fn advance_discovery_watermarks(

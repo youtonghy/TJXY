@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
-    sea_query::{Alias, Expr, OnConflict, Query},
+    sea_query::{Alias, Expr, OnConflict, Query, SimpleExpr},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1323,6 +1323,7 @@ async fn commit_validation_sweep(
         {
             return Err(StorageSyncRepositoryError::RevisionConflict);
         }
+        mark_children_changed(transaction, root_id, target.parent_id, sync_revision).await?;
         insert_outbox_event(
             transaction,
             OutboxEventDraft {
@@ -1543,6 +1544,7 @@ async fn persist_page_contents(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Pairs the change decision with the moved-out and upserted events.
 async fn persist_inventory_object(
     transaction: &DatabaseTransaction,
     page: &StorageSyncPage,
@@ -1566,6 +1568,9 @@ async fn persist_inventory_object(
         now,
     )
     .await?;
+    let relation_unchanged =
+        root_relation_unchanged(transaction, page.storage_root_id, stored.id, page.parent_id)
+            .await?;
     let previous_parent = upsert_root_object(
         transaction,
         page.storage_root_id,
@@ -1573,6 +1578,18 @@ async fn persist_inventory_object(
         page.parent_id,
         sync_revision,
         now,
+    )
+    .await?;
+    if stored.is_unchanged(object.remote_revision()) && relation_unchanged {
+        // Re-observing an identical object confirms nothing new: skip the event so the
+        // projection does not run and the parent keeps its children revision.
+        return Ok(());
+    }
+    mark_children_changed(
+        transaction,
+        page.storage_root_id,
+        page.parent_id,
+        sync_revision,
     )
     .await?;
     if let Some(previous_parent) = previous_parent
@@ -1641,6 +1658,61 @@ async fn persist_inventory_object(
         },
     )
     .await?;
+    Ok(())
+}
+
+/// Reports whether the object is already a `Present` child of `parent_id` in this root.
+async fn root_relation_unchanged(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+    object_id: StorageObjectRecordId,
+    parent_id: StorageObjectRecordId,
+) -> Result<bool, DbErr> {
+    let row = transaction
+        .query_one(
+            transaction.get_database_backend().build(
+                Query::select()
+                    .columns([
+                        Alias::new("parent_storage_object_id"),
+                        Alias::new("presence_state"),
+                    ])
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+                    .and_where(Expr::col(Alias::new("storage_object_id")).eq(object_id.as_uuid()))
+                    .limit(1),
+            ),
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    Ok(
+        row.try_get::<Option<Uuid>>("", "parent_storage_object_id")? == Some(parent_id.as_uuid())
+            && row.try_get::<String>("", "presence_state")? == "Present",
+    )
+}
+
+/// Records that the children of `parent_id` changed at `sync_revision`.
+///
+/// Consumers that fence on the children revision (metadata, source indexing) must see it advance
+/// for a real change, and only for a real change: periodic validation re-observes unchanged
+/// directories and must not invalidate the work queued against them.
+async fn mark_children_changed(
+    transaction: &DatabaseTransaction,
+    root_id: StorageRootId,
+    parent_id: StorageObjectRecordId,
+    sync_revision: i64,
+) -> Result<(), DbErr> {
+    let update = Query::update()
+        .table(Alias::new("storage_root_objects"))
+        .value(Alias::new("children_index_revision"), sync_revision)
+        .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("storage_object_id")).eq(parent_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("children_index_revision")).lt(sync_revision))
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
     Ok(())
 }
 
@@ -1752,6 +1824,9 @@ async fn complete_inventory_scope(
         page.storage_root_id,
         page.parent_id,
         sync_revision,
+        // A scoped sync is an explicit request to index at this revision. Periodic validation
+        // only advances the revision through `mark_children_changed`.
+        matches!(absence_policy, AbsencePolicy::Immediate { .. }),
         now,
     )
     .await
@@ -2347,7 +2422,11 @@ pub(crate) async fn upsert_object(
     let identity_key = natural_key::hash(&[provider_drive_id, object.id().provider_object_id()]);
     let backend = transaction.get_database_backend();
     let existing = Query::select()
-        .columns([Alias::new("id"), Alias::new("remote_revision")])
+        .columns([
+            Alias::new("id"),
+            Alias::new("remote_revision"),
+            Alias::new("presence_state"),
+        ])
         .from(Alias::new("storage_objects"))
         .and_where(Expr::col(Alias::new("storage_account_id")).eq(root.account_id))
         .and_where(Expr::col(Alias::new("identity_key")).eq(identity_key.clone()))
@@ -2421,6 +2500,7 @@ pub(crate) async fn upsert_object(
     } else {
         row.try_get("", "remote_revision")?
     };
+    let was_present = !created && row.try_get::<String>("", "presence_state")? == "Present";
     update_object_facts(
         transaction,
         existing_id,
@@ -2436,12 +2516,31 @@ pub(crate) async fn upsert_object(
     Ok(StoredObject {
         id: StorageObjectRecordId::from_uuid(existing_id),
         before_revision,
+        created,
+        was_present,
     })
 }
 
 pub(crate) struct StoredObject {
     pub(crate) id: StorageObjectRecordId,
     pub(crate) before_revision: Option<String>,
+    pub(crate) created: bool,
+    /// The object was `Present` before this observation, so it needs no availability change.
+    pub(crate) was_present: bool,
+}
+
+impl StoredObject {
+    /// Whether the observation repeated the stored revision with nothing to restore.
+    ///
+    /// Objects without a remote revision can never prove they are unchanged.
+    fn is_unchanged(&self, observed_revision: Option<&str>) -> bool {
+        !self.created
+            && self.was_present
+            && self
+                .before_revision
+                .as_deref()
+                .is_some_and(|before| Some(before) == observed_revision)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2590,12 +2689,24 @@ async fn mark_scope_completed(
     root_id: StorageRootId,
     parent_id: StorageObjectRecordId,
     sync_revision: i64,
+    advance_children_revision: bool,
     now: DateTime<Utc>,
 ) -> Result<(), StorageSyncRepositoryError> {
+    let children_revision = if advance_children_revision {
+        SimpleExpr::from(sync_revision)
+    } else {
+        // A directory indexed for the first time still needs a non-zero revision.
+        Expr::case(
+            Expr::col(Alias::new("children_index_revision")).eq(0_i64),
+            sync_revision,
+        )
+        .finally(Expr::col(Alias::new("children_index_revision")))
+        .into()
+    };
     let update = Query::update()
         .table(Alias::new("storage_root_objects"))
         .value(Alias::new("children_indexed"), true)
-        .value(Alias::new("children_index_revision"), sync_revision)
+        .value(Alias::new("children_index_revision"), children_revision)
         .value(Alias::new("observed_sync_revision"), sync_revision)
         .value(Alias::new("last_listed_at"), now)
         .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid()))
