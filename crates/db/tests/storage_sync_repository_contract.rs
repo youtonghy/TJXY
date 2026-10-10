@@ -2971,3 +2971,275 @@ async fn revalidating_an_unchanged_directory_keeps_its_children_revision_and_emi
     );
     assert_eq!(upserted_event_count(&fixture).await, 2);
 }
+
+async fn stored_object_state(fixture: &Fixture, provider_object_id: &str) -> (i64, String) {
+    let row = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .columns([
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("presence_state"),
+                    ])
+                    .from(Alias::new("storage_objects"))
+                    .and_where(Expr::col(Alias::new("provider_object_id")).eq(provider_object_id)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    (
+        row.try_get("", "observed_sync_revision").unwrap(),
+        row.try_get("", "presence_state").unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn revalidating_identical_facts_leaves_the_object_row_untouched() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ValidateStorageRoot,
+            WorkScope::StorageRoot(fixture.root_id),
+            0,
+            10,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ValidateStorageRoot],
+            "validate-identical",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let repository = StorageSyncRepository::new(&fixture.database);
+    // Filesystem modification times carry sub-microsecond precision that backends truncate.
+    let modified_at = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+    let commit = |identity: &'static str, size: u64| {
+        let page = StorageSyncPage::new(
+            fixture.root_id,
+            fixture.parent_id,
+            "fixture-drive",
+            identity,
+            vec![
+                StorageObject::file_with_identity(
+                    StorageObjectId::new("filesystem", "movie").unwrap(),
+                    "Movie.mkv",
+                    size,
+                    IdentityQuality::StableFileId,
+                )
+                .with_remote_revision("revision-1")
+                .unwrap()
+                .with_etag("etag-1")
+                .unwrap()
+                .with_remote_modified_at(modified_at),
+            ],
+            true,
+        )
+        .unwrap();
+        let claimed = &claimed;
+        let repository = &repository;
+        async move {
+            repository
+                .commit_inventory_page(claimed, page)
+                .await
+                .unwrap()
+        }
+    };
+
+    let first = commit("pass-1", 8).await;
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await,
+        (first.sync_revision(), "Present".to_owned())
+    );
+
+    let second = commit("pass-2", 8).await;
+    assert!(second.sync_revision() > first.sync_revision());
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await.0,
+        first.sync_revision(),
+        "re-observing identical facts must not rewrite the object row"
+    );
+
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("presence_state"), "TemporarilyUnavailable")
+                    .value(
+                        Alias::new("availability_reason"),
+                        "backend-temporarily-unavailable",
+                    )
+                    .and_where(Expr::col(Alias::new("provider_object_id")).eq("movie")),
+            ),
+        )
+        .await
+        .unwrap();
+    let restored = commit("pass-3", 8).await;
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await,
+        (restored.sync_revision(), "Present".to_owned()),
+        "an identical observation still restores availability"
+    );
+
+    let resized = commit("pass-4", 9).await;
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await.0,
+        resized.sync_revision(),
+        "changed facts are written"
+    );
+}
+
+#[tokio::test]
+async fn expired_validation_claim_cannot_commit_its_sweep() {
+    let fixture = fixture().await;
+    let now = Utc.with_ymd_and_hms(2026, 7, 18, 16, 0, 0).unwrap();
+    let clock = ManualClock::new(now);
+    let jobs = WorkJobRepository::with_clock(&fixture.database, clock.clone());
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ValidateStorageRoot,
+            WorkScope::StorageRoot(fixture.root_id),
+            0,
+            10,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ValidateStorageRoot],
+            "validate-expiring",
+            Duration::seconds(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let repository = StorageSyncRepository::with_clock(&fixture.database, clock.clone());
+    let page = repository
+        .commit_inventory_page(
+            &claimed,
+            StorageSyncPage::new(
+                fixture.root_id,
+                fixture.parent_id,
+                "fixture-drive",
+                "expiring-page",
+                vec![object("movie", "Movie.mkv")],
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let root_revision = |database: DatabaseConnection| async move {
+        database
+            .query_one(
+                database.get_database_backend().build(
+                    Query::select()
+                        .column(Alias::new("sync_revision"))
+                        .from(Alias::new("storage_roots"))
+                        .and_where(Expr::col(Alias::new("id")).eq(fixture.root_id.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "sync_revision")
+            .unwrap()
+    };
+    let before = root_revision(fixture.database.clone()).await;
+    clock.set(now + Duration::seconds(31));
+
+    let error = repository
+        .commit_validation_sweep(
+            &claimed,
+            fixture.root_id,
+            fixture.parent_id,
+            page.sync_revision(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageSyncRepositoryError::LostLease));
+    assert_eq!(root_revision(fixture.database.clone()).await, before);
+}
+
+#[tokio::test]
+async fn reobserving_an_object_created_outside_inventory_fills_its_missing_facts() {
+    let fixture = fixture().await;
+    // Bound roots and similar rows are inserted without a provider parent or remote facts.
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("identity_key"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("facts_observed_storage_root_id"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        fixture.account_id.into(),
+                        "fixture-drive".into(),
+                        "movie".into(),
+                        identity_key("fixture-drive", "movie").into(),
+                        "Movie.mkv".into(),
+                        "movie.mkv".into(),
+                        "File".into(),
+                        0_i64.into(),
+                        fixture.root_id.as_uuid().into(),
+                        false.into(),
+                        0_i64.into(),
+                        "StableFileId".into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let claimed = claimed_sync_job(&fixture, ManualClock::new(Utc::now())).await;
+
+    let committed = StorageSyncRepository::new(&fixture.database)
+        .commit_inventory_page(
+            &claimed,
+            StorageSyncPage::new(
+                fixture.root_id,
+                fixture.parent_id,
+                "fixture-drive",
+                "fill-facts",
+                vec![object("movie", "Movie.mkv")],
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await,
+        (committed.sync_revision(), "Present".to_owned())
+    );
+}

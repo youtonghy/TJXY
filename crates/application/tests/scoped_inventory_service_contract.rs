@@ -1469,3 +1469,78 @@ async fn library_roots_scope_does_not_implicitly_schedule_title_discovery() {
         .is_none()
     );
 }
+
+#[tokio::test]
+async fn revalidating_an_unchanged_tree_keeps_objects_present_without_rewriting_them() {
+    let fixture = fixture().await;
+    let storage = Arc::new(TreeBackend {
+        requests: Mutex::new(Vec::new()),
+    });
+    let jobs = WorkJobRepository::new(&fixture.database);
+    let mut results = Vec::new();
+    for pass in ["first", "second"] {
+        jobs.enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ValidateStorageRoot,
+                WorkScope::StorageRoot(fixture.root_id),
+                0,
+                10,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let claimed = jobs
+            .claim_next(
+                &[WorkTaskKind::ValidateStorageRoot],
+                pass,
+                chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let result =
+            FullValidateStorageService::new(fixture.database.clone(), Arc::clone(&storage))
+                .run_claimed(&claimed, fixture.account_id)
+                .await
+                .unwrap();
+        let objects = fixture
+            .database
+            .query_all(Statement::from_string(
+                fixture.database.get_database_backend(),
+                "SELECT o.provider_object_id, o.observed_sync_revision, ro.presence_state \
+                 FROM storage_objects o \
+                 JOIN storage_root_objects ro ON ro.storage_object_id = o.id \
+                 WHERE o.provider_object_id IN ('series', 'episode') \
+                 ORDER BY o.provider_object_id"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.try_get::<String>("", "provider_object_id").unwrap(),
+                    row.try_get::<i64>("", "observed_sync_revision").unwrap(),
+                    row.try_get::<String>("", "presence_state").unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        results.push((result.sync_revision(), objects));
+    }
+
+    let (first_revision, first_objects) = &results[0];
+    let (second_revision, second_objects) = &results[1];
+    assert!(second_revision > first_revision);
+    assert_eq!(first_objects.len(), 2);
+    assert!(
+        second_objects
+            .iter()
+            .all(|(_, _, presence)| presence == "Present"),
+        "the sweep must still see re-observed relations"
+    );
+    assert_eq!(
+        second_objects, first_objects,
+        "an unchanged pass must not rewrite object facts"
+    );
+}

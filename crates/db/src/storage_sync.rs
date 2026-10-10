@@ -1032,7 +1032,8 @@ async fn commit_inventory_page(
     {
         return Err(StorageSyncRepositoryError::InvalidClaimScope);
     }
-    ensure_storage_claim(transaction, claimed, now).await?;
+    // The caller fences the lease once at commit time; a lease already lost here fails that
+    // fence and rolls the page back, so a second no-op row update per page is not needed.
     if !storage_claim_authorizes_scope(transaction, claimed, page.storage_root_id, page.parent_id)
         .await?
     {
@@ -1311,7 +1312,7 @@ async fn commit_validation_sweep(
     {
         return Err(StorageSyncRepositoryError::InvalidClaimScope);
     }
-    ensure_storage_claim(transaction, claimed, now).await?;
+    // Fenced once at the end, after the sweep, so the commit-time lease is what decides.
     if !storage_claim_authorizes_scope(transaction, claimed, root_id, root_object_id).await? {
         return Err(StorageSyncRepositoryError::MissingScope);
     }
@@ -2453,8 +2454,20 @@ pub(crate) async fn upsert_object(
     let existing = Query::select()
         .columns([
             Alias::new("id"),
+            Alias::new("provider_parent_id"),
+            Alias::new("name"),
+            Alias::new("normalized_name"),
+            Alias::new("object_type"),
+            Alias::new("mime_type"),
+            Alias::new("size"),
+            Alias::new("checksum"),
+            Alias::new("etag"),
             Alias::new("remote_revision"),
+            Alias::new("remote_modified_at"),
+            Alias::new("facts_observed_storage_root_id"),
+            Alias::new("identity_quality"),
             Alias::new("presence_state"),
+            Alias::new("availability_reason"),
         ])
         .from(Alias::new("storage_objects"))
         .and_where(Expr::col(Alias::new("storage_account_id")).eq(root.account_id))
@@ -2530,18 +2543,33 @@ pub(crate) async fn upsert_object(
         row.try_get("", "remote_revision")?
     };
     let was_present = !created && row.try_get::<String>("", "presence_state")? == "Present";
-    update_object_facts(
-        transaction,
-        existing_id,
-        parent_provider_id,
-        object,
-        size,
-        normalized_name,
-        root_id,
-        sync_revision,
-        now,
-    )
-    .await?;
+    // Periodic validation re-observes every object. Rewriting identical facts only advanced
+    // `observed_sync_revision`, which every reader treats as an upper bound, at the cost of a
+    // non-HOT row and index rewrite per object per pass.
+    if created
+        || !stored_facts_match(
+            &row,
+            backend,
+            parent_provider_id,
+            object,
+            size,
+            &normalized_name,
+            root_id,
+        )?
+    {
+        update_object_facts(
+            transaction,
+            existing_id,
+            parent_provider_id,
+            object,
+            size,
+            normalized_name,
+            root_id,
+            sync_revision,
+            now,
+        )
+        .await?;
+    }
     Ok(StoredObject {
         id: StorageObjectRecordId::from_uuid(existing_id),
         before_revision,
@@ -2569,6 +2597,62 @@ impl StoredObject {
                 .before_revision
                 .as_deref()
                 .is_some_and(|before| Some(before) == observed_revision)
+    }
+}
+
+/// Whether the stored row already holds exactly these facts from this root and is plainly present.
+fn stored_facts_match(
+    row: &QueryResult,
+    backend: sea_orm::DbBackend,
+    parent_provider_id: &str,
+    object: &StorageObject,
+    size: Option<i64>,
+    normalized_name: &str,
+    root_id: StorageRootId,
+) -> Result<bool, DbErr> {
+    // Rows created outside inventory (for example a bound root) may hold NULL in any column,
+    // so every text column is read as optional and a NULL simply counts as a difference.
+    let text = |column: &str| row.try_get::<Option<String>>("", column);
+    Ok(text("presence_state")?.as_deref() == Some("Present")
+        && text("availability_reason")?.is_none()
+        && row.try_get::<Option<Uuid>>("", "facts_observed_storage_root_id")?
+            == Some(root_id.as_uuid())
+        && text("provider_parent_id")?.as_deref() == Some(parent_provider_id)
+        && text("name")?.as_deref() == Some(object.name())
+        && text("normalized_name")?.as_deref() == Some(normalized_name)
+        && text("object_type")?.as_deref() == Some(object_type(object.object_type()))
+        && text("mime_type")?.as_deref() == object.mime_type()
+        && row.try_get::<Option<i64>>("", "size")? == size
+        && text("checksum")?.as_deref() == object.checksum()
+        && text("etag")?.as_deref() == object.etag()
+        && text("remote_revision")?.as_deref() == object.remote_revision()
+        && stored_timestamp_matches(
+            backend,
+            row.try_get("", "remote_modified_at")?,
+            object.remote_modified_at(),
+        )
+        && text("identity_quality")?.as_deref()
+            == Some(identity_quality(object.identity_quality())))
+}
+
+/// Compares an observed timestamp with its stored copy at the backend's storage precision.
+///
+/// Filesystem times carry nanoseconds while `PostgreSQL` keeps microseconds and `MySQL` DATETIME
+/// keeps whole seconds, so exact equality would report every re-observation as a change.
+fn stored_timestamp_matches(
+    backend: sea_orm::DbBackend,
+    stored: Option<DateTime<Utc>>,
+    observed: Option<DateTime<Utc>>,
+) -> bool {
+    let precision = match backend {
+        sea_orm::DbBackend::MySql => chrono::Duration::seconds(1),
+        sea_orm::DbBackend::Postgres => chrono::Duration::microseconds(1),
+        sea_orm::DbBackend::Sqlite => chrono::Duration::nanoseconds(1),
+    };
+    match (stored, observed) {
+        (None, None) => true,
+        (Some(stored), Some(observed)) => (observed - stored).abs() < precision,
+        _ => false,
     }
 }
 
@@ -2877,5 +2961,52 @@ async fn finish_notifying<T>(
                 rollback,
             }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use sea_orm::DbBackend;
+
+    use super::stored_timestamp_matches;
+
+    #[test]
+    fn stored_timestamps_compare_at_the_backend_precision() {
+        let observed = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+        let micros = Utc.timestamp_opt(1_700_000_000, 123_456_000).unwrap();
+        let seconds = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+        assert!(stored_timestamp_matches(
+            DbBackend::Postgres,
+            Some(micros),
+            Some(observed)
+        ));
+        assert!(!stored_timestamp_matches(
+            DbBackend::Postgres,
+            Some(seconds),
+            Some(observed)
+        ));
+        assert!(stored_timestamp_matches(
+            DbBackend::MySql,
+            Some(seconds),
+            Some(observed)
+        ));
+        assert!(stored_timestamp_matches(
+            DbBackend::Sqlite,
+            Some(observed),
+            Some(observed)
+        ));
+        assert!(!stored_timestamp_matches(
+            DbBackend::Sqlite,
+            Some(micros),
+            Some(observed)
+        ));
+        assert!(stored_timestamp_matches(DbBackend::Sqlite, None, None));
+        assert!(!stored_timestamp_matches(
+            DbBackend::Postgres,
+            None,
+            Some(observed)
+        ));
     }
 }
