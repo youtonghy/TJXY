@@ -94,6 +94,8 @@ pub struct DiscoveredTitle {
 
 /// Metadata state read back after a title upsert, before scheduling resolution.
 struct UpsertedTitle {
+    /// The upsert added or renamed catalog-visible rows, so cached catalog reads are stale.
+    changed: bool,
     revision: i64,
     resolved_revision: i64,
     resolved_requirement: Option<MetadataRequirement>,
@@ -353,8 +355,10 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
             ensure_discovery_storage_facts(&transaction, snapshot.root_id, &storage_objects)
                 .await?;
             let mut metadata_jobs = HashMap::new();
+            let mut catalog_changed = false;
             for title in &snapshot.titles {
                 let item = upsert_title(&transaction, title).await?;
+                catalog_changed |= item.changed;
                 let metadata_revision = item.revision;
                 let Some(requirement) = title.metadata_requirement else {
                     continue;
@@ -445,7 +449,13 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 )
                 .await?;
             }
-            let generation = crate::catalog_publication::advance_generation(&transaction).await?;
+            // Periodic validation rediscovers every unchanged title; advancing the generation
+            // then would invalidate every cached catalog read once per refresh for nothing.
+            let generation = if catalog_changed {
+                crate::catalog_publication::advance_generation(&transaction).await?
+            } else {
+                crate::cache_invalidation::current_catalog_generation(&transaction).await?
+            };
             WorkJobRepository::new(self.database)
                 .complete_in_transaction(
                     &transaction,
@@ -1108,8 +1118,12 @@ async fn upsert_title(
         ])
         .on_conflict(idempotent_conflict(backend, "id"))
         .to_owned();
-    transaction.execute(backend.build(&insert)).await?;
-    refresh_title_naming(transaction, title).await?;
+    let mut changed = transaction
+        .execute(backend.build(&insert))
+        .await?
+        .rows_affected()
+        > 0;
+    changed |= refresh_title_naming(transaction, title).await?;
     let membership_exists = transaction
         .query_one(
             backend.build(
@@ -1158,10 +1172,11 @@ async fn upsert_title(
             ),
         )
         .await?;
+    changed |= !membership_exists;
     if !membership_exists && title.metadata_requirement.is_some() {
         crate::metadata::invalidate_metadata_for_owner(transaction, title.item_id).await?;
     }
-    transaction
+    changed |= transaction
         .execute(
             backend.build(
                 &Query::insert()
@@ -1186,7 +1201,9 @@ async fn upsert_title(
                     .to_owned(),
             ),
         )
-        .await?;
+        .await?
+        .rows_affected()
+        > 0;
     let row = transaction
         .query_one(
             backend.build(
@@ -1204,6 +1221,7 @@ async fn upsert_title(
         .await?
         .ok_or(DiscoverTitlesError::IdentityConflict)?;
     Ok(UpsertedTitle {
+        changed,
         revision: row.try_get("", "metadata_revision")?,
         resolved_revision: row.try_get("", "metadata_resolved_revision")?,
         resolved_requirement: row
@@ -1215,10 +1233,11 @@ async fn upsert_title(
     })
 }
 
+/// Returns whether a parser upgrade rewrote the title's name or revision.
 async fn refresh_title_naming(
     transaction: &sea_orm::DatabaseTransaction,
     title: &DiscoveredTitle,
-) -> Result<(), DiscoverTitlesError> {
+) -> Result<bool, DiscoverTitlesError> {
     let provenance = Alias::new("discover_naming_provenance");
     let provider = Alias::new("discover_naming_provider");
     let authoritative_metadata = Query::select()
@@ -1265,7 +1284,11 @@ async fn refresh_title_naming(
                 .add(Expr::exists(provider_identity).not()),
         )
         .to_owned();
-    transaction.execute(backend.build(&refresh)).await?;
+    let renamed = transaction
+        .execute(backend.build(&refresh))
+        .await?
+        .rows_affected()
+        > 0;
 
     let revision_column = if title.item_type == CatalogItemType::Series {
         "structure_expansion_revision"
@@ -1285,8 +1308,12 @@ async fn refresh_title_naming(
         .and_where(Expr::col(Alias::new("id")).eq(title.item_id.as_uuid()))
         .and_where(Expr::col(Alias::new("naming_parser_version")).lt(MEDIA_NAME_PARSER_VERSION))
         .to_owned();
-    transaction.execute(backend.build(&advance)).await?;
-    Ok(())
+    let advanced = transaction
+        .execute(backend.build(&advance))
+        .await?
+        .rows_affected()
+        > 0;
+    Ok(renamed || advanced)
 }
 
 fn idempotent_conflict(backend: sea_orm::DbBackend, column: &'static str) -> OnConflict {

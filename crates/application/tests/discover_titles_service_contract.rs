@@ -780,7 +780,7 @@ async fn terminate_job(fixture: &DiscoveryFixture, job_id: WorkJobId) {
         .unwrap();
 }
 
-async fn rediscover(fixture: &DiscoveryFixture) {
+async fn rediscover(fixture: &DiscoveryFixture) -> tjxy_application::DiscoverTitlesReport {
     let sql = fixture.database.get_database_backend();
     fixture
         .database
@@ -817,7 +817,37 @@ async fn rediscover(fixture: &DiscoveryFixture) {
     DiscoverTitlesService::new(fixture.database.clone())
         .execute(&claimed)
         .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rediscovering_unchanged_titles_keeps_the_catalog_generation() {
+    let fixture = discovery_fixture("none").await;
+    let first = DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
         .unwrap();
+
+    let repeat = rediscover(&fixture).await;
+    assert_eq!(
+        repeat.generation(),
+        first.generation(),
+        "an unchanged rediscovery must not invalidate cached catalog reads"
+    );
+
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("naming_parser_version"), 0_i32),
+            ),
+        )
+        .await
+        .unwrap();
+    let renamed = rediscover(&fixture).await;
+    assert!(renamed.generation() > first.generation());
 }
 
 #[tokio::test]

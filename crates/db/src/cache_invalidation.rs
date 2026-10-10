@@ -57,6 +57,28 @@ pub async fn advance_catalog_generation(transaction: &DatabaseTransaction) -> Re
         .await
 }
 
+/// Reads the catalog generation inside the caller's transaction without advancing it.
+///
+/// # Errors
+///
+/// Returns a database or invariant failure.
+pub(crate) async fn current_catalog_generation(
+    transaction: &DatabaseTransaction,
+) -> Result<i64, DbErr> {
+    transaction
+        .query_one(
+            transaction.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("generation"))
+                    .from(Alias::new("catalog_state"))
+                    .and_where(Expr::col(Alias::new("id")).eq(1_i32)),
+            ),
+        )
+        .await?
+        .ok_or_else(|| DbErr::Custom("catalog generation row is missing".to_owned()))?
+        .try_get::<i64>("", "generation")
+}
+
 pub struct CacheInvalidationRepository<'connection, Clock = CacheInvalidationSystemClock> {
     database: &'connection DatabaseConnection,
     clock: Clock,
@@ -101,19 +123,7 @@ where
                 "catalog generation row is missing".to_owned(),
             ));
         }
-        let generation = transaction
-            .query_one(
-                backend.build(
-                    Query::select()
-                        .column(Alias::new("generation"))
-                        .from(Alias::new("catalog_state"))
-                        .and_where(Expr::col(Alias::new("id")).eq(1_i32)),
-                ),
-            )
-            .await?
-            .ok_or_else(|| DbErr::Custom("catalog generation row is missing".to_owned()))?
-            .try_get::<i64>("", "generation")?;
-        Ok(generation)
+        current_catalog_generation(transaction).await
     }
 
     /// Claims the oldest available invalidation with a fenced lease.
