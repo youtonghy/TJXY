@@ -1463,33 +1463,7 @@ where
         &self,
         job: WorkJobId,
     ) -> Result<Option<String>, WorkJobRepositoryError> {
-        let row = self
-            .database
-            .query_one(
-                self.database.get_database_backend().build(
-                    Query::select()
-                        .columns([Alias::new("counters"), Alias::new("error_summary")])
-                        .from(Alias::new("work_results"))
-                        .and_where(Expr::col(Alias::new("job_id")).eq(job.as_uuid())),
-                ),
-            )
-            .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let counters: Value = row.try_get("", "counters")?;
-        if let Some(kind @ ("nfo_selection" | "item")) =
-            counters.get("failure_kind").and_then(Value::as_str)
-        {
-            return Ok(Some(kind.to_owned()));
-        }
-        let error: Option<String> = row.try_get("", "error_summary")?;
-        Ok(error
-            .filter(|message| {
-                message == "metadata NFO candidates require selection"
-                    || message.ends_with("metadata inventory has ambiguous NFO candidates")
-            })
-            .map(|_| "nfo_selection".to_owned()))
+        item_failure_kind(self.database, job).await
     }
 
     /// Idempotently writes one staging batch under a live claim.
@@ -1564,7 +1538,13 @@ where
             } else {
                 None
             };
-            let submission = enqueue_or_join(&transaction, spec, self.now()).await?;
+            let submission = match unchanged_source_item_failure(&transaction, spec).await? {
+                Some(job) => WorkJobSubmission {
+                    job,
+                    created: false,
+                },
+                None => enqueue_or_join(&transaction, spec, self.now()).await?,
+            };
             if spec.task_kind() == WorkTaskKind::DiscoverTitles {
                 match spec.scope() {
                     WorkScope::LibraryRootBinding(binding_id) => {
@@ -3692,6 +3672,89 @@ fn active_job(spec: &WorkJobSpec) -> SelectStatement {
         .limit(1);
     select_job_columns(&mut query, &table);
     query.clone()
+}
+
+async fn item_failure_kind<Connection: ConnectionTrait>(
+    connection: &Connection,
+    job: WorkJobId,
+) -> Result<Option<String>, WorkJobRepositoryError> {
+    let row = connection
+        .query_one(
+            connection.get_database_backend().build(
+                Query::select()
+                    .columns([Alias::new("counters"), Alias::new("error_summary")])
+                    .from(Alias::new("work_results"))
+                    .and_where(Expr::col(Alias::new("job_id")).eq(job.as_uuid())),
+            ),
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let counters: Value = row.try_get("", "counters")?;
+    if let Some(kind @ ("nfo_selection" | "item")) =
+        counters.get("failure_kind").and_then(Value::as_str)
+    {
+        return Ok(Some(kind.to_owned()));
+    }
+    let error: Option<String> = row.try_get("", "error_summary")?;
+    Ok(error
+        .filter(|message| {
+            message == "metadata NFO candidates require selection"
+                || message.ends_with("metadata inventory has ambiguous NFO candidates")
+        })
+        .map(|_| "nfo_selection".to_owned()))
+}
+
+/// Returns the latest source-index job for the same item, revision, and storage input when it
+/// failed on the item's own content.
+///
+/// Source indexing is deterministic over its storage input, so re-running it before the item's
+/// children or source revision change can only fail again. Full Scan joins the failed job and
+/// reports the existing item issue instead of enqueueing a fresh child every refresh. Retention
+/// eventually removes the failed job, which lets one later scan retry it.
+async fn unchanged_source_item_failure(
+    transaction: &DatabaseTransaction,
+    spec: &WorkJobSpec,
+) -> Result<Option<WorkJobRecord>, WorkJobRepositoryError> {
+    if spec.task_kind != WorkTaskKind::IndexMediaSources {
+        return Ok(None);
+    }
+    let Some(input_sync_revision) = spec.input_sync_revision else {
+        return Ok(None);
+    };
+    let table = Alias::new("work_jobs");
+    let mut query = Query::select();
+    query
+        .from(table.clone())
+        .and_where(Expr::col(Alias::new("scope_type")).eq(spec.scope.scope_type()))
+        .and_where(Expr::col(Alias::new("scope_id")).eq(spec.scope.id()))
+        .and_where(Expr::col(Alias::new("task_kind")).eq(spec.task_kind.as_str()))
+        .and_where(Expr::col(Alias::new("expected_revision")).eq(spec.expected_revision))
+        .and_where(
+            Expr::col(Alias::new("natural_key_storage_root_id"))
+                .eq(spec.natural_key_storage_root_id()),
+        )
+        .and_where(Expr::col(Alias::new("input_sync_revision")).eq(input_sync_revision))
+        .and_where(Expr::col(Alias::new("state")).is_in([STATE_COMPLETED, STATE_FAILED]))
+        .order_by(Alias::new("created_at"), Order::Desc)
+        .limit(1);
+    select_job_columns(&mut query, &table);
+    let Some(job) = transaction
+        .query_one(transaction.get_database_backend().build(&query))
+        .await?
+        .as_ref()
+        .map(job_from_row)
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    if job.state != WorkJobState::Failed
+        || item_failure_kind(transaction, job.id).await?.as_deref() != Some("item")
+    {
+        return Ok(None);
+    }
+    Ok(Some(job))
 }
 
 fn job_by_id(job_id: WorkJobId) -> SelectStatement {

@@ -1799,6 +1799,117 @@ async fn failed_eager_probe_is_propagated_to_the_full_scan_parent() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Follows one item failure across the scan that saw it and the next refresh.
+async fn unindexable_item_is_isolated_and_not_rescheduled_until_its_input_changes() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "none",
+        "eager",
+        "on_playback",
+    )
+    .await;
+    let (_, storage_object) = seed_root(&database, library).await;
+    advance_library_discovery_watermark(&database, library, 1).await;
+    let item = seed_unindexed_movie(&database, library).await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        storage_object.as_uuid().into(),
+                        item.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&database);
+    let first = claimed_full_scan(&database, library).await;
+    assert!(matches!(
+        FullScanService::new(database.clone()).execute(&first).await,
+        Err(FullScanError::ChildrenPending { scheduled: 1 })
+    ));
+    let index = jobs
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "index",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(index.job().scope(), WorkScope::CatalogItem(item));
+    jobs.fail_item(
+        &index,
+        "source-index input has no supported media object",
+        false,
+    )
+    .await
+    .unwrap();
+    jobs.retry(&first, Duration::zero(), "waiting for source index")
+        .await
+        .unwrap();
+    let resumed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "full-scan-resumed",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    FullScanService::new(database.clone())
+        .execute(&resumed)
+        .await
+        .unwrap();
+    let expected = serde_json::json!({"items": 1, "success": 0, "failed": 1, "skipped": 0, "needs_selection": 0});
+    let tasks = TaskService::new(database.clone());
+    let report = tasks.scan_report(first.id(), 0).await.unwrap();
+    assert_eq!(report.counters.unwrap(), expected);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].item_id, item.as_uuid());
+
+    let refresh = claimed_full_scan(&database, library).await;
+    let result = FullScanService::new(database.clone())
+        .execute(&refresh)
+        .await
+        .unwrap();
+
+    assert_eq!(result.scheduled(), 0);
+    assert!(
+        jobs.claim_next(
+            &[WorkTaskKind::IndexMediaSources],
+            "unexpected-reindex",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "unchanged input must not enqueue another source index"
+    );
+    let report = tasks.scan_report(refresh.id(), 0).await.unwrap();
+    assert_eq!(report.counters.unwrap(), expected);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].child_job_id, index.id().as_uuid());
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Covers scheduling, Partial publication, watermark advance, and parent resume as one workflow.
 async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
     let database = database().await;

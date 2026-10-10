@@ -1189,13 +1189,25 @@ async fn handle_source_index_outcome(
     let message = truncate_error(&error.to_string());
     let result = if source_index_error_is_terminal(&error) {
         log_terminal_failure(claimed, "media source indexing failed terminally", &error);
-        jobs.fail_terminal(claimed, &message).await
+        if source_index_error_is_item_failure(&error) {
+            jobs.fail_item(claimed, &message, false).await
+        } else {
+            jobs.fail_terminal(claimed, &message).await
+        }
     } else {
         jobs.retry(claimed, Duration::seconds(5), &message).await
     };
     if let Err(update_error) = result {
         tracing::error!("Source index worker could not persist failure outcome: {update_error}");
     }
+}
+
+/// Content problems confined to one item; Full Scan isolates them instead of failing the Library.
+const fn source_index_error_is_item_failure(error: &SourceIndexError) -> bool {
+    matches!(
+        error,
+        SourceIndexError::NoMedia | SourceIndexError::InvalidMediaName(_)
+    )
 }
 
 fn source_index_error_is_terminal(error: &SourceIndexError) -> bool {
@@ -1735,6 +1747,16 @@ mod tests {
         full_scan_retry_delay, series_expand_error_is_terminal, storage_retry_delay,
         validation_error_is_terminal, validation_retry_delay,
     };
+
+    #[test]
+    fn source_index_content_failures_are_isolated_to_their_item() {
+        let no_media = super::SourceIndexError::NoMedia;
+        assert!(super::source_index_error_is_terminal(&no_media));
+        assert!(super::source_index_error_is_item_failure(&no_media));
+        assert!(!super::source_index_error_is_item_failure(
+            &super::SourceIndexError::InvalidNamingHints
+        ));
+    }
 
     #[test]
     fn pending_series_inventory_is_retried_instead_of_failed() {
