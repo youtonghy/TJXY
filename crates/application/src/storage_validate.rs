@@ -69,6 +69,7 @@ where
         let jobs = WorkJobRepository::new(&self.database);
         let transaction = self.database.begin().await?;
         let completion: Result<(), FullValidateStorageError> = async {
+            tjxy_db::discard_validation_pages(&transaction, claimed).await?;
             tjxy_db::enqueue_discovery_after_root_sync(
                 &transaction,
                 root_id,

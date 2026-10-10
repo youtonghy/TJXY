@@ -809,6 +809,35 @@ where
     }
 }
 
+/// Drops the replay pages of a full validation inside its completion transaction.
+///
+/// Pages only make an in-flight validation attempt replay-safe; unlike Scoped Storage Sync pages,
+/// no dependent job reads them once the validation has completed. Validation lists every
+/// directory of every root on each periodic pass, so keeping them until work retention ran grew
+/// one row per directory per pass.
+///
+/// # Errors
+///
+/// Returns [`StorageSyncRepositoryError::InvalidClaimScope`] for any other task kind, or SQL
+/// failures.
+#[doc(hidden)]
+pub async fn discard_validation_pages(
+    transaction: &DatabaseTransaction,
+    claimed: &ClaimedWorkJob,
+) -> Result<u64, StorageSyncRepositoryError> {
+    if claimed.job().task_kind() != WorkTaskKind::ValidateStorageRoot {
+        return Err(StorageSyncRepositoryError::InvalidClaimScope);
+    }
+    let delete = Query::delete()
+        .from_table(Alias::new("storage_sync_pages"))
+        .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid()))
+        .to_owned();
+    Ok(transaction
+        .execute(transaction.get_database_backend().build(&delete))
+        .await?
+        .rows_affected())
+}
+
 fn scoped_inventory_target_from_row(
     row: &QueryResult,
 ) -> Result<ScopedInventoryTarget, StorageSyncRepositoryError> {

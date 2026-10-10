@@ -852,6 +852,20 @@ async fn full_validate_recurses_and_confirms_unreachable_subtrees_absent() {
         root.try_get::<i64>("", "reconciled_sync_revision").unwrap(),
         result.sync_revision()
     );
+    let pages = fixture
+        .database
+        .query_one(Statement::from_string(
+            fixture.database.get_database_backend(),
+            "SELECT COUNT(*) AS pages FROM storage_sync_pages".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pages.try_get::<i64>("", "pages").unwrap(),
+        0,
+        "a completed validation must not keep its replay pages"
+    );
 }
 
 #[tokio::test]

@@ -237,6 +237,7 @@ pub use storage_relink::{
 pub use storage_sync::{
     CommittedStoragePage, ObjectAvailabilityUpdate, ScopedInventoryTarget, StorageSyncPage,
     StorageSyncRepository, StorageSyncRepositoryError, TemporaryAvailabilityReason,
+    discard_validation_pages,
 };
 pub use system_settings::{
     DEFAULT_ICON_URL, DEFAULT_LISTEN_HOST, DEFAULT_LOGO_URL, DEFAULT_PORT, DEFAULT_SITE_SUBTITLE,
