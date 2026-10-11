@@ -148,43 +148,7 @@ impl<'connection> SeriesExpandRepository<'connection> {
         let root_object =
             StorageObjectRecordId::from_uuid(roots[0].try_get("", "storage_object_id")?);
         let sync_revision = roots[0].try_get("", "reconciled_sync_revision")?;
-        let rows = self
-            .database
-            .query_all(
-                self.database
-                    .get_database_backend()
-                    .build(&objects_query(storage_root)),
-            )
-            .await?;
-        if rows.len() > MAX_OBJECTS {
-            return Err(SeriesExpandRepositoryError::ObjectLimit);
-        }
-        let objects = rows
-            .iter()
-            .map(|row| {
-                Ok(SeriesStorageObject {
-                    id: StorageObjectRecordId::from_uuid(row.try_get("", "storage_object_id")?),
-                    parent: row
-                        .try_get::<Option<Uuid>>("", "parent_storage_object_id")?
-                        .map(StorageObjectRecordId::from_uuid),
-                    name: row.try_get("", "name")?,
-                    object_type: row.try_get("", "object_type")?,
-                    checksum: row.try_get("", "checksum")?,
-                    observed_revision: row.try_get("", "observed_sync_revision")?,
-                    object_observed_revision: row.try_get("", "object_observed_sync_revision")?,
-                    facts_observed_storage_root_id: row
-                        .try_get("", "facts_observed_storage_root_id")?,
-                    facts_origin_reconciled_revision: row
-                        .try_get("", "facts_origin_reconciled_sync_revision")?,
-                    root_reconciled_revision: row.try_get("", "root_reconciled_sync_revision")?,
-                    has_other_root: row.try_get("", "has_other_root")?,
-                    relation_presence: row.try_get("", "relation_presence_state")?,
-                    object_presence: row.try_get("", "object_presence_state")?,
-                    children_indexed: row.try_get("", "children_indexed")?,
-                    children_revision: row.try_get("", "children_index_revision")?,
-                })
-            })
-            .collect::<Result<Vec<_>, DbErr>>()?;
+        let objects = subtree_objects(self.database, storage_root, root_object).await?;
         let objects = reconciled_subtree(root_object, storage_root, objects)?;
         let existing_seasons = existing_season_ids(self.database, owner).await?;
         Ok(SeriesExpandSnapshot {
@@ -196,6 +160,73 @@ impl<'connection> SeriesExpandRepository<'connection> {
             existing_seasons,
         })
     }
+}
+
+/// Lookups per statement when walking a level; keeps bound parameters well under backend limits.
+const LEVEL_BATCH: usize = 500;
+
+/// Reads only the series directory and its descendants, one tree level per statement.
+///
+/// Reading every relation of the storage root made each expansion cost the whole library (two
+/// seconds and a full `storage_objects` scan at 50k objects) and failed every series once a root
+/// passed the object bound. Each level uses the parent index; files are not descended into, and
+/// the bound now applies to the series subtree only.
+async fn subtree_objects(
+    connection: &impl ConnectionTrait,
+    storage_root: StorageRootId,
+    root_object: StorageObjectRecordId,
+) -> Result<Vec<SeriesStorageObject>, SeriesExpandRepositoryError> {
+    let backend = connection.get_database_backend();
+    let mut objects = Vec::new();
+    let mut seen = HashSet::from([root_object.as_uuid()]);
+    let mut level = vec![root_object.as_uuid()];
+    let mut by_parent = false;
+    while !level.is_empty() {
+        let mut next = Vec::new();
+        for batch in level.chunks(LEVEL_BATCH) {
+            let query = objects_query(storage_root, batch, by_parent);
+            for row in connection.query_all(backend.build(&query)).await? {
+                let object = series_object_from_row(&row)?;
+                if by_parent && !seen.insert(object.id.as_uuid()) {
+                    continue;
+                }
+                if object.object_type == "Directory" {
+                    next.push(object.id.as_uuid());
+                }
+                objects.push(object);
+                if objects.len() > MAX_OBJECTS {
+                    return Err(SeriesExpandRepositoryError::ObjectLimit);
+                }
+            }
+        }
+        level = next;
+        by_parent = true;
+    }
+    objects.sort_by_key(|object| object.id.as_uuid());
+    Ok(objects)
+}
+
+fn series_object_from_row(row: &sea_orm::QueryResult) -> Result<SeriesStorageObject, DbErr> {
+    Ok(SeriesStorageObject {
+        id: StorageObjectRecordId::from_uuid(row.try_get("", "storage_object_id")?),
+        parent: row
+            .try_get::<Option<Uuid>>("", "parent_storage_object_id")?
+            .map(StorageObjectRecordId::from_uuid),
+        name: row.try_get("", "name")?,
+        object_type: row.try_get("", "object_type")?,
+        checksum: row.try_get("", "checksum")?,
+        observed_revision: row.try_get("", "observed_sync_revision")?,
+        object_observed_revision: row.try_get("", "object_observed_sync_revision")?,
+        facts_observed_storage_root_id: row.try_get("", "facts_observed_storage_root_id")?,
+        facts_origin_reconciled_revision: row
+            .try_get("", "facts_origin_reconciled_sync_revision")?,
+        root_reconciled_revision: row.try_get("", "root_reconciled_sync_revision")?,
+        has_other_root: row.try_get("", "has_other_root")?,
+        relation_presence: row.try_get("", "relation_presence_state")?,
+        object_presence: row.try_get("", "object_presence_state")?,
+        children_indexed: row.try_get("", "children_indexed")?,
+        children_revision: row.try_get("", "children_index_revision")?,
+    })
 }
 
 async fn existing_season_ids(
@@ -352,7 +383,11 @@ fn root_query(
 }
 
 #[allow(clippy::too_many_lines)] // One row carries the complete relation and object fact fence for subtree validation.
-fn objects_query(root_id: StorageRootId) -> sea_orm::sea_query::SelectStatement {
+fn objects_query(
+    root_id: StorageRootId,
+    ids: &[Uuid],
+    by_parent: bool,
+) -> sea_orm::sea_query::SelectStatement {
     let relation = Alias::new("series_object_relation");
     let object = Alias::new("series_object");
     let root = Alias::new("series_object_root");
@@ -452,6 +487,17 @@ fn objects_query(root_id: StorageRootId) -> sea_orm::sea_query::SelectStatement 
         )
         .and_where(
             Expr::col((relation.clone(), Alias::new("storage_root_id"))).eq(root_id.as_uuid()),
+        )
+        .and_where(
+            Expr::col((
+                relation,
+                Alias::new(if by_parent {
+                    "parent_storage_object_id"
+                } else {
+                    "storage_object_id"
+                }),
+            ))
+            .is_in(ids.iter().copied()),
         )
         .order_by(Alias::new("storage_object_id"), Order::Asc)
         .to_owned()
