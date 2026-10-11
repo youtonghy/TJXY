@@ -308,6 +308,41 @@ where
         finish_notifying(transaction, result).await
     }
 
+    /// Enqueues a full validation for every root of one storage account.
+    ///
+    /// Used when change hints were lost (an overflowed or paused event watcher), so the account's
+    /// inventory is reconciled again. Roots that are not materialized yet are skipped; their first
+    /// sync inventories them anyway. Returns the number of roots queued or joined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageSyncRepositoryError`] for SQL or work enqueue failures.
+    pub async fn enqueue_account_validation(
+        &self,
+        account_id: Uuid,
+        priority: i32,
+    ) -> Result<usize, StorageSyncRepositoryError> {
+        let roots = Query::select()
+            .column(Alias::new("id"))
+            .from(Alias::new("storage_roots"))
+            .and_where(Expr::col(Alias::new("storage_account_id")).eq(account_id))
+            .to_owned();
+        let mut queued = 0;
+        for row in self
+            .database
+            .query_all(self.database.get_database_backend().build(&roots))
+            .await?
+        {
+            let root_id = StorageRootId::from_uuid(row.try_get("", "id")?);
+            match self.enqueue_validation(root_id, priority).await {
+                Ok(_) => queued += 1,
+                Err(StorageSyncRepositoryError::MissingScope) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(queued)
+    }
+
     /// Enqueues scoped inventory for native filesystem event hints that resolve to live,
     /// materialized directories.
     ///

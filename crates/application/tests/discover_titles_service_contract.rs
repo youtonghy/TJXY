@@ -1139,3 +1139,56 @@ async fn insert_root_relation(
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_moved_root_revision_supersedes_discovery_instead_of_reporting_a_policy_change() {
+    let fixture = discovery_fixture("basic").await;
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("storage_roots"))
+                    .value(
+                        Alias::new("sync_revision"),
+                        Expr::col(Alias::new("sync_revision")).add(1_i64),
+                    )
+                    .value(
+                        Alias::new("reconciled_sync_revision"),
+                        Expr::col(Alias::new("reconciled_sync_revision")).add(1_i64),
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.root.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        DiscoverTitlesRepository::new(&fixture.database)
+            .snapshot(&fixture.claimed)
+            .await,
+        Err(DiscoverTitlesError::StaleRoot)
+    ));
+}
+
+#[tokio::test]
+async fn a_changed_library_profile_still_reports_a_policy_change() {
+    let fixture = discovery_fixture("basic").await;
+    fixture
+        .database
+        .execute(fixture.database.get_database_backend().build(
+            Query::update().table(Alias::new("libraries")).value(
+                Alias::new("profile_version"),
+                Expr::col(Alias::new("profile_version")).add(1),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        DiscoverTitlesRepository::new(&fixture.database)
+            .snapshot(&fixture.claimed)
+            .await,
+        Err(DiscoverTitlesError::StaleLibraryPolicy)
+    ));
+}

@@ -22,6 +22,8 @@ const SCAN_KINDS: [WorkTaskKind; 4] = [
     WorkTaskKind::ExpandItem,
 ];
 const BACKLOG_SAMPLE: u64 = 256;
+/// Distinct roots tracked to tell when the preferred (new-root) claim cannot succeed.
+const ROOT_SET_LIMIT: u64 = 64;
 
 pub(crate) struct ScanServices {
     pub(crate) probe: Arc<ProbeService>,
@@ -126,15 +128,25 @@ async fn run(
     let mut empty = false;
     let mut completed = 0_u32;
     let mut last_sample = started;
+    // Every root with pending work at the last sample; `None` until known completely.
+    let mut pending_roots: Option<Vec<Uuid>> = None;
     loop {
         while tasks.len() < controller.slots() && !empty {
             let jobs = WorkJobRepository::new(&database);
             let kinds = active.accepted_kinds();
             let preferred = active.preferred_exclusions();
             let before = Instant::now();
-            let mut result = jobs
-                .claim_next_background(&kinds, &preferred, &owner, LEASE_DURATION)
-                .await;
+            // When every root with pending work is already running, the preferred claim can
+            // only come back empty after reading that backlog; go straight to the fair-share one.
+            let preferred_is_futile = pending_roots.as_ref().is_some_and(|roots| {
+                !roots.is_empty() && roots.iter().all(|root| preferred.contains(root))
+            });
+            let mut result = if preferred_is_futile {
+                Ok(None)
+            } else {
+                jobs.claim_next_background(&kinds, &preferred, &owner, LEASE_DURATION)
+                    .await
+            };
             if matches!(result, Ok(None)) && !preferred.is_empty() {
                 result = jobs
                     .claim_next_background(
@@ -193,6 +205,12 @@ async fn run(
                 let pending = WorkJobRepository::new(&database).pending_background_roots(&SCAN_KINDS, BACKLOG_SAMPLE).await;
                 pressure.database(before.elapsed(), pending.is_err());
                 let pending = pending.unwrap_or_default();
+                let before = Instant::now();
+                let roots = WorkJobRepository::new(&database)
+                    .pending_background_root_set(&SCAN_KINDS, ROOT_SET_LIMIT)
+                    .await;
+                pressure.database(before.elapsed(), roots.is_err());
+                pending_roots = roots.ok().flatten();
                 let now = Instant::now();
                 let sample = *host.borrow();
                 let measured = pressure.drain();

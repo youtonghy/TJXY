@@ -370,6 +370,7 @@ fn manual_task_error(error: &TaskServiceError) -> Response {
         | TaskServiceError::Metadata(
             MetadataWorkError::AmbiguousStorageScope
             | MetadataWorkError::StaleOrUnavailable
+            | MetadataWorkError::Superseded
             | MetadataWorkError::InvalidClaim
             | MetadataWorkError::MissingSyncRevision
             | MetadataWorkError::TooManySidecars

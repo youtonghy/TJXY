@@ -241,21 +241,25 @@ async fn run_filesystem_event_worker(
     account_id: Uuid,
     backend: Arc<FilesystemBackend>,
 ) {
-    let mut monitor = loop {
-        match backend.watch_events(FILESYSTEM_EVENT_QUIET_WINDOW) {
-            Ok(monitor) => break monitor,
-            Err(error) => {
-                tracing::error!(
-                    "Filesystem event monitor startup failed and will be retried: {error}"
-                );
-                tokio::time::sleep(StdDuration::from_secs(5)).await;
-            }
-        }
-    };
+    let mut monitor = start_filesystem_monitor(&backend).await;
+    // Hints dropped while the path index rebuilt; the next Ready pass validates the account.
+    let mut missed_events = false;
     loop {
         if !filesystem_events_allowed(&database, account_id).await {
-            tokio::time::sleep(StdDuration::from_secs(1)).await;
+            // Keep reading while the path index rebuilds: the watcher's queue is bounded, and an
+            // idle reader let it overflow during every large first scan.
+            match tokio::time::timeout(StdDuration::from_secs(1), monitor.next_batch()).await {
+                Ok(Ok(_)) => missed_events = true,
+                Ok(Err(error)) => {
+                    monitor = restart_filesystem_monitor(&backend, &error).await;
+                    missed_events = true;
+                }
+                Err(_) => {}
+            }
             continue;
+        }
+        if missed_events {
+            missed_events = !validate_after_missed_events(&database, account_id).await;
         }
         match monitor.next_batch().await {
             Ok(batch) => match backend.inventory_scopes_for(&batch).await {
@@ -295,23 +299,63 @@ async fn run_filesystem_event_worker(
                 }
             },
             Err(error) => {
-                tracing::error!("Filesystem event monitor failed and will be restarted: {error}");
-                tokio::time::sleep(StdDuration::from_secs(1)).await;
-                loop {
-                    match backend.watch_events(FILESYSTEM_EVENT_QUIET_WINDOW) {
-                        Ok(replacement) => {
-                            monitor = replacement;
-                            break;
-                        }
-                        Err(restart_error) => {
-                            tracing::error!(
-                                "Filesystem event monitor restart failed: {restart_error}"
-                            );
-                            tokio::time::sleep(StdDuration::from_secs(5)).await;
-                        }
-                    }
-                }
+                monitor = restart_filesystem_monitor(&backend, &error).await;
+                missed_events = true;
             }
+        }
+    }
+}
+
+async fn start_filesystem_monitor(
+    backend: &FilesystemBackend,
+) -> tjxy_storage_filesystem::FilesystemEventMonitor {
+    loop {
+        match backend.watch_events(FILESYSTEM_EVENT_QUIET_WINDOW) {
+            Ok(monitor) => return monitor,
+            Err(error) => {
+                tracing::error!(
+                    "Filesystem event monitor startup failed and will be retried: {error}"
+                );
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Replaces a failed watcher. Lost hints are repaired by the validation queued afterwards, so
+/// this is a warning rather than an error that needs an operator.
+async fn restart_filesystem_monitor(
+    backend: &FilesystemBackend,
+    error: &BackendError,
+) -> tjxy_storage_filesystem::FilesystemEventMonitor {
+    tracing::warn!(
+        "Filesystem event monitor failed and will be restarted; the account will be validated: {error}"
+    );
+    tokio::time::sleep(StdDuration::from_secs(1)).await;
+    start_filesystem_monitor(backend).await
+}
+
+/// Queues validation for an account whose change hints were dropped. Returns whether it worked.
+async fn validate_after_missed_events(database: &DatabaseConnection, account_id: Uuid) -> bool {
+    match tjxy_db::StorageSyncRepository::new(database)
+        .enqueue_account_validation(account_id, FILESYSTEM_EVENT_PRIORITY)
+        .await
+    {
+        Ok(roots) => {
+            tracing::info!(
+                storage_account_id = %account_id,
+                roots,
+                "Validation queued for filesystem changes missed while events were paused"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::error!(
+                storage_account_id = %account_id,
+                %error,
+                "Validation for missed filesystem changes could not be queued"
+            );
+            false
         }
     }
 }
@@ -747,7 +791,14 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
                     };
                     if let Err(error) = outcome {
                         let message = truncate_error(&error.to_string());
-                        let result = if discover_error_is_terminal(&error) {
+                        let result = if matches!(
+                            error,
+                            DiscoverTitlesServiceError::Repository(
+                                tjxy_db::DiscoverTitlesError::StaleRoot
+                            )
+                        ) {
+                            supersede_discovery(&database, &jobs, &claimed, &message).await
+                        } else if discover_error_is_terminal(&error) {
                             log_terminal_failure(
                                 &claimed,
                                 "title discovery failed terminally",
@@ -786,6 +837,35 @@ pub(crate) fn spawn_discover_worker(database: DatabaseConnection) {
             }
         }
     });
+}
+
+/// Ends a discovery whose root revision moved on or was already published, then makes sure the
+/// current revision is discovered. Nothing failed: newer storage input superseded this job.
+async fn supersede_discovery(
+    database: &DatabaseConnection,
+    jobs: &WorkJobRepository<'_>,
+    claimed: &tjxy_db::ClaimedWorkJob,
+    message: &str,
+) -> Result<(), WorkJobRepositoryError> {
+    tracing::debug!(job_id = %claimed.id().as_uuid(), "title discovery superseded");
+    jobs.fail_superseded(claimed, message).await?;
+    if let tjxy_db::WorkScope::StorageRoot(root) = claimed.job().scope() {
+        match tjxy_db::DiscoverTitlesRepository::new(database)
+            .enqueue(root, claimed.job().priority())
+            .await
+        {
+            // Already discovered, or the root is not indexed yet; its next sync enqueues one.
+            Ok(_)
+            | Err(
+                tjxy_db::DiscoverTitlesError::AlreadyCurrent
+                | tjxy_db::DiscoverTitlesError::StaleRoot,
+            ) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not enqueue discovery for the current root revision");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn discover_error_is_terminal(error: &DiscoverTitlesServiceError) -> bool {
@@ -1595,7 +1675,14 @@ async fn handle_metadata_outcome(
         return;
     }
     let message = truncate_error(&error.to_string());
-    let result = if metadata_error_is_terminal(&error) {
+    let result = if matches!(
+        error,
+        MetadataResolveError::Work(MetadataWorkError::Superseded)
+    ) {
+        // A newer revision of the item owns its resolution; nothing failed.
+        tracing::debug!(job_id = %claimed.id().as_uuid(), "metadata resolution superseded");
+        jobs.fail_superseded(claimed, &message).await
+    } else if metadata_error_is_terminal(&error) {
         log_terminal_failure(claimed, "metadata resolution failed terminally", &error);
         if matches!(
             error,
@@ -1666,6 +1753,7 @@ fn metadata_error_is_terminal(error: &MetadataResolveError) -> bool {
                 MetadataWorkError::InvalidClaim
                     | MetadataWorkError::MissingSyncRevision
                     | MetadataWorkError::StaleOrUnavailable
+                    | MetadataWorkError::Superseded
                     | MetadataWorkError::AmbiguousStorageScope
                     | MetadataWorkError::TooManySidecars
                     | MetadataWorkError::AmbiguousSidecars

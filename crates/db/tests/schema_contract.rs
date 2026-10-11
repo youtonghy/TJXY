@@ -2717,7 +2717,7 @@ async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
         assert!(schema.has_index(table, index).await.unwrap());
     }
     // The newer index migrations sit above this one, so roll back all of them.
-    Migrator::down(&database, Some(4)).await.unwrap();
+    Migrator::down(&database, Some(5)).await.unwrap();
     for (table, index) in indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }
@@ -2732,7 +2732,7 @@ async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
     let database = test_database().await.unwrap();
     Migrator::up(&database, None).await.unwrap();
     let schema = SchemaManager::new(&database);
-    let indexes = [
+    let mut indexes = vec![
         ("people", "ix_people_name"),
         (
             "publication_catalog_items",
@@ -2746,16 +2746,21 @@ async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
         ("work_job_retention_queue", "ix_work_job_retention_terminal"),
         ("work_jobs", "ix_work_jobs_state_completed"),
         ("work_jobs", "ix_work_jobs_scope_history"),
+        ("catalog_publications", "ix_catalog_publications_job"),
     ];
-    for (table, index) in indexes {
+    // MySQL has no partial indexes and keeps claiming through the legacy claim index.
+    if database.get_database_backend() != sea_orm::DbBackend::MySql {
+        indexes.push(("work_jobs", "ix_work_jobs_claim_pending"));
+    }
+    for &(table, index) in &indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
-    Migrator::down(&database, Some(3)).await.unwrap();
-    for (table, index) in indexes {
+    Migrator::down(&database, Some(4)).await.unwrap();
+    for &(table, index) in &indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }
     Migrator::up(&database, None).await.unwrap();
-    for (table, index) in indexes {
+    for &(table, index) in &indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
 }

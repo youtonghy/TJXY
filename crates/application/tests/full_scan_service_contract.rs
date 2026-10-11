@@ -2983,6 +2983,132 @@ async fn an_nfo_conflict_is_isolated_and_the_resumed_scan_completes_with_an_exac
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Mirrors the NFO isolation setup with a superseded child instead.
+async fn a_superseded_child_makes_the_scan_re_evaluate_instead_of_failing() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "basic",
+        "on_browse",
+        "on_playback",
+    )
+    .await;
+    let sql = database.get_database_backend();
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only"),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut items = Vec::new();
+    for _ in 0..2 {
+        let (item, _) = seed_indexed_movie_with_source(&database, library).await;
+        let (_, object) = seed_root(&database, library).await;
+        database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("metadata_revision"), 2_i64)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+        database
+            .execute(
+                sql.build(
+                    Query::insert()
+                        .into_table(Alias::new("identity_matches"))
+                        .columns([
+                            Alias::new("id"),
+                            Alias::new("storage_object_id"),
+                            Alias::new("candidate_catalog_item_id"),
+                            Alias::new("confidence"),
+                            Alias::new("state"),
+                            Alias::new("evidence"),
+                        ])
+                        .values_panic([
+                            Uuid::new_v4().into(),
+                            object.as_uuid().into(),
+                            item.as_uuid().into(),
+                            1.0.into(),
+                            "Matched".into(),
+                            serde_json::json!({}).into(),
+                        ]),
+                ),
+            )
+            .await
+            .unwrap();
+        items.push(item);
+    }
+    let parent = claimed_full_scan(&database, library).await;
+    let service = FullScanService::new(database.clone());
+    assert!(matches!(
+        service.execute(&parent).await,
+        Err(FullScanError::ChildrenPending { scheduled: 2 })
+    ));
+    let jobs = WorkJobRepository::new(&database);
+    for _ in 0..2 {
+        let child = jobs
+            .claim_next(
+                &[WorkTaskKind::ResolveMetadata],
+                "isolated-nfo",
+                Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        if child.job().scope() == WorkScope::CatalogItem(items[0]) {
+            jobs.fail_superseded(
+                &child,
+                "metadata work was superseded by a newer item revision",
+            )
+            .await
+            .unwrap();
+        } else {
+            MetadataResolveService::new(database.clone())
+                .execute(&child)
+                .await
+                .unwrap();
+        }
+    }
+    jobs.defer(&parent, Duration::zero(), "waiting for children")
+        .await
+        .unwrap();
+    let resumed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "restarted-orchestrator",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let error = FullScanService::new(database.clone())
+        .execute(&resumed)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            FullScanError::ChildTargetChanged {
+                task: WorkTaskKind::ResolveMetadata,
+                scope: WorkScope::CatalogItem(item),
+            } if item == items[0]
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn disabled_accounts_cancel_running_storage_work_and_fail_waiting_dependents() {
     let database = database().await;
     let library = seed_library(&database).await;

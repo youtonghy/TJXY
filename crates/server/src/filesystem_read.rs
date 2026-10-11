@@ -13,6 +13,9 @@ use tjxy_storage_filesystem::FilesystemBackend;
 use uuid::Uuid;
 
 const PATH_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Lookups slower than this are logged. The time includes waiting for a pooled connection, which
+/// alone reaches 100-160 ms while a large scan saturates the pool, so a lower bound only adds noise.
+const SLOW_PATH_RESOLUTION: Duration = Duration::from_millis(500);
 
 pub(crate) struct IndexedFilesystemBackend {
     database: DatabaseConnection,
@@ -111,7 +114,7 @@ impl IndexedFilesystemBackend {
             }
         };
         let elapsed = started.elapsed();
-        if elapsed >= Duration::from_millis(100) {
+        if elapsed >= SLOW_PATH_RESOLUTION {
             tracing::warn!(
                 storage_account_id = %self.account_id,
                 storage_root_id = %resolved.root_id(),

@@ -269,6 +269,10 @@ impl<'connection> MetadataWorkRepository<'connection> {
         if claimed.job().task_kind() != WorkTaskKind::ResolveMetadata {
             return Err(MetadataWorkError::InvalidClaim);
         }
+        // Checked before any storage or provider work: a newer revision has its own job.
+        if is_superseded(self.database, item_id, claimed.job().expected_revision()).await? {
+            return Err(MetadataWorkError::Superseded);
+        }
         let input_revision = claimed
             .job()
             .input_sync_revision()
@@ -1090,9 +1094,43 @@ async fn fence_metadata_revision(
         .rows_affected()
         != 1
     {
-        return Err(MetadataWorkError::StaleOrUnavailable);
+        return Err(missed_revision_fence(transaction, item_id, expected_revision).await?);
     }
     Ok(())
+}
+
+/// Whether the item has moved past `expected_revision`, so work at that revision is obsolete.
+async fn is_superseded(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    expected_revision: i64,
+) -> Result<bool, DbErr> {
+    let query = Query::select()
+        .column(Alias::new("metadata_revision"))
+        .from(Alias::new("catalog_items"))
+        .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
+        .to_owned();
+    Ok(connection
+        .query_one(connection.get_database_backend().build(&query))
+        .await?
+        .map(|row| row.try_get::<i64>("", "metadata_revision"))
+        .transpose()?
+        .is_some_and(|revision| revision > expected_revision))
+}
+
+/// Tells a superseded revision apart from a missing or unauthorized item after a fence missed.
+async fn missed_revision_fence(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    expected_revision: i64,
+) -> Result<MetadataWorkError, DbErr> {
+    Ok(
+        if is_superseded(connection, item_id, expected_revision).await? {
+            MetadataWorkError::Superseded
+        } else {
+            MetadataWorkError::StaleOrUnavailable
+        },
+    )
 }
 
 async fn advance_metadata_watermark(
@@ -1118,7 +1156,7 @@ async fn advance_metadata_watermark(
         .rows_affected()
         != 1
     {
-        return Err(MetadataWorkError::StaleOrUnavailable);
+        return Err(missed_revision_fence(transaction, item_id, expected_revision).await?);
     }
     Ok(())
 }
@@ -1201,6 +1239,9 @@ pub enum MetadataWorkError {
     MissingSyncRevision,
     #[error("metadata work is stale, unauthorized, or unavailable")]
     StaleOrUnavailable,
+    /// The item moved to a newer metadata revision, which owns its own resolution.
+    #[error("metadata work was superseded by a newer item revision")]
+    Superseded,
     #[error("metadata inventory has too many NFO candidates")]
     TooManySidecars,
     #[error("metadata inventory has too many local image candidates")]

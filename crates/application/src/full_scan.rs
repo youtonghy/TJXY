@@ -436,7 +436,15 @@ impl FullScanService {
                     .child_dependency(claimed, natural_key)
                     .await?
                     .ok_or_else(|| FullScanError::MissingChildDependency(natural_key.to_owned()))?;
-                if let Some(kind) = jobs.item_failure_kind(child).await? {
+                let kind = jobs.item_failure_kind(child).await?;
+                if kind.as_deref() == Some("superseded") {
+                    // The target moved to a newer revision; the next pass schedules that one.
+                    return Err(FullScanError::ChildTargetChanged {
+                        task: spec.task_kind(),
+                        scope: spec.scope(),
+                    });
+                }
+                if let Some(kind) = kind {
                     return Err(FullScanError::ItemFailed {
                         task: spec.task_kind(),
                         scope: spec.scope(),

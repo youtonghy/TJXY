@@ -1155,6 +1155,50 @@ where
             .collect()
     }
 
+    /// Lists every distinct root affinity of claimable pending background work, or `None` when
+    /// there are more than `limit` roots and the set would be incomplete.
+    ///
+    /// Root UUID nil denotes jobs without a root affinity.
+    /// # Errors
+    /// Returns invalid limit or database failures.
+    pub async fn pending_background_root_set(
+        &self,
+        accepted_kinds: &[WorkTaskKind],
+        limit: u64,
+    ) -> Result<Option<Vec<Uuid>>, WorkJobRepositoryError> {
+        if limit == 0 || limit > 256 {
+            return Err(WorkJobRepositoryError::InvalidClaimFilter);
+        }
+        let query = Query::select()
+            .distinct()
+            .column(Alias::new("storage_root_affinity"))
+            .from(Alias::new("work_jobs"))
+            .and_where(Expr::cust("state = 'Pending'"))
+            .and_where(Expr::col(Alias::new("priority")).lt(100))
+            .and_where(
+                Expr::col(Alias::new("task_kind"))
+                    .is_in(accepted_kinds.iter().map(|kind| kind.as_str())),
+            )
+            .cond_where(
+                Cond::any()
+                    .add(Expr::col(Alias::new("available_at")).is_null())
+                    .add(Expr::col(Alias::new("available_at")).lte(self.now())),
+            )
+            .limit(limit + 1)
+            .to_owned();
+        let roots = self
+            .database
+            .query_all(self.database.get_database_backend().build(&query))
+            .await?
+            .iter()
+            .map(|row| {
+                row.try_get::<Option<Uuid>>("", "storage_root_affinity")
+                    .map(Option::unwrap_or_default)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((u64::try_from(roots.len()).unwrap_or(u64::MAX) <= limit).then_some(roots))
+    }
+
     async fn claim_filtered(
         &self,
         accepted_kinds: &[WorkTaskKind],
@@ -1440,18 +1484,61 @@ where
         error: &str,
         needs_selection: bool,
     ) -> Result<(), WorkJobRepositoryError> {
+        self.fail_classified(
+            claimed,
+            error,
+            if needs_selection {
+                "nfo_selection"
+            } else {
+                "item"
+            },
+        )
+        .await
+    }
+
+    /// Ends work whose target moved on to a newer revision before it could publish.
+    ///
+    /// The job is terminal like any failure, but its classification lets Full Scan treat it as a
+    /// changed target to re-evaluate rather than as a failed child.
+    ///
+    /// # Errors
+    /// Returns validation, lease, or database failures.
+    pub async fn fail_superseded(
+        &self,
+        claimed: &ClaimedWorkJob,
+        error: &str,
+    ) -> Result<(), WorkJobRepositoryError> {
+        self.fail_classified(claimed, error, "superseded").await
+    }
+
+    async fn fail_classified(
+        &self,
+        claimed: &ClaimedWorkJob,
+        error: &str,
+        failure_kind: &str,
+    ) -> Result<(), WorkJobRepositoryError> {
         if error.trim().is_empty() || error.chars().count() > MAX_ERROR_CHARS {
             return Err(WorkJobRepositoryError::InvalidErrorSummary);
         }
         let transaction = self.database.begin().await?;
         let result = async {
             fail_terminal(&transaction, claimed, error, self.now()).await?;
-            transaction.execute(transaction.get_database_backend().build(Query::update()
-                .table(Alias::new("work_results"))
-                .value(Alias::new("counters"), serde_json::json!({"failure_kind": if needs_selection { "nfo_selection" } else { "item" }}))
-                .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())))).await?;
+            transaction
+                .execute(
+                    transaction.get_database_backend().build(
+                        Query::update()
+                            .table(Alias::new("work_results"))
+                            .value(
+                                Alias::new("counters"),
+                                serde_json::json!({"failure_kind": failure_kind}),
+                            )
+                            .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())),
+                    ),
+                )
+                .await?;
             Ok(())
-        }.await;
+        }
+        .await;
         finish_notifying(transaction, result).await
     }
 
@@ -2667,7 +2754,11 @@ async fn claim_next(
     let now = mysql_compatible_timestamp(backend, now);
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
     for _ in 0..8 {
-        let mut candidate = claim_candidate(accepted_kinds, filter, now);
+        let candidates = claim_candidates(transaction, accepted_kinds, filter, now).await?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let mut candidate = claim_lock(&candidates, filter, now);
         if backend == sea_orm::DbBackend::Postgres {
             // Concurrent workers otherwise pick the same best row and queue on its lock until the
             // winner commits, holding a pooled connection each while they wait.
@@ -2750,6 +2841,30 @@ async fn claim_next(
         }
     }
     Ok(None)
+}
+
+/// Collects each pending kind's and the expired leases' best claimable ids.
+async fn claim_candidates(
+    transaction: &DatabaseTransaction,
+    accepted_kinds: &[WorkTaskKind],
+    filter: ClaimFilter<'_>,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, WorkJobRepositoryError> {
+    let backend = transaction.get_database_backend();
+    let branches = accepted_kinds
+        .iter()
+        .map(|kind| ClaimBranch::Pending(*kind))
+        .chain([ClaimBranch::ExpiredLease(accepted_kinds)]);
+    let mut candidates = Vec::new();
+    for branch in branches {
+        for row in transaction
+            .query_all(backend.build(&claim_candidate(branch, filter, now)))
+            .await?
+        {
+            candidates.push(row.try_get::<Uuid>("", "id")?);
+        }
+    }
+    Ok(candidates)
 }
 
 pub(crate) async fn fail_terminal_dependents(
@@ -3235,24 +3350,87 @@ fn apply_scan_claim_filter(query: &mut SelectStatement, job: &Alias, filter: &Cl
     }
 }
 
+/// Candidates read per task kind (and for expired leases) before the locking pick.
+const CLAIM_CANDIDATES_PER_BRANCH: u64 = 16;
+
+#[derive(Clone, Copy)]
+enum ClaimBranch<'a> {
+    /// Pending work of one kind, read in claim order straight from the pending partial index.
+    Pending(WorkTaskKind),
+    /// Running work of these kinds whose lease has expired.
+    ExpiredLease(&'a [WorkTaskKind]),
+}
+
+/// Reads the best claimable job ids of one branch, in claim order, without locking them.
+///
+/// A single query over every accepted kind and both states could not use an index for its
+/// ordering, and `PostgreSQL` multiplied the redundant state predicates into a tiny row estimate.
+/// With a large backlog every claim then read and sorted all pending rows (about 63 ms at 10k).
+/// Each branch here is an ordered index range that stops after a few rows.
 fn claim_candidate(
-    accepted_kinds: &[WorkTaskKind],
+    branch: ClaimBranch<'_>,
     filter: ClaimFilter<'_>,
     now: DateTime<Utc>,
 ) -> SelectStatement {
     let job = Alias::new("job");
-    let completed_dependency = completed_sync_dependency_for(&job);
+    let mut query = Query::select();
+    query
+        .column((job.clone(), Alias::new("id")))
+        .from_as(Alias::new("work_jobs"), job.clone());
+    match branch {
+        ClaimBranch::Pending(kind) => {
+            // Literal state predicates let SQLite and PostgreSQL prove the partial index applies.
+            query
+                .and_where(Expr::cust("job.state = 'Pending'"))
+                .and_where(Expr::col((job.clone(), Alias::new("task_kind"))).eq(kind.as_str()))
+                .cond_where(
+                    Cond::any()
+                        .add(Expr::col((job.clone(), Alias::new("available_at"))).is_null())
+                        .add(Expr::col((job.clone(), Alias::new("available_at"))).lte(now)),
+                );
+        }
+        ClaimBranch::ExpiredLease(kinds) => {
+            query
+                .and_where(Expr::cust("job.state IN ('Pending', 'Running')"))
+                .and_where(Expr::col((job.clone(), Alias::new("state"))).eq(STATE_RUNNING))
+                .and_where(
+                    Expr::col((job.clone(), Alias::new("task_kind")))
+                        .is_in(kinds.iter().map(|kind| kind.as_str())),
+                )
+                .cond_where(
+                    Cond::any()
+                        .add(Expr::col((job.clone(), Alias::new("lease_expires_at"))).is_null())
+                        .add(Expr::col((job.clone(), Alias::new("lease_expires_at"))).lte(now)),
+                );
+        }
+    }
+    apply_claim_filters(&mut query, &job, filter);
+    query.limit(CLAIM_CANDIDATES_PER_BRANCH);
+    query
+}
+
+/// Locks the best still-claimable job among the candidates, rechecking every claim predicate.
+///
+/// The per-kind candidate sets together contain the global best rows, so the pick matches what a
+/// single ordered query over all kinds would return.
+fn claim_lock(candidates: &[Uuid], filter: ClaimFilter<'_>, now: DateTime<Utc>) -> SelectStatement {
+    let job = Alias::new("job");
     let mut query = Query::select();
     query
         .from_as(Alias::new("work_jobs"), job.clone())
-        // Keep the partial-index predicate literal: bound state parameters inside
-        // the OR below do not let SQLite prove that this index is applicable.
-        .and_where(Expr::cust("job.state IN ('Pending', 'Running')"))
-        .and_where(
-            Expr::col((job.clone(), Alias::new("task_kind")))
-                .is_in(accepted_kinds.iter().map(|kind| kind.as_str())),
-        )
-        .cond_where(claimable_condition_for(&job, now))
+        .and_where(Expr::col((job.clone(), Alias::new("id"))).is_in(candidates.iter().copied()))
+        .cond_where(claimable_condition_for(&job, now));
+    apply_claim_filters(&mut query, &job, filter);
+    query.limit(1);
+    select_job_columns(&mut query, &job);
+    query
+}
+
+/// Dependency readiness, scan admission, storage scope, and claim order shared by both steps.
+#[allow(clippy::too_many_lines)] // Mirrors the account and root storage scope fences.
+fn apply_claim_filters(query: &mut SelectStatement, job: &Alias, filter: ClaimFilter<'_>) {
+    let completed_dependency = completed_sync_dependency_for(job);
+    query
         .cond_where(
             Cond::any()
                 .add(Expr::col((job.clone(), Alias::new("required_sync_job_id"))).is_null())
@@ -3260,9 +3438,9 @@ fn claim_candidate(
         )
         .order_by((job.clone(), Alias::new("priority")), Order::Desc)
         .order_by((job.clone(), Alias::new("created_at")), Order::Asc)
-        .order_by((job.clone(), Alias::new("id")), Order::Asc)
-        .limit(1);
-    apply_scan_claim_filter(&mut query, &job, &filter);
+        .order_by((job.clone(), Alias::new("id")), Order::Asc);
+    apply_scan_claim_filter(query, job, &filter);
+    let job = job.clone();
     if let Some((account_id, provider_drive_id)) = filter.storage_scope {
         let account = Alias::new("claim_scope_account");
         query.and_where(Expr::exists(
@@ -3338,8 +3516,6 @@ fn claim_candidate(
                 .into(),
         );
     }
-    select_job_columns(&mut query, &job);
-    query.clone()
 }
 
 #[allow(clippy::too_many_lines)] // Completion requires the job, result, page, root, and scope fences in one query.
@@ -3692,7 +3868,7 @@ async fn item_failure_kind<Connection: ConnectionTrait>(
         return Ok(None);
     };
     let counters: Value = row.try_get("", "counters")?;
-    if let Some(kind @ ("nfo_selection" | "item")) =
+    if let Some(kind @ ("nfo_selection" | "item" | "superseded")) =
         counters.get("failure_kind").and_then(Value::as_str)
     {
         return Ok(Some(kind.to_owned()));
@@ -3960,34 +4136,67 @@ async fn finish_notifying<T>(
 mod claim_plan_tests {
     use super::*;
 
+    async fn sqlite_plan(
+        database: &sea_orm::DatabaseConnection,
+        query: &SelectStatement,
+    ) -> Vec<String> {
+        let mut statement = database.get_database_backend().build(query);
+        statement.sql = format!("EXPLAIN QUERY PLAN {}", statement.sql);
+        database
+            .query_all(statement)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get::<String>("", "detail").unwrap())
+            .collect()
+    }
+
     #[tokio::test]
-    async fn sqlite_claim_uses_the_active_partial_index() {
+    async fn sqlite_claims_read_pending_work_in_index_order() {
         let database = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         crate::migrate_database(&database).await.unwrap();
         for scope in [None, Some((Uuid::new_v4(), None))] {
-            let mut statement = database.get_database_backend().build(&claim_candidate(
-                &[WorkTaskKind::ScopedStorageSync],
-                ClaimFilter {
-                    storage_scope: scope,
-                    ..ClaimFilter::default()
-                },
-                Utc::now(),
-            ));
-            statement.sql = format!("EXPLAIN QUERY PLAN {}", statement.sql);
-            let rows = database.query_all(statement).await.unwrap();
-            let details = rows
-                .iter()
-                .map(|row| row.try_get::<String>("", "detail").unwrap())
-                .collect::<Vec<_>>();
+            let filter = ClaimFilter {
+                storage_scope: scope,
+                ..ClaimFilter::default()
+            };
+            let pending = sqlite_plan(
+                &database,
+                &claim_candidate(
+                    ClaimBranch::Pending(WorkTaskKind::ScopedStorageSync),
+                    filter,
+                    Utc::now(),
+                ),
+            )
+            .await;
             assert!(
-                details
+                pending
                     .iter()
-                    .any(|detail| detail.contains("ix_work_jobs_claim_active")),
-                "{details:?}"
+                    .any(|detail| detail.contains("ix_work_jobs_claim_pending")),
+                "{pending:?}"
             );
             assert!(
-                !details.iter().any(|detail| detail == "SCAN job"),
-                "{details:?}"
+                !pending.iter().any(|detail| detail.contains("TEMP B-TREE")),
+                "pending claims must not sort the backlog: {pending:?}"
+            );
+            let expired = sqlite_plan(
+                &database,
+                &claim_candidate(
+                    ClaimBranch::ExpiredLease(&[WorkTaskKind::ScopedStorageSync]),
+                    filter,
+                    Utc::now(),
+                ),
+            )
+            .await;
+            assert!(
+                expired
+                    .iter()
+                    .any(|detail| detail.contains("ix_work_jobs_claim_active")),
+                "{expired:?}"
+            );
+            assert!(
+                !expired.iter().any(|detail| detail == "SCAN job"),
+                "{expired:?}"
             );
         }
     }

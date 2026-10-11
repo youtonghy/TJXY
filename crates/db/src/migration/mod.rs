@@ -80,6 +80,7 @@ mod m20260910_000079_scan_lookup_indexes;
 mod m20260911_000080_hot_path_indexes;
 mod m20260912_000081_terminal_work_index;
 mod m20260913_000082_work_scope_history_index;
+mod m20260914_000083_claim_and_purge_indexes;
 
 use std::collections::HashSet;
 
@@ -359,6 +360,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260911_000080_hot_path_indexes::Migration),
             Box::new(m20260912_000081_terminal_work_index::Migration),
             Box::new(m20260913_000082_work_scope_history_index::Migration),
+            Box::new(m20260914_000083_claim_and_purge_indexes::Migration),
         ]
     }
 }

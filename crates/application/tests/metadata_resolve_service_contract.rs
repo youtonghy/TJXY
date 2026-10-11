@@ -1281,7 +1281,8 @@ async fn direct_metadata_publication_stales_an_older_running_resolver() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, MetadataWorkError::StaleOrUnavailable));
+    // The direct publication advanced the item's revision, so the older resolver is superseded.
+    assert!(matches!(error, MetadataWorkError::Superseded), "{error:?}");
     let item = fixture
         .database
         .query_one(
@@ -2683,4 +2684,83 @@ async fn a_single_invalid_local_nfo_records_a_choice_and_suppresses_duplicate_wo
             .is_some(),
         "a changed candidate inventory must unlock a fresh resolution attempt"
     );
+}
+
+async fn bump_metadata_revision(fixture: &Fixture) {
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(
+                        Alias::new("metadata_revision"),
+                        Expr::col(Alias::new("metadata_revision")).add(1),
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn claimed_metadata(fixture: &Fixture, owner: &str) -> tjxy_db::ClaimedWorkJob {
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(fixture.item),
+            1,
+            20,
+        )
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    jobs.claim_next(
+        &[WorkTaskKind::ResolveMetadata],
+        owner,
+        chrono::Duration::minutes(5),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_newer_revision_supersedes_metadata_work_before_any_lookup() {
+    let fixture = fixture().await;
+    let claimed = claimed_metadata(&fixture, "metadata-superseded-snapshot").await;
+    bump_metadata_revision(&fixture).await;
+
+    let error = MetadataWorkRepository::new(&fixture.database)
+        .snapshot(&claimed)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MetadataWorkError::Superseded), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_newer_revision_supersedes_metadata_work_at_commit() {
+    let fixture = fixture().await;
+    let claimed = claimed_metadata(&fixture, "metadata-superseded-commit").await;
+    let repository = MetadataWorkRepository::new(&fixture.database);
+    let snapshot = repository.snapshot(&claimed).await.unwrap();
+    let resolution = MetadataResolution::from_candidate(
+        snapshot.lookup(),
+        MetadataCandidate::new(MetadataSource::new("Fixture", None::<String>, 1_000).unwrap())
+            .with_title("Arrival"),
+    )
+    .unwrap();
+    bump_metadata_revision(&fixture).await;
+
+    let error = repository
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MetadataWorkError::Superseded), "{error:?}");
 }

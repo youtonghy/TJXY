@@ -233,7 +233,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                     .iter()
                     .any(|scope| eligible.get(&scope.id).copied() != Some(scope.profile_version))
                 {
-                    return Err(DiscoverTitlesError::StaleLibraryPolicy);
+                    return Err(stale_discovery(self.database, &libraries).await?);
                 }
                 root
             }
@@ -245,7 +245,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
                 )
                 .await?;
                 if libraries.as_slice() != [eligible] {
-                    return Err(DiscoverTitlesError::StaleLibraryPolicy);
+                    return Err(stale_discovery(self.database, &libraries).await?);
                 }
                 root
             }
@@ -827,6 +827,45 @@ pub(crate) async fn stage_discovery_binding(
         }],
     )
     .await
+}
+
+/// Classifies a staged library set that no longer matches the eligible set.
+///
+/// Libraries become ineligible when the root's reconciled revision moves on or a sibling job
+/// already published this revision, which happens constantly during a large scan. Only a changed
+/// profile version or a disabled library is a real policy change; anything else means newer
+/// discovery work supersedes this job.
+async fn stale_discovery(
+    database: &DatabaseConnection,
+    libraries: &[DiscoveryLibraryScope],
+) -> Result<DiscoverTitlesError, DbErr> {
+    let query = Query::select()
+        .columns([Alias::new("id"), Alias::new("profile_version")])
+        .from(Alias::new("libraries"))
+        .and_where(Expr::col(Alias::new("id")).is_in(libraries.iter().map(|scope| scope.id)))
+        .and_where(Expr::col(Alias::new("is_enabled")).eq(true))
+        .to_owned();
+    let current = database
+        .query_all(database.get_database_backend().build(&query))
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<Uuid>("", "id")?,
+                row.try_get::<i32>("", "profile_version")?,
+            ))
+        })
+        .collect::<Result<HashMap<_, _>, DbErr>>()?;
+    Ok(
+        if libraries
+            .iter()
+            .all(|scope| current.get(&scope.id).copied() == Some(scope.profile_version))
+        {
+            DiscoverTitlesError::StaleRoot
+        } else {
+            DiscoverTitlesError::StaleLibraryPolicy
+        },
+    )
 }
 
 async fn staged_discovery_libraries(

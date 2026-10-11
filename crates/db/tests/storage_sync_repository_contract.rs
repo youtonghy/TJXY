@@ -3353,3 +3353,141 @@ async fn scoped_sync_pages_keep_their_replay_record_and_page_marker() {
         1
     );
 }
+
+#[tokio::test]
+async fn maintenance_drops_finished_validation_pages_but_keeps_scoped_sync_pages() {
+    let fixture = fixture().await;
+    let scoped = claimed_sync_job(&fixture, ManualClock::new(Utc::now())).await;
+    StorageSyncRepository::new(&fixture.database)
+        .commit_inventory_page(
+            &scoped,
+            StorageSyncPage::new(
+                fixture.root_id,
+                fixture.parent_id,
+                "fixture-drive",
+                "scoped-page",
+                vec![object("movie", "Movie.mkv")],
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // A finished validation from an older version that still recorded its pages.
+    let jobs = WorkJobRepository::new(&fixture.database);
+    let validation = jobs
+        .enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ValidateStorageRoot,
+                WorkScope::StorageRoot(fixture.root_id),
+                0,
+                10,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let backend = fixture.database.get_database_backend();
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_sync_pages"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("job_id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("scope_storage_object_id"),
+                        Alias::new("page_identity"),
+                        Alias::new("payload_sha256"),
+                        Alias::new("sync_revision"),
+                        Alias::new("scope_completed"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        validation.job().id().as_uuid().into(),
+                        fixture.root_id.as_uuid().into(),
+                        fixture.parent_id.as_uuid().into(),
+                        "attempt:1:legacy".into(),
+                        "0".repeat(64).into(),
+                        1_i64.into(),
+                        true.into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    fixture
+        .database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("work_jobs"))
+                    .value(Alias::new("state"), "Completed")
+                    .and_where(Expr::col(Alias::new("id")).eq(validation.job().id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(table_rows(&fixture, "storage_sync_pages", None).await, 2);
+
+    let report = jobs.maintain_queue().await.unwrap();
+
+    assert!(report.acquired);
+    assert_eq!(report.validation_pages, 1);
+    let remaining = fixture
+        .database
+        .query_all(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("job_id"))
+                    .from(Alias::new("storage_sync_pages")),
+            ),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.try_get::<Uuid>("", "job_id").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [scoped.id().as_uuid()]);
+}
+
+#[tokio::test]
+async fn missed_change_hints_queue_one_validation_per_account_root() {
+    let fixture = fixture().await;
+    let repository = StorageSyncRepository::new(&fixture.database);
+
+    assert_eq!(
+        repository
+            .enqueue_account_validation(fixture.account_id, 90)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repository
+            .enqueue_account_validation(fixture.account_id, 90)
+            .await
+            .unwrap(),
+        1,
+        "a repeated request joins the active validation"
+    );
+    let validations = fixture
+        .database
+        .query_all(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("scope_id"))
+                    .from(Alias::new("work_jobs"))
+                    .and_where(Expr::col(Alias::new("task_kind")).eq("ValidateStorageRoot"))
+                    .and_where(Expr::col(Alias::new("state")).eq("Pending")),
+            ),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.try_get::<Uuid>("", "scope_id").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(validations, [fixture.root_id.as_uuid()]);
+}

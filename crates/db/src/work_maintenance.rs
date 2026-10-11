@@ -11,6 +11,9 @@ const BATCH_SIZE: u64 = 100;
 /// Superseded metadata jobs removed per maintenance pass. Pending jobs own no history, so the
 /// batch is larger than the cancellation batch while still bounded within one transaction.
 const SUPERSEDED_BATCH_SIZE: u64 = 5_000;
+/// Finished validation pages removed per maintenance pass; spreads a backlog's deletes (and their
+/// WAL) over many short transactions.
+const VALIDATION_PAGE_BATCH_SIZE: u64 = 5_000;
 pub(crate) const INACTIVE_SCOPE_REASON: &str =
     "cancelled: storage account disabled or root unbound";
 
@@ -20,6 +23,7 @@ pub struct WorkMaintenanceReport {
     pub reclaimed: u64,
     pub cancelled: u64,
     pub superseded: u64,
+    pub validation_pages: u64,
 }
 
 impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
@@ -51,6 +55,7 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
         }
         let cancelled = cancel_disabled_storage_work(&transaction, now).await?;
         let superseded = purge_superseded_metadata_jobs(&transaction).await?;
+        let validation_pages = purge_finished_validation_pages(&transaction).await?;
         let reclaimed = crate::work_job::reclaim_expired_leases(&transaction, now).await?;
         crate::work_job::fail_terminal_dependents(
             &transaction,
@@ -79,6 +84,7 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
             reclaimed,
             cancelled,
             superseded,
+            validation_pages,
         })
     }
 }
@@ -87,7 +93,12 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
 ///
 /// Enqueueing a newer revision already removes its predecessors; this drains the backlog created
 /// before that rule existed and any revision bump that happened outside an enqueue. A job whose
-/// revision is behind the item's can only fail as stale, so removing it changes no outcome.
+/// revision is behind the item's can only end as superseded, so removing it changes no outcome.
+///
+/// Only never-claimed jobs are removed: staging rows, results, and publications are written while
+/// a job runs, so `attempt_count = 0` proves it owns none. That replaces four correlated
+/// ownership probes per pending job, which ran against the whole backlog every few seconds. A job
+/// that already ran once is left for its next claim to end as superseded.
 async fn purge_superseded_metadata_jobs(
     transaction: &DatabaseTransaction,
 ) -> Result<u64, WorkJobRepositoryError> {
@@ -114,16 +125,7 @@ async fn purge_superseded_metadata_jobs(
             Expr::col((job.clone(), Alias::new("expected_revision")))
                 .lt(Expr::col((item, Alias::new("metadata_revision")))),
         )
-        .and_where(crate::work_job::lacks_owned_rows(&job, "work_staging_rows"))
-        .and_where(crate::work_job::lacks_owned_rows(
-            &job,
-            "catalog_publications",
-        ))
-        .and_where(crate::work_job::lacks_owned_rows(&job, "work_results"))
-        .and_where(crate::work_job::lacks_owned_rows(
-            &job,
-            "storage_sync_pages",
-        ))
+        .and_where(Expr::col((job.clone(), Alias::new("attempt_count"))).eq(0_i32))
         .limit(SUPERSEDED_BATCH_SIZE)
         .to_owned();
     let ids = transaction
@@ -139,6 +141,53 @@ async fn purge_superseded_metadata_jobs(
         .from_table(Alias::new("work_jobs"))
         .and_where(Expr::col(Alias::new("id")).is_in(ids))
         .and_where(Expr::col(Alias::new("state")).eq("Pending"))
+        .and_where(Expr::col(Alias::new("attempt_count")).eq(0_i32))
+        .to_owned();
+    Ok(transaction
+        .execute(backend.build(&delete))
+        .await?
+        .rows_affected())
+}
+
+/// Deletes replay pages left by finished full validations, a bounded batch per pass.
+///
+/// Validation stopped writing these pages and nothing reads them after the job ends, but rows
+/// from earlier passes would otherwise wait for work retention (days, and millions of rows on a
+/// large library). Scoped sync pages are kept: dependent media work fences on them.
+async fn purge_finished_validation_pages(
+    transaction: &DatabaseTransaction,
+) -> Result<u64, WorkJobRepositoryError> {
+    let backend = transaction.get_database_backend();
+    let page = Alias::new("finished_validation_page");
+    let job = Alias::new("finished_validation_job");
+    let finished = Query::select()
+        .column((page.clone(), Alias::new("id")))
+        .from_as(Alias::new("storage_sync_pages"), page.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("work_jobs"),
+            job.clone(),
+            Expr::col((job.clone(), Alias::new("id"))).equals((page, Alias::new("job_id"))),
+        )
+        .and_where(
+            Expr::col((job.clone(), Alias::new("task_kind")))
+                .eq(WorkTaskKind::ValidateStorageRoot.as_str()),
+        )
+        .and_where(Expr::col((job, Alias::new("state"))).is_in(["Completed", "Failed"]))
+        .limit(VALIDATION_PAGE_BATCH_SIZE)
+        .to_owned();
+    let ids = transaction
+        .query_all(backend.build(&finished))
+        .await?
+        .iter()
+        .map(|row| row.try_get::<uuid::Uuid>("", "id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let delete = Query::delete()
+        .from_table(Alias::new("storage_sync_pages"))
+        .and_where(Expr::col(Alias::new("id")).is_in(ids))
         .to_owned();
     Ok(transaction
         .execute(backend.build(&delete))

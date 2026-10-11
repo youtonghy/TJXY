@@ -2478,4 +2478,68 @@ async fn maintenance_drains_pending_metadata_behind_the_item_revision() {
     assert_eq!(report.superseded, 1);
     assert!(repository.get(stale.job().id()).await.unwrap().is_none());
     assert!(repository.get(fresh.job().id()).await.unwrap().is_some());
+
+    // A job that already ran once may own staging rows or results, so it is left for its next
+    // claim to end as superseded.
+    let retried = repository
+        .enqueue_or_join(&metadata_spec(item_id, 8))
+        .await
+        .unwrap();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("work_jobs"))
+                    .value(Alias::new("attempt_count"), 1_i32)
+                    .and_where(Expr::col(Alias::new("id")).eq(retried.job().id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    clock.set(now + Duration::minutes(2));
+    assert_eq!(repository.maintain_queue().await.unwrap().superseded, 0);
+    assert!(repository.get(retried.job().id()).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn pending_background_root_set_is_complete_or_absent() {
+    let database = database().await;
+    let jobs = WorkJobRepository::new(&database);
+    let roots = [StorageRootId::new(), StorageRootId::new()];
+    // Several jobs per root, one unrooted job, and a foreground job that must not count.
+    for (priority, affinity) in [
+        (50, Some(roots[0])),
+        (40, Some(roots[0])),
+        (30, Some(roots[1])),
+        (20, None),
+        (100, Some(StorageRootId::new())),
+    ] {
+        let mut spec = WorkJobSpec::new(
+            WorkTaskKind::ExpandItem,
+            WorkScope::CatalogItem(CatalogItemId::new()),
+            1,
+            priority,
+        )
+        .unwrap();
+        if let Some(root) = affinity {
+            spec = spec.with_storage_root_affinity(root).unwrap();
+        }
+        jobs.enqueue_or_join(&spec).await.unwrap();
+    }
+    let kinds = [WorkTaskKind::ExpandItem];
+
+    let mut set = jobs
+        .pending_background_root_set(&kinds, 64)
+        .await
+        .unwrap()
+        .unwrap();
+    set.sort_unstable();
+    let mut expected = vec![Uuid::nil(), roots[0].as_uuid(), roots[1].as_uuid()];
+    expected.sort_unstable();
+    assert_eq!(set, expected);
+    assert_eq!(
+        jobs.pending_background_root_set(&kinds, 2).await.unwrap(),
+        None,
+        "a truncated set cannot prove that every pending root is busy"
+    );
 }
