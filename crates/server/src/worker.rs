@@ -1080,7 +1080,11 @@ async fn handle_series_expand_outcome(
     let message = truncate_error(&error.to_string());
     let result = if series_expand_error_is_terminal(&error) {
         log_terminal_failure(claimed, "series expansion failed terminally", &error);
-        jobs.fail_terminal(claimed, &message).await
+        if series_expand_error_is_item_failure(&error) {
+            jobs.fail_item(claimed, &message, false).await
+        } else {
+            jobs.fail_terminal(claimed, &message).await
+        }
     } else {
         let delay = if matches!(error, SeriesExpandError::InventoryPending { .. })
             && claimed.job().priority() >= 100
@@ -1098,6 +1102,14 @@ async fn handle_series_expand_outcome(
     if let Err(update_error) = result {
         tracing::error!("Series expand worker could not persist failure outcome: {update_error}");
     }
+}
+
+/// Content problems confined to one series; Full Scan isolates them instead of failing the Library.
+const fn series_expand_error_is_item_failure(error: &SeriesExpandError) -> bool {
+    matches!(
+        error,
+        SeriesExpandError::NoEpisodes | SeriesExpandError::InvalidMediaName(_)
+    )
 }
 
 fn series_expand_error_is_terminal(error: &SeriesExpandError) -> bool {
@@ -1747,6 +1759,16 @@ mod tests {
         full_scan_retry_delay, series_expand_error_is_terminal, storage_retry_delay,
         validation_error_is_terminal, validation_retry_delay,
     };
+
+    #[test]
+    fn series_expand_content_failures_are_isolated_to_their_item() {
+        let no_episodes = super::SeriesExpandError::NoEpisodes;
+        assert!(super::series_expand_error_is_terminal(&no_episodes));
+        assert!(super::series_expand_error_is_item_failure(&no_episodes));
+        assert!(!super::series_expand_error_is_item_failure(
+            &super::SeriesExpandError::IncompleteTree
+        ));
+    }
 
     #[test]
     fn source_index_content_failures_are_isolated_to_their_item() {

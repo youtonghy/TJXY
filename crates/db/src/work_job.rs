@@ -1538,7 +1538,7 @@ where
             } else {
                 None
             };
-            let submission = match unchanged_source_item_failure(&transaction, spec).await? {
+            let submission = match unchanged_item_failure(&transaction, spec).await? {
                 Some(job) => WorkJobSubmission {
                     job,
                     created: false,
@@ -3706,18 +3706,21 @@ async fn item_failure_kind<Connection: ConnectionTrait>(
         .map(|_| "nfo_selection".to_owned()))
 }
 
-/// Returns the latest source-index job for the same item, revision, and storage input when it
-/// failed on the item's own content.
+/// Returns the latest source-index or series-expansion job for the same item, revision, and
+/// storage input when it failed on the item's own content.
 ///
-/// Source indexing is deterministic over its storage input, so re-running it before the item's
-/// children or source revision change can only fail again. Full Scan joins the failed job and
+/// Both stages are deterministic over their storage input, so re-running one before the item's
+/// children or revision change can only fail again. Full Scan joins the failed job and
 /// reports the existing item issue instead of enqueueing a fresh child every refresh. Retention
 /// eventually removes the failed job, which lets one later scan retry it.
-async fn unchanged_source_item_failure(
+async fn unchanged_item_failure(
     transaction: &DatabaseTransaction,
     spec: &WorkJobSpec,
 ) -> Result<Option<WorkJobRecord>, WorkJobRepositoryError> {
-    if spec.task_kind != WorkTaskKind::IndexMediaSources {
+    if !matches!(
+        spec.task_kind,
+        WorkTaskKind::IndexMediaSources | WorkTaskKind::ExpandItem
+    ) {
         return Ok(None);
     }
     let Some(input_sync_revision) = spec.input_sync_revision else {
