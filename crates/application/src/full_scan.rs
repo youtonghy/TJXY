@@ -502,6 +502,18 @@ fn eager_media_task(
     }
 }
 
+/// Background claims are ordered by priority, then age, across kinds. Series expansion publishes
+/// the seasons and episodes that the scan's later metadata, source, and probe work builds on, so
+/// it runs one step ahead of them; it stays below the foreground threshold.
+const fn child_priority(task: WorkTaskKind, priority: i32) -> i32 {
+    match task {
+        WorkTaskKind::ExpandItem if priority < FOREGROUND_PRIORITY - 1 => priority + 1,
+        _ => priority,
+    }
+}
+
+const FOREGROUND_PRIORITY: i32 = 100;
+
 fn eager_child_spec(
     item: CatalogItemId,
     task: WorkTaskKind,
@@ -520,12 +532,17 @@ fn eager_child_spec(
         task == WorkTaskKind::IndexMediaSources && target.item_type() == CatalogItemType::Audio;
     if scope.is_ready() || (direct_audio && scope.is_ready_for_direct_source()) {
         let spec = root_affine_spec(
-            WorkJobSpec::new(task, WorkScope::CatalogItem(item), revision, priority)?
-                .with_input_sync_revision(if direct_audio {
-                    scope.metadata_input_revision()
-                } else {
-                    scope.children_revision()
-                })?,
+            WorkJobSpec::new(
+                task,
+                WorkScope::CatalogItem(item),
+                revision,
+                child_priority(task, priority),
+            )?
+            .with_input_sync_revision(if direct_audio {
+                scope.metadata_input_revision()
+            } else {
+                scope.children_revision()
+            })?,
             storage_root.or(Some(scope.storage_root_id())),
         )?;
         Ok((format!("{}:{item}:{revision}", task.as_str()), spec))

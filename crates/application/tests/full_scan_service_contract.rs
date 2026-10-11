@@ -3219,3 +3219,79 @@ async fn target_cursor_crosses_page_boundary_without_skips_or_duplicates() {
     );
     assert_eq!([first, second].concat(), expected);
 }
+
+async fn match_identity(
+    database: &DatabaseConnection,
+    object: StorageObjectRecordId,
+    item: CatalogItemId,
+) {
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        object.as_uuid().into(),
+                        item.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn series_expansion_is_scheduled_ahead_of_other_scan_children() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "none",
+        "eager",
+        "on_playback",
+    )
+    .await;
+    let (_, series_object) = seed_root(&database, library).await;
+    let (_, movie_object) = seed_root(&database, library).await;
+    advance_library_discovery_watermark(&database, library, 1).await;
+    let series = seed_background_candidate(&database, library, "Dark", Utc::now()).await;
+    let movie = seed_unindexed_movie(&database, library).await;
+    match_identity(&database, series_object, series).await;
+    match_identity(&database, movie_object, movie).await;
+    let parent = claimed_full_scan(&database, library).await;
+
+    assert!(matches!(
+        FullScanService::new(database.clone())
+            .execute(&parent)
+            .await,
+        Err(FullScanError::ChildrenPending { scheduled: 2 })
+    ));
+
+    let jobs = WorkJobRepository::new(&database);
+    let first = jobs
+        .claim_next(
+            &[WorkTaskKind::IndexMediaSources, WorkTaskKind::ExpandItem],
+            "scan-children",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.job().scope(), WorkScope::CatalogItem(series));
+    assert_eq!(first.job().task_kind(), WorkTaskKind::ExpandItem);
+    assert_eq!(first.job().priority(), parent.job().priority() + 1);
+    assert!(first.job().priority() < 100);
+}
