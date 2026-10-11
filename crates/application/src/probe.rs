@@ -32,6 +32,32 @@ const ADAPTIVE_RANGE_BUDGETS: &[u64] = &[
 const SEQUENTIAL_FALLBACK_MAX: u64 = 128 * 1024 * 1024;
 const GAP_RETRY_RANGE: u64 = 8 * 1024 * 1024;
 const MAX_GAP_RETRIES: usize = 16;
+/// Requests outside the read ladder: object lookups before and after the read, the `.strm`
+/// descriptor and target lookup, and resolving a `.strm` target across storage accounts.
+const PROBE_OVERHEAD_REQUESTS: u32 = 16;
+
+const fn adaptive_ladder_bytes() -> u64 {
+    let mut total = 0;
+    let mut step = 0;
+    while step < ADAPTIVE_RANGE_BUDGETS.len() {
+        total += ADAPTIVE_RANGE_BUDGETS[step];
+        step += 1;
+    }
+    total
+}
+
+/// Bytes the read ladder can reserve in the worst case: head and tail, every gap fill, and head
+/// and tail at each adaptive step. The full-file fallback only applies to files no larger than
+/// `SEQUENTIAL_FALLBACK_MAX`, where the ladder stops after its small steps, so it fits too.
+///
+/// A smaller default made the later ladder steps and the fallback unreachable: every probe that
+/// needed them failed as "byte budget exhausted". The time budget still bounds slow storage.
+pub(crate) const PROBE_READ_BYTES_LIMIT: u64 =
+    2 * RANGE_BUDGET + MAX_GAP_RETRIES as u64 * GAP_RETRY_RANGE + 2 * adaptive_ladder_bytes();
+/// Requests the read ladder can issue in the worst case, plus lookup overhead.
+#[allow(clippy::cast_possible_truncation)] // A handful of ladder steps and retries.
+pub(crate) const PROBE_READ_REQUEST_LIMIT: u32 =
+    2 + MAX_GAP_RETRIES as u32 + 2 * ADAPTIVE_RANGE_BUDGETS.len() as u32 + PROBE_OVERHEAD_REQUESTS;
 
 #[derive(Clone)]
 pub struct ProbeInput {
@@ -1250,10 +1276,18 @@ impl ProbeService {
         )
         .await
         .unwrap_or(Err(ProbeServiceError::Budget(ProbeBudgetError::Time)));
-        tracing::info!(job_id = %claimed.id().as_uuid(), media_source_id = %claimed.job().scope().id(),
-            requests = budget.requests, bytes = budget.bytes, gap_reads = budget.gap_reads,
-            duration_ms = started.elapsed().as_millis(), success = outcome.is_ok(),
-            "media probe resource usage");
+        // One line per probe is noise across a large library; keep the ones worth reading.
+        if outcome.is_err() || budget.bytes > self.limits.max_bytes / 2 {
+            tracing::info!(job_id = %claimed.id().as_uuid(), media_source_id = %claimed.job().scope().id(),
+                requests = budget.requests, bytes = budget.bytes, gap_reads = budget.gap_reads,
+                duration_ms = started.elapsed().as_millis(), success = outcome.is_ok(),
+                "media probe resource usage");
+        } else {
+            tracing::debug!(job_id = %claimed.id().as_uuid(), media_source_id = %claimed.job().scope().id(),
+                requests = budget.requests, bytes = budget.bytes, gap_reads = budget.gap_reads,
+                duration_ms = started.elapsed().as_millis(), success = true,
+                "media probe resource usage");
+        }
         if let Err(ProbeServiceError::Budget(error)) = &outcome {
             let message = error.to_string();
             repository
@@ -1941,6 +1975,28 @@ impl Seek for SparseProbeReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_probe_budget_reaches_every_fallback_step() {
+        let limits = ProbeLimits::default();
+        let ladder: u64 = ADAPTIVE_RANGE_BUDGETS.iter().map(|step| 2 * step).sum();
+        let gaps = MAX_GAP_RETRIES as u64 * GAP_RETRY_RANGE;
+        assert!(limits.max_bytes >= 2 * RANGE_BUDGET + gaps + ladder);
+        // The full-file read only runs for files the small ladder steps already covered.
+        let small_ladder: u64 = ADAPTIVE_RANGE_BUDGETS
+            .iter()
+            .take_while(|step| **step * 2 < SEQUENTIAL_FALLBACK_MAX)
+            .map(|step| 2 * step)
+            .sum();
+        assert!(
+            limits.max_bytes >= 2 * RANGE_BUDGET + gaps + small_ladder + SEQUENTIAL_FALLBACK_MAX
+        );
+        let ladder_requests = 2 + MAX_GAP_RETRIES + 2 * ADAPTIVE_RANGE_BUDGETS.len();
+        assert!(
+            usize::try_from(limits.max_requests).unwrap() > ladder_requests,
+            "lookups must still fit after the read ladder"
+        );
+    }
 
     #[test]
     fn sparse_reader_allows_cached_seeks_and_rejects_budget_gaps() {

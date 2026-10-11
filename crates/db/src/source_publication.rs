@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::{
     catalog_publication::{
         CatalogPublicationError, CatalogPublicationRepository, STATE_ACTIVE, STATE_BUILDING,
-        STATE_READY, activate_publication, advance_generation, finish, insert_change_event,
+        STATE_READY, activate_publication, advance_generation, finish, finish_staging,
+        insert_change_event,
     },
     catalog_visibility::projected_enabled_membership,
     work_job::{
@@ -818,7 +819,7 @@ impl CatalogPublicationRepository<'_> {
         let owner = source_owner(claimed)?;
         let transaction = self.database.begin().await?;
         let result = begin_sources(&transaction, claimed, owner, manifest, Utc::now()).await;
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Idempotently writes one bounded Source projection batch under a live lease.
@@ -857,7 +858,7 @@ impl CatalogPublicationRepository<'_> {
                 .map_err(Into::into),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Stages bounded Episode source groups inside the owning Series publication.
@@ -886,7 +887,7 @@ impl CatalogPublicationRepository<'_> {
                 .map_err(Into::into),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Validates, materializes stable identities, and freezes a Source projection.
@@ -907,7 +908,7 @@ impl CatalogPublicationRepository<'_> {
                 .map_err(Into::into),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Atomically activates a sealed Source publication and completes its work job.

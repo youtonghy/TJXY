@@ -486,7 +486,8 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                crate::work_queue::commit_and_notify(transaction).await?;
+                // Completion makes no new work claimable; see `wake_waiting_full_scans`.
+                transaction.commit().await?;
                 Ok(value)
             }
             Err(error) => {
@@ -634,7 +635,8 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                crate::work_queue::commit_and_notify(transaction).await?;
+                // Completion makes no new work claimable; see `wake_waiting_full_scans`.
+                transaction.commit().await?;
                 Ok(value)
             }
             Err(error) => {
@@ -721,7 +723,8 @@ impl<'connection> MetadataWorkRepository<'connection> {
         .await;
         match result {
             Ok(value) => {
-                crate::work_queue::commit_and_notify(transaction).await?;
+                // Completion makes no new work claimable; see `wake_waiting_full_scans`.
+                transaction.commit().await?;
                 Ok(value)
             }
             Err(error) => {

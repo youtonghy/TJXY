@@ -649,7 +649,8 @@ where
                 .map(|()| committed),
             Err(error) => Err(error),
         };
-        finish_notifying(transaction, result).await
+        // A page only adds change-outbox events; the job's completion wakes dependent work.
+        finish_notifying_outbox(transaction, result).await
     }
 
     /// Records a retryable backend failure against the exact root-local inventory scope.
@@ -840,7 +841,7 @@ where
             self.clock.now(),
         )
         .await;
-        finish_notifying(transaction, result).await
+        finish_notifying_outbox(transaction, result).await
     }
 }
 
@@ -3013,6 +3014,25 @@ async fn finish_notifying<T>(
     match result {
         Ok(value) => {
             crate::work_queue::commit_and_notify(transaction).await?;
+            Ok(value)
+        }
+        Err(original) => match transaction.rollback().await {
+            Ok(()) => Err(original),
+            Err(rollback) => Err(StorageSyncRepositoryError::RollbackFailed {
+                original: original.to_string(),
+                rollback,
+            }),
+        },
+    }
+}
+
+async fn finish_notifying_outbox<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, StorageSyncRepositoryError>,
+) -> Result<T, StorageSyncRepositoryError> {
+    match result {
+        Ok(value) => {
+            crate::work_queue::commit_and_notify_outbox(transaction).await?;
             Ok(value)
         }
         Err(original) => match transaction.rollback().await {

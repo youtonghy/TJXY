@@ -1265,7 +1265,9 @@ async fn finish<T>(
 ) -> Result<T, ProbeRepositoryError> {
     match result {
         Ok(value) => {
-            crate::work_queue::commit_and_notify(transaction).await?;
+            // A probe outcome makes no new work claimable; a waiting Full Scan parent is woken
+            // through its own coalesced availability and polling.
+            transaction.commit().await?;
             Ok(value)
         }
         Err(original) => match transaction.rollback().await {

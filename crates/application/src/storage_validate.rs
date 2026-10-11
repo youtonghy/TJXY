@@ -96,7 +96,8 @@ where
         }
         .await;
         match completion {
-            Ok(()) => transaction.commit().await?,
+            // Completion releases dependent media work and may enqueue discovery.
+            Ok(()) => tjxy_db::commit_and_wake_workers(transaction).await?,
             Err(error) => {
                 transaction.rollback().await?;
                 return Err(error);

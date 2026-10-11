@@ -11,8 +11,8 @@ pub struct ProbeLimits {
 impl Default for ProbeLimits {
     fn default() -> Self {
         Self {
-            max_requests: 32,
-            max_bytes: 64 * 1024 * 1024,
+            max_requests: crate::probe::PROBE_READ_REQUEST_LIMIT,
+            max_bytes: crate::probe::PROBE_READ_BYTES_LIMIT,
             timeout: Duration::from_secs(45),
         }
     }

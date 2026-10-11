@@ -188,7 +188,7 @@ impl<'connection> CatalogPublicationRepository<'connection> {
         let owner = structure_owner(claimed)?;
         let transaction = self.database.begin().await?;
         let result = begin_structure(&transaction, claimed, owner, manifest, Utc::now()).await;
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Idempotently stages a bounded batch without changing the active pointer.
@@ -214,7 +214,7 @@ impl<'connection> CatalogPublicationRepository<'connection> {
                 .map_err(Into::into),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Validates and freezes the complete shadow projection before the short publish transaction.
@@ -235,7 +235,7 @@ impl<'connection> CatalogPublicationRepository<'connection> {
                 .map_err(Into::into),
             Err(error) => Err(error),
         };
-        finish(transaction, result).await
+        finish_staging(transaction, result).await
     }
 
     /// Atomically activates a complete structure projection and completes its job.
@@ -1155,9 +1155,29 @@ pub(crate) async fn finish<T>(
     transaction: DatabaseTransaction,
     result: Result<T, CatalogPublicationError>,
 ) -> Result<T, CatalogPublicationError> {
+    finish_with(transaction, result, true).await
+}
+
+/// Commits a staging step. Staging makes no work claimable, so idle workers are not woken.
+pub(crate) async fn finish_staging<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, CatalogPublicationError>,
+) -> Result<T, CatalogPublicationError> {
+    finish_with(transaction, result, false).await
+}
+
+async fn finish_with<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, CatalogPublicationError>,
+    wake_workers: bool,
+) -> Result<T, CatalogPublicationError> {
     match result {
         Ok(value) => {
-            crate::work_queue::commit_and_notify(transaction).await?;
+            if wake_workers {
+                crate::work_queue::commit_and_notify(transaction).await?;
+            } else {
+                transaction.commit().await?;
+            }
             Ok(value)
         }
         Err(error) => match transaction.rollback().await {

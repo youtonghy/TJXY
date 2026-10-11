@@ -385,7 +385,7 @@ pub(crate) fn spawn_cache_invalidation_worker(
 ) {
     tokio::spawn(async move {
         let service = CacheInvalidationService::new(database, cache);
-        let mut waiter = tjxy_db::WorkQueueWaiter::default();
+        let mut waiter = tjxy_db::WorkQueueWaiter::outbox_consumer();
         let mut last_outbox_purge = std::time::Instant::now();
         loop {
             let delay = match service.run_once().await {
@@ -442,7 +442,7 @@ const OUTBOX_PURGE_INTERVAL: StdDuration = StdDuration::from_secs(30);
 pub(crate) fn spawn_storage_change_reconciler(database: DatabaseConnection) {
     tokio::spawn(async move {
         let mut reconciler = StorageChangeReconciler::new(database);
-        let mut waiter = tjxy_db::WorkQueueWaiter::default();
+        let mut waiter = tjxy_db::WorkQueueWaiter::outbox_consumer();
         loop {
             let delay = match reconciler.run_once().await {
                 Ok(report) => {
@@ -1779,7 +1779,7 @@ async fn handle_outcome(
             WorkJobRepositoryError::LostLease,
         ))) => {}
         Err(ProbeServiceError::InspectionFailed(error)) => {
-            tracing::error!(
+            tracing::warn!(
                 job_id = %claimed.id().as_uuid(),
                 media_source_id = %claimed.job().scope().id(),
                 attempt = claimed.attempt_count(),

@@ -75,7 +75,7 @@ mod work_queue;
 
 pub use work_maintenance::WorkMaintenanceReport;
 
-pub use work_queue::{WorkQueueWaiter, listen_for_work};
+pub use work_queue::{WorkQueueWaiter, commit_and_wake_workers, listen_for_work};
 
 pub use ai::{
     AI_PROVIDER_KEY, AiConversationRecord, AiConversationRepository, AiConversationRepositoryError,
