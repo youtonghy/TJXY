@@ -213,7 +213,8 @@ is intentionally being deleted.
 
 ## Native Installation
 
-Native builds require Rust 1.88 or newer, Node.js 22.12 or newer, npm, and the
+Native builds require Rust 1.88 or newer, Node.js 22.12 or newer, pnpm 10
+(`corepack enable` uses the version pinned in `admin/package.json`), and the
 prepared frontend dependencies. Docker is additionally required when native
 TJXY uses managed PostgreSQL.
 
@@ -236,7 +237,7 @@ To let the launcher provision PostgreSQL in Docker while TJXY runs natively:
 For a manual build:
 
 ```bash
-npm --prefix admin run build
+pnpm --dir admin run build
 cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
@@ -245,7 +246,7 @@ Local builds report product version `0.0.0`. To stamp a build manually, pass the
 same version to both build pipelines:
 
 ```bash
-VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
+VITE_TJXY_VERSION=0.2.0 pnpm --dir admin run build
 TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
 ```
 
@@ -434,7 +435,7 @@ an installation.
 
 ## Build from Source
 
-Source builds are for maintainers. They require Node.js 22.12 or newer, npm,
+Source builds are for maintainers. They require Node.js 22.12 or newer, pnpm 10,
 prepared frontend dependencies in `admin/node_modules`, and Rust 1.88 or newer
 when compiling the server. HeroUI Pro is a licensed build dependency. Store
 `HEROUI_KEY` as a GitHub Actions repository secret before publishing a release.
@@ -442,8 +443,8 @@ For a local source build, install it without committing the key:
 
 ```bash
 cd admin
-HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
-npm run build
+HEROUI_KEY="<your-key>" pnpm dlx hpsetup@latest --auto
+pnpm run build
 cd ..
 ```
 
@@ -470,10 +471,10 @@ React 19, HeroUI v3, Tailwind CSS v4, and Vite.
 
 ```bash
 # Frontend
-npm --prefix admin run typecheck
-npm --prefix admin run lint
-npm --prefix admin test -- --run
-npm --prefix admin run build
+pnpm --dir admin run typecheck
+pnpm --dir admin run lint
+pnpm --dir admin test --run
+pnpm --dir admin run build
 
 # Rust workspace
 cargo test --workspace

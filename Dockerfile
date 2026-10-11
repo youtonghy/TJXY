@@ -2,10 +2,11 @@ FROM node:22.22.3-bookworm-slim AS frontend
 ARG TJXY_BUILD_VERSION=0.0.0
 ENV VITE_TJXY_VERSION=${TJXY_BUILD_VERSION}
 WORKDIR /build/admin
-COPY admin/package.json admin/package-lock.json ./
-RUN npm ci
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+COPY admin/package.json admin/pnpm-lock.yaml admin/pnpm-workspace.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
 COPY admin/ ./
-RUN npm run build
+RUN pnpm run build
 
 FROM rust:1.88.0-bookworm AS server
 ARG TJXY_BUILD_VERSION=0.0.0

@@ -27,7 +27,7 @@
 
 ### 环境准备
 
-- 从仓库根目录执行命令，依赖应与锁文件一致；缺失或不一致时运行 `npm --prefix admin ci`。不要为绕过安装失败擅自更新锁文件。
+- 从仓库根目录执行命令，依赖应与锁文件一致；缺失或不一致时运行 `pnpm --dir admin install --frozen-lockfile`。不要为绕过安装失败擅自更新锁文件。
 - Node.js 与 CI 保持一致，目前为 `22.22.3`；前端声明的最低版本为 `22.12.0`。
 - Rust 与 CI 的 `RUST_VERSION` 保持一致，目前为 `1.88.0`，并安装 `clippy`、`rustfmt`。不得仅用本机更新版本的工具链通过结果代替 CI 版本验证。
 - CI 工具链或检查脚本变化时，同步更新此处的版本和命令。若构建需要 HeroUI Pro 配置，按现有项目流程配置，不能把凭据写入仓库。
@@ -35,10 +35,10 @@
 ### 前端完整检查
 
 ```sh
-npm --prefix admin run typecheck
-npm --prefix admin run lint
-npm --prefix admin test -- --run
-npm --prefix admin run build
+pnpm --dir admin run typecheck
+pnpm --dir admin run lint
+pnpm --dir admin test --run
+pnpm --dir admin run build
 ```
 
 ### Rust 编译、全工作区测试与静态检查

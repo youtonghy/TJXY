@@ -220,10 +220,10 @@ wait_for_http() {
 }
 
 start_local() {
-    require_command npm
+    require_command pnpm
     require_command cargo
     printf '%s\n' 'Building the frontend and local TJXY server...'
-    npm --prefix "$ROOT_DIR/admin" run build
+    (CDPATH= cd "$ROOT_DIR/admin" && pnpm run build)
     cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release --locked -p tjxy-server --bin tjxy-server
 
     if [ "$DATABASE_MODE" = postgres ]; then
@@ -272,9 +272,9 @@ start_docker() {
         printf 'Pulling published TJXY image %s...\n' "$IMAGE"
         compose pull
     else
-        require_command npm
+        require_command pnpm
         printf '%s\n' 'Building the host frontend for the Docker image...'
-        npm --prefix "$ROOT_DIR/admin" run build
+        (CDPATH= cd "$ROOT_DIR/admin" && pnpm run build)
     fi
     if [ -n "$IMAGE" ]; then
         compose up -d --wait --wait-timeout 600

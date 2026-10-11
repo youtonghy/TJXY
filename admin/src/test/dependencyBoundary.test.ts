@@ -1,5 +1,5 @@
-import packageLock from '../../package-lock.json';
 import packageManifest from '../../package.json';
+import pnpmLock from '../../pnpm-lock.yaml?raw';
 
 const forbiddenNames = ['react-admin', 'ra-ui-materialui'];
 const forbiddenScopes = ['@mui/', '@emotion/'];
@@ -22,12 +22,10 @@ it('keeps presentation packages out of direct dependencies', () => {
 });
 
 it('keeps presentation packages out of the complete lockfile graph', () => {
-  const forbidden = Object.keys(packageLock.packages).filter((packagePath) => {
-    return forbiddenNames.some((name) => packagePath === `node_modules/${name}`
-      || packagePath.endsWith(`/node_modules/${name}`))
-      || forbiddenScopes.some((scope) => packagePath.includes(`node_modules/${scope}`));
-  });
+  const lockedPackages = lockfilePackageNames(pnpmLock);
+  const forbidden = lockedPackages.filter(isForbiddenPackage);
 
+  expect(lockedPackages).toContain('react');
   expect(forbidden).toEqual([]);
 });
 
@@ -41,4 +39,10 @@ it('keeps presentation imports out of production source', () => {
 
 function isForbiddenPackage(name: string): boolean {
   return forbiddenNames.includes(name) || forbiddenScopes.some((scope) => name.startsWith(scope));
+}
+
+// pnpm-lock.yaml lists every resolved package as a two-space-indented
+// `name@version:` key under `packages:` and `snapshots:`.
+function lockfilePackageNames(lockfile: string): string[] {
+  return [...lockfile.matchAll(/^ {2}'?((?:@[^/'\s]+\/)?[^@'\s]+)@/gmu)].map(([, name]) => name ?? '');
 }

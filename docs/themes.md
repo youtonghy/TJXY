@@ -125,10 +125,10 @@ SystemLocaleProvider -> ClientThemeRuntime -> 静态 registry
 ## 验证
 
 ```bash
-npm --prefix admin run typecheck
-npm --prefix admin run lint
-npm --prefix admin test -- --run
-npm --prefix admin run build
+pnpm --dir admin run typecheck
+pnpm --dir admin run lint
+pnpm --dir admin test --run
+pnpm --dir admin run build
 cargo test -p tjxy-db --test site_theme_settings_repository_contract
 cargo test -p tjxy-db --test schema_contract site_theme_settings
 cargo test -p tjxy-server --test browse_routes site_theme

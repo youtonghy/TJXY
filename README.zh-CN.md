@@ -181,8 +181,9 @@ volume。升级发布镜像部署前，应先备份数据库和宿主机目录�
 
 ## 本地安装
 
-本地构建需要 Rust 1.88 或更高版本、Node.js 22.12 或更高版本、npm，以及
-已经准备好的前端依赖。如果本地运行 TJXY、同时使用自动管理 PostgreSQL，
+本地构建需要 Rust 1.88 或更高版本、Node.js 22.12 或更高版本、pnpm 10
+（`corepack enable` 会使用 `admin/package.json` 固定的版本），以及已经准备好的
+前端依赖。如果本地运行 TJXY、同时使用自动管理 PostgreSQL，
 还需要 Docker。
 
 使用启动脚本进行本地安装：
@@ -204,7 +205,7 @@ volume。升级发布镜像部署前，应先备份数据库和宿主机目录�
 手动构建方式：
 
 ```bash
-npm --prefix admin run build
+pnpm --dir admin run build
 cargo build --release --locked -p tjxy-server --bin tjxy-server
 TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 ```
@@ -213,7 +214,7 @@ TJXY_ADMIN_DIST_DIR=admin/dist ./target/release/tjxy-server
 版本：
 
 ```bash
-VITE_TJXY_VERSION=0.2.0 npm --prefix admin run build
+VITE_TJXY_VERSION=0.2.0 pnpm --dir admin run build
 TJXY_BUILD_VERSION=0.2.0 cargo build --release --locked -p tjxy-server --bin tjxy-server
 ```
 
@@ -323,7 +324,7 @@ cd tjxy-v0.0.1-linux-x86_64-gnu
 
 ## 从源码构建
 
-源码构建面向维护者。需要 Node.js 22.12 或更高版本、npm、已经准备好的
+源码构建面向维护者。需要 Node.js 22.12 或更高版本、pnpm 10、已经准备好的
 `admin/node_modules` 前端依赖；编译服务端时还需要 Rust 1.88 或更高版本。
 HeroUI Pro 是受许可保护的构建依赖。发布版本前，必须将 `HEROUI_KEY` 保存为
 GitHub Actions repository secret。本地准备源码时也可以在 `admin/` 中安装，
@@ -331,8 +332,8 @@ GitHub Actions repository secret。本地准备源码时也可以在 `admin/` �
 
 ```bash
 cd admin
-HEROUI_KEY="<your-key>" npx -y hpsetup@latest --auto
-npm run build
+HEROUI_KEY="<your-key>" pnpm dlx hpsetup@latest --auto
+pnpm run build
 cd ..
 ```
 
@@ -356,10 +357,10 @@ HeroUI v3、Tailwind CSS v4 和 Vite。
 
 ```bash
 # 前端
-npm --prefix admin run typecheck
-npm --prefix admin run lint
-npm --prefix admin test -- --run
-npm --prefix admin run build
+pnpm --dir admin run typecheck
+pnpm --dir admin run lint
+pnpm --dir admin test --run
+pnpm --dir admin run build
 
 # Rust workspace
 cargo test --workspace
