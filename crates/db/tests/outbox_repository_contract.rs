@@ -595,3 +595,80 @@ async fn caller_owned_completion_transaction_can_roll_back_atomically() {
         .unwrap();
     assert_eq!(watermark, 0);
 }
+
+async fn reconciled_revision(database: &DatabaseConnection, root_id: StorageRootId) -> i64 {
+    database
+        .query_one(
+            database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("reconciled_sync_revision"))
+                    .from(Alias::new("storage_roots"))
+                    .and_where(Expr::col(Alias::new("id")).eq(root_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "reconciled_sync_revision")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_run_of_empty_revisions_is_crossed_up_to_the_next_pending_event() {
+    // Periodic validation commits one revision per page and most pages carry no event.
+    let database = database().await;
+    let root_id = seed_root(&database, 500).await;
+    let pending = seed_event(&database, root_id, 300).await;
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap();
+    let (repository, _clock) = repository(&database, now);
+
+    let claimed = repository
+        .claim_next(root_id, "worker", Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id(), pending);
+    assert_eq!(reconciled_revision(&database, root_id).await, 299);
+
+    let completion = complete_claim(&repository, &database, &claimed)
+        .await
+        .unwrap();
+    assert_eq!(completion.reconciled_sync_revision, 500);
+    assert!(
+        repository
+            .claim_next(root_id, "worker", Duration::seconds(30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(reconciled_revision(&database, root_id).await, 500);
+}
+
+#[tokio::test]
+async fn a_dead_lettered_event_still_holds_the_watermark_below_it() {
+    let database = database().await;
+    let root_id = seed_root(&database, 40).await;
+    let event_id = seed_event(&database, root_id, 10).await;
+    database
+        .execute(
+            database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("storage_change_outbox"))
+                    .value(Alias::new("state"), "DeadLetter")
+                    .and_where(Expr::col(Alias::new("id")).eq(event_id)),
+            ),
+        )
+        .await
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap();
+    let (repository, _clock) = repository(&database, now);
+
+    assert!(
+        repository
+            .claim_next(root_id, "worker", Duration::seconds(30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(reconciled_revision(&database, root_id).await, 9);
+}

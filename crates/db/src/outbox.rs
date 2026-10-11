@@ -523,6 +523,13 @@ async fn fail_in_transaction(
     Ok(OutboxFailureDisposition::Deferred)
 }
 
+/// Advances the reconciled revision past every leading revision with no unprocessed event.
+///
+/// The root's `sync_revision` is read first. Each revision is allocated by a compare-and-set on
+/// that row in the same transaction that writes its events, so every event at or below the value
+/// read is already committed and visible to the range query below. The watermark can therefore
+/// jump straight to the revision before the first one still holding work, in one update, instead
+/// of stepping through revisions that never had events (most periodic validation pages).
 async fn advance_contiguous_watermark(
     transaction: &DatabaseTransaction,
     storage_root_id: StorageRootId,
@@ -533,25 +540,29 @@ async fn advance_contiguous_watermark(
             .ok_or(OutboxRepositoryError::MissingRoot)?;
     let backend = transaction.get_database_backend();
     while reconciled_revision < sync_revision {
-        let next = reconciled_revision + 1;
         let statement = Query::select()
-            .expr_as(Expr::col(Alias::new("id")).count(), Alias::new("remaining"))
+            .expr_as(
+                Expr::col(Alias::new("sync_revision")).min(),
+                Alias::new("blocking_revision"),
+            )
             .from(Alias::new("storage_change_outbox"))
             .and_where(Expr::col(Alias::new("storage_root_id")).eq(storage_root_id.as_uuid()))
-            .and_where(Expr::col(Alias::new("sync_revision")).eq(next))
+            .and_where(Expr::col(Alias::new("sync_revision")).gt(reconciled_revision))
+            .and_where(Expr::col(Alias::new("sync_revision")).lte(sync_revision))
             .and_where(Expr::col(Alias::new("state")).ne(STATE_PROCESSED))
             .to_owned();
-        let remaining: i64 = transaction
+        let blocking_revision: Option<i64> = transaction
             .query_one(backend.build(&statement))
             .await?
             .ok_or(OutboxRepositoryError::MissingAggregateRow)?
-            .try_get("", "remaining")?;
-        if remaining != 0 {
+            .try_get("", "blocking_revision")?;
+        let target = blocking_revision.map_or(sync_revision, |revision| revision - 1);
+        if target <= reconciled_revision {
             break;
         }
         let update = Query::update()
             .table(Alias::new("storage_roots"))
-            .value(Alias::new("reconciled_sync_revision"), next)
+            .value(Alias::new("reconciled_sync_revision"), target)
             .and_where(Expr::col(Alias::new("id")).eq(storage_root_id.as_uuid()))
             .and_where(Expr::col(Alias::new("reconciled_sync_revision")).eq(reconciled_revision))
             .to_owned();
@@ -566,13 +577,13 @@ async fn advance_contiguous_watermark(
             else {
                 return Err(OutboxRepositoryError::MissingRoot);
             };
-            if observed_revision >= next {
+            if observed_revision > reconciled_revision {
                 reconciled_revision = observed_revision;
                 continue;
             }
             return Err(OutboxRepositoryError::WatermarkConflict);
         }
-        reconciled_revision = next;
+        reconciled_revision = target;
     }
     Ok(reconciled_revision)
 }
