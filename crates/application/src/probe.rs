@@ -52,8 +52,12 @@ const fn adaptive_ladder_bytes() -> u64 {
 ///
 /// A smaller default made the later ladder steps and the fallback unreachable: every probe that
 /// needed them failed as "byte budget exhausted". The time budget still bounds slow storage.
-pub(crate) const PROBE_READ_BYTES_LIMIT: u64 =
-    2 * RANGE_BUDGET + MAX_GAP_RETRIES as u64 * GAP_RETRY_RANGE + 2 * adaptive_ladder_bytes();
+pub(crate) const PROBE_READ_BYTES_LIMIT: u64 = 2 * RANGE_BUDGET
+    + MAX_GAP_RETRIES as u64 * GAP_RETRY_RANGE
+    + 2 * adaptive_ladder_bytes()
+    + PROBE_OVERHEAD_BYTES;
+/// Reads outside the ladder: the `.strm` descriptor and a small allowance for lookups.
+const PROBE_OVERHEAD_BYTES: u64 = MAX_STRM_BYTES as u64 + 1024 * 1024;
 /// Requests the read ladder can issue in the worst case, plus lookup overhead.
 #[allow(clippy::cast_possible_truncation)] // A handful of ladder steps and retries.
 pub(crate) const PROBE_READ_REQUEST_LIMIT: u32 =
@@ -1981,7 +1985,9 @@ mod tests {
         let limits = ProbeLimits::default();
         let ladder: u64 = ADAPTIVE_RANGE_BUDGETS.iter().map(|step| 2 * step).sum();
         let gaps = MAX_GAP_RETRIES as u64 * GAP_RETRY_RANGE;
-        assert!(limits.max_bytes >= 2 * RANGE_BUDGET + gaps + ladder);
+        // A `.strm` source reads its descriptor before the ladder starts.
+        let descriptor = MAX_STRM_BYTES as u64;
+        assert!(limits.max_bytes >= descriptor + 2 * RANGE_BUDGET + gaps + ladder);
         // The full-file read only runs for files the small ladder steps already covered.
         let small_ladder: u64 = ADAPTIVE_RANGE_BUDGETS
             .iter()
@@ -1989,7 +1995,8 @@ mod tests {
             .map(|step| 2 * step)
             .sum();
         assert!(
-            limits.max_bytes >= 2 * RANGE_BUDGET + gaps + small_ladder + SEQUENTIAL_FALLBACK_MAX
+            limits.max_bytes
+                >= descriptor + 2 * RANGE_BUDGET + gaps + small_ladder + SEQUENTIAL_FALLBACK_MAX
         );
         let ladder_requests = 2 + MAX_GAP_RETRIES + 2 * ADAPTIVE_RANGE_BUDGETS.len();
         assert!(

@@ -21,6 +21,8 @@ const STATE_PENDING: &str = "Pending";
 const STATE_RUNNING: &str = "Running";
 const STATE_COMPLETED: &str = "Completed";
 const STATE_FAILED: &str = "Failed";
+/// Jobs at or above this priority are interactive and claimed by the foreground workers.
+const FOREGROUND_PRIORITY: i32 = 100;
 const MAX_LEASE_OWNER_CHARS: usize = 128;
 const MAX_STAGING_KEY_CHARS: usize = 512;
 const MAX_ERROR_CHARS: usize = 4096;
@@ -753,7 +755,11 @@ where
         }
         let transaction = self.database.begin().await?;
         let result = enqueue_or_join(&transaction, spec, self.now()).await;
-        finish_notifying(transaction, result).await
+        let foreground = spec.priority >= FOREGROUND_PRIORITY;
+        finish_waking_if(transaction, result, |submission| {
+            submission.created() || foreground
+        })
+        .await
     }
 
     /// Enqueues or joins one policy-aware media scan for each enabled Library with automatic work.
@@ -1672,7 +1678,14 @@ where
             Ok(FullScanChildSubmission::Job(submission))
         }
         .await;
-        finish_notifying(transaction, result).await
+        // A scan re-checks every child each time it resumes; joining work that is already queued
+        // makes nothing new claimable, so only a created child wakes idle workers.
+        finish_waking_if(
+            transaction,
+            result,
+            |submission| matches!(submission, FullScanChildSubmission::Job(job) if job.created()),
+        )
+        .await
     }
 
     /// Rechecks publication after observing a completed child. The earlier target
@@ -2858,7 +2871,7 @@ async fn claim_candidates(
     let mut candidates = Vec::new();
     for branch in branches {
         for row in transaction
-            .query_all(backend.build(&claim_candidate(branch, filter, now)))
+            .query_all(backend.build(&claim_candidate(backend, branch, filter, now)))
             .await?
         {
             candidates.push(row.try_get::<Uuid>("", "id")?);
@@ -3337,9 +3350,9 @@ pub(crate) async fn fence_live_claim(
 fn apply_scan_claim_filter(query: &mut SelectStatement, job: &Alias, filter: &ClaimFilter<'_>) {
     if let Some(foreground) = filter.foreground {
         query.and_where(if foreground {
-            Expr::col((job.clone(), Alias::new("priority"))).gte(100)
+            Expr::col((job.clone(), Alias::new("priority"))).gte(FOREGROUND_PRIORITY)
         } else {
-            Expr::col((job.clone(), Alias::new("priority"))).lt(100)
+            Expr::col((job.clone(), Alias::new("priority"))).lt(FOREGROUND_PRIORITY)
         });
     }
     if !filter.excluded_roots.is_empty() {
@@ -3368,6 +3381,7 @@ enum ClaimBranch<'a> {
 /// With a large backlog every claim then read and sorted all pending rows (about 63 ms at 10k).
 /// Each branch here is an ordered index range that stops after a few rows.
 fn claim_candidate(
+    backend: sea_orm::DbBackend,
     branch: ClaimBranch<'_>,
     filter: ClaimFilter<'_>,
     now: DateTime<Utc>,
@@ -3390,9 +3404,17 @@ fn claim_candidate(
                 );
         }
         ClaimBranch::ExpiredLease(kinds) => {
+            // SQLite only uses a partial index whose predicate appears verbatim. PostgreSQL proves
+            // it from `state = 'Running'` and would otherwise multiply the two state predicates
+            // into a tiny estimate and scan the wrong index.
+            if backend == sea_orm::DbBackend::Sqlite {
+                query
+                    .and_where(Expr::cust("job.state IN ('Pending', 'Running')"))
+                    .and_where(Expr::col((job.clone(), Alias::new("state"))).eq(STATE_RUNNING));
+            } else {
+                query.and_where(Expr::cust("job.state = 'Running'"));
+            }
             query
-                .and_where(Expr::cust("job.state IN ('Pending', 'Running')"))
-                .and_where(Expr::col((job.clone(), Alias::new("state"))).eq(STATE_RUNNING))
                 .and_where(
                     Expr::col((job.clone(), Alias::new("task_kind")))
                         .is_in(kinds.iter().map(|kind| kind.as_str())),
@@ -4119,6 +4141,21 @@ async fn finish<T>(
     }
 }
 
+/// Commits, waking idle workers only when `made_claimable` says the outcome added claimable work.
+async fn finish_waking_if<T>(
+    transaction: DatabaseTransaction,
+    result: Result<T, WorkJobRepositoryError>,
+    made_claimable: impl FnOnce(&T) -> bool,
+) -> Result<T, WorkJobRepositoryError> {
+    match result {
+        Ok(value) if made_claimable(&value) => {
+            crate::work_queue::commit_and_notify(transaction).await?;
+            Ok(value)
+        }
+        result => finish(transaction, result).await,
+    }
+}
+
 async fn finish_notifying<T>(
     transaction: DatabaseTransaction,
     result: Result<T, WorkJobRepositoryError>,
@@ -4163,6 +4200,7 @@ mod claim_plan_tests {
             let pending = sqlite_plan(
                 &database,
                 &claim_candidate(
+                    sea_orm::DbBackend::Sqlite,
                     ClaimBranch::Pending(WorkTaskKind::ScopedStorageSync),
                     filter,
                     Utc::now(),
@@ -4182,6 +4220,7 @@ mod claim_plan_tests {
             let expired = sqlite_plan(
                 &database,
                 &claim_candidate(
+                    sea_orm::DbBackend::Sqlite,
                     ClaimBranch::ExpiredLease(&[WorkTaskKind::ScopedStorageSync]),
                     filter,
                     Utc::now(),
