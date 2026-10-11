@@ -3243,3 +3243,113 @@ async fn reobserving_an_object_created_outside_inventory_fills_its_missing_facts
         (committed.sync_revision(), "Present".to_owned())
     );
 }
+
+async fn table_rows(fixture: &Fixture, table: &str, event_type: Option<&str>) -> usize {
+    let mut query = Query::select();
+    query.column(Alias::new("id")).from(Alias::new(table));
+    if let Some(event_type) = event_type {
+        query.and_where(Expr::col(Alias::new("event_type")).eq(event_type));
+    }
+    fixture
+        .database
+        .query_all(fixture.database.get_database_backend().build(&query))
+        .await
+        .unwrap()
+        .len()
+}
+
+#[tokio::test]
+async fn validation_pages_keep_no_replay_record_or_page_marker() {
+    let fixture = fixture().await;
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ValidateStorageRoot,
+            WorkScope::StorageRoot(fixture.root_id),
+            0,
+            10,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ValidateStorageRoot],
+            "validate-bookkeeping",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let repository = StorageSyncRepository::new(&fixture.database);
+
+    let committed = repository
+        .commit_inventory_page(
+            &claimed,
+            StorageSyncPage::new(
+                fixture.root_id,
+                fixture.parent_id,
+                "fixture-drive",
+                "validation-page",
+                vec![object("movie", "Movie.mkv")],
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(table_rows(&fixture, "storage_sync_pages", None).await, 0);
+    assert_eq!(
+        table_rows(
+            &fixture,
+            "storage_change_outbox",
+            Some("InventoryPageCommitted")
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        upserted_event_count(&fixture).await,
+        1,
+        "a new object is still announced to the projector"
+    );
+    assert_eq!(
+        stored_object_state(&fixture, "movie").await.0,
+        committed.sync_revision()
+    );
+}
+
+#[tokio::test]
+async fn scoped_sync_pages_keep_their_replay_record_and_page_marker() {
+    let fixture = fixture().await;
+    let claimed = claimed_sync_job(&fixture, ManualClock::new(Utc::now())).await;
+
+    StorageSyncRepository::new(&fixture.database)
+        .commit_inventory_page(
+            &claimed,
+            StorageSyncPage::new(
+                fixture.root_id,
+                fixture.parent_id,
+                "fixture-drive",
+                "scoped-page",
+                vec![object("movie", "Movie.mkv")],
+                true,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(table_rows(&fixture, "storage_sync_pages", None).await, 1);
+    assert_eq!(
+        table_rows(
+            &fixture,
+            "storage_change_outbox",
+            Some("InventoryPageCommitted")
+        )
+        .await,
+        1
+    );
+}

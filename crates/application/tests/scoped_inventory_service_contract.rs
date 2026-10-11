@@ -1544,3 +1544,143 @@ async fn revalidating_an_unchanged_tree_keeps_objects_present_without_rewriting_
         "an unchanged pass must not rewrite object facts"
     );
 }
+
+/// The validation tree, optionally with one extra file that appears between passes.
+struct GrowingTreeBackend {
+    tree: TreeBackend,
+    grown: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for GrowingTreeBackend {
+    async fn get_object(&self, id: &StorageObjectId) -> Result<StorageObject, BackendError> {
+        self.tree.get_object(id).await
+    }
+
+    async fn list_children(
+        &self,
+        parent: &StorageObjectId,
+        page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        let mut listed = self.tree.list_children(parent, page).await?;
+        if parent.provider_object_id() == "series"
+            && self.grown.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            listed.objects.push(StorageObject::file(
+                StorageObjectId::new("filesystem", "bonus").unwrap(),
+                "Bonus.mkv",
+                8,
+            ));
+        }
+        Ok(listed)
+    }
+
+    async fn list_changes(&self, cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
+        self.tree.list_changes(cursor).await
+    }
+
+    async fn open_range(
+        &self,
+        id: &StorageObjectId,
+        range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        self.tree.open_range(id, range).await
+    }
+
+    fn capabilities(&self) -> StorageCapabilities {
+        self.tree.capabilities()
+    }
+}
+
+async fn scalar(fixture: &Fixture, sql: &str) -> i64 {
+    fixture
+        .database
+        .query_one(Statement::from_string(
+            fixture.database.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "value")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn validation_passes_reconcile_fully_without_page_bookkeeping() {
+    let fixture = fixture().await;
+    let storage = Arc::new(GrowingTreeBackend {
+        tree: TreeBackend {
+            requests: Mutex::new(Vec::new()),
+        },
+        grown: std::sync::atomic::AtomicBool::new(false),
+    });
+    let jobs = WorkJobRepository::new(&fixture.database);
+    for pass in ["first", "unchanged", "grown"] {
+        if pass == "grown" {
+            storage
+                .grown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        jobs.enqueue_or_join(
+            &WorkJobSpec::new(
+                WorkTaskKind::ValidateStorageRoot,
+                WorkScope::StorageRoot(fixture.root_id),
+                0,
+                10,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let claimed = jobs
+            .claim_next(
+                &[WorkTaskKind::ValidateStorageRoot],
+                pass,
+                chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let result =
+            FullValidateStorageService::new(fixture.database.clone(), Arc::clone(&storage))
+                .run_claimed(&claimed, fixture.account_id)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            scalar(
+                &fixture,
+                "SELECT reconciled_sync_revision AS value FROM storage_roots"
+            )
+            .await,
+            result.sync_revision(),
+            "{pass}: the watermark must reach the pass revision"
+        );
+        assert_eq!(
+            scalar(
+                &fixture,
+                "SELECT COUNT(*) AS value FROM storage_change_outbox WHERE state <> 'Processed'"
+            )
+            .await,
+            0,
+            "{pass}: every event must be projected"
+        );
+        assert_eq!(
+            scalar(&fixture, "SELECT COUNT(*) AS value FROM storage_sync_pages").await,
+            0,
+            "{pass}: validation keeps no page records"
+        );
+    }
+    assert_eq!(
+        scalar(
+            &fixture,
+            "SELECT COUNT(*) AS value FROM storage_root_objects ro \
+             JOIN storage_objects o ON o.id = ro.storage_object_id \
+             WHERE o.provider_object_id = 'bonus' AND ro.presence_state = 'Present'"
+        )
+        .await,
+        1,
+        "a file added between passes is still inventoried"
+    );
+}

@@ -809,12 +809,11 @@ where
     }
 }
 
-/// Drops the replay pages of a full validation inside its completion transaction.
+/// Drops any replay pages of a full validation inside its completion transaction.
 ///
-/// Pages only make an in-flight validation attempt replay-safe; unlike Scoped Storage Sync pages,
-/// no dependent job reads them once the validation has completed. Validation lists every
-/// directory of every root on each periodic pass, so keeping them until work retention ran grew
-/// one row per directory per pass.
+/// Validation no longer records pages (see `commit_inventory_page`); this only clears rows left by
+/// attempts that started on an older version, so an upgrade mid-pass does not leave them until
+/// work retention runs.
 ///
 /// # Errors
 ///
@@ -1039,7 +1038,12 @@ async fn commit_inventory_page(
     {
         return Err(StorageSyncRepositoryError::MissingScope);
     }
-    if let Some(replayed) = replayed_page(transaction, claimed, page).await? {
+    // Full validation never re-commits a page within one attempt: any failure retries the whole
+    // job, and every claim advances `attempt_count`, which is part of each page identity. Its
+    // pages therefore need no replay record. Scoped syncs keep them, since dependent media work
+    // fences on their committed pages.
+    let validation = claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot;
+    if !validation && let Some(replayed) = replayed_page(transaction, claimed, page).await? {
         return Ok(replayed);
     }
     let root = read_root(transaction, page.storage_root_id)
@@ -1058,13 +1062,14 @@ async fn commit_inventory_page(
         .sync_revision
         .checked_add(1)
         .ok_or(StorageSyncRepositoryError::InvalidRevision)?;
-    let first_job_revision = first_job_revision(transaction, claimed)
-        .await?
-        .unwrap_or(sync_revision);
-    let absence_policy = if claimed.job().task_kind() == WorkTaskKind::ValidateStorageRoot {
+    let absence_policy = if validation {
         AbsencePolicy::Deferred
     } else {
-        AbsencePolicy::Immediate { first_job_revision }
+        AbsencePolicy::Immediate {
+            first_job_revision: first_job_revision(transaction, claimed)
+                .await?
+                .unwrap_or(sync_revision),
+        }
     };
     persist_page_contents(
         transaction,
@@ -1082,6 +1087,7 @@ async fn commit_inventory_page(
         page,
         root.sync_revision,
         sync_revision,
+        !validation,
         now,
     )
     .await?;
@@ -1548,6 +1554,23 @@ async fn persist_page_contents(
         )
         .await?;
     }
+    // The projector takes no action for this marker. Full validation (the only deferred-absence
+    // caller) lists every directory on each pass, so it skips the marker: its unchanged pages then
+    // leave empty revisions that the watermark crosses in one step, and the sweep's own
+    // `ValidationCompleted` event plus the explicit drain still close the pass.
+    if matches!(absence_policy, AbsencePolicy::Immediate { .. }) {
+        insert_inventory_page_marker(transaction, page, sync_revision, now).await?;
+    }
+    complete_inventory_scope(transaction, page, absence_policy, sync_revision, now).await?;
+    Ok(())
+}
+
+async fn insert_inventory_page_marker(
+    transaction: &DatabaseTransaction,
+    page: &StorageSyncPage,
+    sync_revision: i64,
+    now: DateTime<Utc>,
+) -> Result<(), StorageSyncRepositoryError> {
     insert_outbox_event(
         transaction,
         OutboxEventDraft {
@@ -1570,7 +1593,6 @@ async fn persist_page_contents(
         },
     )
     .await?;
-    complete_inventory_scope(transaction, page, absence_policy, sync_revision, now).await?;
     Ok(())
 }
 
@@ -2223,6 +2245,7 @@ async fn advance_root_and_record_page(
     page: &StorageSyncPage,
     previous_revision: i64,
     sync_revision: i64,
+    record_page: bool,
     now: DateTime<Utc>,
 ) -> Result<(), StorageSyncRepositoryError> {
     let backend = transaction.get_database_backend();
@@ -2239,6 +2262,9 @@ async fn advance_root_and_record_page(
         != 1
     {
         return Err(StorageSyncRepositoryError::RevisionConflict);
+    }
+    if !record_page {
+        return Ok(());
     }
     let page_insert = Query::insert()
         .into_table(Alias::new("storage_sync_pages"))
