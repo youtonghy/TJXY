@@ -101,7 +101,10 @@ pub struct FilesystemBackend {
     root_identity_changed: bool,
     #[cfg(unix)]
     device_alias: Option<(u64, u64)>,
+    /// Directory paths, listed again by id during inventory.
     paths: RwLock<HashMap<StorageObjectId, PathBuf>>,
+    /// File paths, read by id; bounded on their own so files never evict directories.
+    file_paths: RwLock<HashMap<StorageObjectId, PathBuf>>,
     open_permits: Arc<Semaphore>,
 }
 
@@ -188,6 +191,7 @@ impl FilesystemBackend {
             #[cfg(unix)]
             device_alias,
             paths: RwLock::new(paths),
+            file_paths: RwLock::new(HashMap::new()),
             open_permits: Arc::new(Semaphore::new(MAX_BLOCKING_OPENS)),
         })
     }
@@ -375,8 +379,34 @@ impl FilesystemBackend {
         Ok(scopes.into_iter().map(|(id, _)| id).collect())
     }
 
+    /// Remembers listed paths. Directories and files are bounded separately: a large root's
+    /// files used to fill the shared map, and the reset that followed dropped directories a
+    /// validation pass had queued but not yet listed, failing the whole pass. Files are cheap to
+    /// forget (they are re-resolved through the persisted index or the next listing).
+    async fn index_paths(&self, listed: Vec<(StorageObjectId, PathBuf, bool)>) {
+        let (directories, files): (Vec<_>, Vec<_>) =
+            listed.into_iter().partition(|(_, _, is_dir)| *is_dir);
+        if !directories.is_empty() {
+            let mut paths = self.paths.write().await;
+            if paths.len().saturating_add(directories.len()) > MAX_INDEXED_PATHS {
+                paths.retain(|id, _| id == &self.root_id);
+            }
+            paths.extend(directories.into_iter().map(|(id, path, _)| (id, path)));
+        }
+        if !files.is_empty() {
+            let mut paths = self.file_paths.write().await;
+            if paths.len().saturating_add(files.len()) > MAX_INDEXED_PATHS {
+                paths.clear();
+            }
+            paths.extend(files.into_iter().map(|(id, path, _)| (id, path)));
+        }
+    }
+
     async fn path_for(&self, id: &StorageObjectId) -> Result<PathBuf, BackendError> {
         if let Some(path) = self.paths.read().await.get(id).cloned() {
+            return Ok(path);
+        }
+        if let Some(path) = self.file_paths.read().await.get(id).cloned() {
             return Ok(path);
         }
         Err(BackendError::BackendNotReady {
@@ -463,15 +493,11 @@ impl FilesystemBackend {
             }
             let metadata = entry.metadata().await.map_err(map_io_error)?;
             let object = self.object_from_metadata(&canonical, &metadata)?;
-            indexed_paths.push((object.id().clone(), canonical));
+            indexed_paths.push((object.id().clone(), canonical, metadata.is_dir()));
             objects.push(object);
         }
         objects.sort_by(|left, right| left.name().cmp(right.name()));
-        let mut paths = self.paths.write().await;
-        if paths.len().saturating_add(indexed_paths.len()) > MAX_INDEXED_PATHS {
-            paths.retain(|id, _| id == &self.root_id);
-        }
-        paths.extend(indexed_paths);
+        self.index_paths(indexed_paths).await;
         Ok(ObjectPage::complete(objects))
     }
 
@@ -726,7 +752,10 @@ impl FilesystemBackend {
             });
         }
         let object = self.object_from_metadata(&path, &metadata)?;
-        self.paths.write().await.insert(object.id().clone(), path);
+        self.file_paths
+            .write()
+            .await
+            .insert(object.id().clone(), path);
         Ok(object)
     }
 }
@@ -900,6 +929,39 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{FilesystemEventMonitor, event_requires_inventory};
+
+    #[tokio::test]
+    async fn listing_keeps_directories_apart_from_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Season 1")).unwrap();
+        for index in 0..3 {
+            std::fs::write(root.path().join(format!("Episode {index}.mkv")), b"x").unwrap();
+        }
+        let backend = super::FilesystemBackend::new(root.path()).await.unwrap();
+        let root_id = backend.root_id.clone();
+
+        let page = super::StorageBackend::list_children(&backend, &root_id, None)
+            .await
+            .unwrap();
+
+        let directories = backend.paths.read().await;
+        let files = backend.file_paths.read().await;
+        for object in &page.objects {
+            let is_dir = object.object_type() == tjxy_storage::ObjectType::Directory;
+            assert_eq!(
+                directories.contains_key(object.id()),
+                is_dir,
+                "{}",
+                object.name()
+            );
+            assert_eq!(
+                files.contains_key(object.id()),
+                !is_dir,
+                "{}",
+                object.name()
+            );
+        }
+    }
 
     #[test]
     fn inventory_events_exclude_non_mutating_access() {
