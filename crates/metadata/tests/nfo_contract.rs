@@ -102,12 +102,32 @@ Second line.]]></plot>
 }
 
 #[test]
-fn nfo_rejects_non_xml_control_characters_without_calling_them_oversized() {
-    let error = NfoDocument::parse(
+fn nfo_drops_control_characters_and_keeps_the_field() {
+    let document = NfoDocument::parse(
         b"<movie><title>Unsafe\x01Title</title></movie>",
         "unsafe-control.nfo",
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(error, tjxy_metadata::MetadataError::InvalidText));
+    assert_eq!(document.title(), Some("UnsafeTitle"));
+}
+
+#[test]
+fn nfo_skips_unusable_fields_and_keeps_the_rest_of_the_document() {
+    let document = NfoDocument::parse(
+        format!(
+            "<movie><title>Arrival</title><year>20166</year><mpaa>{}</mpaa>\
+             <plot>First contact.</plot></movie>",
+            "R".repeat(40)
+        )
+        .as_bytes(),
+        "partly-bad.nfo",
+    )
+    .unwrap();
+
+    assert_eq!(document.title(), Some("Arrival"));
+    assert_eq!(document.overview(), Some("First contact."));
+    assert_eq!(document.production_year(), None);
+    assert_eq!(document.official_rating(), Some("R".repeat(32).as_str()));
+    assert_eq!(document.skipped_fields(), ["movie/year"]);
 }

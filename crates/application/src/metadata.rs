@@ -556,7 +556,18 @@ impl MetadataResolveService {
                 .clone()
                 .unwrap_or_else(|| format!("storage-object:{}", file.record_id()));
             match NfoDocument::parse(&bytes, &reference) {
-                Ok(document) => documents.push((file.record_id().as_uuid(), document)),
+                Ok(document) => {
+                    if !document.skipped_fields().is_empty() {
+                        tracing::error!(
+                            catalog_item_id = %claimed.job().scope().id(),
+                            storage_object_id = %file.record_id().as_uuid(),
+                            nfo = %file.name(),
+                            fields = ?document.skipped_fields(),
+                            "unusable NFO fields skipped"
+                        );
+                    }
+                    documents.push((file.record_id().as_uuid(), document));
+                }
                 Err(error) if files.len() == 1 => {
                     if claimed.job().metadata_source_mode() == Some(MetadataSourceMode::LocalOnly) {
                         repository

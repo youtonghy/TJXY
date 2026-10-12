@@ -203,6 +203,8 @@ pub struct NfoDocument {
     official_rating: Option<String>,
     original_language: Option<String>,
     source: MetadataSource,
+    /// Element paths whose values were unusable and dropped; the rest of the document is kept.
+    skipped_fields: Vec<String>,
 }
 
 impl NfoDocument {
@@ -315,6 +317,13 @@ impl NfoDocument {
     #[must_use]
     pub fn source(&self) -> &MetadataSource {
         &self.source
+    }
+
+    /// Element paths (such as `movie/mpaa`) whose values were malformed or out of range and were
+    /// dropped instead of rejecting the whole document.
+    #[must_use]
+    pub fn skipped_fields(&self) -> &[String] {
+        &self.skipped_fields
     }
 
     #[must_use]
@@ -476,28 +485,50 @@ impl NfoParser {
             official_rating: None,
             original_language: None,
             source: self.source.clone(),
+            skipped_fields: Vec::new(),
         });
         Ok(())
     }
 
+    /// Collects element text, dropping control characters and anything beyond the text bound so
+    /// one malformed or oversized field never rejects the whole document.
+    #[allow(clippy::unnecessary_wraps)] // Keeps the parser's per-event signature uniform.
     fn append_text(&mut self, value: &str) -> Result<(), MetadataError> {
-        if value.chars().any(is_disallowed_xml_text_character) {
-            return Err(MetadataError::InvalidText);
-        }
-        if self
-            .text
-            .chars()
-            .count()
-            .saturating_add(value.chars().count())
-            > MAX_TEXT_CHARS
-        {
-            return Err(MetadataError::FieldTooLarge);
-        }
-        self.text.push_str(value);
+        let room = MAX_TEXT_CHARS.saturating_sub(self.text.chars().count());
+        self.text.extend(
+            value
+                .chars()
+                .filter(|character| !is_disallowed_xml_text_character(*character))
+                .take(room),
+        );
         Ok(())
     }
 
+    /// Applies one closed element. A value that is malformed or out of range drops only that
+    /// field (recorded in `skipped_fields`); structural problems still reject the document.
     fn finish_element(&mut self) -> Result<(), MetadataError> {
+        match self.apply_element() {
+            Err(
+                MetadataError::FieldTooLarge
+                | MetadataError::InvalidYear
+                | MetadataError::InvalidAssociation
+                | MetadataError::TooManyAssociations
+                | MetadataError::InvalidText,
+            ) => {
+                let path = self.stack.join("/");
+                if let Some(document) = self.document.as_mut()
+                    && document.skipped_fields.len() < MAX_ASSOCIATIONS
+                    && !document.skipped_fields.contains(&path)
+                {
+                    document.skipped_fields.push(path);
+                }
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    fn apply_element(&mut self) -> Result<(), MetadataError> {
         let value = self.text.trim();
         let path = self.stack.iter().map(String::as_str).collect::<Vec<_>>();
         let Some(document) = self.document.as_mut() else {
@@ -2210,7 +2241,17 @@ fn set_once(
         return Ok(());
     }
     if !valid_text(value, max_chars) {
-        return Err(MetadataError::FieldTooLarge);
+        // Keep what is usable of an over-long or control-laden value; drop it if nothing is.
+        let cleaned = value
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(max_chars)
+            .collect::<String>();
+        if !valid_text(&cleaned, max_chars) {
+            return Err(MetadataError::FieldTooLarge);
+        }
+        *target = Some(cleaned.trim().to_owned());
+        return Ok(());
     }
     *target = Some(value.to_owned());
     Ok(())
@@ -2225,7 +2266,16 @@ fn set_once_multiline(
         return Ok(());
     }
     if !valid_multiline_text(value, max_chars) {
-        return Err(MetadataError::FieldTooLarge);
+        let cleaned = value
+            .chars()
+            .filter(|character| !is_disallowed_xml_text_character(*character))
+            .take(max_chars)
+            .collect::<String>();
+        if !valid_multiline_text(&cleaned, max_chars) {
+            return Err(MetadataError::FieldTooLarge);
+        }
+        *target = Some(cleaned.trim().to_owned());
+        return Ok(());
     }
     *target = Some(value.to_owned());
     Ok(())
