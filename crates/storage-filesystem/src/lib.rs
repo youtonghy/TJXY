@@ -474,7 +474,7 @@ impl FilesystemBackend {
                 });
             }
         }
-        let mut directory = fs::read_dir(parent_path).await.map_err(map_io_error)?;
+        let mut directory = fs::read_dir(&parent_path).await.map_err(map_io_error)?;
         let mut objects = Vec::new();
         let mut indexed_paths = Vec::new();
         while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
@@ -483,22 +483,44 @@ impl FilesystemBackend {
                     "filesystem directory exceeds the 10000-entry limit",
                 ));
             }
-            let file_type = entry.file_type().await.map_err(map_io_error)?;
-            if file_type.is_symlink() {
-                continue;
+            // One unreadable, vanished, or non-UTF-8 entry must not fail the whole directory (and
+            // with it a scoped sync or a full root validation): report it and skip it.
+            match self.listed_entry(&entry).await {
+                Ok(Some((object, canonical, is_dir))) => {
+                    indexed_paths.push((object.id().clone(), canonical, is_dir));
+                    objects.push(object);
+                }
+                Ok(None) => {}
+                Err(error) => tracing::error!(
+                    directory = %parent_path.display(),
+                    entry = %entry.file_name().to_string_lossy(),
+                    %error,
+                    "filesystem entry skipped"
+                ),
             }
-            let canonical = fs::canonicalize(entry.path()).await.map_err(map_io_error)?;
-            if !canonical.starts_with(&self.root) {
-                continue;
-            }
-            let metadata = entry.metadata().await.map_err(map_io_error)?;
-            let object = self.object_from_metadata(&canonical, &metadata)?;
-            indexed_paths.push((object.id().clone(), canonical, metadata.is_dir()));
-            objects.push(object);
         }
         objects.sort_by(|left, right| left.name().cmp(right.name()));
         self.index_paths(indexed_paths).await;
         Ok(ObjectPage::complete(objects))
+    }
+
+    /// Reads one directory entry; `None` for entries the inventory never exposes (symlinks and
+    /// anything resolving outside the root).
+    async fn listed_entry(
+        &self,
+        entry: &fs::DirEntry,
+    ) -> Result<Option<(StorageObject, PathBuf, bool)>, BackendError> {
+        let file_type = entry.file_type().await.map_err(map_io_error)?;
+        if file_type.is_symlink() {
+            return Ok(None);
+        }
+        let canonical = fs::canonicalize(entry.path()).await.map_err(map_io_error)?;
+        if !canonical.starts_with(&self.root) {
+            return Ok(None);
+        }
+        let metadata = entry.metadata().await.map_err(map_io_error)?;
+        let object = self.object_from_metadata(&canonical, &metadata)?;
+        Ok(Some((object, canonical, metadata.is_dir())))
     }
 
     async fn open_range_from_path(

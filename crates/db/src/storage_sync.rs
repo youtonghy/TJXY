@@ -88,18 +88,36 @@ impl StorageSyncPage {
         if !valid_identity(&provider_drive_id) || !valid_identity(&page_identity) {
             return Err(StorageSyncRepositoryError::InvalidPage);
         }
-        let mut identities = HashSet::new();
-        if objects.len() > MAX_OBJECTS_PER_PAGE
-            || objects.iter().any(|object| {
-                !valid_identity(object.name())
-                    || !identities.insert((
-                        object.id().provider().to_owned(),
-                        object.id().provider_object_id().to_owned(),
-                    ))
-            })
-        {
+        if objects.len() > MAX_OBJECTS_PER_PAGE {
             return Err(StorageSyncRepositoryError::InvalidPage);
         }
+        // An unusable name or a repeated identity is one bad entry, not a bad page: report it and
+        // keep the rest of the listing, so the scope and its root still sync.
+        let mut identities = HashSet::new();
+        let objects = objects
+            .into_iter()
+            .filter(|object| {
+                let reason = if !valid_identity(object.name()) {
+                    "name is empty, too long, or contains control characters"
+                } else if !identities.insert((
+                    object.id().provider().to_owned(),
+                    object.id().provider_object_id().to_owned(),
+                )) {
+                    "identity repeats an earlier entry in the page"
+                } else {
+                    return true;
+                };
+                tracing::error!(
+                    storage_root_id = %storage_root_id.as_uuid(),
+                    parent_storage_object_id = %parent_id.as_uuid(),
+                    provider_object_id = object.id().provider_object_id(),
+                    name = object.name(),
+                    reason,
+                    "storage entry skipped"
+                );
+                false
+            })
+            .collect::<Vec<_>>();
         let encoded = serde_json::to_vec(&(
             storage_root_id.as_uuid(),
             parent_id.as_uuid(),

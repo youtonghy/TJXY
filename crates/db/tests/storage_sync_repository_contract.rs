@@ -711,17 +711,9 @@ fn object_revision(id: &str, name: &str, revision: &str) -> StorageObject {
 }
 
 #[test]
-fn inventory_page_rejects_unbounded_names_and_object_counts() {
+fn inventory_page_rejects_unbounded_object_counts() {
     let root = StorageRootId::new();
     let parent = StorageObjectRecordId::new();
-    let oversized_name = StorageObject::file(
-        StorageObjectId::new("filesystem", "object").unwrap(),
-        "x".repeat(2049),
-        1,
-    );
-    assert!(
-        StorageSyncPage::new(root, parent, "drive", "page", vec![oversized_name], true,).is_err()
-    );
     let objects = (0..10_001)
         .map(|index| object(&format!("object-{index}"), "file"))
         .collect();
@@ -3490,4 +3482,52 @@ async fn missed_change_hints_queue_one_validation_per_account_root() {
         .map(|row| row.try_get::<Uuid>("", "scope_id").unwrap())
         .collect::<Vec<_>>();
     assert_eq!(validations, [fixture.root_id.as_uuid()]);
+}
+
+#[tokio::test]
+async fn a_bad_entry_is_skipped_and_the_rest_of_the_page_commits() {
+    let fixture = fixture().await;
+    let claimed = claimed_sync_job(&fixture, ManualClock::new(Utc::now())).await;
+    let oversized_name = StorageObject::file(
+        StorageObjectId::new("filesystem", "oversized").unwrap(),
+        "x".repeat(2049),
+        1,
+    );
+    let page = StorageSyncPage::new(
+        fixture.root_id,
+        fixture.parent_id,
+        "fixture-drive",
+        "page-with-bad-entries",
+        vec![
+            oversized_name,
+            object("movie", "Movie.mkv"),
+            object("movie", "Movie again.mkv"),
+        ],
+        true,
+    )
+    .unwrap();
+
+    StorageSyncRepository::new(&fixture.database)
+        .commit_inventory_page(&claimed, page)
+        .await
+        .unwrap();
+
+    let names = fixture
+        .database
+        .query_all(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("name"))
+                    .from(Alias::new("storage_objects"))
+                    .and_where(
+                        Expr::col(Alias::new("provider_object_id")).is_in(["oversized", "movie"]),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.try_get::<String>("", "name").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Movie.mkv"]);
 }

@@ -12,6 +12,7 @@ bytes.workspace = true
 chrono.workspace = true
 notify.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tjxy-storage = { path = "../storage" }
 
 [target.'cfg(unix)'.dependencies]

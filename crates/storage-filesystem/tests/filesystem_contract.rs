@@ -5,6 +5,35 @@ use tempfile::tempdir;
 use tjxy_storage::{ByteRange, IdentityQuality, StorageBackend, StorageObjectId};
 use tjxy_storage_filesystem::FilesystemBackend;
 
+/// Linux only: APFS refuses non-UTF-8 names, so the bad entry cannot be created on macOS.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_non_utf8_entry_is_skipped_without_failing_the_listing() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("movie.mkv"), b"abcdefgh").unwrap();
+    fs::write(
+        root.path()
+            .join(std::ffi::OsStr::from_bytes(b"broken-\xff-name.mkv")),
+        b"x",
+    )
+    .unwrap();
+    let backend = FilesystemBackend::new(root.path()).await.unwrap();
+
+    let page = backend
+        .list_children(backend.root_id(), None)
+        .await
+        .unwrap();
+
+    let names = page
+        .objects
+        .iter()
+        .map(|object| object.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["movie.mkv"]);
+}
+
 #[tokio::test]
 async fn lists_objects_without_classifying_or_opening_media() {
     let root = tempdir().unwrap();
