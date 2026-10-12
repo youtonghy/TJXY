@@ -23,6 +23,19 @@ pub struct SourceIndexObject {
 }
 
 impl SourceIndexObject {
+    /// Builds an input object without stable identities; used to exercise graph building.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn unindexed(id: StorageObjectRecordId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            checksum: None,
+            stable_source: None,
+            stable_subtitle: None,
+        }
+    }
+
     #[must_use]
     pub const fn id(&self) -> StorageObjectRecordId {
         self.id

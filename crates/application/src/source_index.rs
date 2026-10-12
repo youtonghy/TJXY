@@ -105,35 +105,53 @@ fn build_graph(
                 MediaLocationId::new(),
             )
         });
-        if source_ids.insert(source) {
-            let locator_kind = if extension == "strm" {
-                "strm"
+        // Build the file's rows completely before keeping any of them: one unusable file (an
+        // over-long name, a malformed checksum) is skipped instead of failing the whole item.
+        let built = (|| {
+            let source_row = if source_ids.contains(&source) {
+                None
             } else {
-                "storage"
+                let locator_kind = if extension == "strm" {
+                    "strm"
+                } else {
+                    "storage"
+                };
+                let container = (extension != "strm").then_some(extension.clone());
+                let mut source_row =
+                    MediaSourcePublicationRow::new(source, presentation, None, container)?
+                        .with_locator_kind(locator_kind)?;
+                if !is_audio {
+                    let parsed = parse_media_name(object.name())?;
+                    let hints = serde_json::to_value(parsed)
+                        .map_err(|_| SourceIndexError::InvalidNamingHints)?;
+                    source_row = source_row.with_naming_hints(hints)?;
+                }
+                Some(source_row)
             };
-            let container = (extension != "strm").then_some(extension);
-            let mut source_row =
-                MediaSourcePublicationRow::new(source, presentation, None, container)?
-                    .with_locator_kind(locator_kind)?;
-            if !is_audio {
-                let parsed = parse_media_name(object.name())?;
-                let hints = serde_json::to_value(parsed)
-                    .map_err(|_| SourceIndexError::InvalidNamingHints)?;
-                source_row = source_row.with_naming_hints(hints)?;
+            let (identity, kind) = object.checksum().map_or((None, None), |value| {
+                (Some(value.to_owned()), Some("provider_checksum".to_owned()))
+            });
+            let location_row =
+                MediaLocationPublicationRow::new(location, source, object.id(), identity, kind, 0)?;
+            Ok::<_, SourceIndexError>((source_row, location_row))
+        })();
+        let (source_row, location_row) = match built {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(
+                    storage_object_id = %object.id().as_uuid(),
+                    name = %object.name(),
+                    %error,
+                    "media file skipped"
+                );
+                continue;
             }
+        };
+        if let Some(source_row) = source_row {
+            source_ids.insert(source);
             sources.push(source_row);
         }
-        let (identity, kind) = object.checksum().map_or((None, None), |value| {
-            (Some(value.to_owned()), Some("provider_checksum".to_owned()))
-        });
-        locations.push(MediaLocationPublicationRow::new(
-            location,
-            source,
-            object.id(),
-            identity,
-            kind,
-            0,
-        )?);
+        locations.push(location_row);
         media_files.push(MediaFile {
             stem: stem.to_lowercase(),
             source,
@@ -185,7 +203,7 @@ fn build_graph(
             .stable_subtitle()
             .filter(|(_, source)| *source == video.source)
             .map_or_else(SubtitleId::new, |(id, _)| id);
-        subtitles.push(SubtitlePublicationRow::new(
+        match SubtitlePublicationRow::new(
             subtitle,
             video.source,
             object.id(),
@@ -194,7 +212,16 @@ fn build_graph(
             None,
             is_default,
             is_forced,
-        )?);
+        ) {
+            Ok(subtitle) => subtitles.push(subtitle),
+            // A malformed sidecar (for example an over-long language tag) loses only itself.
+            Err(error) => tracing::error!(
+                storage_object_id = %object.id().as_uuid(),
+                subtitle = %object.name(),
+                %error,
+                "subtitle skipped"
+            ),
+        }
     }
     Ok(SourceGraph {
         sources,
@@ -241,7 +268,26 @@ pub enum SourceIndexError {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_parts, supported_media_extension};
+    use super::{build_graph, file_parts, supported_media_extension};
+    use tjxy_common::StorageObjectRecordId;
+    use tjxy_db::SourceIndexObject;
+
+    #[test]
+    fn an_unusable_file_is_skipped_and_the_item_keeps_its_good_source() {
+        let good = StorageObjectRecordId::new();
+        let objects = [
+            SourceIndexObject::unindexed(good, "Arrival.2016.mkv"),
+            SourceIndexObject::unindexed(
+                StorageObjectRecordId::new(),
+                format!("{}.mkv", "x".repeat(600)),
+            ),
+        ];
+
+        let graph = build_graph(&objects, false, false).unwrap();
+
+        assert_eq!(graph.sources.len(), 1);
+        assert_eq!(graph.locations.len(), 1);
+    }
 
     #[test]
     fn strm_is_a_video_source_but_not_an_audio_source() {

@@ -1799,3 +1799,95 @@ async fn expansion_reads_only_its_series_subtree_in_a_large_storage_root() {
     let (season, episode) = projected_children(&fixture).await;
     assert_ne!(season, episode);
 }
+
+#[tokio::test]
+async fn an_unusable_episode_file_is_skipped_and_the_series_still_expands() {
+    let fixture = fixture(true, false, false).await;
+    let sql = fixture.database.get_database_backend();
+    // Too long to parse as a media name; the season's other episode is fine.
+    let bad = StorageObjectRecordId::new();
+    let name = format!("{}.S01E02.mkv", "x".repeat(600));
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("size"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        bad.as_uuid().into(),
+                        fixture.account.into(),
+                        "local".into(),
+                        bad.to_string().into(),
+                        name.clone().into(),
+                        name.to_lowercase().into(),
+                        "File".into(),
+                        Some(1024_i64).into(),
+                        1_i64.into(),
+                        false.into(),
+                        1_i64.into(),
+                        "StableFileId".into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    fixture
+        .database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_root_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("parent_storage_object_id"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        fixture.root.as_uuid().into(),
+                        bad.as_uuid().into(),
+                        fixture.season.as_uuid().into(),
+                        1_i64.into(),
+                        false.into(),
+                        1_i64.into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    expand_series(&fixture).await;
+
+    let (season, _) = projected_children(&fixture).await;
+    let episodes = CatalogQueryRepository::new(&fixture.database)
+        .items(
+            UserId::new(),
+            BrowseParent::Item(season),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(episodes.items().len(), 1);
+}

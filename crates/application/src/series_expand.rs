@@ -123,7 +123,13 @@ fn build_graph(
     let mut seasons = BTreeMap::<u32, SeasonGroup<'_>>::new();
     let mut warnings = Vec::new();
     for video in videos {
-        let (parsed, season_scope) = parse_episode_path(video, root, &by_id)?;
+        let (parsed, season_scope) = match parse_episode_path(video, root, &by_id) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                skip_episode(owner, video, &error, &mut warnings);
+                continue;
+            }
+        };
         let (Some(season), Some(episode)) = (parsed.season(), parsed.episode()) else {
             if warnings.len() < MAX_SCAN_WARNINGS {
                 warnings.push(format!(
@@ -155,54 +161,49 @@ fn build_graph(
         group
             .episodes
             .sort_unstable_by_key(|(_, _, episode)| (episode.start(), episode.end()));
-        let season_name = format!("Season {season_number}");
-        rows.push(
-            StructurePublicationRow::new(
-                group.id,
-                owner,
-                storage_root,
-                group.scope,
-                "Season",
-                &season_name,
-                season_name.to_lowercase(),
-                None,
-                None,
-            )?
-            .with_index_number(Some(number_to_i32(season_number)?))?,
-        );
+        let season_row = season_row(owner, group.id, storage_root, group.scope, season_number);
+        let season_row = match season_row {
+            Ok(row) => row,
+            Err(error) => {
+                for (video, _, _) in &group.episodes {
+                    skip_episode(owner, video, &error, &mut warnings);
+                }
+                continue;
+            }
+        };
+        let mut season_episodes = Vec::new();
         for (video, parsed, episode) in group.episodes {
-            let episode_id = derived_item(owner, "episode", video.id());
-            let episode_scope = video.parent().ok_or(SeriesExpandError::InvalidMedia)?;
-            let episode_name = episode_display_name(season_number, episode);
-            rows.push(
-                StructurePublicationRow::new(
-                    episode_id,
-                    group.id,
+            // Build the episode completely before keeping any of it, so one bad file is skipped
+            // whole instead of failing the series.
+            let built = build_episode(
+                &EpisodeContext {
+                    owner,
+                    season: group.id,
+                    season_number,
                     storage_root,
-                    episode_scope,
-                    "Episode",
-                    &episode_name,
-                    episode_name.to_lowercase(),
-                    parsed.year(),
-                    None,
-                )?
-                .with_index_number(Some(number_to_i32(episode.start())?))?,
-            );
-            let (stem, container) =
-                video_parts(video.name()).ok_or(SeriesExpandError::InvalidMedia)?;
-            sources.push(episode_source(
-                episode_id,
+                    sync_revision,
+                    siblings: video
+                        .parent()
+                        .and_then(|parent| children.get(&parent))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                },
                 video,
-                video
-                    .parent()
-                    .and_then(|parent| children.get(&parent))
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                &stem,
-                container,
-                sync_revision,
                 &parsed,
-            )?);
+                episode,
+            );
+            match built {
+                Ok(episode) => season_episodes.push(episode),
+                Err(error) => skip_episode(owner, video, &error, &mut warnings),
+            }
+        }
+        if season_episodes.is_empty() {
+            continue;
+        }
+        rows.push(season_row);
+        for (row, source) in season_episodes {
+            rows.push(row);
+            sources.push(source);
         }
     }
     if sources.is_empty() {
@@ -373,7 +374,13 @@ fn episode_source(
             continue;
         }
         if subtitles.len() >= MAX_SUBTITLES_PER_EPISODE {
-            return Err(SeriesExpandError::InvalidMedia);
+            tracing::error!(
+                catalog_item_id = %episode.as_uuid(),
+                video = %video.name(),
+                limit = MAX_SUBTITLES_PER_EPISODE,
+                "extra episode subtitles skipped"
+            );
+            break;
         }
         let tokens = normalized
             .strip_prefix(&normalized_stem)
@@ -382,7 +389,7 @@ fn episode_source(
             .split('.')
             .filter(|token| !token.is_empty())
             .collect::<Vec<_>>();
-        subtitles.push(SubtitlePublicationRow::new(
+        match SubtitlePublicationRow::new(
             SubtitleId::from_uuid(derived_uuid(episode.as_uuid(), "subtitle", sidecar.id())),
             source,
             sidecar.id(),
@@ -395,11 +402,106 @@ fn episode_source(
             None,
             tokens.contains(&"default"),
             tokens.contains(&"forced"),
-        )?);
+        ) {
+            Ok(subtitle) => subtitles.push(subtitle),
+            // A malformed sidecar (for example an over-long language tag) loses only itself.
+            Err(error) => tracing::error!(
+                catalog_item_id = %episode.as_uuid(),
+                subtitle = %sidecar.name(),
+                %error,
+                "episode subtitle skipped"
+            ),
+        }
     }
     SeriesSourcePublication::new(episode, vec![source_row], vec![location], subtitles)?
         .with_source_revision(sync_revision)
         .map_err(Into::into)
+}
+
+fn season_row(
+    owner: CatalogItemId,
+    season: CatalogItemId,
+    storage_root: tjxy_common::StorageRootId,
+    scope: StorageObjectRecordId,
+    season_number: u32,
+) -> Result<StructurePublicationRow, SeriesExpandError> {
+    let name = format!("Season {season_number}");
+    StructurePublicationRow::new(
+        season,
+        owner,
+        storage_root,
+        scope,
+        "Season",
+        &name,
+        name.to_lowercase(),
+        None,
+        None,
+    )?
+    .with_index_number(Some(number_to_i32(season_number)?))
+    .map_err(Into::into)
+}
+
+struct EpisodeContext<'object> {
+    owner: CatalogItemId,
+    season: CatalogItemId,
+    season_number: u32,
+    storage_root: tjxy_common::StorageRootId,
+    sync_revision: i64,
+    siblings: &'object [&'object SeriesStorageObject],
+}
+
+/// Builds one episode's structure row and source publication, or fails as a whole.
+fn build_episode(
+    context: &EpisodeContext<'_>,
+    video: &SeriesStorageObject,
+    parsed: &ParsedMediaName,
+    episode: NumberRange,
+) -> Result<(StructurePublicationRow, SeriesSourcePublication), SeriesExpandError> {
+    let episode_id = derived_item(context.owner, "episode", video.id());
+    let episode_scope = video.parent().ok_or(SeriesExpandError::InvalidMedia)?;
+    let episode_name = episode_display_name(context.season_number, episode);
+    let row = StructurePublicationRow::new(
+        episode_id,
+        context.season,
+        context.storage_root,
+        episode_scope,
+        "Episode",
+        &episode_name,
+        episode_name.to_lowercase(),
+        parsed.year(),
+        None,
+    )?
+    .with_index_number(Some(number_to_i32(episode.start())?))?;
+    let (stem, container) = video_parts(video.name()).ok_or(SeriesExpandError::InvalidMedia)?;
+    let source = episode_source(
+        episode_id,
+        video,
+        context.siblings,
+        &stem,
+        container,
+        context.sync_revision,
+        parsed,
+    )?;
+    Ok((row, source))
+}
+
+/// Reports one unusable episode file and leaves the rest of the series to publish.
+fn skip_episode(
+    owner: CatalogItemId,
+    video: &SeriesStorageObject,
+    error: &SeriesExpandError,
+    warnings: &mut Vec<String>,
+) {
+    tracing::error!(
+        catalog_item_id = %owner.as_uuid(),
+        storage_object_id = %video.id().as_uuid(),
+        video = %video.name(),
+        %error,
+        "series episode skipped"
+    );
+    if warnings.len() < MAX_SCAN_WARNINGS {
+        warnings.push(format!("Skipped series video {:?}: {error}", video.name()));
+    }
 }
 
 fn derived_item(owner: CatalogItemId, kind: &str, object: StorageObjectRecordId) -> CatalogItemId {
