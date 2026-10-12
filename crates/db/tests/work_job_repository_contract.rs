@@ -2195,11 +2195,8 @@ async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backo
             record.next_attempt_at(),
             Some(
                 now + if index == 0 {
-                    if database.get_database_backend() == sea_orm::DbBackend::MySql {
-                        Duration::seconds(1)
-                    } else {
-                        Duration::milliseconds(200)
-                    }
+                    // Completions coalesce into at most one parent pass per five seconds.
+                    Duration::seconds(5)
                 } else {
                     Duration::seconds(30)
                 }
@@ -2499,6 +2496,19 @@ async fn maintenance_drains_pending_metadata_behind_the_item_revision() {
     clock.set(now + Duration::minutes(2));
     assert_eq!(repository.maintain_queue().await.unwrap().superseded, 0);
     assert!(repository.get(retried.job().id()).await.unwrap().is_some());
+
+    // A pass that removed nothing defers the next purge by a minute instead of re-reading the
+    // whole pending backlog every few seconds.
+    let late = repository
+        .enqueue_or_join(&metadata_spec(item_id, 6))
+        .await
+        .unwrap();
+    clock.set(now + Duration::minutes(2) + Duration::seconds(10));
+    assert_eq!(repository.maintain_queue().await.unwrap().superseded, 0);
+    assert!(repository.get(late.job().id()).await.unwrap().is_some());
+    clock.set(now + Duration::minutes(3) + Duration::seconds(10));
+    assert_eq!(repository.maintain_queue().await.unwrap().superseded, 1);
+    assert!(repository.get(late.job().id()).await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -1671,7 +1671,7 @@ where
                 &transaction,
                 claimed,
                 claimed.id().as_uuid(),
-                &[row],
+                &full_scan_child_rows(row, spec)?,
                 self.now(),
             )
             .await?;
@@ -3130,6 +3130,28 @@ async fn complete_in_transaction(
 // A completion is only a scheduling hint. Parent policy, child revisions and
 // publications are revalidated when it runs. Coalesce bursts and never touch a
 // running, cancelled, provider-backed-off or unrelated root-affine parent.
+/// The child reference plus, for item-scoped work, a touched marker that lets the scan report
+/// ask "did this item get child work" with an exact key instead of a substring search over every
+/// child row of the scan.
+fn full_scan_child_rows(
+    child: WorkStagingRow,
+    spec: &WorkJobSpec,
+) -> Result<Vec<WorkStagingRow>, WorkJobRepositoryError> {
+    let mut rows = vec![child];
+    if let WorkScope::CatalogItem(item) = spec.scope() {
+        rows.push(WorkStagingRow::new(
+            crate::scan_report::TOUCHED_KIND,
+            item.to_string(),
+            Value::Object(serde_json::Map::new()),
+            "Observed",
+        )?);
+    }
+    Ok(rows)
+}
+
+/// Shortest delay before a child completion resumes its waiting full scan.
+const FULL_SCAN_WAKE_COALESCE: Duration = Duration::seconds(5);
+
 async fn wake_waiting_full_scans(
     transaction: &DatabaseTransaction,
     child: &ClaimedWorkJob,
@@ -3141,14 +3163,18 @@ async fn wake_waiting_full_scans(
     ) {
         return Ok(());
     }
-    // MySQL's existing task timestamps have second precision. Round forward
-    // there so subsecond coalescing cannot become an immediate repeated wake.
-    let wake_at = now
-        + if transaction.get_database_backend() == sea_orm::DbBackend::MySql {
-            Duration::nanoseconds(1_000_000_000 - i64::from(now.timestamp_subsec_nanos()))
-        } else {
-            Duration::milliseconds(200)
-        };
+    // A full scan re-walks its whole library on every pass, so a large scan whose children
+    // complete continuously must not be resumed after each one. The floor coalesces completions
+    // into at most one pass per interval; a parent already due sooner keeps its time.
+    let mut wake_at = now + FULL_SCAN_WAKE_COALESCE;
+    // MySQL's existing task timestamps have second precision; round forward so the stored time
+    // never lands before the floor.
+    if transaction.get_database_backend() == sea_orm::DbBackend::MySql
+        && wake_at.timestamp_subsec_nanos() != 0
+    {
+        wake_at +=
+            Duration::nanoseconds(1_000_000_000 - i64::from(wake_at.timestamp_subsec_nanos()));
+    }
     let mut update = Query::update();
     update
         .table(Alias::new("work_jobs"))

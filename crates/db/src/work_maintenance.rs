@@ -54,7 +54,16 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
             return Ok(WorkMaintenanceReport::default());
         }
         let cancelled = cancel_disabled_storage_work(&transaction, now).await?;
-        let superseded = purge_superseded_metadata_jobs(&transaction).await?;
+        let superseded = if claim_purge_slot(&transaction, now).await? {
+            let superseded = purge_superseded_metadata_jobs(&transaction).await?;
+            if superseded > 0 {
+                // Keep draining on the next pass while the backlog still yields rows.
+                set_purge_available_at(&transaction, now).await?;
+            }
+            superseded
+        } else {
+            0
+        };
         let validation_pages = purge_finished_validation_pages(&transaction).await?;
         let reclaimed = crate::work_job::reclaim_expired_leases(&transaction, now).await?;
         crate::work_job::fail_terminal_dependents(
@@ -87,6 +96,46 @@ impl<Clock: crate::WorkJobClock> WorkJobRepository<'_, Clock> {
             validation_pages,
         })
     }
+}
+
+/// Interval between superseded-metadata purges once a pass finds nothing to remove.
+const IDLE_PURGE_INTERVAL: Duration = Duration::seconds(60);
+
+/// Claims this pass's superseded-metadata purge when it is due, deferring the next idle one.
+async fn claim_purge_slot(
+    transaction: &DatabaseTransaction,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool, WorkJobRepositoryError> {
+    let due = Query::update()
+        .table(Alias::new("work_maintenance_state"))
+        .value(Alias::new("purge_available_at"), now + IDLE_PURGE_INTERVAL)
+        .and_where(Expr::col(Alias::new("id")).eq(1_i32))
+        .cond_where(
+            Cond::any()
+                .add(Expr::col(Alias::new("purge_available_at")).is_null())
+                .add(Expr::col(Alias::new("purge_available_at")).lte(now)),
+        )
+        .to_owned();
+    Ok(transaction
+        .execute(transaction.get_database_backend().build(&due))
+        .await?
+        .rows_affected()
+        == 1)
+}
+
+async fn set_purge_available_at(
+    transaction: &DatabaseTransaction,
+    at: chrono::DateTime<Utc>,
+) -> Result<(), WorkJobRepositoryError> {
+    let update = Query::update()
+        .table(Alias::new("work_maintenance_state"))
+        .value(Alias::new("purge_available_at"), at)
+        .and_where(Expr::col(Alias::new("id")).eq(1_i32))
+        .to_owned();
+    transaction
+        .execute(transaction.get_database_backend().build(&update))
+        .await?;
+    Ok(())
 }
 
 /// Deletes Pending metadata resolutions whose item has moved on to a newer metadata revision.

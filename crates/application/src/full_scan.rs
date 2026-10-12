@@ -66,6 +66,10 @@ impl FullScanService {
                 .item_issues(claimed.id(), &targets)
                 .await
                 .map_err(FullScanRepositoryError::from)?;
+            let mut touched = scans
+                .items_had_work(claimed.id(), &targets)
+                .await
+                .map_err(FullScanRepositoryError::from)?;
             for item in &targets {
                 if let Some(issue) = issues.get(item) {
                     if issue.needs_selection {
@@ -128,11 +132,7 @@ impl FullScanService {
                                     source.id(),
                                     source.probe_revision()
                                 );
-                                if !scans
-                                    .item_had_work(claimed.id(), *item)
-                                    .await
-                                    .map_err(FullScanRepositoryError::from)?
-                                {
+                                if touched.insert(*item) {
                                     jobs.stage_batch(
                                         claimed,
                                         claimed.id().as_uuid(),
@@ -164,11 +164,7 @@ impl FullScanService {
                 match item_result {
                     Ok(pending) if pending > 0 => scheduled += pending,
                     Ok(_) => {
-                        if scans
-                            .item_had_work(claimed.id(), *item)
-                            .await
-                            .map_err(FullScanRepositoryError::from)?
-                        {
+                        if touched.contains(item) {
                             success += 1;
                         } else {
                             skipped += 1;

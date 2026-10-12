@@ -1,6 +1,6 @@
 use sea_orm::{
     ConnectionTrait, DbErr,
-    sea_query::{Alias, Cond, Expr, Order, Query},
+    sea_query::{Alias, Expr, Order, Query},
 };
 use serde::{Deserialize, Serialize};
 use tjxy_common::{CatalogItemId, WorkJobId};
@@ -10,6 +10,8 @@ use crate::{
 };
 
 const ISSUE_KIND: &str = "FullScanItemIssue";
+/// Marks an item that received child work in a scan; keyed by the bare item id.
+pub(crate) const TOUCHED_KIND: &str = "FullScanTouched";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -171,49 +173,49 @@ impl FullScanRepository<'_> {
             .collect()
     }
 
-    /// Checks recorded child work so a no-change scan reports skipped items accurately.
+    /// Returns the page items that received child work in this scan, so a no-change scan reports
+    /// skipped items accurately. One indexed lookup per target page.
     ///
     /// # Errors
-    /// Returns database failures.
-    pub async fn item_had_work(&self, job: WorkJobId, item: CatalogItemId) -> Result<bool, DbErr> {
+    /// Returns an invalid page size or database failures.
+    pub async fn items_had_work(
+        &self,
+        job: WorkJobId,
+        items: &[CatalogItemId],
+    ) -> Result<std::collections::HashSet<CatalogItemId>, DbErr> {
+        if items.len() > 128 {
+            return Err(DbErr::Custom(
+                "scan report page exceeds 128 items".to_owned(),
+            ));
+        }
+        if items.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
         let database = self.connection();
-        Ok(database
-            .query_one(
+        database
+            .query_all(
                 database.get_database_backend().build(
                     Query::select()
-                        .expr(Expr::val(1_i32))
+                        .column(Alias::new("natural_key"))
                         .from(Alias::new("work_staging_rows"))
                         .and_where(Expr::col(Alias::new("job_id")).eq(job.as_uuid()))
-                        .cond_where(
-                            Cond::any()
-                                .add(
-                                    Cond::all()
-                                        .add(
-                                            Expr::col(Alias::new("entity_kind"))
-                                                .eq("FullScanChild"),
-                                        )
-                                        .add(
-                                            Expr::col(Alias::new("natural_key"))
-                                                .like(format!("%:{item}:%")),
-                                        ),
-                                )
-                                .add(
-                                    Cond::all()
-                                        .add(
-                                            Expr::col(Alias::new("entity_kind"))
-                                                .eq("FullScanTouched"),
-                                        )
-                                        .add(
-                                            Expr::col(Alias::new("natural_key"))
-                                                .eq(item.to_string()),
-                                        ),
-                                ),
-                        )
-                        .limit(1),
+                        .and_where(Expr::col(Alias::new("publication_id")).eq(job.as_uuid()))
+                        .and_where(Expr::col(Alias::new("entity_kind")).eq(TOUCHED_KIND))
+                        .and_where(
+                            Expr::col(Alias::new("natural_key"))
+                                .is_in(items.iter().map(ToString::to_string)),
+                        ),
                 ),
             )
             .await?
-            .is_some())
+            .into_iter()
+            .map(|row| {
+                let key: String = row.try_get("", "natural_key")?;
+                uuid::Uuid::parse_str(&key)
+                    .map(CatalogItemId::from_uuid)
+                    .map_err(|_| DbErr::Custom("invalid scan touched item".to_owned()))
+            })
+            .collect()
     }
 
     /// Returns one bounded diagnostic page; legacy scans have no detailed counters.

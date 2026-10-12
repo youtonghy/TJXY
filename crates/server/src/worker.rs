@@ -1051,10 +1051,12 @@ async fn handle_full_scan_outcome(
 }
 
 fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration {
-    if matches!(error, FullScanError::ChildrenPending { .. }) {
-        // Completions wake a waiting parent sooner; this is the bounded fallback
-        // for a lost hint or a child that finished before the parent deferred.
-        return Duration::seconds(2);
+    if let FullScanError::ChildrenPending { scheduled } = error {
+        // Completions wake a waiting parent sooner (coalesced to one pass per few seconds);
+        // this is the fallback for a lost hint. Each pass re-walks the whole library, so a large
+        // backlog waits longer between passes while a small one still finishes promptly.
+        let scheduled = i64::try_from(*scheduled).unwrap_or(i64::MAX);
+        return Duration::seconds((2 + scheduled / 100).min(30));
     }
     storage_backoff(attempt_count)
 }
@@ -1905,6 +1907,15 @@ mod tests {
         assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
         assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 2);
         assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 2);
+    }
+
+    #[test]
+    fn large_pending_backlogs_space_out_full_scan_passes() {
+        let pending = |scheduled| tjxy_application::FullScanError::ChildrenPending { scheduled };
+
+        assert_eq!(full_scan_retry_delay(&pending(99), 1).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&pending(1_000), 1).num_seconds(), 12);
+        assert_eq!(full_scan_retry_delay(&pending(5_788), 1).num_seconds(), 30);
     }
 
     #[test]
