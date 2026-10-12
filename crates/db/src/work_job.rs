@@ -3177,6 +3177,9 @@ async fn classify_failure(
 
 /// Shortest delay before a child completion resumes its waiting full scan.
 const FULL_SCAN_WAKE_COALESCE: Duration = Duration::seconds(5);
+/// Only scans already due within this horizon are woken early. A slow scan defers for a multiple
+/// of its pass time instead, and waking it would run its passes back to back.
+const FULL_SCAN_WAKE_HORIZON: Duration = Duration::seconds(30);
 
 async fn wake_waiting_full_scans(
     transaction: &DatabaseTransaction,
@@ -3211,7 +3214,8 @@ async fn wake_waiting_full_scans(
             Expr::col(Alias::new("task_kind")).is_in(["FullMediaScan", "FullLibraryRootScan"]),
         )
         .and_where(Expr::col(Alias::new("last_error")).like("full scan scheduled % child jobs"))
-        .and_where(Expr::col(Alias::new("available_at")).gt(wake_at));
+        .and_where(Expr::col(Alias::new("available_at")).gt(wake_at))
+        .and_where(Expr::col(Alias::new("available_at")).lte(now + FULL_SCAN_WAKE_HORIZON));
     if let Some(root) = child.job().storage_root_affinity() {
         update.and_where(
             Expr::col(Alias::new("storage_root_affinity")).is_in([root.as_uuid(), Uuid::nil()]),

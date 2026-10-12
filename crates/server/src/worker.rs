@@ -1003,6 +1003,7 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
         {
             Ok(Some(claimed)) => {
                 idle.reset();
+                let started = Instant::now();
                 let outcome = Box::pin(renew_scan_execution(
                     &database,
                     &claimed,
@@ -1010,7 +1011,7 @@ async fn run_full_scan_worker(database: DatabaseConnection, service: FullScanSer
                     FullScanError::Work,
                 ))
                 .await;
-                handle_full_scan_outcome(&jobs, &claimed, outcome).await;
+                handle_full_scan_outcome(&jobs, &claimed, outcome, started.elapsed()).await;
             }
             Ok(None) => idle.wait().await,
             Err(error) => {
@@ -1025,6 +1026,7 @@ async fn handle_full_scan_outcome(
     jobs: &WorkJobRepository<'_>,
     claimed: &tjxy_db::ClaimedWorkJob,
     outcome: Result<tjxy_application::FullScanResult, FullScanError>,
+    pass: StdDuration,
 ) {
     let Err(error) = outcome else { return };
     if matches!(
@@ -1038,7 +1040,7 @@ async fn handle_full_scan_outcome(
         log_terminal_failure(claimed, "full scan failed terminally", &error);
         jobs.fail_terminal(claimed, &message).await
     } else {
-        let delay = full_scan_retry_delay(&error, claimed.attempt_count());
+        let delay = full_scan_retry_delay(&error, claimed.attempt_count(), pass);
         if matches!(error, FullScanError::ChildrenPending { .. }) {
             jobs.defer(claimed, delay, &message).await
         } else {
@@ -1050,13 +1052,26 @@ async fn handle_full_scan_outcome(
     }
 }
 
-fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32) -> Duration {
+/// Idle time a pending full scan waits per unit of time its last pass took.
+const FULL_SCAN_IDLE_PER_PASS: i32 = 4;
+/// Longest wait between passes, so a finished backlog is still noticed promptly.
+const FULL_SCAN_MAX_PASS_GAP: Duration = Duration::minutes(15);
+
+fn full_scan_retry_delay(error: &FullScanError, attempt_count: i32, pass: StdDuration) -> Duration {
     if let FullScanError::ChildrenPending { scheduled } = error {
         // Completions wake a waiting parent sooner (coalesced to one pass per few seconds);
         // this is the fallback for a lost hint. Each pass re-walks the whole library, so a large
         // backlog waits longer between passes while a small one still finishes promptly.
         let scheduled = i64::try_from(*scheduled).unwrap_or(i64::MAX);
-        return Duration::seconds((2 + scheduled / 100).min(30));
+        let backlog = Duration::seconds((2 + scheduled / 100).min(30));
+        // A pass over a large library can take minutes. Waiting a multiple of it keeps scans to a
+        // bounded share of database time, leaving it to the children they wait for.
+        let cost = Duration::from_std(pass)
+            .unwrap_or(FULL_SCAN_MAX_PASS_GAP)
+            .checked_mul(FULL_SCAN_IDLE_PER_PASS)
+            .unwrap_or(FULL_SCAN_MAX_PASS_GAP)
+            .min(FULL_SCAN_MAX_PASS_GAP);
+        return backlog.max(cost);
     }
     storage_backoff(attempt_count)
 }
@@ -1904,18 +1919,47 @@ mod tests {
     fn pending_full_scan_children_keep_a_short_loss_tolerant_poll() {
         let error = tjxy_application::FullScanError::ChildrenPending { scheduled: 1 };
 
-        assert_eq!(full_scan_retry_delay(&error, 1).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&error, 4).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&error, 20).num_seconds(), 2);
+        let pass = StdDuration::from_millis(200);
+        assert_eq!(full_scan_retry_delay(&error, 1, pass).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&error, 4, pass).num_seconds(), 2);
+        assert_eq!(full_scan_retry_delay(&error, 20, pass).num_seconds(), 2);
     }
 
     #[test]
     fn large_pending_backlogs_space_out_full_scan_passes() {
         let pending = |scheduled| tjxy_application::FullScanError::ChildrenPending { scheduled };
 
-        assert_eq!(full_scan_retry_delay(&pending(99), 1).num_seconds(), 2);
-        assert_eq!(full_scan_retry_delay(&pending(1_000), 1).num_seconds(), 12);
-        assert_eq!(full_scan_retry_delay(&pending(5_788), 1).num_seconds(), 30);
+        let pass = StdDuration::from_millis(200);
+        assert_eq!(
+            full_scan_retry_delay(&pending(99), 1, pass).num_seconds(),
+            2
+        );
+        assert_eq!(
+            full_scan_retry_delay(&pending(1_000), 1, pass).num_seconds(),
+            12
+        );
+        assert_eq!(
+            full_scan_retry_delay(&pending(5_788), 1, pass).num_seconds(),
+            30
+        );
+    }
+
+    #[test]
+    fn slow_full_scan_passes_wait_a_multiple_of_their_cost() {
+        let pending = tjxy_application::FullScanError::ChildrenPending { scheduled: 36_951 };
+
+        assert_eq!(
+            full_scan_retry_delay(&pending, 1, StdDuration::from_secs(20)).num_seconds(),
+            80
+        );
+        assert_eq!(
+            full_scan_retry_delay(&pending, 1, StdDuration::from_secs(400)).num_minutes(),
+            15
+        );
+        assert_eq!(
+            full_scan_retry_delay(&pending, 1, StdDuration::MAX).num_minutes(),
+            15
+        );
     }
 
     #[test]

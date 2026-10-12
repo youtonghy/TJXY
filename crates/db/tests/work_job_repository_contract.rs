@@ -2133,7 +2133,12 @@ async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backo
     let now = Utc.with_ymd_and_hms(2026, 9, 10, 0, 0, 0).unwrap();
     let (jobs, clock) = repository(&database, now);
     let mut parents = Vec::new();
-    for message in ["full scan scheduled 4 child jobs", "provider rate limit"] {
+    for (message, delay) in [
+        ("full scan scheduled 4 child jobs", Duration::seconds(30)),
+        ("provider rate limit", Duration::seconds(30)),
+        // A slow pass over a large library defers for a multiple of its own cost.
+        ("full scan scheduled 36951 child jobs", Duration::minutes(5)),
+    ] {
         jobs.enqueue_or_join(
             &WorkJobSpec::new(
                 WorkTaskKind::FullMediaScan,
@@ -2154,9 +2159,7 @@ async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backo
             .await
             .unwrap()
             .unwrap();
-        jobs.defer(&claimed, Duration::seconds(30), message)
-            .await
-            .unwrap();
+        jobs.defer(&claimed, delay, message).await.unwrap();
         parents.push(claimed.id());
     }
     for offset in [0, 100] {
@@ -2194,11 +2197,12 @@ async fn child_completion_coalesces_parent_wakeups_without_bypassing_other_backo
         assert_eq!(
             record.next_attempt_at(),
             Some(
-                now + if index == 0 {
+                now + match index {
                     // Completions coalesce into at most one parent pass per five seconds.
-                    Duration::seconds(5)
-                } else {
-                    Duration::seconds(30)
+                    0 => Duration::seconds(5),
+                    1 => Duration::seconds(30),
+                    // Waking a slow scan early would put its passes back to back.
+                    _ => Duration::minutes(5),
                 }
             )
         );
