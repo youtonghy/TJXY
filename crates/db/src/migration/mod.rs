@@ -82,6 +82,7 @@ mod m20260912_000081_terminal_work_index;
 mod m20260913_000082_work_scope_history_index;
 mod m20260914_000083_claim_and_purge_indexes;
 mod m20260915_000084_maintenance_purge_cadence;
+mod m20261012_000085_reresolve_episode_and_season_art;
 
 use std::collections::HashSet;
 
@@ -363,6 +364,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260913_000082_work_scope_history_index::Migration),
             Box::new(m20260914_000083_claim_and_purge_indexes::Migration),
             Box::new(m20260915_000084_maintenance_purge_cadence::Migration),
+            Box::new(m20261012_000085_reresolve_episode_and_season_art::Migration),
         ]
     }
 }

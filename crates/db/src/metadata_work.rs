@@ -358,30 +358,16 @@ impl<'connection> MetadataWorkRepository<'connection> {
             .and_then(|(id, _)| sidecars.iter().find(|file| file.record_id.as_uuid() == *id))
             .or_else(|| sidecars.first())
             .cloned();
-        let image_rows = self
-            .database
-            .query_all(
-                self.database
-                    .get_database_backend()
-                    .build(&sibling_file_query(
-                        item_id,
-                        scope,
-                        input_revision,
-                        SiblingFileKind::Image,
-                    )),
-            )
-            .await?;
-        if u64::try_from(image_rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
-            return Err(MetadataWorkError::TooManyImages);
-        }
-        let mut image_candidates = image_rows
-            .iter()
-            .map(sidecar_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        if let Some(stem) = &flat_file_stem {
-            image_candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
-        }
-        let images = select_images(&image_candidates);
+        let images = collect_images(
+            self.database,
+            item_id,
+            scope,
+            input_revision,
+            kind,
+            flat_file_stem.as_deref(),
+            &video_names,
+        )
+        .await?;
         Ok(MetadataWorkSnapshot {
             lookup,
             sidecar,
@@ -1049,27 +1035,16 @@ async fn revalidate_metadata_snapshot(
     {
         return Err(MetadataWorkError::StaleOrUnavailable);
     }
-    let image_rows = transaction
-        .query_all(
-            transaction
-                .get_database_backend()
-                .build(&sibling_file_query(
-                    item_id,
-                    scope,
-                    input_revision,
-                    SiblingFileKind::Image,
-                )),
-        )
-        .await?;
-    if u64::try_from(image_rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
-        return Err(MetadataWorkError::TooManyImages);
-    }
-    let images = select_images(
-        &image_rows
-            .iter()
-            .map(sidecar_from_row)
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let images = collect_images(
+        transaction,
+        item_id,
+        scope,
+        input_revision,
+        snapshot.lookup.kind(),
+        flat_file_stem.as_deref(),
+        &video_names,
+    )
+    .await?;
     if images != snapshot.images {
         return Err(MetadataWorkError::StaleOrUnavailable);
     }
@@ -1603,14 +1578,197 @@ fn sidecar_from_row(
     })
 }
 
-fn select_images(candidates: &[MetadataSidecarCandidate]) -> Vec<MetadataImageCandidate> {
+/// Series-folder context a season needs to find its `seasonNN-poster` art.
+#[derive(Clone, Copy, Debug)]
+struct SeasonArt {
+    index: i32,
+    /// The owning series and its folder, present only when that folder is this
+    /// season folder's parent and its inventory is settled.
+    series_folder: Option<(
+        CatalogItemId,
+        crate::catalog_storage_scope::CatalogStorageScope,
+    )>,
+}
+
+/// Loads the season number and, for a season folder inside its series folder, the series
+/// scope. The series folder is read at its own children revision, so it needs no extra job
+/// input revision: revalidation recomputes the selection and rejects any difference.
+async fn season_art(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+) -> Result<Option<SeasonArt>, MetadataWorkError> {
+    let query = Query::select()
+        .columns([
+            Alias::new("index_number"),
+            Alias::new("structure_owner_item_id"),
+        ])
+        .from(Alias::new("catalog_items"))
+        .and_where(Expr::col(Alias::new("id")).eq(item_id.as_uuid()))
+        .limit(1)
+        .to_owned();
+    let Some(row) = connection
+        .query_one(connection.get_database_backend().build(&query))
+        .await?
+    else {
+        return Err(MetadataWorkError::StaleOrUnavailable);
+    };
+    let Some(index) = row.try_get::<Option<i32>>("", "index_number")? else {
+        return Ok(None);
+    };
+    let owner = row
+        .try_get::<Option<Uuid>>("", "structure_owner_item_id")?
+        .map(CatalogItemId::from_uuid);
+    let series_folder = match (owner, scope.parent_storage_object_id()) {
+        (Some(owner), Some(parent)) if !scope.is_file() => {
+            series_folder_scope(connection, owner, scope.storage_root_id(), parent)
+                .await?
+                .map(|series| (owner, series))
+        }
+        _ => None,
+    };
+    Ok(Some(SeasonArt {
+        index,
+        series_folder,
+    }))
+}
+
+async fn series_folder_scope(
+    connection: &impl ConnectionTrait,
+    series: CatalogItemId,
+    root: StorageRootId,
+    season_parent: StorageObjectRecordId,
+) -> Result<Option<crate::catalog_storage_scope::CatalogStorageScope>, MetadataWorkError> {
+    let scope = match crate::catalog_storage_scope::resolve_catalog_storage_scope(
+        connection,
+        series,
+        Some(root),
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        // The series' own resolution reports its ambiguity; the season resolves without
+        // series-folder art instead of failing on its parent's behalf.
+        Err(crate::catalog_storage_scope::CatalogStorageScopeError::Ambiguous) => None,
+        Err(crate::catalog_storage_scope::CatalogStorageScopeError::Database(error)) => {
+            return Err(error.into());
+        }
+    };
+    let Some(scope) = scope.filter(|scope| {
+        scope.storage_object_id() == season_parent
+            && scope.children_indexed()
+            && scope.accepts_metadata_input(scope.children_revision())
+    }) else {
+        return Ok(None);
+    };
+    Ok(
+        crate::catalog_storage_scope::storage_scope_is_reconciled(connection, scope, true)
+            .await?
+            .then_some(scope),
+    )
+}
+
+async fn image_candidates(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+    input_revision: i64,
+) -> Result<Vec<MetadataSidecarCandidate>, MetadataWorkError> {
+    let rows = connection
+        .query_all(connection.get_database_backend().build(&sibling_file_query(
+            item_id,
+            scope,
+            input_revision,
+            SiblingFileKind::Image,
+        )))
+        .await?;
+    if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_IMAGE_CANDIDATES {
+        return Err(MetadataWorkError::TooManyImages);
+    }
+    rows.iter().map(sidecar_from_row).collect()
+}
+
+/// Collects and selects the sidecar images for one item. The snapshot and its
+/// revalidation both go through here so they cannot disagree on the filters.
+async fn collect_images(
+    connection: &impl ConnectionTrait,
+    item_id: CatalogItemId,
+    scope: crate::catalog_storage_scope::CatalogStorageScope,
+    input_revision: i64,
+    kind: MetadataItemKind,
+    flat_file_stem: Option<&str>,
+    video_names: &[String],
+) -> Result<Vec<MetadataImageCandidate>, MetadataWorkError> {
+    let mut candidates = image_candidates(connection, item_id, scope, input_revision).await?;
+    if let Some(stem) = flat_file_stem {
+        candidates.retain(|candidate| sidecar_stem_matches(&candidate.name, stem));
+    }
+    let rule = match kind {
+        MetadataItemKind::Episode => ImageRule::Episode(file_stems(video_names)),
+        MetadataItemKind::Season => match season_art(connection, item_id, scope).await? {
+            Some(art) => {
+                let names = season_art_names(art.index);
+                if let Some((series, series_scope)) = art.series_folder {
+                    let mut series_images = image_candidates(
+                        connection,
+                        series,
+                        series_scope,
+                        series_scope.children_revision(),
+                    )
+                    .await?;
+                    // Only this season's named art; the rest of the folder is the series'.
+                    series_images.retain(|candidate| {
+                        file_stem(&candidate.name)
+                            .is_some_and(|stem| season_art_kind(&stem, &names).is_some())
+                    });
+                    candidates.extend(series_images);
+                }
+                ImageRule::Season(names)
+            }
+            None => ImageRule::Folder,
+        },
+        MetadataItemKind::Audio | MetadataItemKind::Movie | MetadataItemKind::Series => {
+            ImageRule::Folder
+        }
+    };
+    Ok(select_images(&rule, &candidates))
+}
+
+/// Which sidecar image names an item owns.
+enum ImageRule {
+    /// Folder art of a movie, series, or album folder.
+    Folder,
+    /// Folder art plus `seasonNN-*` art, under these accepted `seasonNN` prefixes.
+    Season(Vec<String>),
+    /// Episodes share their season folder, so an episode only owns images named after
+    /// one of its own video files (lowercase stems).
+    Episode(HashSet<String>),
+}
+
+fn file_stem(name: &str) -> Option<String> {
+    Some(Path::new(name).file_stem()?.to_str()?.to_ascii_lowercase())
+}
+
+fn file_stems(names: &[String]) -> HashSet<String> {
+    names.iter().filter_map(|name| file_stem(name)).collect()
+}
+
+fn select_images(
+    rule: &ImageRule,
+    candidates: &[MetadataSidecarCandidate],
+) -> Vec<MetadataImageCandidate> {
     let mut selected = Vec::new();
     for image_type in [ImageType::Primary, ImageType::Backdrop] {
         let mut matches = candidates
             .iter()
             .filter_map(|candidate| {
-                image_rank(&candidate.name, image_type)
-                    .map(|rank| (rank, candidate.name.to_ascii_lowercase(), candidate.clone()))
+                let stem = file_stem(&candidate.name)?;
+                match rule {
+                    ImageRule::Folder => folder_image_rank(&stem, image_type),
+                    ImageRule::Season(names) => season_image_rank(&stem, image_type, names),
+                    ImageRule::Episode(stems) => episode_image_rank(&stem, image_type, stems),
+                }
+                .map(|rank| (rank, candidate.name.to_ascii_lowercase(), candidate.clone()))
             })
             .collect::<Vec<_>>();
         matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
@@ -1621,23 +1779,88 @@ fn select_images(candidates: &[MetadataSidecarCandidate]) -> Vec<MetadataImageCa
     selected
 }
 
-fn image_rank(name: &str, image_type: ImageType) -> Option<u8> {
-    let stem = Path::new(name).file_stem()?.to_str()?.to_ascii_lowercase();
+fn folder_image_rank(stem: &str, image_type: ImageType) -> Option<u8> {
     match image_type {
-        ImageType::Primary => match stem.as_str() {
+        ImageType::Primary => match stem {
             "poster" => Some(0),
             "folder" => Some(1),
             "cover" => Some(2),
-            _ if stem.ends_with("-poster") => Some(3),
+            // `season01-poster.jpg` sits in the series folder but belongs to a season.
+            _ if stem.ends_with("-poster") && !is_season_art(stem) => Some(3),
             _ => None,
         },
-        ImageType::Backdrop => match stem.as_str() {
+        ImageType::Backdrop => match stem {
             "fanart" => Some(0),
             "backdrop" => Some(1),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// `seasonNN-poster`/`seasonNN-fanart` (Jellyfin/Kodi) win over plain folder art, which
+/// also keeps a season scoped to the series folder off the series' own `poster.jpg`.
+fn season_image_rank(stem: &str, image_type: ImageType, names: &[String]) -> Option<u8> {
+    match season_art_kind(stem, names) {
+        Some(kind) => match (image_type, kind) {
+            (ImageType::Primary, "poster") | (ImageType::Backdrop, "fanart") => Some(0),
+            _ => None,
+        },
+        None if is_season_art(stem) => None,
+        None => folder_image_rank(stem, image_type).map(|rank| rank + 1),
+    }
+}
+
+/// Jellyfin/Kodi episode art: `<video>-thumb.jpg`, or an image sharing the video's stem.
+fn episode_image_rank(
+    stem: &str,
+    image_type: ImageType,
+    video_stems: &HashSet<String>,
+) -> Option<u8> {
+    if image_type != ImageType::Primary {
+        return None;
+    }
+    if stem
+        .strip_suffix("-thumb")
+        .is_some_and(|video| video_stems.contains(video))
+    {
+        Some(0)
+    } else if video_stems.contains(stem) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// The `seasonNN` prefixes naming one season's art; season 0 is the specials season.
+fn season_art_names(index: i32) -> Vec<String> {
+    let mut names = vec![format!("season{index:02}"), format!("season{index}")];
+    if index == 0 {
+        names.push("season-specials".to_owned());
+    }
+    names.dedup();
+    names
+}
+
+/// The art kind (`poster`, `fanart`, ...) when `stem` is one of this season's names.
+fn season_art_kind<'a>(stem: &'a str, names: &[String]) -> Option<&'a str> {
+    names.iter().find_map(|name| {
+        stem.strip_prefix(name.as_str())?
+            .strip_prefix('-')
+            .filter(|kind| !kind.is_empty())
+    })
+}
+
+/// Whether `stem` names art of some season (`season01-poster`, `season-specials-fanart`).
+fn is_season_art(stem: &str) -> bool {
+    let Some(rest) = stem.strip_prefix("season") else {
+        return false;
+    };
+    if rest.starts_with("-specials-") || rest.starts_with("-all-") {
+        return true;
+    }
+    let after_digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    after_digits.len() < rest.len() && after_digits.starts_with('-')
 }
 
 fn select_sidecars(
@@ -1871,5 +2094,121 @@ mod tests {
         let selected =
             select_sidecars(MetadataItemKind::Series, vec![candidate("tvshow.nfo")], &[]).unwrap();
         assert_eq!(selected.len(), 1);
+    }
+
+    fn selected_names(images: &[MetadataImageCandidate]) -> Vec<(ImageType, &str)> {
+        images
+            .iter()
+            .map(|image| (image.image_type, image.file.name.as_str()))
+            .collect()
+    }
+
+    fn episode(videos: &[&str]) -> ImageRule {
+        ImageRule::Episode(file_stems(
+            &videos
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    #[test]
+    fn an_episode_takes_only_the_thumb_named_after_its_own_video() {
+        let season_folder = [
+            "Show.S01E01 - 4K-thumb.jpg",
+            "Show.S01E02 - 4K-thumb.jpg",
+            "poster.jpg",
+            "fanart.jpg",
+        ]
+        .map(candidate);
+
+        let images = select_images(&episode(&["Show.S01E02 - 4K.strm"]), &season_folder);
+
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "Show.S01E02 - 4K-thumb.jpg")]
+        );
+    }
+
+    #[test]
+    fn an_episode_prefers_the_thumb_over_an_image_sharing_its_stem() {
+        let images = select_images(
+            &episode(&["S01E01.mkv"]),
+            &["S01E01.JPG", "S01E01-thumb.png"].map(candidate),
+        );
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "S01E01-thumb.png")]
+        );
+
+        let images = select_images(&episode(&["s01e01.mkv"]), &[candidate("S01E01.jpg")]);
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "S01E01.jpg")]
+        );
+    }
+
+    #[test]
+    fn a_season_takes_its_own_numbered_art_before_folder_art() {
+        let images = select_images(
+            &ImageRule::Season(season_art_names(1)),
+            &[
+                "poster.jpg",
+                "fanart.jpg",
+                "season01-poster.jpg",
+                "season02-poster.jpg",
+                "S01E01-thumb.jpg",
+            ]
+            .map(candidate),
+        );
+        assert_eq!(
+            selected_names(&images),
+            [
+                (ImageType::Primary, "season01-poster.jpg"),
+                (ImageType::Backdrop, "fanart.jpg")
+            ]
+        );
+
+        let images = select_images(
+            &ImageRule::Season(season_art_names(2)),
+            &["season01-poster.jpg", "season1-poster.jpg"].map(candidate),
+        );
+        assert!(images.is_empty(), "{images:?}");
+
+        let images = select_images(
+            &ImageRule::Season(season_art_names(0)),
+            &["Season-Specials-Poster.jpg"].map(candidate),
+        );
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "Season-Specials-Poster.jpg")]
+        );
+    }
+
+    #[test]
+    fn folder_art_ignores_episode_and_season_art() {
+        let images = select_images(
+            &ImageRule::Folder,
+            &["S01E01-thumb.jpg", "season01-poster.jpg", "fanart.jpg"].map(candidate),
+        );
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Backdrop, "fanart.jpg")]
+        );
+
+        let images = select_images(
+            &ImageRule::Folder,
+            &["season01-poster.jpg", "movie-poster.jpg", "poster.jpg"].map(candidate),
+        );
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "poster.jpg")]
+        );
+
+        let images = select_images(&ImageRule::Folder, &["movie-poster.jpg"].map(candidate));
+        assert_eq!(
+            selected_names(&images),
+            [(ImageType::Primary, "movie-poster.jpg")]
+        );
     }
 }

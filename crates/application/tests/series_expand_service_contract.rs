@@ -21,6 +21,7 @@ struct Fixture {
     series: CatalogItemId,
     account: Uuid,
     root: StorageRootId,
+    title: StorageObjectRecordId,
     season: StorageObjectRecordId,
     season_nfo: StorageObjectRecordId,
     episode_nfos: Vec<StorageObjectRecordId>,
@@ -281,74 +282,16 @@ async fn fixture_with_video_name(
         ]);
     }
     for (id, parent, name, object_type, indexed) in objects {
-        database
-            .execute(
-                sql.build(
-                    Query::insert()
-                        .into_table(Alias::new("storage_objects"))
-                        .columns([
-                            Alias::new("id"),
-                            Alias::new("storage_account_id"),
-                            Alias::new("provider_drive_id"),
-                            Alias::new("provider_object_id"),
-                            Alias::new("name"),
-                            Alias::new("normalized_name"),
-                            Alias::new("object_type"),
-                            Alias::new("size"),
-                            Alias::new("observed_sync_revision"),
-                            Alias::new("children_indexed"),
-                            Alias::new("children_index_revision"),
-                            Alias::new("identity_quality"),
-                            Alias::new("presence_state"),
-                        ])
-                        .values_panic([
-                            id.as_uuid().into(),
-                            account.into(),
-                            "local".into(),
-                            id.to_string().into(),
-                            name.into(),
-                            name.to_lowercase().into(),
-                            object_type.into(),
-                            (object_type == "File").then_some(1024_i64).into(),
-                            1_i64.into(),
-                            indexed.into(),
-                            1_i64.into(),
-                            "StableFileId".into(),
-                            "Present".into(),
-                        ]),
-                ),
-            )
-            .await
-            .unwrap();
-        database
-            .execute(
-                sql.build(
-                    Query::insert()
-                        .into_table(Alias::new("storage_root_objects"))
-                        .columns([
-                            Alias::new("id"),
-                            Alias::new("storage_root_id"),
-                            Alias::new("storage_object_id"),
-                            Alias::new("parent_storage_object_id"),
-                            Alias::new("observed_sync_revision"),
-                            Alias::new("children_indexed"),
-                            Alias::new("children_index_revision"),
-                            Alias::new("presence_state"),
-                        ])
-                        .values_panic([
-                            Uuid::new_v4().into(),
-                            root.as_uuid().into(),
-                            id.as_uuid().into(),
-                            parent.map(StorageObjectRecordId::as_uuid).into(),
-                            1_i64.into(),
-                            indexed.into(),
-                            1_i64.into(),
-                            "Present".into(),
-                        ]),
-                ),
-            )
-            .await
-            .unwrap();
+        insert_storage_object(
+            &database,
+            account,
+            root,
+            (id, parent),
+            name,
+            object_type,
+            indexed,
+        )
+        .await;
     }
     database
         .execute(
@@ -380,12 +323,93 @@ async fn fixture_with_video_name(
         series,
         account,
         root,
+        title,
         season,
         season_nfo,
         episode_nfos,
         video,
         subtitle,
     }
+}
+
+async fn insert_storage_object(
+    database: &DatabaseConnection,
+    account: Uuid,
+    root: StorageRootId,
+    (id, parent): (StorageObjectRecordId, Option<StorageObjectRecordId>),
+    name: &str,
+    object_type: &str,
+    indexed: bool,
+) {
+    let sql = database.get_database_backend();
+    database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_account_id"),
+                        Alias::new("provider_drive_id"),
+                        Alias::new("provider_object_id"),
+                        Alias::new("name"),
+                        Alias::new("normalized_name"),
+                        Alias::new("object_type"),
+                        Alias::new("size"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("identity_quality"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        id.as_uuid().into(),
+                        account.into(),
+                        "local".into(),
+                        id.to_string().into(),
+                        name.into(),
+                        name.to_lowercase().into(),
+                        object_type.into(),
+                        (object_type == "File").then_some(1024_i64).into(),
+                        1_i64.into(),
+                        indexed.into(),
+                        1_i64.into(),
+                        "StableFileId".into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("storage_root_objects"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_root_id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("parent_storage_object_id"),
+                        Alias::new("observed_sync_revision"),
+                        Alias::new("children_indexed"),
+                        Alias::new("children_index_revision"),
+                        Alias::new("presence_state"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        root.as_uuid().into(),
+                        id.as_uuid().into(),
+                        parent.map(StorageObjectRecordId::as_uuid).into(),
+                        1_i64.into(),
+                        indexed.into(),
+                        1_i64.into(),
+                        "Present".into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1391,6 +1415,261 @@ async fn metadata_commit_rejects_a_structure_scope_invalidated_after_snapshot() 
         jobs.get(claimed.id()).await.unwrap().unwrap().state(),
         WorkJobState::Running
     );
+}
+
+async fn claim_metadata(fixture: &Fixture, item: CatalogItemId) -> tjxy_db::ClaimedWorkJob {
+    let target = CatalogQueryRepository::new(&fixture.database)
+        .lazy_work_target(UserId::new(), item)
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(item),
+            target.metadata_revision(),
+            100,
+        )
+        .unwrap()
+        .with_metadata_requirement(MetadataRequirement::Full)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    jobs.claim_next(
+        &[WorkTaskKind::ResolveMetadata],
+        "sidecar-images",
+        chrono::Duration::minutes(5),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+fn image_names(snapshot: &tjxy_db::MetadataWorkSnapshot) -> Vec<(String, String)> {
+    snapshot
+        .images()
+        .iter()
+        .map(|image| {
+            (
+                image.image_type().to_string(),
+                image.file().name().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn episodes_and_seasons_select_their_own_named_sidecar_images() {
+    let fixture = fixture(true, false, true).await;
+    let poster_for_season = StorageObjectRecordId::new();
+    for (parent, name, id) in [
+        (
+            fixture.season,
+            "Dark.S01E01-thumb.jpg",
+            StorageObjectRecordId::new(),
+        ),
+        (
+            fixture.season,
+            "Dark.S01E02-thumb.jpg",
+            StorageObjectRecordId::new(),
+        ),
+        (fixture.title, "poster.jpg", StorageObjectRecordId::new()),
+        (fixture.title, "season01-poster.jpg", poster_for_season),
+        (
+            fixture.title,
+            "season02-poster.jpg",
+            StorageObjectRecordId::new(),
+        ),
+    ] {
+        insert_storage_object(
+            &fixture.database,
+            fixture.account,
+            fixture.root,
+            (id, Some(parent)),
+            name,
+            "File",
+            false,
+        )
+        .await;
+    }
+    expand_series(&fixture).await;
+    let query = CatalogQueryRepository::new(&fixture.database);
+    let (season, _) = projected_children(&fixture).await;
+    let episodes = query
+        .items(
+            UserId::new(),
+            BrowseParent::Item(season),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap()
+        .items()
+        .iter()
+        .map(|item| (item.id(), item.name().to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(episodes.len(), 2);
+    let repository = MetadataWorkRepository::new(&fixture.database);
+
+    for (episode, name) in episodes {
+        let claimed = claim_metadata(&fixture, episode).await;
+        let snapshot = repository.snapshot(&claimed).await.unwrap();
+        // Each episode keeps the thumb named after its own video, never its sibling's.
+        let episode_code = name.trim_start_matches("Dark.");
+        assert_eq!(
+            image_names(&snapshot),
+            [(
+                "Primary".to_owned(),
+                format!("Dark.{episode_code}-thumb.jpg")
+            )],
+            "episode {name}"
+        );
+    }
+
+    let claimed = claim_metadata(&fixture, season).await;
+    let snapshot = repository.snapshot(&claimed).await.unwrap();
+    assert_eq!(
+        image_names(&snapshot),
+        [("Primary".to_owned(), "season01-poster.jpg".to_owned())]
+    );
+    let source = MetadataSource::new("Fixture", None::<String>, 1_000).unwrap();
+    let resolution = MetadataResolution::from_candidate(
+        snapshot.lookup(),
+        MetadataCandidate::new(source).with_title("Season 1"),
+    )
+    .unwrap();
+    // The series-folder poster is part of the fenced input: losing it after the
+    // snapshot must reject the commit instead of publishing a stale image.
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("storage_objects"))
+                    .value(Alias::new("presence_state"), "Missing")
+                    .and_where(Expr::col(Alias::new("id")).eq(poster_for_season.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let error = repository
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        tjxy_db::MetadataWorkError::StaleOrUnavailable
+    ));
+}
+
+#[tokio::test]
+async fn a_season_commit_revalidates_its_series_folder_poster() {
+    let fixture = fixture(true, false, false).await;
+    insert_storage_object(
+        &fixture.database,
+        fixture.account,
+        fixture.root,
+        (StorageObjectRecordId::new(), Some(fixture.title)),
+        "season01-poster.jpg",
+        "File",
+        false,
+    )
+    .await;
+    expand_series(&fixture).await;
+    let (season, _) = projected_children(&fixture).await;
+    let claimed = claim_metadata(&fixture, season).await;
+    let repository = MetadataWorkRepository::new(&fixture.database);
+    let snapshot = repository.snapshot(&claimed).await.unwrap();
+    let source = MetadataSource::new("Fixture", None::<String>, 1_000).unwrap();
+    let resolution = MetadataResolution::from_candidate(
+        snapshot.lookup(),
+        MetadataCandidate::new(source).with_title("Season 1"),
+    )
+    .unwrap();
+
+    repository
+        .commit(&claimed, &snapshot, &resolution, &[], false, Vec::new())
+        .await
+        .unwrap();
+}
+
+async fn metadata_revision(fixture: &Fixture, item: CatalogItemId) -> i64 {
+    let row = fixture
+        .database
+        .query_one(
+            fixture.database.get_database_backend().build(
+                Query::select()
+                    .column(Alias::new("metadata_revision"))
+                    .from(Alias::new("catalog_items"))
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    row.try_get("", "metadata_revision").unwrap()
+}
+
+#[tokio::test]
+async fn art_backfill_migration_reresolves_only_items_with_named_art() {
+    let fixture = fixture(true, false, true).await;
+    for (parent, name) in [
+        (fixture.season, "Dark.S01E01-thumb.jpg"),
+        (fixture.title, "season01-poster.jpg"),
+    ] {
+        insert_storage_object(
+            &fixture.database,
+            fixture.account,
+            fixture.root,
+            (StorageObjectRecordId::new(), Some(parent)),
+            name,
+            "File",
+            false,
+        )
+        .await;
+    }
+    expand_series(&fixture).await;
+    let (season, _) = projected_children(&fixture).await;
+    let episodes = CatalogQueryRepository::new(&fixture.database)
+        .items(
+            UserId::new(),
+            BrowseParent::Item(season),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap()
+        .items()
+        .iter()
+        .map(tjxy_db::CatalogItemRecord::id)
+        .collect::<Vec<_>>();
+    let mut items = vec![fixture.series, season];
+    items.extend(episodes);
+    let mut before = Vec::new();
+    for item in &items {
+        before.push(metadata_revision(&fixture, *item).await);
+    }
+
+    // The backfill is the newest migration and its `down` is a no-op, so re-applying it
+    // runs it against the projected catalog.
+    tjxy_db::Migrator::down(&fixture.database, Some(1))
+        .await
+        .unwrap();
+    tjxy_db::Migrator::up(&fixture.database, None)
+        .await
+        .unwrap();
+
+    let mut bumped = Vec::new();
+    for (item, revision) in items.iter().zip(before) {
+        bumped.push(metadata_revision(&fixture, *item).await - revision);
+    }
+    // Series untouched; the season has series-folder art; the episodes share a season
+    // folder holding a thumb, so both are re-resolved and selection sorts out ownership.
+    assert_eq!(bumped, [0, 1, 1, 1]);
 }
 
 #[tokio::test]

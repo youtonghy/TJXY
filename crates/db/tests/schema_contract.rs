@@ -2717,7 +2717,7 @@ async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
         assert!(schema.has_index(table, index).await.unwrap());
     }
     // The newer index migrations sit above this one, so roll back all of them.
-    Migrator::down(&database, Some(6)).await.unwrap();
+    Migrator::down(&database, Some(7)).await.unwrap();
     for (table, index) in indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }
@@ -2755,7 +2755,7 @@ async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
     for &(table, index) in &indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
-    Migrator::down(&database, Some(5)).await.unwrap();
+    Migrator::down(&database, Some(6)).await.unwrap();
     for &(table, index) in &indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }

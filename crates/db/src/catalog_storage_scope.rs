@@ -27,6 +27,10 @@ impl CatalogStorageScope {
         self.storage_object_id
     }
 
+    pub(crate) const fn parent_storage_object_id(self) -> Option<StorageObjectRecordId> {
+        self.parent_storage_object_id
+    }
+
     pub(crate) const fn sidecar_parent_object_id(self) -> StorageObjectRecordId {
         if self.is_file {
             match self.parent_storage_object_id {
