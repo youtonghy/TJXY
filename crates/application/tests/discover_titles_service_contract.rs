@@ -1192,3 +1192,56 @@ async fn a_changed_library_profile_still_reports_a_policy_change() {
         Err(DiscoverTitlesError::StaleLibraryPolicy)
     ));
 }
+
+#[tokio::test]
+async fn an_unparsable_title_is_skipped_and_its_siblings_are_published() {
+    let fixture = discovery_fixture("basic").await;
+    let root_object = StorageObjectRecordId::from_uuid(
+        fixture
+            .database
+            .query_one(
+                fixture.database.get_database_backend().build(
+                    Query::select()
+                        .column(Alias::new("storage_object_id"))
+                        .from(Alias::new("storage_root_objects"))
+                        .and_where(
+                            Expr::col(Alias::new("storage_root_id")).eq(fixture.root.as_uuid()),
+                        )
+                        .and_where(Expr::col(Alias::new("parent_storage_object_id")).is_null()),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "storage_object_id")
+            .unwrap(),
+    );
+    // Longer than a media name may be, so it can never be parsed into a title.
+    let unparsable = StorageObjectRecordId::new();
+    let account = account_id(&fixture.database).await;
+    insert_object(
+        &fixture.database,
+        account,
+        unparsable,
+        "unparsable",
+        &"x".repeat(600),
+        "Directory",
+        true,
+    )
+    .await;
+    insert_root_relation(
+        &fixture.database,
+        fixture.root,
+        unparsable,
+        Some(root_object),
+    )
+    .await;
+
+    let report = DiscoverTitlesService::new(fixture.database.clone())
+        .execute(&fixture.claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(report.discovered(), 1);
+    assert_eq!(count(&fixture.database, "catalog_items").await, 1);
+}

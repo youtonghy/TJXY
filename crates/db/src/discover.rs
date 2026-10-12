@@ -268,13 +268,23 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
             let collection: String = row.try_get("", "collection_type")?;
             let raw_name: String = row.try_get("", "name")?;
             let (item_type, name, production_year) = match collection.as_str() {
-                "movies" => {
-                    let (name, year) = parse_title(&raw_name)?;
-                    (CatalogItemType::Movie, name, year)
-                }
-                "tvshows" | "shows" | "mixed" => {
-                    let (name, year) = parse_title(&raw_name)?;
-                    (CatalogItemType::Series, name, year)
+                "movies" | "tvshows" | "shows" | "mixed" => {
+                    // One unusable folder name must not keep the root's other titles unpublished.
+                    let Some((name, year)) = parse_title(&raw_name) else {
+                        tracing::error!(
+                            storage_root_id = %root.as_uuid(),
+                            storage_object_id = %object.as_uuid(),
+                            name = %raw_name,
+                            "title skipped: its name cannot be parsed"
+                        );
+                        continue;
+                    };
+                    let item_type = if collection == "movies" {
+                        CatalogItemType::Movie
+                    } else {
+                        CatalogItemType::Series
+                    };
+                    (item_type, name, year)
                 }
                 "music" => {
                     let Some(name) = parse_audio_title(&raw_name) else {
@@ -316,6 +326,7 @@ impl<'connection> DiscoverTitlesRepository<'connection> {
         if u64::try_from(titles.len()).unwrap_or(u64::MAX) > MAX_TITLES {
             return Err(DiscoverTitlesError::TitleLimit);
         }
+        let titles = skip_conflicting_titles(self.database, root, titles).await?;
         let mut storage_objects = Vec::with_capacity(titles.len() + 1);
         storage_objects.push(root_object);
         storage_objects.extend(titles.iter().map(|title| title.storage_object_id));
@@ -1558,8 +1569,8 @@ fn supported_video_name_condition(object: &Alias) -> sea_orm::sea_query::Conditi
         })
 }
 
-fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError> {
-    let parsed = parse_media_name(value).map_err(|_| DiscoverTitlesError::InvalidTitle)?;
+fn parse_title(value: &str) -> Option<(String, Option<i32>)> {
+    let parsed = parse_media_name(value).ok()?;
     let fallback = std::path::Path::new(value.trim())
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1567,9 +1578,56 @@ fn parse_title(value: &str) -> Result<(String, Option<i32>), DiscoverTitlesError
         .trim();
     let name = parsed.title().unwrap_or(fallback);
     if name.is_empty() {
-        return Err(DiscoverTitlesError::InvalidTitle);
+        return None;
     }
-    Ok((name.to_owned(), parsed.year()))
+    Some((name.to_owned(), parsed.year()))
+}
+
+/// Drops titles whose folder already backs a catalog item of another type (for example a folder
+/// bound to both a movie and a TV library). Publishing one would fail the whole root's
+/// discovery as an identity conflict, so each is reported and skipped instead.
+async fn skip_conflicting_titles(
+    database: &DatabaseConnection,
+    root: StorageRootId,
+    titles: Vec<DiscoveredTitle>,
+) -> Result<Vec<DiscoveredTitle>, DiscoverTitlesError> {
+    let mut existing = HashMap::new();
+    for chunk in titles.chunks(500) {
+        let query = Query::select()
+            .columns([Alias::new("id"), Alias::new("item_type")])
+            .from(Alias::new("catalog_items"))
+            .and_where(
+                Expr::col(Alias::new("id"))
+                    .is_in(chunk.iter().map(|title| title.item_id.as_uuid())),
+            )
+            .to_owned();
+        for row in database
+            .query_all(database.get_database_backend().build(&query))
+            .await?
+        {
+            existing.insert(
+                row.try_get::<Uuid>("", "id")?,
+                row.try_get::<String>("", "item_type")?,
+            );
+        }
+    }
+    Ok(titles
+        .into_iter()
+        .filter(|title| match existing.get(&title.item_id.as_uuid()) {
+            Some(stored) if stored != title.item_type.as_database_value() => {
+                tracing::error!(
+                    storage_root_id = %root.as_uuid(),
+                    storage_object_id = %title.storage_object_id.as_uuid(),
+                    name = %title.name,
+                    stored_type = %stored,
+                    discovered_type = title.item_type.as_database_value(),
+                    "title skipped: its folder already backs a catalog item of another type"
+                );
+                false
+            }
+            _ => true,
+        })
+        .collect())
 }
 
 fn parse_audio_title(value: &str) -> Option<String> {
