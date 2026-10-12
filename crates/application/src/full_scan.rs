@@ -195,6 +195,10 @@ impl FullScanService {
                             failed += 1;
                         }
                     }
+                    Err(FullScanError::MissingStorageScope(item)) => {
+                        log_unscoped_item(claimed, item);
+                        failed += 1;
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -236,7 +240,8 @@ impl FullScanService {
                 continue;
             }
             let Some(scope) = target.storage_scope() else {
-                return Err(FullScanError::MissingStorageScope(item));
+                log_unscoped_item(claimed, item);
+                continue;
             };
             let (natural_key, spec) = if scope.is_ready() {
                 (
@@ -575,6 +580,17 @@ fn eager_child_spec(
             .with_storage_root_affinity(scope.storage_root_id())?,
         ))
     }
+}
+
+/// An item without a matched storage object (for example an episode left without its series)
+/// has nothing a scan can schedule. It is reported and skipped so the rest of the library is
+/// still scanned.
+fn log_unscoped_item(claimed: &ClaimedWorkJob, item: CatalogItemId) {
+    tracing::error!(
+        job_id = %claimed.id().as_uuid(),
+        catalog_item_id = %item.as_uuid(),
+        "full scan item has no matched storage scope; skipped"
+    );
 }
 
 async fn scan_work_target(

@@ -2156,6 +2156,99 @@ async fn failed_metadata_is_retried_by_the_next_scan_so_fixes_reach_unchanged_it
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Seeds a matched and an unmatched item in one library.
+async fn an_item_without_a_storage_scope_is_skipped_and_the_scan_continues() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "basic",
+        "on_browse",
+        "on_playback",
+    )
+    .await;
+    let sql = database.get_database_backend();
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    let (matched, _) = seed_indexed_movie_with_source(&database, library).await;
+    // No identity match ties this item to a storage object, as for an orphaned episode.
+    let (unmatched, _) = seed_indexed_movie_with_source(&database, library).await;
+    let (_, storage_object) = seed_root(&database, library).await;
+    for item in [matched, unmatched] {
+        database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new("catalog_items"))
+                        .value(Alias::new("metadata_state"), "Partial")
+                        .value(Alias::new("metadata_revision"), 2_i64)
+                        .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        storage_object.as_uuid().into(),
+                        matched.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let claimed = claimed_full_scan(&database, library).await;
+
+    let outcome = FullScanService::new(database.clone())
+        .execute(&claimed)
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(FullScanError::ChildrenPending { scheduled: 1 })
+        ),
+        "the unmatched item must not fail the scan: {outcome:?}"
+    );
+    let metadata = WorkJobRepository::new(&database)
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata.job().scope(), WorkScope::CatalogItem(matched));
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Covers scheduling, Partial publication, watermark advance, and parent resume as one workflow.
 async fn basic_metadata_policy_waits_for_resolution_at_the_current_revision() {
     let database = database().await;
