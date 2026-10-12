@@ -1661,6 +1661,20 @@ fn select_sidecars(
                     .is_some_and(|stem| video_stems.contains(&stem.to_ascii_lowercase()))
         });
     }
+    // A conventional name belongs to one kind. A season whose structure scope is the series
+    // folder (specials, flat layouts) would otherwise pick up `tvshow.nfo` and fail as a kind
+    // mismatch on every scan.
+    let foreign: &[&str] = match kind {
+        MetadataItemKind::Movie => &["tvshow.nfo", "season.nfo"],
+        MetadataItemKind::Series => &["movie.nfo", "season.nfo"],
+        MetadataItemKind::Season => &["movie.nfo", "tvshow.nfo"],
+        MetadataItemKind::Audio | MetadataItemKind::Episode => &[],
+    };
+    candidates.retain(|candidate| {
+        !foreign
+            .iter()
+            .any(|name| candidate.name.eq_ignore_ascii_case(name))
+    });
     candidates.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -1818,4 +1832,44 @@ async fn select_for_item(
         select_sidecars(kind, candidates, videos)?
     };
     Ok((files, selection, fingerprint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(name: &str) -> MetadataSidecarCandidate {
+        MetadataSidecarCandidate {
+            record_id: StorageObjectRecordId::new(),
+            storage_account_id: Uuid::new_v4(),
+            provider: "filesystem".to_owned(),
+            provider_drive_id: "local".to_owned(),
+            provider_object_id: name.to_owned(),
+            name: name.to_owned(),
+            size: 128,
+            remote_revision: None,
+            observed_sync_revision: 1,
+            facts_observed_storage_root_id: None,
+        }
+    }
+
+    #[test]
+    fn a_season_scoped_to_the_series_folder_does_not_take_the_series_nfo() {
+        let selected =
+            select_sidecars(MetadataItemKind::Season, vec![candidate("tvshow.nfo")], &[]).unwrap();
+        assert!(selected.is_empty(), "{selected:?}");
+
+        let selected = select_sidecars(
+            MetadataItemKind::Season,
+            vec![candidate("tvshow.nfo"), candidate("season.nfo")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "season.nfo");
+
+        let selected =
+            select_sidecars(MetadataItemKind::Series, vec![candidate("tvshow.nfo")], &[]).unwrap();
+        assert_eq!(selected.len(), 1);
+    }
 }
