@@ -1748,7 +1748,7 @@ async fn completed_probe_without_probe_publication_still_fails_the_scan() {
 }
 
 #[tokio::test]
-async fn failed_eager_probe_is_propagated_to_the_full_scan_parent() {
+async fn failed_eager_probe_is_reported_as_an_item_issue_and_the_scan_completes() {
     let database = database().await;
     let library = seed_library_with_policy(
         &database,
@@ -1759,7 +1759,7 @@ async fn failed_eager_probe_is_propagated_to_the_full_scan_parent() {
         "eager",
     )
     .await;
-    let (_, source) = seed_indexed_movie_with_source(&database, library).await;
+    let (item, _) = seed_indexed_movie_with_source(&database, library).await;
     let claimed = claimed_full_scan(&database, library).await;
     assert!(matches!(
         FullScanService::new(database.clone())
@@ -1789,13 +1789,25 @@ async fn failed_eager_probe_is_propagated_to_the_full_scan_parent() {
         .unwrap()
         .unwrap();
 
-    assert!(matches!(
-        FullScanService::new(database).execute(&resumed).await,
-        Err(FullScanError::ChildFailed {
-            task: WorkTaskKind::ProbeMedia,
-            scope: WorkScope::MediaSource(id),
-        }) if id == source
-    ));
+    // One unreadable file is that item's problem: reported, not fatal to the library scan.
+    FullScanService::new(database.clone())
+        .execute(&resumed)
+        .await
+        .unwrap();
+    let report = TaskService::new(database.clone())
+        .scan_report(claimed.id(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.counters.unwrap(),
+        serde_json::json!({"items": 1, "success": 0, "failed": 1, "skipped": 0, "needs_selection": 0})
+    );
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].item_id, item.as_uuid());
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Completed
+    );
 }
 
 #[tokio::test]
@@ -2014,6 +2026,133 @@ async fn series_without_episodes_is_isolated_and_not_rescheduled_until_its_input
     assert_eq!(report.counters.unwrap(), expected);
     assert_eq!(report.issues.len(), 1);
     assert_eq!(report.issues[0].child_job_id, index.id().as_uuid());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Follows one metadata item failure across the scan that saw it and the next refresh.
+async fn failed_metadata_is_retried_by_the_next_scan_so_fixes_reach_unchanged_items() {
+    let database = database().await;
+    let library = seed_library_with_policy(
+        &database,
+        "Full",
+        "library_roots",
+        "basic",
+        "on_browse",
+        "on_playback",
+    )
+    .await;
+    let sql = database.get_database_backend();
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(Alias::new("metadata_source_mode"), "local_only")
+                    .and_where(Expr::col(Alias::new("id")).eq(library)),
+            ),
+        )
+        .await
+        .unwrap();
+    let (item, _) = seed_indexed_movie_with_source(&database, library).await;
+    let (_, storage_object) = seed_root(&database, library).await;
+    database
+        .execute(
+            sql.build(
+                Query::update()
+                    .table(Alias::new("catalog_items"))
+                    .value(Alias::new("metadata_state"), "Partial")
+                    .value(Alias::new("metadata_revision"), 2_i64)
+                    .and_where(Expr::col(Alias::new("id")).eq(item.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+    database
+        .execute(
+            sql.build(
+                Query::insert()
+                    .into_table(Alias::new("identity_matches"))
+                    .columns([
+                        Alias::new("id"),
+                        Alias::new("storage_object_id"),
+                        Alias::new("candidate_catalog_item_id"),
+                        Alias::new("confidence"),
+                        Alias::new("state"),
+                        Alias::new("evidence"),
+                    ])
+                    .values_panic([
+                        Uuid::new_v4().into(),
+                        storage_object.as_uuid().into(),
+                        item.as_uuid().into(),
+                        1.0.into(),
+                        "Matched".into(),
+                        serde_json::json!({}).into(),
+                    ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let jobs = WorkJobRepository::new(&database);
+    let first = claimed_full_scan(&database, library).await;
+    assert!(matches!(
+        FullScanService::new(database.clone()).execute(&first).await,
+        Err(FullScanError::ChildrenPending { scheduled: 1 })
+    ));
+    let metadata = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata.job().scope(), WorkScope::CatalogItem(item));
+    jobs.fail_item(
+        &metadata,
+        "metadata NFO kind does not match the catalog item",
+        false,
+    )
+    .await
+    .unwrap();
+    jobs.retry(&first, Duration::zero(), "waiting for metadata")
+        .await
+        .unwrap();
+    let resumed = jobs
+        .claim_next(
+            &[WorkTaskKind::FullMediaScan],
+            "full-scan-resumed",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    FullScanService::new(database.clone())
+        .execute(&resumed)
+        .await
+        .unwrap();
+
+    let refresh = claimed_full_scan(&database, library).await;
+    assert!(
+        matches!(
+            FullScanService::new(database.clone())
+                .execute(&refresh)
+                .await,
+            Err(FullScanError::ChildrenPending { scheduled: 1 })
+        ),
+        "a metadata failure may be fixed by a release, so the next scan must retry it"
+    );
+    let retried = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "metadata-retry",
+            Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retried.job().scope(), WorkScope::CatalogItem(item));
+    assert_ne!(retried.id(), metadata.id());
 }
 
 #[tokio::test]

@@ -440,12 +440,15 @@ impl FullScanService {
                         scope: spec.scope(),
                     });
                 }
-                if let Some(kind) = kind {
+                // Work on one item or one source failing (bad content, exhausted retries) is that
+                // item's problem: report it and keep scanning. Only root-level children, whose
+                // failure leaves the library's storage or titles unknown, fail the scan.
+                if kind.is_some() || item_scoped(spec) {
                     return Err(FullScanError::ItemFailed {
                         task: spec.task_kind(),
                         scope: spec.scope(),
                         child,
-                        needs_selection: kind == "nfo_selection",
+                        needs_selection: kind.as_deref() == Some("nfo_selection"),
                     });
                 }
                 Err(FullScanError::ChildFailed {
@@ -476,6 +479,20 @@ impl FullScanService {
             }
         }
     }
+}
+
+/// Children scoped to one catalog item or one media source.
+fn item_scoped(spec: &WorkJobSpec) -> bool {
+    matches!(
+        spec.scope(),
+        WorkScope::CatalogItem(_) | WorkScope::MediaSource(_)
+    ) && matches!(
+        spec.task_kind(),
+        WorkTaskKind::ResolveMetadata
+            | WorkTaskKind::IndexMediaSources
+            | WorkTaskKind::ExpandItem
+            | WorkTaskKind::ProbeMedia
+    )
 }
 
 fn eager_media_task(

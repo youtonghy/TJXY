@@ -1134,6 +1134,11 @@ impl CatalogQueryService {
                 && requested_source.is_none_or(|key| key == source.presentation_key())
         });
         let probe_jobs = self.enqueue_playback_probes(item_id, &sources).await?;
+        // A source whose probe already failed is not probed again; it still means the file is
+        // there but unreadable, which is a failure rather than having no sources.
+        let probe_already_failed = sources
+            .iter()
+            .any(|source| source.probe_state() == "ProbeFailed");
         let last_used = PlaystateRepository::new(&self.database)
             .last_presentation_key(principal, item_id)
             .await?;
@@ -1162,7 +1167,9 @@ impl CatalogQueryService {
                     LazyWaitOutcome::Failed | LazyWaitOutcome::Missing => {
                         PlaybackPreparation::Failed
                     }
-                    LazyWaitOutcome::Completed if failed => PlaybackPreparation::Failed,
+                    LazyWaitOutcome::Completed if failed || probe_already_failed => {
+                        PlaybackPreparation::Failed
+                    }
                     LazyWaitOutcome::Completed => PlaybackPreparation::NoSources,
                 };
             }
@@ -1194,7 +1201,9 @@ impl CatalogQueryService {
         let jobs = WorkJobRepository::new(&self.database);
         let mut ids = Vec::new();
         for source in sources {
-            if source.probe_state() == "Probed"
+            // A failed probe stays failed until the file changes (which resets it to Stale), so
+            // playback does not re-read a known-bad file on every request.
+            if matches!(source.probe_state(), "Probed" | "ProbeFailed")
                 || source.is_hidden()
                 || !source
                     .locations()

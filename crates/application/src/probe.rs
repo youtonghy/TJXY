@@ -36,6 +36,18 @@ const MAX_GAP_RETRIES: usize = 16;
 /// descriptor and target lookup, and resolving a `.strm` target across storage accounts.
 const PROBE_OVERHEAD_REQUESTS: u32 = 16;
 
+fn report_probe_failure(candidate: &ProbeCandidate, reason: &str) {
+    tracing::error!(
+        media_source_id = %candidate.source_id().as_uuid(),
+        catalog_item_id = %candidate.item_id().as_uuid(),
+        storage_object_id = %candidate.storage_object_id().as_uuid(),
+        provider_object_id = candidate.provider_object_id(),
+        locator_kind = candidate.locator_kind(),
+        reason,
+        "media probe skipped this source"
+    );
+}
+
 const fn adaptive_ladder_bytes() -> u64 {
     let mut total = 0;
     let mut step = 0;
@@ -1292,11 +1304,22 @@ impl ProbeService {
                 duration_ms = started.elapsed().as_millis(), success = true,
                 "media probe resource usage");
         }
-        if let Err(ProbeServiceError::Budget(error)) = &outcome {
-            let message = error.to_string();
+        // Any content-level failure marks the source ProbeFailed, so it is skipped (not retried)
+        // until its storage changes; it is reported once here, with the file it concerns.
+        let message = match &outcome {
+            Err(ProbeServiceError::Budget(error)) => Some(error.to_string()),
+            Err(ProbeServiceError::Inspection(message)) => Some(message.clone()),
+            Err(ProbeServiceError::InspectionFailed(message)) => {
+                report_probe_failure(&candidate, message);
+                None
+            }
+            _ => None,
+        };
+        if let Some(message) = message {
             repository
                 .commit_failure(claimed, &candidate, &message)
                 .await?;
+            report_probe_failure(&candidate, &message);
             return Err(ProbeServiceError::InspectionFailed(message));
         }
         outcome

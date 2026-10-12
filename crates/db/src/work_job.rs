@@ -1529,20 +1529,7 @@ where
         let transaction = self.database.begin().await?;
         let result = async {
             fail_terminal(&transaction, claimed, error, self.now()).await?;
-            transaction
-                .execute(
-                    transaction.get_database_backend().build(
-                        Query::update()
-                            .table(Alias::new("work_results"))
-                            .value(
-                                Alias::new("counters"),
-                                serde_json::json!({"failure_kind": failure_kind}),
-                            )
-                            .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())),
-                    ),
-                )
-                .await?;
-            Ok(())
+            classify_failure(&transaction, claimed, failure_kind).await
         }
         .await;
         finish_notifying(transaction, result).await
@@ -1755,6 +1742,22 @@ where
             return Err(WorkJobRepositoryError::InvalidErrorSummary);
         }
         fail_terminal(transaction, claimed, error, self.now()).await
+    }
+
+    /// Records an item failure (bad content confined to one item) inside the caller's
+    /// transaction, so Full Scan reports the item and carries on.
+    ///
+    /// # Errors
+    /// Returns validation, lease, or database failures.
+    pub async fn fail_item_in_transaction(
+        &self,
+        transaction: &DatabaseTransaction,
+        claimed: &ClaimedWorkJob,
+        error: &str,
+    ) -> Result<(), WorkJobRepositoryError> {
+        self.fail_terminal_in_transaction(transaction, claimed, error)
+            .await?;
+        classify_failure(transaction, claimed, "item").await
     }
 
     /// Reads a durable job for join polling.
@@ -3149,6 +3152,29 @@ fn full_scan_child_rows(
     Ok(rows)
 }
 
+/// Tags a just-failed job's result so Full Scan can tell item, selection and superseded failures
+/// from infrastructure ones.
+async fn classify_failure(
+    transaction: &DatabaseTransaction,
+    claimed: &ClaimedWorkJob,
+    failure_kind: &str,
+) -> Result<(), WorkJobRepositoryError> {
+    transaction
+        .execute(
+            transaction.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("work_results"))
+                    .value(
+                        Alias::new("counters"),
+                        serde_json::json!({"failure_kind": failure_kind}),
+                    )
+                    .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())),
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Shortest delay before a child completion resumes its waiting full scan.
 const FULL_SCAN_WAKE_COALESCE: Duration = Duration::seconds(5);
 
@@ -3934,7 +3960,10 @@ async fn item_failure_kind<Connection: ConnectionTrait>(
 /// storage input when it failed on the item's own content.
 ///
 /// Both stages are deterministic over their storage input, so re-running one before the item's
-/// children or revision change can only fail again. Full Scan joins the failed job and
+/// children or revision change can only fail again. Metadata is left out on purpose: its item
+/// failures come from NFO parsing and selection rules that releases keep loosening, and each
+/// item costs one cheap job per scan, so every scan retries it and a fix reaches items whose
+/// files never change. Full Scan joins the failed job and
 /// reports the existing item issue instead of enqueueing a fresh child every refresh. Retention
 /// eventually removes the failed job, which lets one later scan retry it.
 async fn unchanged_item_failure(

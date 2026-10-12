@@ -2493,3 +2493,25 @@ async fn cancelled_playback_request_does_not_cancel_its_durable_probe() {
         Some(PlaybackPreparation::Ready(sources)) if sources.len() == 1)
     );
 }
+
+#[tokio::test]
+async fn playback_does_not_reprobe_a_source_whose_probe_already_failed() {
+    let (service, database) = service_fixture().await;
+    let service = service.with_playback_wait_timeout(Duration::from_millis(50));
+    let item = seed_playback_cache_fixture(&database).await;
+    set_probe_state(&database, item, "ProbeFailed").await;
+
+    let response = service
+        .prepare_playback(UserId::new(), None, item, None)
+        .await
+        .unwrap();
+
+    assert_eq!(response, Some(PlaybackPreparation::Failed));
+    assert!(
+        !tjxy_db::WorkJobRepository::new(&database)
+            .has_active_task(tjxy_db::WorkTaskKind::ProbeMedia)
+            .await
+            .unwrap(),
+        "a known-bad file must not be read again on every playback request"
+    );
+}

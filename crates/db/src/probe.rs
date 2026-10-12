@@ -876,8 +876,9 @@ async fn commit_failure(
         Utc::now(),
     )
     .await?;
+    // An unreadable or unsupported file is bad content for one source: skip it, not the scan.
     WorkJobRepository::new(database)
-        .fail_terminal_in_transaction(transaction, claimed, error)
+        .fail_item_in_transaction(transaction, claimed, error)
         .await?;
     Ok(generation)
 }

@@ -1781,7 +1781,7 @@ async fn handle_outcome(
             WorkJobRepositoryError::LostLease,
         ))) => {}
         Err(ProbeServiceError::InspectionFailed(error)) => {
-            tracing::warn!(
+            tracing::debug!(
                 job_id = %claimed.id().as_uuid(),
                 media_source_id = %claimed.job().scope().id(),
                 attempt = claimed.attempt_count(),
