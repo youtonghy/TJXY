@@ -117,6 +117,31 @@ impl StorageBackend for ChangeAwareFilesystem {
     }
 }
 
+/// The running server writes through its own single `SQLite` connection. A fixture write
+/// transaction that reads before inserting cannot upgrade its lock while the server holds
+/// the write lock, and `SQLite` fails that at once instead of waiting for the busy timeout.
+/// Retry only that error, briefly; production has one connection and never races itself.
+async fn retry_while_sqlite_busy<T, E, F, Fut>(mut operation: F) -> T
+where
+    E: std::fmt::Debug,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match operation().await {
+            Ok(value) => return value,
+            Err(error)
+                if format!("{error:?}").contains("database is locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+}
+
 fn api_key_cipher(
     active_version: i32,
     active_byte: u8,
@@ -1688,19 +1713,17 @@ async fn initialization_starts_the_provider_drive_scoped_inventory_worker() {
         .await
         .unwrap()
         .unwrap();
-    let indexed = WorkJobRepository::new(&database)
-        .enqueue_or_join(
-            &WorkJobSpec::new(
-                WorkTaskKind::IndexMediaSources,
-                WorkScope::CatalogItem(item_id),
-                1,
-                100,
-            )
-            .unwrap()
-            .with_required_sync(submission.job().id(), inventory_revision),
-        )
-        .await
-        .unwrap();
+    let jobs = WorkJobRepository::new(&database);
+    let spec = WorkJobSpec::new(
+        WorkTaskKind::IndexMediaSources,
+        WorkScope::CatalogItem(item_id),
+        1,
+        100,
+    )
+    .unwrap()
+    .with_required_sync(submission.job().id(), inventory_revision);
+    let (jobs, spec) = (&jobs, &spec);
+    let indexed = retry_while_sqlite_busy(move || jobs.enqueue_or_join(spec)).await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if WorkJobRepository::new(&database)
