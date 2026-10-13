@@ -331,8 +331,8 @@ impl<'connection> MetadataWorkRepository<'connection> {
             flat_file_stem.as_deref(),
         )
         .await?;
-        let video_names = if kind == MetadataItemKind::Movie {
-            movie_video_names(self.database, item_id, scope, input_revision).await?
+        let video_names = if reads_folder_videos(kind) {
+            folder_video_names(self.database, item_id, scope, input_revision).await?
         } else if kind == MetadataItemKind::Episode {
             crate::source_publication::effective_video_storage_names(
                 self.database,
@@ -1007,8 +1007,8 @@ async fn revalidate_metadata_snapshot(
         flat_file_stem.as_deref(),
     )
     .await?;
-    let video_names = if snapshot.lookup.kind() == MetadataItemKind::Movie {
-        movie_video_names(transaction, item_id, scope, input_revision).await?
+    let video_names = if reads_folder_videos(snapshot.lookup.kind()) {
+        folder_video_names(transaction, item_id, scope, input_revision).await?
     } else if snapshot.lookup.kind() == MetadataItemKind::Episode {
         crate::source_publication::effective_video_storage_names(
             transaction,
@@ -1884,6 +1884,16 @@ fn select_sidecars(
                     .is_some_and(|stem| video_stems.contains(&stem.to_ascii_lowercase()))
         });
     }
+    // Episode NFOs share their season (or flat series) folder but never describe that folder's
+    // own item; a folder without `season.nfo`/`tvshow.nfo` has no NFO, not an ambiguous one.
+    if matches!(kind, MetadataItemKind::Season | MetadataItemKind::Series) {
+        let video_stems = file_stems(video_names);
+        candidates.retain(|candidate| {
+            !video_stems
+                .iter()
+                .any(|stem| sidecar_stem_matches(&candidate.name, stem))
+        });
+    }
     // A conventional name belongs to one kind. A season whose structure scope is the series
     // folder (specials, flat layouts) would otherwise pick up `tvshow.nfo` and fail as a kind
     // mismatch on every scan.
@@ -1952,7 +1962,16 @@ fn validate_sidecars(
     Ok(candidates)
 }
 
-async fn movie_video_names(
+/// Movies match their NFO to their video; seasons and series use the folder's videos to
+/// tell episode NFOs apart from their own.
+const fn reads_folder_videos(kind: MetadataItemKind) -> bool {
+    matches!(
+        kind,
+        MetadataItemKind::Movie | MetadataItemKind::Season | MetadataItemKind::Series
+    )
+}
+
+async fn folder_video_names(
     connection: &impl sea_orm::ConnectionTrait,
     item: CatalogItemId,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
@@ -2094,6 +2113,23 @@ mod tests {
         let selected =
             select_sidecars(MetadataItemKind::Series, vec![candidate("tvshow.nfo")], &[]).unwrap();
         assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn a_folder_without_its_own_nfo_does_not_take_episode_nfos() {
+        let episodes = ["Physical.100.S02E01", "Physical.100.S02E02"];
+        let nfos = episodes.map(|stem| candidate(&format!("{stem}.nfo")));
+        let videos = episodes.map(|stem| format!("{stem}.strm"));
+        for kind in [MetadataItemKind::Season, MetadataItemKind::Series] {
+            let selected = select_sidecars(kind, nfos.to_vec(), &videos).unwrap();
+            assert!(selected.is_empty(), "{kind:?}: {selected:?}");
+        }
+
+        let mut with_season_nfo = nfos.to_vec();
+        with_season_nfo.push(candidate("season.nfo"));
+        let selected = select_sidecars(MetadataItemKind::Season, with_season_nfo, &videos).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "season.nfo");
     }
 
     fn selected_names(images: &[MetadataImageCandidate]) -> Vec<(ImageType, &str)> {

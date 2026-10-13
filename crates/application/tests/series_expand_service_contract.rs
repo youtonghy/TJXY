@@ -1568,6 +1568,40 @@ async fn episodes_and_seasons_select_their_own_named_sidecar_images() {
 }
 
 #[tokio::test]
+async fn a_season_folder_without_season_nfo_resolves_without_episode_nfos() {
+    let fixture = fixture(true, false, true).await;
+    expand_series(&fixture).await;
+    let sql = fixture.database.get_database_backend();
+    for (table, column) in [
+        ("storage_root_objects", "storage_object_id"),
+        ("storage_objects", "id"),
+    ] {
+        fixture
+            .database
+            .execute(
+                sql.build(
+                    Query::update()
+                        .table(Alias::new(table))
+                        .value(Alias::new("presence_state"), "ConfirmedAbsent")
+                        .and_where(Expr::col(Alias::new(column)).eq(fixture.season_nfo.as_uuid())),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let (season, _) = projected_children(&fixture).await;
+    let claimed = claim_metadata(&fixture, season).await;
+
+    // Only the episodes' own NFOs remain in the folder; none of them describes the season.
+    let snapshot = MetadataWorkRepository::new(&fixture.database)
+        .snapshot(&claimed)
+        .await
+        .unwrap();
+
+    assert!(snapshot.sidecar().is_none());
+}
+
+#[tokio::test]
 async fn a_season_commit_revalidates_its_series_folder_poster() {
     let fixture = fixture(true, false, false).await;
     insert_storage_object(
