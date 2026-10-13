@@ -21,6 +21,7 @@ struct Fixture {
     series: CatalogItemId,
     account: Uuid,
     root: StorageRootId,
+    library: Uuid,
     title: StorageObjectRecordId,
     season: StorageObjectRecordId,
     season_nfo: StorageObjectRecordId,
@@ -323,6 +324,7 @@ async fn fixture_with_video_name(
         series,
         account,
         root,
+        library,
         title,
         season,
         season_nfo,
@@ -1602,6 +1604,112 @@ async fn a_season_folder_without_season_nfo_resolves_without_episode_nfos() {
 }
 
 #[tokio::test]
+async fn committed_episode_and_season_art_is_served_as_direct_images() {
+    let fixture = fixture(true, false, true).await;
+    // Production libraries keep local images in place and import only metadata.
+    fixture
+        .database
+        .execute(
+            fixture.database.get_database_backend().build(
+                Query::update()
+                    .table(Alias::new("libraries"))
+                    .value(
+                        Alias::new("local_metadata_access_mode"),
+                        "import_metadata_only",
+                    )
+                    .and_where(Expr::col(Alias::new("id")).eq(fixture.library)),
+            ),
+        )
+        .await
+        .unwrap();
+    for (parent, name) in [
+        (fixture.season, "Dark.S01E01-thumb.jpg"),
+        (fixture.title, "season01-poster.jpg"),
+    ] {
+        insert_storage_object(
+            &fixture.database,
+            fixture.account,
+            fixture.root,
+            (StorageObjectRecordId::new(), Some(parent)),
+            name,
+            "File",
+            false,
+        )
+        .await;
+    }
+    expand_series(&fixture).await;
+    let (season, _) = projected_children(&fixture).await;
+    let episodes = CatalogQueryRepository::new(&fixture.database)
+        .items(
+            UserId::new(),
+            BrowseParent::Item(season),
+            CatalogPageRequest::new(0, 20).unwrap(),
+        )
+        .await
+        .unwrap()
+        .items()
+        .iter()
+        .map(|item| (item.id(), item.name().to_owned()))
+        .collect::<Vec<_>>();
+    let repository = MetadataWorkRepository::new(&fixture.database);
+    let mut items = vec![(season, "Season 1".to_owned())];
+    items.extend(episodes);
+    for (item, name) in &items {
+        let claimed = claim_metadata(&fixture, *item).await;
+        let snapshot = repository.snapshot(&claimed).await.unwrap();
+        let source = MetadataSource::new("Fixture", None::<String>, 1_000).unwrap();
+        let resolution = MetadataResolution::from_candidate(
+            snapshot.lookup(),
+            MetadataCandidate::new(source).with_title(name.clone()),
+        )
+        .unwrap();
+        repository
+            .commit_mixed(
+                &claimed,
+                &snapshot,
+                Some(&resolution),
+                &[],
+                false,
+                true,
+                false,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Seasons and episodes are library members only through their series.
+    let direct = tjxy_db::DirectMetadataRepository::new(&fixture.database);
+    let library = tjxy_common::LibraryId::from_uuid(fixture.library);
+    let mut served = Vec::new();
+    for (item, _) in &items {
+        let any_library = direct.object(*item, "Primary", 0).await.unwrap();
+        let in_library = direct
+            .object_in_library(*item, "Primary", 0, library)
+            .await
+            .unwrap();
+        assert_eq!(
+            any_library
+                .as_ref()
+                .map(tjxy_db::DirectMetadataObjectRecord::name),
+            in_library
+                .as_ref()
+                .map(tjxy_db::DirectMetadataObjectRecord::name)
+        );
+        served.push(any_library.map(|object| object.name().to_owned()));
+    }
+    served.sort();
+    assert_eq!(
+        served,
+        [
+            None,
+            Some("Dark.S01E01-thumb.jpg".to_owned()),
+            Some("season01-poster.jpg".to_owned())
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_season_commit_revalidates_its_series_folder_poster() {
     let fixture = fixture(true, false, false).await;
     insert_storage_object(
@@ -1688,8 +1796,8 @@ async fn art_backfill_migration_reresolves_only_items_with_named_art() {
         before.push(metadata_revision(&fixture, *item).await);
     }
 
-    // The backfill is the newest migration and its `down` is a no-op, so re-applying it
-    // runs it against the projected catalog.
+    // The newest migration re-runs this backfill and its `down` is a no-op, so re-applying
+    // it runs the backfill against the projected catalog.
     tjxy_db::Migrator::down(&fixture.database, Some(1))
         .await
         .unwrap();

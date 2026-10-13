@@ -141,9 +141,10 @@ impl<'connection> DirectMetadataRepository<'connection> {
                 Expr::col((import_library.clone(), Alias::new("id")))
                     .equals((import_membership.clone(), Alias::new("library_id"))),
             )
-            .and_where(
-                Expr::col((import_membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()),
-            )
+            .cond_where(crate::catalog_visibility::item_or_owner_membership(
+                &import_membership,
+                item_id.as_uuid(),
+            ))
             .and_where(Expr::col((import_library.clone(), Alias::new("is_enabled"))).eq(true))
             // Whether a direct resource is shadowed is determined by the
             // resource-specific import mode.  A library may still use an
@@ -252,10 +253,10 @@ impl<'connection> DirectMetadataRepository<'connection> {
                     Expr::col((authorized_library, Alias::new("local_metadata_access_mode")))
                         .is_in(direct_modes),
                 )
-                .and_where(
-                    Expr::col((authorized_membership, Alias::new("catalog_item_id")))
-                        .eq(item_id.as_uuid()),
-                )
+                .cond_where(crate::catalog_visibility::item_or_owner_membership(
+                    &authorized_membership,
+                    item_id.as_uuid(),
+                ))
                 .and_where(
                     Expr::col((authorized_binding, Alias::new("storage_root_id")))
                         .equals((reference.clone(), Alias::new("storage_root_id"))),

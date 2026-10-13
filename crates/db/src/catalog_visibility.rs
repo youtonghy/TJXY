@@ -104,3 +104,19 @@ pub(crate) fn enabled_membership_for_item_in_library(
     }
     query.clone()
 }
+
+/// Matches `membership` rows that cover `item_id`: its own library membership, or that of
+/// the series whose structure projects it. Seasons and episodes are never library members
+/// themselves, so a membership check on the item alone never matches them.
+pub(crate) fn item_or_owner_membership(membership: &Alias, item_id: Uuid) -> Condition {
+    let owner = Query::select()
+        .column(Alias::new("structure_owner_item_id"))
+        .from(Alias::new("catalog_items"))
+        .and_where(Expr::col(Alias::new("id")).eq(item_id))
+        .and_where(Expr::col(Alias::new("structure_owner_item_id")).is_not_null())
+        .to_owned();
+    let member = Expr::col((membership.clone(), Alias::new("catalog_item_id")));
+    Condition::any()
+        .add(member.clone().eq(item_id))
+        .add(member.in_subquery(owner))
+}

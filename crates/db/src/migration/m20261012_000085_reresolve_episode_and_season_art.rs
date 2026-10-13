@@ -20,45 +20,51 @@ const UPDATE_CHUNK: usize = 500;
 #[sea_orm_migration::async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let transaction = manager.get_connection().begin().await?;
-        let backend = transaction.get_database_backend();
-        let mut items = BTreeSet::new();
-        for query in [episodes_with_thumbs(), seasons_with_named_art()] {
-            for row in transaction.query_all(backend.build(&query)).await? {
-                items.insert(row.try_get::<Uuid>("", "catalog_item_id")?);
-            }
-        }
-        // Selected first and updated by id: MySQL rejects an UPDATE whose subquery reads
-        // `catalog_items` itself.
-        let items = items.into_iter().collect::<Vec<_>>();
-        let mut changed = false;
-        for chunk in items.chunks(UPDATE_CHUNK) {
-            let update = Query::update()
-                .table(Alias::new("catalog_items"))
-                .value(
-                    Alias::new("metadata_revision"),
-                    Expr::col(Alias::new("metadata_revision")).add(1),
-                )
-                .and_where(Expr::col(Alias::new("id")).is_in(chunk.iter().copied()))
-                .and_where(Expr::col(Alias::new("is_present")).eq(true))
-                .and_where(Expr::col(Alias::new("classification_state")).eq("Matched"))
-                .to_owned();
-            changed |= transaction
-                .execute(backend.build(&update))
-                .await?
-                .rows_affected()
-                > 0;
-        }
-        if changed {
-            crate::advance_catalog_generation(&transaction).await?;
-        }
-        transaction.commit().await
+        reresolve_items_with_art(manager).await
     }
 
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // A revision bump only schedules another resolution; there is nothing to restore.
         Ok(())
     }
+}
+
+/// Advances the metadata revision of every projected episode and season whose folders hold
+/// episode thumbs or `seasonNN` art.
+pub(super) async fn reresolve_items_with_art(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let transaction = manager.get_connection().begin().await?;
+    let backend = transaction.get_database_backend();
+    let mut items = BTreeSet::new();
+    for query in [episodes_with_thumbs(), seasons_with_named_art()] {
+        for row in transaction.query_all(backend.build(&query)).await? {
+            items.insert(row.try_get::<Uuid>("", "catalog_item_id")?);
+        }
+    }
+    // Selected first and updated by id: MySQL rejects an UPDATE whose subquery reads
+    // `catalog_items` itself.
+    let items = items.into_iter().collect::<Vec<_>>();
+    let mut changed = false;
+    for chunk in items.chunks(UPDATE_CHUNK) {
+        let update = Query::update()
+            .table(Alias::new("catalog_items"))
+            .value(
+                Alias::new("metadata_revision"),
+                Expr::col(Alias::new("metadata_revision")).add(1),
+            )
+            .and_where(Expr::col(Alias::new("id")).is_in(chunk.iter().copied()))
+            .and_where(Expr::col(Alias::new("is_present")).eq(true))
+            .and_where(Expr::col(Alias::new("classification_state")).eq("Matched"))
+            .to_owned();
+        changed |= transaction
+            .execute(backend.build(&update))
+            .await?
+            .rows_affected()
+            > 0;
+    }
+    if changed {
+        crate::advance_catalog_generation(&transaction).await?;
+    }
+    transaction.commit().await
 }
 
 fn name_matches(object: &Alias, patterns: &[&str]) -> Cond {

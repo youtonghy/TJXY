@@ -749,7 +749,10 @@ async fn direct_library_modes(
             Expr::col((binding.clone(), Alias::new("library_id")))
                 .equals((library.clone(), Alias::new("id"))),
         )
-        .and_where(Expr::col((membership, Alias::new("catalog_item_id"))).eq(item_id.as_uuid()))
+        .cond_where(crate::catalog_visibility::item_or_owner_membership(
+            &membership,
+            item_id.as_uuid(),
+        ))
         .and_where(Expr::col((binding, Alias::new("storage_root_id"))).eq(root_id.as_uuid()))
         .and_where(Expr::col((library, Alias::new("is_enabled"))).eq(true))
         .to_owned();
