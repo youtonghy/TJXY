@@ -161,6 +161,11 @@ impl ProbedStream {
     }
 
     #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
+    #[must_use]
     pub fn codec(&self) -> Option<&str> {
         self.codec.as_deref()
     }

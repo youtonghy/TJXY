@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use matroska::{Settings, Tracktype};
+use matroska::{Parseable, Settings, Tracktype};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_db::{
@@ -116,13 +116,11 @@ pub struct MatroskaInspector;
 
 impl MediaInspector for MatroskaInspector {
     fn inspect(&self, input: ProbeInput) -> Result<ProbeResult, ProbeServiceError> {
-        let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            matroska::Matroska::open(input.into_reader())
-        }))
-        .map_err(|_| {
-            ProbeServiceError::Inspection("Matroska parser rejected seek metadata".into())
-        })?
-        .map_err(|error| ProbeServiceError::Inspection(error.to_string()))?;
+        let mut reader = input.into_reader();
+        let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| read_matroska_head(&mut reader)))
+            .map_err(|_| {
+                ProbeServiceError::Inspection("Matroska parser rejected malformed metadata".into())
+            })??;
         let mut streams = Vec::with_capacity(parsed.tracks.len());
         let mut video_codec = None;
         let mut resolution = None;
@@ -140,7 +138,7 @@ impl MediaInspector for MatroskaInspector {
                 (Tracktype::Subtitle, _) => ("Subtitle", None, None, None),
                 _ => continue,
             };
-            let codec = normalize_codec(&track.codec_id);
+            let codec = normalize_codec(track.codec_id.trim_end_matches('\0'));
             let (profile, level) = if stream_type == "Video" {
                 codec_compatibility(&codec, track.codec_private.as_deref())
             } else {
@@ -165,7 +163,7 @@ impl MediaInspector for MatroskaInspector {
                         ProbeServiceError::Inspection("track index is too large".into())
                     })?,
                     Some(codec),
-                    track.language.as_ref().map(ToString::to_string),
+                    track.language.as_ref().and_then(matroska_language),
                     width,
                     height,
                     channels,
@@ -185,7 +183,7 @@ impl MediaInspector for MatroskaInspector {
         }
         let runtime_ticks = parsed
             .info
-            .duration
+            .and_then(|info| info.duration)
             .map(|duration| duration.as_nanos() / 100)
             .map(i64::try_from)
             .transpose()
@@ -197,6 +195,242 @@ impl MediaInspector for MatroskaInspector {
     }
 }
 
+/// Muxers write empty or NUL-padded language strings; neither names a language.
+fn matroska_language(language: &matroska::Language) -> Option<String> {
+    let language = language
+        .to_string()
+        .trim_matches(|character: char| character == '\0' || character.is_whitespace())
+        .to_owned();
+    (!language.is_empty()).then_some(language)
+}
+
+const EBML_HEADER_ID: u32 = 0x1A45_DFA3;
+const MATROSKA_SEGMENT_ID: u32 = 0x1853_8067;
+const MATROSKA_SEEK_HEAD_ID: u32 = 0x114D_9B74;
+const MATROSKA_SEEK_ID: u32 = 0x4DBB;
+const MATROSKA_SEEK_ENTRY_ID: u32 = 0x53AB;
+const MATROSKA_SEEK_POSITION_ID: u32 = 0x53AC;
+const MATROSKA_CLUSTER_ID: u32 = 0x1F43_B675;
+/// Info and Tracks are small; a larger declared size is corruption, and the crate would
+/// allocate it before reading.
+const MAX_MATROSKA_HEADER_ELEMENT: u64 = 16 * 1024 * 1024;
+
+struct MatroskaHead {
+    info: Option<matroska::Info>,
+    tracks: Vec<matroska::Track>,
+}
+
+/// Reads only Info and Tracks. `matroska::Matroska::open` also reads Attachments, Chapters,
+/// and Tags in full (hundreds of MB of fonts in some files) and asserts on stale `SeekHead`
+/// pointers; here other elements are skipped by seeking, and a `SeekHead` pointer is only
+/// followed when the element it lands on has the expected ID.
+fn read_matroska_head(reader: &mut SparseProbeReader) -> Result<MatroskaHead, ProbeServiceError> {
+    if read_ebml_id(reader)? != EBML_HEADER_ID {
+        return Err(ProbeServiceError::Inspection(
+            "Matroska EBML header is missing".into(),
+        ));
+    }
+    let header_size = read_known_ebml_size(reader)?;
+    reader
+        .seek(SeekFrom::Current(ebml_offset(header_size)?))
+        .map_err(ebml_io)?;
+    let segment_size = loop {
+        let id = read_ebml_id(reader)?;
+        let size = read_ebml_size(reader)?;
+        if id == MATROSKA_SEGMENT_ID {
+            break size;
+        }
+        let size = size.ok_or_else(|| invalid_ebml("unknown-size element before Segment"))?;
+        reader
+            .seek(SeekFrom::Current(ebml_offset(size)?))
+            .map_err(ebml_io)?;
+    };
+    let segment_start = reader.stream_position().map_err(ebml_io)?;
+    let segment_end = segment_size
+        .and_then(|size| segment_start.checked_add(size))
+        .map_or(reader.size, |end| end.min(reader.size));
+    let mut info = None;
+    let mut tracks = None;
+    let mut seek_positions = Vec::new();
+    while reader.position < segment_end && (info.is_none() || tracks.is_none()) {
+        let id = read_ebml_id(reader)?;
+        let size = read_ebml_size(reader)?;
+        let body = reader.position;
+        match (id, size) {
+            (matroska::Info::ID, Some(size)) => {
+                info = Some(parse_matroska_element::<matroska::Info>(reader, size)?);
+            }
+            (matroska::Track::ID, Some(size)) => {
+                tracks = Some(parse_matroska_element::<matroska::Track>(reader, size)?);
+            }
+            (MATROSKA_SEEK_HEAD_ID, Some(size)) => {
+                seek_positions.extend(read_seek_head(reader, size)?);
+            }
+            // Media data starts here (or the size is unknown); the rest is only reachable
+            // through the SeekHead.
+            (MATROSKA_CLUSTER_ID, _) | (_, None) => break,
+            (_, Some(_)) => {}
+        }
+        let Some(size) = size else { break };
+        let next = body
+            .checked_add(size)
+            .ok_or_else(|| invalid_ebml("element size overflows"))?;
+        reader.seek(SeekFrom::Start(next)).map_err(ebml_io)?;
+    }
+    for (id, position) in seek_positions {
+        let missing = match id {
+            matroska::Info::ID => info.is_none(),
+            matroska::Track::ID => tracks.is_none(),
+            _ => false,
+        };
+        let Some(start) = segment_start.checked_add(position) else {
+            continue;
+        };
+        if !missing || start >= reader.size {
+            continue;
+        }
+        reader.seek(SeekFrom::Start(start)).map_err(ebml_io)?;
+        // A stale index points at unrelated bytes; ignore the entry instead of failing.
+        if read_ebml_id(reader).ok() != Some(id) {
+            continue;
+        }
+        let size = read_known_ebml_size(reader)?;
+        if id == matroska::Info::ID {
+            info = Some(parse_matroska_element::<matroska::Info>(reader, size)?);
+        } else {
+            tracks = Some(parse_matroska_element::<matroska::Track>(reader, size)?);
+        }
+    }
+    Ok(MatroskaHead {
+        info,
+        tracks: tracks.unwrap_or_default(),
+    })
+}
+
+fn parse_matroska_element<P: Parseable>(
+    reader: &mut SparseProbeReader,
+    size: u64,
+) -> Result<P::Output, ProbeServiceError> {
+    if size > MAX_MATROSKA_HEADER_ELEMENT {
+        return Err(invalid_ebml("Matroska header element is too large"));
+    }
+    P::parse(reader, size).map_err(|error| ProbeServiceError::Inspection(error.to_string()))
+}
+
+/// `SeekHead` entries as (element ID, position relative to the Segment body).
+fn read_seek_head(
+    reader: &mut SparseProbeReader,
+    size: u64,
+) -> Result<Vec<(u32, u64)>, ProbeServiceError> {
+    let end = reader
+        .position
+        .checked_add(size)
+        .ok_or_else(|| invalid_ebml("element size overflows"))?;
+    let mut entries = Vec::new();
+    while reader.position < end {
+        let id = read_ebml_id(reader)?;
+        let size = read_known_ebml_size(reader)?;
+        let next = reader
+            .position
+            .checked_add(size)
+            .ok_or_else(|| invalid_ebml("element size overflows"))?;
+        if id == MATROSKA_SEEK_ID {
+            let (mut target, mut position) = (None, None);
+            while reader.position < next {
+                let field = read_ebml_id(reader)?;
+                let field_size = read_known_ebml_size(reader)?;
+                let field_end = reader
+                    .position
+                    .checked_add(field_size)
+                    .ok_or_else(|| invalid_ebml("element size overflows"))?;
+                match field {
+                    MATROSKA_SEEK_ENTRY_ID if field_size <= 4 => {
+                        target = Some(
+                            u32::try_from(read_ebml_uint(reader, field_size)?)
+                                .map_err(|_| invalid_ebml("invalid SeekID"))?,
+                        );
+                    }
+                    MATROSKA_SEEK_POSITION_ID if field_size <= 8 => {
+                        position = Some(read_ebml_uint(reader, field_size)?);
+                    }
+                    _ => {}
+                }
+                reader.seek(SeekFrom::Start(field_end)).map_err(ebml_io)?;
+            }
+            if let (Some(target), Some(position)) = (target, position) {
+                entries.push((target, position));
+            }
+        }
+        reader.seek(SeekFrom::Start(next)).map_err(ebml_io)?;
+    }
+    Ok(entries)
+}
+
+/// Keeps the reader's message: the service parses "Probe byte budget gap at offset N" to
+/// fetch the missing range and retry.
+#[allow(clippy::needless_pass_by_value)] // Shaped for `map_err`.
+fn ebml_io(error: io::Error) -> ProbeServiceError {
+    ProbeServiceError::Inspection(error.to_string())
+}
+
+fn invalid_ebml(message: &str) -> ProbeServiceError {
+    ProbeServiceError::Inspection(message.to_owned())
+}
+
+fn ebml_offset(size: u64) -> Result<i64, ProbeServiceError> {
+    i64::try_from(size).map_err(|_| invalid_ebml("element size overflows"))
+}
+
+fn read_ebml_byte(reader: &mut SparseProbeReader) -> Result<u8, ProbeServiceError> {
+    let mut byte = [0_u8; 1];
+    reader.read_exact(&mut byte).map_err(ebml_io)?;
+    Ok(byte[0])
+}
+
+/// An element ID keeps its length marker, matching the IDs in the Matroska spec.
+fn read_ebml_id(reader: &mut SparseProbeReader) -> Result<u32, ProbeServiceError> {
+    let first = read_ebml_byte(reader)?;
+    let length = first.leading_zeros() + 1;
+    if length > 4 {
+        return Err(invalid_ebml("invalid element ID"));
+    }
+    let mut id = u32::from(first);
+    for _ in 1..length {
+        id = (id << 8) | u32::from(read_ebml_byte(reader)?);
+    }
+    Ok(id)
+}
+
+/// `None` is the reserved all-ones "unknown size" (live and streamed files).
+fn read_ebml_size(reader: &mut SparseProbeReader) -> Result<Option<u64>, ProbeServiceError> {
+    let first = read_ebml_byte(reader)?;
+    let length = first.leading_zeros() + 1;
+    if length > 8 {
+        return Err(invalid_ebml("invalid element size"));
+    }
+    let mask = 0xFF_u8.checked_shr(length).unwrap_or(0);
+    let mut value = u64::from(first & mask);
+    let mut all_ones = first & mask == mask;
+    for _ in 1..length {
+        let byte = read_ebml_byte(reader)?;
+        all_ones &= byte == 0xFF;
+        value = (value << 8) | u64::from(byte);
+    }
+    Ok((!all_ones).then_some(value))
+}
+
+fn read_known_ebml_size(reader: &mut SparseProbeReader) -> Result<u64, ProbeServiceError> {
+    read_ebml_size(reader)?.ok_or_else(|| invalid_ebml("unexpected unknown-size element"))
+}
+
+fn read_ebml_uint(reader: &mut SparseProbeReader, size: u64) -> Result<u64, ProbeServiceError> {
+    let mut value = 0_u64;
+    for _ in 0..size {
+        value = (value << 8) | u64::from(read_ebml_byte(reader)?);
+    }
+    Ok(value)
+}
+
 #[derive(Default)]
 pub struct DefaultMediaInspector;
 
@@ -206,9 +440,50 @@ impl MediaInspector for DefaultMediaInspector {
             IsoBmffInspector.inspect(input)
         } else if is_audio_container(&input) {
             AudioInspector.inspect(input)
-        } else {
+        } else if is_matroska(&input) {
             MatroskaInspector.inspect(input)
+        } else {
+            // Without this, TS/FLV/AVI files named `.mp4`/`.mkv` reach the Matroska parser
+            // and fail with misleading EBML errors such as "invalid element size".
+            Err(ProbeServiceError::Inspection(format!(
+                "unsupported container: {}",
+                sniff_container(&input)
+            )))
         }
+    }
+}
+
+fn head_segment(input: &ProbeInput) -> Option<&[u8]> {
+    input
+        .segments
+        .iter()
+        .find(|segment| segment.start == 0)
+        .map(|segment| segment.bytes.as_slice())
+}
+
+fn is_matroska(input: &ProbeInput) -> bool {
+    head_segment(input).is_some_and(|bytes| bytes.starts_with(&EBML_HEADER_ID.to_be_bytes()))
+}
+
+/// Names the container for an unsupported-format error.
+fn sniff_container(input: &ProbeInput) -> &'static str {
+    const TS_PACKET: usize = 188;
+    const ASF_HEADER: [u8; 8] = [0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11];
+    let Some(bytes) = head_segment(input) else {
+        return "unknown";
+    };
+    if bytes.first() == Some(&0x47) && bytes.get(TS_PACKET).is_none_or(|byte| *byte == 0x47) {
+        "mpegts"
+    } else if bytes.starts_with(b"FLV") {
+        "flv"
+    } else if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"AVI " {
+        "avi"
+    } else if bytes.starts_with(&ASF_HEADER) {
+        "asf"
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0xBA]) {
+        "mpeg-ps"
+    } else {
+        "unknown"
     }
 }
 
@@ -2149,6 +2424,190 @@ mod tests {
         assert_eq!(result.streams()[0].codec(), Some("h264"));
         assert_eq!(result.streams()[0].profile(), Some("High"));
         assert_eq!(result.streams()[0].level(), Some(41));
+    }
+
+    /// One EBML element; sizes of 127 bytes or more use the 8-byte size form.
+    fn ebml(id: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = id.to_vec();
+        bytes.extend(ebml_size(payload.len() as u64));
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn ebml_size(size: u64) -> Vec<u8> {
+        if size < 127 {
+            vec![0x80 | u8::try_from(size).unwrap()]
+        } else {
+            let mut bytes = vec![0x01];
+            bytes.extend_from_slice(&size.to_be_bytes()[1..]);
+            bytes
+        }
+    }
+
+    fn mkv_track(language: Option<&[u8]>) -> Vec<u8> {
+        let mut video = Vec::new();
+        video.extend(ebml(&[0xB0], &[0x07, 0x80]));
+        video.extend(ebml(&[0xBA], &[0x04, 0x38]));
+        let mut track = Vec::new();
+        track.extend(ebml(&[0xD7], &[1]));
+        track.extend(ebml(&[0x73, 0xC5], &[7]));
+        track.extend(ebml(&[0x83], &[1]));
+        track.extend(ebml(&[0x86], b"V_MPEG4/ISO/AVC"));
+        if let Some(language) = language {
+            track.extend(ebml(&[0x22, 0xB5, 0x9C], language));
+        }
+        track.extend(ebml(&[0xE0], &video));
+        ebml(&[0x16, 0x54, 0xAE, 0x6B], &ebml(&[0xAE], &track))
+    }
+
+    fn seek_entry(id: &[u8], position: u64) -> Vec<u8> {
+        let mut entry = ebml(&[0x53, 0xAB], id);
+        entry.extend(ebml(&[0x53, 0xAC], &position.to_be_bytes()));
+        ebml(&[0x4D, 0xBB], &entry)
+    }
+
+    /// An EBML header plus a Segment whose declared size spans `file_size`.
+    fn mkv_head(segment_body: &[u8], file_size: u64) -> (Vec<u8>, u64) {
+        let mut bytes = ebml(&[0x1A, 0x45, 0xDF, 0xA3], &[]);
+        bytes.extend([0x18, 0x53, 0x80, 0x67]);
+        let segment_start = bytes.len() as u64 + 8;
+        bytes.extend(ebml_size(file_size - segment_start));
+        bytes.extend_from_slice(segment_body);
+        (bytes, segment_start)
+    }
+
+    /// A Matroska file holding exactly `segment_body`, so every byte is in the input.
+    fn complete_mkv(segment_body: &[u8]) -> Vec<u8> {
+        let size = mkv_head(segment_body, u64::from(u32::MAX)).0.len() as u64;
+        mkv_head(segment_body, size).0
+    }
+
+    fn sparse(size: u64, segments: Vec<(u64, Vec<u8>)>) -> ProbeInput {
+        ProbeInput {
+            size,
+            segments: segments
+                .into_iter()
+                .map(|(start, bytes)| ProbeSegment {
+                    start,
+                    bytes: Arc::new(bytes),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn matroska_inspector_drops_an_empty_track_language() {
+        for language in [&b""[..], b"\0\0\0", b"eng\0"] {
+            let info = ebml(&[0x15, 0x49, 0xA9, 0x66], &[]);
+            let bytes = complete_mkv(&[info, mkv_track(Some(language))].concat());
+
+            let result = MatroskaInspector
+                .inspect(sparse(bytes.len() as u64, vec![(0, bytes)]))
+                .unwrap();
+
+            let expected = (language == b"eng\0").then_some("eng");
+            assert_eq!(result.streams()[0].language(), expected, "{language:?}");
+        }
+    }
+
+    #[test]
+    fn matroska_inspector_skips_attachments_beyond_the_probed_range() {
+        // Hundreds of MB of font attachments between the header and the tracks, as muxed
+        // by many anime releases; only the head and the tracks are in the probe input.
+        let attachments_size: u64 = 300 * 1024 * 1024;
+        let info = ebml(&[0x15, 0x49, 0xA9, 0x66], &[]);
+        let mut attachments_header = vec![0x19, 0x41, 0xA4, 0x69];
+        attachments_header.extend(ebml_size(attachments_size));
+        let tracks = mkv_track(None);
+        let head_body = [info, attachments_header].concat();
+        // The segment body length only depends on the file size through a fixed-width
+        // size field, so the head length is known before the file size.
+        let head_len = mkv_head(&head_body, u64::from(u32::MAX)).0.len() as u64;
+        let tracks_offset = head_len + attachments_size;
+        let file_size = tracks_offset + tracks.len() as u64 + 1024;
+        let (head, _) = mkv_head(&head_body, file_size);
+        assert_eq!(head.len() as u64, head_len);
+        let input = sparse(file_size, vec![(0, head), (tracks_offset, tracks)]);
+
+        let result = DefaultMediaInspector.inspect(input).unwrap();
+
+        assert_eq!(result.streams().len(), 1);
+        assert_eq!(result.streams()[0].codec(), Some("h264"));
+    }
+
+    #[test]
+    fn matroska_inspector_ignores_stale_seek_head_pointers() {
+        let file_size = 1 << 20;
+        let info = ebml(&[0x15, 0x49, 0xA9, 0x66], &[]);
+        let tracks = mkv_track(None);
+        let stale_position = 900_000;
+        // Info and Tracks pointers are right; the Tags pointer lands on unrelated bytes, as in
+        // files remuxed without rewriting the index. `matroska::Matroska::open` asserts there.
+        let seek_head = |info_position: u64| {
+            let mut entries = seek_entry(&[0x15, 0x49, 0xA9, 0x66], info_position);
+            entries.extend(seek_entry(
+                &[0x16, 0x54, 0xAE, 0x6B],
+                info_position + info.len() as u64,
+            ));
+            entries.extend(seek_entry(&[0x12, 0x54, 0xC3, 0x67], stale_position));
+            ebml(&[0x11, 0x4D, 0x9B, 0x74], &entries)
+        };
+        let info_position = seek_head(0).len() as u64;
+        let body = [seek_head(info_position), info.clone(), tracks].concat();
+        let (bytes, segment_start) = mkv_head(&body, file_size);
+        let junk = (segment_start + stale_position, vec![0x27, 0xA9, 0x4B, 0x80]);
+
+        let result = MatroskaInspector
+            .inspect(sparse(file_size, vec![(0, bytes), junk]))
+            .unwrap();
+
+        assert_eq!(result.streams().len(), 1);
+    }
+
+    #[test]
+    fn matroska_inspector_follows_a_valid_seek_head_past_the_clusters() {
+        let file_size = 1 << 20;
+        let tracks = mkv_track(None);
+        let tracks_position = 500_000;
+        let seek_head = ebml(
+            &[0x11, 0x4D, 0x9B, 0x74],
+            &seek_entry(&[0x16, 0x54, 0xAE, 0x6B], tracks_position),
+        );
+        let cluster = ebml(&[0x1F, 0x43, 0xB6, 0x75], &[0; 16]);
+        let (bytes, segment_start) = mkv_head(&[seek_head, cluster].concat(), file_size);
+
+        let result = MatroskaInspector
+            .inspect(sparse(
+                file_size,
+                vec![(0, bytes), (segment_start + tracks_position, tracks)],
+            ))
+            .unwrap();
+
+        assert_eq!(result.streams().len(), 1);
+    }
+
+    #[test]
+    fn default_inspector_names_containers_it_cannot_parse() {
+        let mut transport_stream = vec![0_u8; 188 * 2];
+        transport_stream[0..3].copy_from_slice(&[0x47, 0x40, 0x00]);
+        transport_stream[188] = 0x47;
+        let mut avi = b"RIFF\0\0\0\0AVI LIST".to_vec();
+        avi.resize(64, 0);
+        for (bytes, container) in [
+            (transport_stream, "mpegts"),
+            (b"FLV\x01\x05\0\0\0\x09".to_vec(), "flv"),
+            (avi, "avi"),
+            (vec![0x13; 32], "unknown"),
+        ] {
+            let error = DefaultMediaInspector
+                .inspect(sparse(bytes.len() as u64, vec![(0, bytes)]))
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!("media inspection failed: unsupported container: {container}")
+            );
+        }
     }
 
     #[test]
