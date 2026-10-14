@@ -597,7 +597,9 @@ fn media_refresh_interval(
             .ok()
             .filter(|value| *value <= 2_592_000)
             .ok_or(StartupError::InvalidMediaRefreshInterval)?,
-        Err(env::VarError::NotPresent) => 900,
+        // Each refresh re-walks every enabled library; on large libraries a pass takes minutes,
+        // so a shorter default keeps the database busy even when nothing changed.
+        Err(env::VarError::NotPresent) => 3_600,
         Err(env::VarError::NotUnicode(_)) => {
             return Err(StartupError::InvalidMediaRefreshInterval);
         }
@@ -770,7 +772,7 @@ mod tests {
     fn media_refresh_interval_defaults_disables_and_rejects_invalid_values() {
         assert_eq!(
             media_refresh_interval(|| Err(VarError::NotPresent)).unwrap(),
-            Some(Duration::from_secs(900))
+            Some(Duration::from_secs(3_600))
         );
         assert_eq!(media_refresh_interval(|| Ok("0".to_owned())).unwrap(), None);
         assert!(media_refresh_interval(|| Ok("invalid".to_owned())).is_err());
