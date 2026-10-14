@@ -64,7 +64,7 @@ cargo +1.88.0 fmt --all -- --check
 
 ## Git 交付
 
-- 复杂任务——超出参数调整或少量局部改动的工作——在独立的 Git worktree 和专用分支上完成，不直接在主检出中修改；主检出可能保留用户未提交的改动。进入 worktree 后先按“环境准备”执行 `npm --prefix admin ci` 等依赖安装，再开始开发。
+- 复杂任务——超出参数调整或少量局部改动的工作——在独立的 Git worktree 和专用分支上完成，不直接在主检出中修改；主检出可能保留用户未提交的改动。进入 worktree 后先按“环境准备”执行 `pnpm --dir admin install --frozen-lockfile` 等依赖安装，再开始开发。
 - 交付时把分支合回主检出（fast-forward 或 cherry-pick），不得改动用户未提交的改动；在主检出重新运行相关检查通过后，删除该 worktree 及其分支。
 - 每个任务完成后，为该任务的改动创建一个或多个 Git commit。
 - 任务包含互不相关的改动时，按改动类别或仓库职责分组提交。
