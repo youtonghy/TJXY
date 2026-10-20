@@ -65,6 +65,9 @@ impl FilesystemEventMonitor {
                 message: "filesystem event watcher closed".to_owned(),
             })?
             .map_err(map_notify_error)?;
+        // A rescan hint (inotify queue overflow, FSEvents must-scan) names no paths, so it cannot
+        // be resolved to scopes; report it like a full queue so the account is validated.
+        let mut rescan = first.need_rescan();
         let mut paths = first.paths;
         let sleep = tokio::time::sleep(self.quiet_window);
         tokio::pin!(sleep);
@@ -77,6 +80,7 @@ impl FilesystemEventMonitor {
                             message: "filesystem event watcher closed".to_owned(),
                         })?
                         .map_err(map_notify_error)?;
+                    rescan |= event.need_rescan();
                     paths.extend(event.paths);
                     sleep.as_mut().reset(tokio::time::Instant::now() + self.quiet_window);
                 }
@@ -84,7 +88,7 @@ impl FilesystemEventMonitor {
         }
         paths.sort();
         paths.dedup();
-        if self.overflowed.swap(false, Ordering::AcqRel) {
+        if self.overflowed.swap(false, Ordering::AcqRel) || rescan {
             return Err(event_overflow_error());
         }
         Ok(FilesystemEventBatch { paths })
@@ -946,7 +950,7 @@ mod tests {
 
     use notify::{
         Event, EventKind,
-        event::{AccessKind, CreateKind, ModifyKind, RemoveKind},
+        event::{AccessKind, CreateKind, Flag, ModifyKind, RemoveKind},
     };
     use tokio::sync::mpsc;
 
@@ -1036,5 +1040,34 @@ mod tests {
             batch.paths,
             vec![PathBuf::from("/root/a"), PathBuf::from("/root/b")]
         );
+    }
+
+    #[tokio::test]
+    async fn event_monitor_reports_a_rescan_hint_as_missed_events() {
+        let (sender, receiver) = mpsc::channel(4);
+        let mut monitor = FilesystemEventMonitor {
+            _watcher: None,
+            receiver,
+            overflowed: Arc::new(AtomicBool::new(false)),
+            quiet_window: Duration::from_millis(10),
+        };
+        sender
+            .send(Ok(
+                Event::new(EventKind::Any).add_path(PathBuf::from("/root/a"))
+            ))
+            .await
+            .unwrap();
+        // notify's inotify backend reports IN_Q_OVERFLOW exactly like this: no paths at all.
+        sender
+            .send(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)))
+            .await
+            .unwrap();
+
+        let error = monitor.next_batch().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::BackendError::TemporarilyUnavailable { .. }
+        ));
     }
 }
