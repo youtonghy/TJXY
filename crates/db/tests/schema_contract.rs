@@ -2716,8 +2716,13 @@ async fn scan_lookup_indexes_survive_upgrade_rollback_and_reapply() {
     for (table, index) in indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
-    // The newer index migrations sit above this one, so roll back all of them.
-    Migrator::down(&database, Some(8)).await.unwrap();
+    // The newer migrations sit above this one, so roll back all of them.
+    Migrator::down(
+        &database,
+        Some(steps_to_undo("m20260910_000079_scan_lookup_indexes")),
+    )
+    .await
+    .unwrap();
     for (table, index) in indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }
@@ -2755,7 +2760,12 @@ async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
     for &(table, index) in &indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
-    Migrator::down(&database, Some(7)).await.unwrap();
+    Migrator::down(
+        &database,
+        Some(steps_to_undo("m20260911_000080_hot_path_indexes")),
+    )
+    .await
+    .unwrap();
     for &(table, index) in &indexes {
         assert!(!schema.has_index(table, index).await.unwrap());
     }
@@ -2763,4 +2773,14 @@ async fn hot_path_indexes_survive_upgrade_rollback_and_reapply() {
     for &(table, index) in &indexes {
         assert!(schema.has_index(table, index).await.unwrap());
     }
+}
+
+/// Rollback steps that undo `name` and every migration registered after it.
+fn steps_to_undo(name: &str) -> u32 {
+    let migrations = Migrator::migrations();
+    let position = migrations
+        .iter()
+        .position(|migration| migration.name() == name)
+        .unwrap();
+    u32::try_from(migrations.len() - position).unwrap()
 }

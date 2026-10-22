@@ -1796,9 +1796,17 @@ async fn art_backfill_migration_reresolves_only_items_with_named_art() {
         before.push(metadata_revision(&fixture, *item).await);
     }
 
-    // The newest migration re-runs this backfill and its `down` is a no-op, so re-applying
-    // it runs the backfill against the projected catalog.
-    tjxy_db::Migrator::down(&fixture.database, Some(1))
+    // This migration re-runs the backfill and its `down` is a no-op, so rolling back to just
+    // before it and re-applying runs the backfill against the projected catalog.
+    let migrations = tjxy_db::Migrator::migrations();
+    let backfill = migrations
+        .iter()
+        .position(|migration| {
+            migration.name() == "m20261013_000086_reresolve_art_for_projected_library_items"
+        })
+        .unwrap();
+    let steps = u32::try_from(migrations.len() - backfill).unwrap();
+    tjxy_db::Migrator::down(&fixture.database, Some(steps))
         .await
         .unwrap();
     tjxy_db::Migrator::up(&fixture.database, None)
