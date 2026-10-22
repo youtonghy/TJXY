@@ -41,6 +41,7 @@ import {
 import { useClientAuth } from '../auth/ClientAuthContext';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
 import { ServerAddressField } from '../ui/ServerAddressField';
+import { ClientUpdateCard } from '../updates/ClientUpdateCard';
 import { PasswordStrength } from '../../ui/passwordStrength';
 import { deletePasskey, listPasskeys, passkeyErrorMessage, registerPasskey, type PasskeySummary } from '../auth/passkeyApi';
 import { useTranslate } from '../../settings/i18n';
@@ -157,6 +158,8 @@ export function ProfilePage() {
           </Card.Content>
         </Card>
       )}
+
+      <ClientUpdateCard />
 
       <section className="space-y-5" aria-labelledby="statistics-heading">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">

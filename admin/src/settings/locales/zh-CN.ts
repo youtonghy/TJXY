@@ -42,6 +42,7 @@ const zhCN: Record<string, string> = {
   'admin.navigation.about': '关于',
   'admin.navigation.ai': 'AI 助手',
   'admin.navigation.announcements': '公告管理',
+  'admin.navigation.clientReleases': '客户端版本',
   'admin.navigation.close': '关闭导航',
   'admin.navigation.dashboard': '仪表盘',
   'admin.navigation.googleDrive': 'Google Drive',

@@ -7,6 +7,7 @@ const enUS: Record<string, string> = {
   'admin.navigation.about': 'About',
   'admin.navigation.ai': 'AI assistant',
   'admin.navigation.announcements': 'Announcements',
+  'admin.navigation.clientReleases': 'Client releases',
   'admin.navigation.close': 'Close navigation',
   'admin.navigation.dashboard': 'Dashboard',
   'admin.navigation.googleDrive': 'Google Drive',

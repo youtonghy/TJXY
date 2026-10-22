@@ -84,6 +84,7 @@ mod m20260914_000083_claim_and_purge_indexes;
 mod m20260915_000084_maintenance_purge_cadence;
 mod m20261012_000085_reresolve_episode_and_season_art;
 mod m20261013_000086_reresolve_art_for_projected_library_items;
+mod m20261022_000087_client_releases;
 
 use std::collections::HashSet;
 
@@ -203,6 +204,7 @@ async fn validate_current_schema(
         "ai_execution_records",
         "ai_daily_usage",
         "announcements",
+        "client_releases",
         "installation_records",
         "asset_storage_roots",
         "logging_settings",
@@ -367,6 +369,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260915_000084_maintenance_purge_cadence::Migration),
             Box::new(m20261012_000085_reresolve_episode_and_season_art::Migration),
             Box::new(m20261013_000086_reresolve_art_for_projected_library_items::Migration),
+            Box::new(m20261022_000087_client_releases::Migration),
         ]
     }
 }

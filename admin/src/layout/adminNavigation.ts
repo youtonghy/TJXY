@@ -6,6 +6,7 @@ import {
   Logs,
   LayoutDashboard,
   Megaphone,
+  MonitorDown,
   Palette,
   ShieldCheck,
   Settings2,
@@ -33,6 +34,7 @@ export const adminNavigation: readonly AdminNavigationGroup[] = [
       { labelKey: 'admin.navigation.access', to: '/admin/access', icon: ShieldCheck },
       { labelKey: 'admin.navigation.libraries', to: '/admin/libraries', icon: FolderKanban },
       { labelKey: 'admin.navigation.announcements', to: '/admin/announcements', icon: Megaphone },
+      { labelKey: 'admin.navigation.clientReleases', to: '/admin/client-releases', icon: MonitorDown },
     ],
   },
   {

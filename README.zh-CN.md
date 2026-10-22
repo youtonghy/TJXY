@@ -45,6 +45,10 @@ TJXY 将影视或音乐条目与实际提供文件内容的存储位置分离。
   范围内提供媒体发现与推荐。
 - **多数据库支持**：可使用 SQLite、PostgreSQL 或 MySQL；`tjxy-setup` 可以自动
   创建并管理 PostgreSQL。
+- **客户端更新**：管理员在“客户端版本”中上传桌面端和 Android 安装包，并按平台和
+  架构指定最新版本。安装包保存在 `<assets 目录>/client-releases`（单个上限 2 GiB）。
+  已登录的原生客户端通过 `GET /ClientUpdates/Latest` 检查更新，并通过支持断点续传的
+  `GET /ClientUpdates/{id}/Download` 下载。
 - **运维工具**：健康检查、结构化滚动日志、终端诊断界面、Docker 健康检查和
   持久化安装配置。
 

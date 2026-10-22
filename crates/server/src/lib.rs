@@ -12,6 +12,7 @@ mod auth;
 mod bounded_log;
 mod browse;
 mod client_portal;
+mod client_releases;
 mod configuration;
 mod dashboard_admin;
 mod device;
@@ -183,6 +184,7 @@ pub struct AppState {
     display_preferences: Option<Arc<DisplayPreferencesService>>,
     dashboard_admin: Option<Arc<dashboard_admin::DashboardAdminService>>,
     client_portal: Option<Arc<client_portal::ClientPortalService>>,
+    client_releases: Option<Arc<client_releases::ClientReleaseService>>,
     libraries: Option<Arc<LibraryService>>,
     filesystem_browser: Option<Arc<FilesystemBrowser>>,
     assets: Option<Arc<AssetReadService>>,
@@ -226,6 +228,7 @@ impl AppState {
             display_preferences: None,
             dashboard_admin: None,
             client_portal: None,
+            client_releases: None,
             libraries: None,
             filesystem_browser: None,
             assets: None,
@@ -270,6 +273,19 @@ impl AppState {
     #[must_use]
     pub fn with_announcements(mut self, database: sea_orm::DatabaseConnection) -> Self {
         self.announcements = Some(Arc::new(announcements::AnnouncementService::new(database)));
+        self
+    }
+
+    /// Enables client installer distribution, storing uploaded packages in `directory`.
+    #[must_use]
+    pub fn with_client_releases(
+        mut self,
+        database: sea_orm::DatabaseConnection,
+        directory: std::path::PathBuf,
+    ) -> Self {
+        self.client_releases = Some(Arc::new(client_releases::ClientReleaseService::new(
+            database, directory,
+        )));
         self
     }
 
@@ -608,6 +624,11 @@ pub fn build_router(state: AppState) -> Router {
             "/Announcements/{id}/Acknowledge",
             post(announcements::acknowledge),
         )
+        .route("/ClientUpdates/Latest", get(client_releases::check))
+        .route(
+            "/ClientUpdates/{id}/Download",
+            get(client_releases::download),
+        )
         .route("/Users/Me/Insights", get(client_portal::insights))
         .route(
             "/Users/Me/Profile",
@@ -875,6 +896,18 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/Admin/Announcements/{id}/Archive",
             post(announcements::admin_archive),
+        )
+        .route(
+            "/Admin/ClientReleases",
+            get(client_releases::admin_list).post(client_releases::admin_upload),
+        )
+        .route(
+            "/Admin/ClientReleases/{id}",
+            put(client_releases::admin_update_notes).delete(client_releases::admin_delete),
+        )
+        .route(
+            "/Admin/ClientReleases/{id}/Latest",
+            post(client_releases::admin_mark_latest),
         )
         .route(
             "/Admin/Ai/Settings/Models",

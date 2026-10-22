@@ -918,6 +918,7 @@ pub async fn initialize(mut options: StartupOptions) -> Result<AppState, Initial
     .with_metadata_settings_admin(metadata_settings_admin)
     .with_local_metadata_admin(local_metadata_admin)
     .with_system_settings_assets(database.clone(), branding_assets_dir)
+    .with_client_releases(database.clone(), options.assets_dir.join("client-releases"))
     .with_logging_runtime(options.logging_runtime)
     .with_relink_admin(relink_admin)
     .with_storage_runtime(storage_runtime)

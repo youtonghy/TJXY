@@ -24,6 +24,7 @@ const AccessPage = lazyComponent(() => import('./access/AccessPage'), 'AccessPag
 const AiSettingsPage = lazyComponent(() => import('./settings/AiSettingsPage'), 'AiSettingsPage');
 const AboutPage = lazyComponent(() => import('./settings/AboutPage'), 'AboutPage');
 const AnnouncementsPage = lazyComponent(() => import('./announcements/AnnouncementsPage'), 'AnnouncementsPage');
+const ClientReleasesPage = lazyComponent(() => import('./clientReleases/ClientReleasesPage'), 'ClientReleasesPage');
 const ClientApp = lazyComponent(() => import('./client/ClientApp'), 'ClientApp');
 const GoogleDrivePage = lazyComponent(() => import('./storage/GoogleDrivePage'), 'GoogleDrivePage');
 const LibrariesPage = lazyComponent(() => import('./libraries/LibrariesPage'), 'LibrariesPage');
@@ -133,6 +134,7 @@ function ApplicationRoutes() {
                 />
                 <Route element={<AccessPage />} path="/access" />
                 <Route element={<AnnouncementsPage />} path="/announcements" />
+                <Route element={<ClientReleasesPage />} path="/client-releases" />
                 <Route element={<TasksPage />} path="/tasks" />
                 <Route element={<LogsPage />} path="/logs" />
                 <Route element={<LibrariesPage />} path="/libraries" />

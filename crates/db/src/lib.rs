@@ -12,6 +12,7 @@ mod catalog_publication;
 mod catalog_query;
 mod catalog_storage_scope;
 mod catalog_visibility;
+mod client_release;
 mod dashboard;
 mod demo_catalog;
 mod device;
@@ -114,6 +115,10 @@ pub use catalog_query::{
     LazyCatalogWorkTarget, LazyStorageScope, LibraryViewRecord,
 };
 pub use catalog_visibility::catalog_item_visibility_condition;
+pub use client_release::{
+    ClientArch, ClientPlatform, ClientReleaseInput, ClientReleaseRecord, ClientReleaseRepository,
+    ClientReleaseRepositoryError, ClientVersion, client_package_extension,
+};
 pub use dashboard::{
     DashboardLoginRecord, DashboardNowPlaying, DashboardPage, DashboardPlaybackEvent,
     DashboardRepository, DashboardSnapshot, DashboardTopItem, DashboardWatchRecord,

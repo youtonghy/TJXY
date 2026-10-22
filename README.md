@@ -66,6 +66,11 @@ controlled separately by `TJXY_LEGACY_AUTH`.
   discovery grounded in the authenticated user's visible catalog and history.
 - **Multiple databases:** use SQLite, PostgreSQL, or MySQL; PostgreSQL can be
   provisioned automatically by `tjxy-setup`.
+- **Client updates:** administrators upload desktop and Android installers under
+  *Client releases* and mark the latest version per platform and architecture.
+  Packages are stored in `<assets dir>/client-releases` (2 GiB per upload).
+  Signed-in native clients check `GET /ClientUpdates/Latest` and download
+  through `GET /ClientUpdates/{id}/Download`, which supports resumable ranges.
 - **Operational tooling:** health checks, structured rotating logs, a diagnostic
   TUI, Docker health checks, and persistent installation configuration.
 
