@@ -17,7 +17,8 @@ import {
   type PlaybackTicket,
 } from '../api/playbackApi';
 import { useClientAuth } from '../auth/ClientAuthContext';
-import { getApiBaseUrl, isDesktopShell, resolveApiUrl } from '../api/apiBase';
+import { getApiBaseUrl, isDesktopShell } from '../api/apiBase';
+import { activeStreamOrigin, markStreamOriginFailed, resolveStreamUrl, streamOriginForPlayback, useStreamRoutes } from '../api/streamRoutes';
 import { browserSources, nativeSources, selectBrowserSource, selectNativeSource, sourceLabel } from './sourceSelection';
 import { useTranslate } from '../../settings/i18n';
 import { randomUuid } from '../../utils/uuid';
@@ -25,6 +26,7 @@ import { attachHlsSource, isHlsSource } from './hlsPlayback';
 import { takePlaybackInfo } from './playbackInfoCache';
 import { DesktopPlayerSurface } from './DesktopPlayerSurface';
 import { WebPlayerSurface } from './WebPlayerSurface';
+import { StreamRouteSelect } from './StreamRouteSelect';
 
 type LoadState = 'loading' | 'ready' | 'no-source' | 'unsupported' | 'error';
 interface SubtitleTrack {
@@ -55,6 +57,10 @@ export function PlayerPage() {
   const [selectedSourceId, setSelectedSourceId] = useState<string>();
   const [playSessionId, setPlaySessionId] = useState<string>();
   const [ticket, setTicket] = useState<PlaybackTicket>();
+  // The route this player is pinned to; later probes never move a running
+  // stream, only a user choice or an automatic failover does.
+  const [streamOrigin, setStreamOrigin] = useState<string>();
+  const { preference: routePreference } = useStreamRoutes();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [selectedSubtitle, setSelectedSubtitle] = useState('off');
   const [desktopStartTicks, setDesktopStartTicks] = useState(0);
@@ -101,6 +107,7 @@ export function PlayerPage() {
         setSelectedSourceId(undefined);
         setPlaySessionId(undefined);
         setTicket(undefined);
+        setStreamOrigin(undefined);
         setPlaybackError(undefined);
         // PlaybackInfo does not need the item response, so both requests run
         // concurrently. The item still decides whether the result is used.
@@ -149,13 +156,17 @@ export function PlayerPage() {
     let active = true;
     setTicket(undefined);
     setPlaybackError(undefined);
-    void issuePlaybackTicket(id, selectedSource.Id, playSessionId)
-      .then((issued) => {
+    void Promise.all([
+      issuePlaybackTicket(id, selectedSource.Id, playSessionId),
+      streamOriginForPlayback(),
+    ])
+      .then(([issued, origin]) => {
         if (!active) {
           void revokePlaybackTicket(issued.Id);
           return;
         }
         setTicket(issued);
+        setStreamOrigin((current) => current ?? origin);
         setState('ready');
       })
       .catch(() => {
@@ -232,15 +243,13 @@ export function PlayerPage() {
     if (!desktop || !ticket) return undefined;
     return {
       loadId: ticket.Id,
-      url: ticket.StreamUrl.startsWith('http')
-        ? ticket.StreamUrl
-        : resolveApiUrl(ticket.StreamUrl, getApiBaseUrl()),
+      url: resolveStreamUrl(ticket.StreamUrl, streamOrigin),
       serverOrigin: getApiBaseUrl(),
       startPositionTicks: desktopStartTicks,
       autoplay: true,
     };
-  }, [desktop, desktopStartTicks, ticket]);
-  const playerSrc = desktop ? undefined : ticket?.StreamUrl;
+  }, [desktop, desktopStartTicks, streamOrigin, ticket]);
+  const playerSrc = desktop || !ticket ? undefined : resolveStreamUrl(ticket.StreamUrl, streamOrigin);
   const usesHlsAdapter = !desktop && isHlsSource(playerSrc);
 
   useEffect(() => {
@@ -323,6 +332,23 @@ export function PlayerPage() {
     setPlaySessionId(randomUuid());
     setSelectedSourceId(sourceId);
   };
+  const switchRoute = (origin: string) => {
+    if (origin === streamOrigin) return;
+    resumeTicksRef.current = currentPlaybackTicks();
+    setDesktopStartTicks(resumeTicksRef.current);
+    setPlaybackError(undefined);
+    setStreamOrigin(origin);
+  };
+  // In automatic mode a failing alternate route falls back to the next best
+  // one, ending at the current address, before an error is shown.
+  const failOver = () => {
+    if (routePreference.mode !== 'auto' || !streamOrigin || streamOrigin === getApiBaseUrl()) return false;
+    markStreamOriginFailed(streamOrigin);
+    const next = activeStreamOrigin();
+    if (next === streamOrigin) return false;
+    switchRoute(next);
+    return true;
+  };
   const nextSource = sources[(sources.findIndex((source) => source.Id === selectedSource.Id) + 1) % sources.length];
 
   return (
@@ -355,7 +381,7 @@ export function PlayerPage() {
               if (user) void togglePlayed(user.Id, id, true);
               setItem({ ...item, UserData: { ...item.UserData, Played: true, PlaybackPositionTicks: 0 } });
             }}
-            onError={(message) => { setPlaybackError(message); }}
+            onError={(message) => { if (!failOver()) setPlaybackError(message); }}
             onPhase={(snapshot, previousPhase) => {
               positionTicksRef.current = snapshot.positionTicks;
               const playing = snapshot.phase === 'playing' || snapshot.phase === 'buffering';
@@ -392,7 +418,7 @@ export function PlayerPage() {
             setItem({ ...item, UserData: { ...item.UserData, Played: true, PlaybackPositionTicks: 0 } });
           }}
           onError={() => {
-            setPlaybackError('This source could not be played. Choose another source.');
+            if (!failOver()) setPlaybackError('This source could not be played. Choose another source.');
           }}
           onLoadedMetadata={() => {
             const video = videoRef.current;
@@ -477,7 +503,7 @@ export function PlayerPage() {
         </Alert>
       )}
 
-      <div className="grid gap-4 border-b border-separator pb-5 sm:grid-cols-2">
+      <div className="grid gap-4 border-b border-separator pb-5 sm:grid-cols-2 lg:grid-cols-3">
         <Select
           aria-label={tr('Video source', '视频源')}
           value={selectedSource.Id}
@@ -542,6 +568,8 @@ export function PlayerPage() {
             </ListBox>
           </Select.Popover>
         </Select>
+
+        {streamOrigin && <StreamRouteSelect origin={streamOrigin} onSwitch={switchRoute} />}
       </div>
 
       <div>

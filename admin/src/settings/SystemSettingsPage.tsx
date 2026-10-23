@@ -14,11 +14,14 @@ import {
 import {
   KeyRound,
   Image as ImageIcon,
+  Network,
   Palette,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Server,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
@@ -28,10 +31,12 @@ import { PageHeader } from '../ui/PageHeader';
 import { useTranslate } from './i18n';
 import { useSystemLocale } from './SystemLocaleProvider';
 import {
+  MAX_STREAM_ADDRESSES,
   getSystemSettings,
   restartSystem,
   saveSystemSettings,
   uploadBrandAsset,
+  type StreamAddressSetting,
   type SystemSettings,
 } from './systemSettingsApi';
 
@@ -42,6 +47,7 @@ const initialSettings: SystemSettings = {
   logoUrl: '/brand/tjxy-mark.webp',
   iconUrl: '/brand/favicon.svg',
   publicUrl: '',
+  streamAddresses: [],
   listenHost: '127.0.0.1',
   port: 8096,
   passkeyEnabled: false,
@@ -79,6 +85,15 @@ export function SystemSettingsPage() {
 
   const patch = <Key extends keyof SystemSettings>(key: Key, value: SystemSettings[Key]) => {
     setSettings((current) => ({ ...current, [key]: value }));
+  };
+
+  const patchStreamAddress = (index: number, change: Partial<StreamAddressSetting>) => {
+    setSettings((current) => ({
+      ...current,
+      streamAddresses: current.streamAddresses.map((address, position) => (
+        position === index ? { ...address, ...change } : address
+      )),
+    }));
   };
 
   const save = () => {
@@ -247,6 +262,51 @@ export function SystemSettingsPage() {
           {(settings.environmentOverrides.listenAddress || settings.environmentOverrides.publicUrl) && (
             <p className="text-xs text-warning md:col-span-2">{tr('admin.system.environmentOverride')}</p>
           )}
+        </Card.Content>
+      </Card>
+
+      <Card>
+        <Card.Header className="items-start gap-3">
+          <Network className="mt-0.5 size-5 shrink-0 text-accent" />
+          <div><Card.Title>{tr('admin.system.streamAddresses')}</Card.Title><Card.Description>{tr('admin.system.streamAddressesDescription')}</Card.Description></div>
+        </Card.Header>
+        <Card.Content className="space-y-4">
+          {settings.streamAddresses.length === 0 && <p className="text-sm text-muted">{tr('admin.system.streamAddressesEmpty')}</p>}
+          {settings.streamAddresses.map((address, index) => {
+            const position = String(index + 1);
+            return (
+              // Rows are plain controlled values without identity of their own.
+              <div className="grid items-end gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]" key={index}>
+                <TextField fullWidth>
+                  <Label>{tr('admin.system.streamAddressName').replace('{index}', position)}</Label>
+                  <Input maxLength={64} placeholder={tr('admin.system.streamAddressNamePlaceholder')} value={address.name} onChange={(event) => { patchStreamAddress(index, { name: event.currentTarget.value }); }} />
+                </TextField>
+                <TextField fullWidth>
+                  <Label>{tr('admin.system.streamAddressUrl').replace('{index}', position)}</Label>
+                  <Input placeholder="https://cdn.example.com" type="url" value={address.url} onChange={(event) => { patchStreamAddress(index, { url: event.currentTarget.value }); }} />
+                </TextField>
+                <Button
+                  aria-label={tr('admin.system.removeStreamAddress').replace('{index}', position)}
+                  isIconOnly
+                  onPress={() => {
+                    patch('streamAddresses', settings.streamAddresses.filter((_, current) => current !== index));
+                  }}
+                  variant="ghost"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            );
+          })}
+          <Button
+            isDisabled={settings.streamAddresses.length >= MAX_STREAM_ADDRESSES}
+            onPress={() => { patch('streamAddresses', [...settings.streamAddresses, { name: '', url: '' }]); }}
+            size="sm"
+            variant="secondary"
+          >
+            <Plus className="size-4" />{tr('admin.system.addStreamAddress')}
+          </Button>
+          <p className="text-xs text-muted">{tr('admin.system.streamAddressesHint')}</p>
         </Card.Content>
       </Card>
 

@@ -39,7 +39,11 @@ export function isRetryableClientError(error: unknown): boolean {
     && (error.status === 0 || error.status === 429 || error.status >= 500);
 }
 
-export async function clientFetch(path: string, options: RequestInit = {}): Promise<Response> {
+/**
+ * Sends an API request. `baseUrl` targets an alternate stream route of the
+ * same server; such requests carry only the bearer token, never cookies.
+ */
+export async function clientFetch(path: string, options: RequestInit = {}, baseUrl = getApiBaseUrl()): Promise<Response> {
   if (!path.startsWith('/') || path.startsWith('//')) throw new ClientApiError(0, 'validation');
   const headers = new Headers(options.headers);
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
@@ -47,14 +51,16 @@ export async function clientFetch(path: string, options: RequestInit = {}): Prom
   if (token) headers.set('Authorization', `MediaBrowser Token="${token}"`);
   else headers.set('Authorization', clientIdentityHeader());
   if (options.body !== undefined && options.body !== null && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const crossRoute = baseUrl !== getApiBaseUrl();
   let response: Response;
   try {
-    const baseUrl = getApiBaseUrl();
     if (!baseUrl) throw new ClientApiError(0, 'validation');
-    response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, credentials: 'include', headers });
+    response = await desktopAwareFetch(resolveApiUrl(path, baseUrl), { ...options, credentials: crossRoute ? 'omit' : 'include', headers });
   }
   catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; if (error instanceof ClientApiError) throw error; throw new ClientApiError(0, 'network'); }
-  if (response.status === 401 && token) {
+  // Only the API base is authoritative for the session; a misconfigured
+  // stream route must not sign the user out.
+  if (response.status === 401 && token && !crossRoute) {
     clearClientToken();
     window.dispatchEvent(new Event(CLIENT_AUTH_INVALIDATED_EVENT));
   }

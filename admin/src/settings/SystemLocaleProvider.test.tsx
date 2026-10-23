@@ -16,6 +16,7 @@ const publicSettings = {
   logoUrl: '/brand/tjxy-mark.webp',
   iconUrl: '/brand/favicon.svg',
   publicUrl: '',
+  streamAddresses: [],
   listenHost: '127.0.0.1',
   port: 8096,
   revision: 0,

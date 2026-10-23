@@ -16,6 +16,16 @@ pub const DEFAULT_LOGO_URL: &str = "/brand/tjxy-mark.webp";
 pub const DEFAULT_ICON_URL: &str = "/brand/favicon.svg";
 pub const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8096;
+pub const MAX_STREAM_ADDRESSES: usize = 10;
+const MAX_STREAM_ADDRESS_NAME_CHARS: usize = 64;
+
+/// An alternate origin that serves the same server, offered to clients for
+/// media and image delivery.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct StreamAddress {
+    pub name: String,
+    pub url: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemSettingsRecord {
@@ -28,6 +38,7 @@ pub struct SystemSettingsRecord {
     listen_host: String,
     port: u16,
     media_browser_roots: Vec<String>,
+    stream_addresses: Vec<StreamAddress>,
     revision: i64,
     passkey_enabled: bool,
     updated_at: DateTime<Utc>,
@@ -71,6 +82,10 @@ impl SystemSettingsRecord {
         &self.media_browser_roots
     }
     #[must_use]
+    pub fn stream_addresses(&self) -> &[StreamAddress] {
+        &self.stream_addresses
+    }
+    #[must_use]
     pub const fn revision(&self) -> i64 {
         self.revision
     }
@@ -95,6 +110,7 @@ pub struct SystemSettingsInput {
     pub listen_host: String,
     pub port: u16,
     pub media_browser_roots: Vec<String>,
+    pub stream_addresses: Vec<StreamAddress>,
     pub passkey_enabled: bool,
 }
 
@@ -110,6 +126,7 @@ impl Default for SystemSettingsInput {
             listen_host: DEFAULT_LISTEN_HOST.to_owned(),
             port: DEFAULT_PORT,
             media_browser_roots: Vec::new(),
+            stream_addresses: Vec::new(),
             passkey_enabled: false,
         }
     }
@@ -127,6 +144,7 @@ impl From<&SystemSettingsRecord> for SystemSettingsInput {
             listen_host: value.listen_host.clone(),
             port: value.port,
             media_browser_roots: value.media_browser_roots.clone(),
+            stream_addresses: value.stream_addresses.clone(),
             passkey_enabled: value.passkey_enabled,
         }
     }
@@ -218,6 +236,7 @@ async fn put_on(
                     Alias::new("listen_host"),
                     Alias::new("port"),
                     Alias::new("media_browser_roots"),
+                    Alias::new("stream_addresses"),
                     Alias::new("passkey_enabled"),
                     Alias::new("revision"),
                     Alias::new("created_at"),
@@ -234,6 +253,7 @@ async fn put_on(
                     input.listen_host.clone().into(),
                     i32::from(input.port).into(),
                     media_browser_roots_json(input).into(),
+                    stream_addresses_json(input).into(),
                     input.passkey_enabled.into(),
                     1_i64.into(),
                     now.into(),
@@ -272,6 +292,10 @@ async fn put_on(
                         Alias::new("media_browser_roots"),
                         media_browser_roots_json(input).into(),
                     ),
+                    (
+                        Alias::new("stream_addresses"),
+                        stream_addresses_json(input).into(),
+                    ),
                     (Alias::new("passkey_enabled"), input.passkey_enabled.into()),
                     (Alias::new("revision"), revision.into()),
                     (Alias::new("updated_at"), now.into()),
@@ -308,6 +332,7 @@ async fn get_on(
             Alias::new("listen_host"),
             Alias::new("port"),
             Alias::new("media_browser_roots"),
+            Alias::new("stream_addresses"),
             Alias::new("passkey_enabled"),
             Alias::new("revision"),
             Alias::new("updated_at"),
@@ -336,6 +361,15 @@ fn settings_from_row(
                     .map_err(|_| SystemSettingsRepositoryError::InvalidMediaBrowserRoots)
             },
         )?;
+    let stream_addresses = row
+        .try_get::<Option<serde_json::Value>>("", "stream_addresses")?
+        .map_or_else(
+            || Ok(Vec::new()),
+            |value| {
+                serde_json::from_value(value)
+                    .map_err(|_| SystemSettingsRepositoryError::InvalidStreamAddresses)
+            },
+        )?;
     Ok(SystemSettingsRecord {
         locale: row.try_get("", "locale")?,
         site_title: row.try_get("", "site_title")?,
@@ -346,6 +380,7 @@ fn settings_from_row(
         listen_host: row.try_get("", "listen_host")?,
         port: u16::try_from(port).map_err(|_| SystemSettingsRepositoryError::InvalidPort)?,
         media_browser_roots,
+        stream_addresses,
         revision: row.try_get("", "revision")?,
         passkey_enabled: row.try_get("", "passkey_enabled")?,
         updated_at: row.try_get("", "updated_at")?,
@@ -418,6 +453,7 @@ fn validate(
         }
         roots.push(root.to_owned());
     }
+    let stream_addresses = validate_stream_addresses(&input.stream_addresses)?;
     Ok(SystemSettingsInput {
         locale: input.locale.clone(),
         site_title: site_title.to_owned(),
@@ -428,6 +464,7 @@ fn validate(
         listen_host: listen_host.to_owned(),
         port: input.port,
         media_browser_roots: roots,
+        stream_addresses,
         passkey_enabled: input.passkey_enabled,
     })
 }
@@ -448,6 +485,53 @@ fn media_browser_roots_json(input: &SystemSettingsInput) -> serde_json::Value {
             .map(serde_json::Value::String)
             .collect(),
     )
+}
+
+fn stream_addresses_json(input: &SystemSettingsInput) -> serde_json::Value {
+    serde_json::to_value(&input.stream_addresses).unwrap_or(serde_json::Value::Array(Vec::new()))
+}
+
+fn validate_stream_addresses(
+    addresses: &[StreamAddress],
+) -> Result<Vec<StreamAddress>, SystemSettingsRepositoryError> {
+    if addresses.len() > MAX_STREAM_ADDRESSES {
+        return Err(SystemSettingsRepositoryError::InvalidStreamAddresses);
+    }
+    let mut unique = HashSet::with_capacity(addresses.len());
+    let mut validated = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        let name = address.name.trim();
+        let url = normalize_origin(address.url.trim())
+            .ok_or(SystemSettingsRepositoryError::InvalidStreamAddresses)?;
+        if name.is_empty()
+            || name.chars().count() > MAX_STREAM_ADDRESS_NAME_CHARS
+            || name.chars().any(char::is_control)
+            || !unique.insert(url.clone())
+        {
+            return Err(SystemSettingsRepositoryError::InvalidStreamAddresses);
+        }
+        validated.push(StreamAddress {
+            name: name.to_owned(),
+            url,
+        });
+    }
+    Ok(validated)
+}
+
+/// Reduces an http(s) URL without a path to its `scheme://host[:port]` origin.
+///
+/// Clients append absolute server paths to stream addresses, so a path prefix
+/// would silently address the wrong resource and is rejected.
+#[must_use]
+pub fn normalize_origin(value: &str) -> Option<String> {
+    if !valid_http_url(value) {
+        return None;
+    }
+    let url = Url::parse(value).ok()?;
+    if url.path() != "/" {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
 }
 
 fn valid_http_url(value: &str) -> bool {
@@ -479,6 +563,8 @@ pub enum SystemSettingsRepositoryError {
     InvalidPort,
     #[error("system media browser roots are invalid")]
     InvalidMediaBrowserRoots,
+    #[error("system stream addresses are invalid")]
+    InvalidStreamAddresses,
     #[error("system settings revision is invalid")]
     InvalidRevision,
     #[error("system settings revision conflict")]
@@ -493,7 +579,7 @@ pub enum SystemSettingsRepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_http_url;
+    use super::{StreamAddress, normalize_origin, valid_http_url, validate_stream_addresses};
 
     #[test]
     fn public_urls_require_a_web_scheme_and_real_host() {
@@ -501,5 +587,52 @@ mod tests {
         assert!(!valid_http_url("not-a-url"));
         assert!(!valid_http_url("https://user:secret@media.example.com"));
         assert!(!valid_http_url("https://media.example.com/?token=secret"));
+    }
+
+    #[test]
+    fn stream_addresses_normalize_to_origins_and_reject_paths() {
+        assert_eq!(
+            normalize_origin("HTTPS://CDN.Example.com:443/").as_deref(),
+            Some("https://cdn.example.com")
+        );
+        assert_eq!(
+            normalize_origin("http://10.0.0.2:8096").as_deref(),
+            Some("http://10.0.0.2:8096")
+        );
+        assert_eq!(normalize_origin("https://cdn.example.com/tjxy"), None);
+        assert_eq!(normalize_origin("ftp://cdn.example.com"), None);
+    }
+
+    #[test]
+    fn stream_addresses_require_unique_named_origins() {
+        let address = |name: &str, url: &str| StreamAddress {
+            name: name.to_owned(),
+            url: url.to_owned(),
+        };
+        let validated = validate_stream_addresses(&[
+            address(" Line A ", "https://a.example.com/"),
+            address("Line B", "http://b.example.com:8096"),
+        ])
+        .expect("valid addresses");
+        assert_eq!(
+            validated,
+            vec![
+                address("Line A", "https://a.example.com"),
+                address("Line B", "http://b.example.com:8096"),
+            ]
+        );
+        assert!(
+            validate_stream_addresses(&[
+                address("A", "https://a.example.com"),
+                address("B", "https://A.example.com/"),
+            ])
+            .is_err()
+        );
+        assert!(validate_stream_addresses(&[address(" ", "https://a.example.com")]).is_err());
+        assert!(validate_stream_addresses(&[address("A", "https://a.example.com/x")]).is_err());
+        let too_many = (0..=super::MAX_STREAM_ADDRESSES)
+            .map(|index| address("Line", &format!("https://{index}.example.com")))
+            .collect::<Vec<_>>();
+        assert!(validate_stream_addresses(&too_many).is_err());
     }
 }

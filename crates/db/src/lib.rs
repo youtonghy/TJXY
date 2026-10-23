@@ -246,8 +246,9 @@ pub use storage_sync::{
 };
 pub use system_settings::{
     DEFAULT_ICON_URL, DEFAULT_LISTEN_HOST, DEFAULT_LOGO_URL, DEFAULT_PORT, DEFAULT_SITE_SUBTITLE,
-    DEFAULT_SITE_TITLE, DEFAULT_SYSTEM_LOCALE, SystemSettingsInput, SystemSettingsRecord,
-    SystemSettingsRepository, SystemSettingsRepositoryError,
+    DEFAULT_SITE_TITLE, DEFAULT_SYSTEM_LOCALE, MAX_STREAM_ADDRESSES, StreamAddress,
+    SystemSettingsInput, SystemSettingsRecord, SystemSettingsRepository,
+    SystemSettingsRepositoryError,
 };
 pub use user_data::{
     UserDataCommit, UserDataPatch, UserDataRecord, UserDataRepository, UserDataRepositoryError,

@@ -1,5 +1,5 @@
 import { Spinner, Toast } from '@heroui/react';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { ClientAuthProvider, useClientAuth } from './auth/ClientAuthContext';
 import { ClientLoginPage } from './auth/ClientLoginPage';
@@ -9,6 +9,7 @@ import { HomePage } from './catalog/HomePage';
 import { ClientShell } from './layout/ClientShell';
 import { useTranslate } from '../settings/i18n';
 import { ClientThemeRuntime } from './themes/ThemeRuntime';
+import { ensureStreamRoutes } from './api/streamRoutes';
 
 const AiChatPage = lazy(async () => ({ default: (await import('./ai/AiChatPage')).AiChatPage }));
 const IptvPage = lazy(async () => ({ default: (await import('./iptv/IptvPage')).IptvPage }));
@@ -29,4 +30,4 @@ function ClientRouteLoading() { const tr = useTranslate(); return <div className
 
 function ClientShellLayout() { return <ClientShell><Outlet /></ClientShell>; }
 
-function ClientRouteGuard() { const { user, isLoading } = useClientAuth(); const location = useLocation(); const tr = useTranslate(); if (isLoading) return <div className="flex min-h-screen items-center justify-center"><Spinner aria-label={tr('Loading account', '正在加载账户')} /></div>; if (!user) return <Navigate replace state={{ from: location.pathname + location.search }} to={`/login?redirect=${encodeURIComponent(safeClientDestination(location.pathname + location.search))}`} />; return <Outlet />; }
+function ClientRouteGuard() { const { user, isLoading } = useClientAuth(); const location = useLocation(); const tr = useTranslate(); const userId = user?.Id; useEffect(() => { if (userId) void ensureStreamRoutes().catch(() => undefined); }, [userId]); if (isLoading) return <div className="flex min-h-screen items-center justify-center"><Spinner aria-label={tr('Loading account', '正在加载账户')} /></div>; if (!user) return <Navigate replace state={{ from: location.pathname + location.search }} to={`/login?redirect=${encodeURIComponent(safeClientDestination(location.pathname + location.search))}`} />; return <Outlet />; }

@@ -8606,6 +8606,186 @@ async fn administrator_can_manage_complete_system_settings() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Follows one address list through save, listing, CORS grant, and revocation.
+async fn stream_addresses_are_listed_to_users_and_gate_cross_origin_images() {
+    let app = test_app().await;
+    let (_, _, token) = login(&app.router).await;
+    let settings = |stream_addresses: Option<Value>, revision: Option<i64>| {
+        let mut body = json!({
+            "Locale": "zh-CN",
+            "SiteTitle": "TJXY",
+            "SiteSubtitle": "Your media library",
+            "LogoUrl": "/brand/tjxy-mark.webp",
+            "IconUrl": "/brand/favicon.svg",
+            "PublicUrl": "https://media.example.com",
+            "ListenHost": "127.0.0.1",
+            "Port": 8096,
+            "PasskeyEnabled": false,
+            "Revision": revision
+        });
+        if let Some(addresses) = stream_addresses {
+            body["StreamAddresses"] = addresses;
+        }
+        body
+    };
+    let image = format!("/Items/{}/Images/Primary", Uuid::new_v4());
+    let preflight = |origin: &'static str| {
+        let router = app.router.clone();
+        let image = image.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri(image)
+                        .header(header::ORIGIN, origin)
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    // Before any address is configured, image preflights are not granted.
+    let response = preflight("https://cdn.example.com").await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+
+    let invalid = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        settings(
+            Some(json!([{"Name": "CDN", "Url": "https://cdn.example.com/tjxy"}])),
+            None,
+        )
+        .to_string(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        settings(
+            Some(json!([{"Name": " CDN ", "Url": "https://CDN.example.com/"}])),
+            None,
+        )
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let expected = json!([{"Name": "CDN", "Url": "https://cdn.example.com"}]);
+    assert_eq!(saved["StreamAddresses"], expected);
+
+    assert_eq!(
+        get(&app.router, "/System/StreamAddresses", None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = get(&app.router, "/System/StreamAddresses", Some(&token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let listed: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(listed, json!({"Addresses": expected}));
+
+    // Configured stream addresses and the public address may read images;
+    // credentials are never allowed cross-origin.
+    for origin in ["https://cdn.example.com", "https://media.example.com"] {
+        let response = preflight(origin).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let headers = response.headers();
+        assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], origin);
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "Authorization, Accept"
+        );
+        assert!(
+            headers
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .is_none()
+        );
+    }
+    let response = preflight("https://evil.example.com").await;
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&image)
+                .header(header::ORIGIN, "https://cdn.example.com")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(r#"MediaBrowser Token="{token}""#),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "https://cdn.example.com"
+    );
+
+    // Omitting the field preserves the list; an empty list revokes access at once.
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        settings(None, Some(1)).to_string(),
+    )
+    .await;
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(saved["StreamAddresses"], expected);
+    let response = put(
+        &app.router,
+        "/Admin/System/Settings",
+        &token,
+        settings(Some(json!([])), Some(2)).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = preflight("https://cdn.example.com").await;
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn system_ping_is_readable_from_any_origin_and_never_cached() {
+    let app = test_app().await;
+    let response = get(&app.router, "/System/Ping", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+}
+
+#[tokio::test]
 async fn administrator_can_switch_site_themes_and_preserve_each_configuration() {
     let app = test_app().await;
     let (_, _, token) = login(&app.router).await;

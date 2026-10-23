@@ -30,6 +30,7 @@ const settings = {
   logoUrl: '/brand/tjxy-mark.webp',
   iconUrl: '/brand/favicon.svg',
   publicUrl: 'https://media.example.com',
+  streamAddresses: [{ name: 'CDN', url: 'https://cdn.example.com' }],
   listenHost: '127.0.0.1',
   port: 8096,
   passkeyEnabled: false,
@@ -129,4 +130,22 @@ it('offers an explicit restart beside the shared save action', async () => {
   await user.click(await screen.findByRole('button', { name: 'Restart service' }));
 
   await waitFor(() => { expect(restartMock).toHaveBeenCalledOnce(); });
+});
+
+it('edits stream addresses and saves them with the other settings', async () => {
+  renderWithAdmin(<SystemSettingsPage />, { initialEntries: ['/admin/settings/system'] });
+  const user = userEvent.setup();
+
+  expect(await screen.findByLabelText('Address 1 URL')).toHaveValue('https://cdn.example.com');
+  await user.click(screen.getByRole('button', { name: 'Add stream address' }));
+  await user.type(screen.getByLabelText('Address 2 name'), 'LAN');
+  await user.type(screen.getByLabelText('Address 2 URL'), 'http://10.0.0.2:8096');
+  await user.click(screen.getByRole('button', { name: 'Remove address 1' }));
+  await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+  await waitFor(() => {
+    expect(saveMock).toHaveBeenCalledWith(expect.objectContaining({
+      streamAddresses: [{ name: 'LAN', url: 'http://10.0.0.2:8096' }],
+    }));
+  });
 });

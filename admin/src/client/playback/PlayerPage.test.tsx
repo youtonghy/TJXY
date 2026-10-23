@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { PlayerPage } from './PlayerPage';
 import { clearPlaybackInfoCache } from './playbackInfoCache';
+import { resetStreamRoutesForTests } from '../api/streamRoutes';
 
 const catalog = vi.hoisted(() => ({
   getItem: vi.fn(),
@@ -31,6 +32,8 @@ vi.mock('../auth/ClientAuthContext', () => auth);
 beforeEach(() => {
   vi.clearAllMocks();
   clearPlaybackInfoCache();
+  window.localStorage.clear();
+  resetStreamRoutesForTests();
   playback.getPlaybackInfo.mockResolvedValue({ PlaySessionId: 'session-1', MediaSources: [] });
   Object.defineProperty(globalThis.crypto, 'randomUUID', {
     configurable: true,
@@ -105,7 +108,7 @@ it('requests the item and playback info concurrently', async () => {
   expect(playback.issuePlaybackTicket).not.toHaveBeenCalled();
   resolveItem({ Id: 'movie-1', Name: 'Arrival', Type: 'Movie', HasMediaSources: true });
 
-  expect(await screen.findByLabelText('Playing Arrival')).toHaveAttribute('src', '/stream/1080');
+  expect(await screen.findByLabelText('Playing Arrival')).toHaveAttribute('src', 'http://localhost:3000/stream/1080');
   expect(playback.getPlaybackInfo).toHaveBeenCalledTimes(1);
 });
 
@@ -165,7 +168,7 @@ it('switches sources, loads subtitles, and reports the playback lifecycle', asyn
   renderPlayer();
 
   const video = await screen.findByLabelText('Playing Arrival');
-  expect(video).toHaveAttribute('src', '/stream/1080');
+  expect(video).toHaveAttribute('src', 'http://localhost:3000/stream/1080');
   expect(video).toHaveAttribute('autoplay');
   expect(playback.getSubtitleBlob).toHaveBeenCalledTimes(2);
 
@@ -188,7 +191,7 @@ it('switches sources, loads subtitles, and reports the playback lifecycle', asyn
 
   await user.click(screen.getByRole('button', { name: /Video source/ }));
   await user.click(await screen.findByRole('option', { name: /720p/ }));
-  expect(await screen.findByLabelText('Playing Arrival')).toHaveAttribute('src', '/stream/720');
+  expect(await screen.findByLabelText('Playing Arrival')).toHaveAttribute('src', 'http://localhost:3000/stream/720');
   expect(playback.issuePlaybackTicket).toHaveBeenNthCalledWith(
     2,
     'movie-1',
@@ -253,4 +256,47 @@ it('stops an active session with keepalive when the player leaves the page', asy
   }, { keepalive: true });
   rendered.unmount();
   expect(playback.stopPlayback).toHaveBeenCalledTimes(1);
+});
+
+it('fails over from an unplayable alternate route to the current address', async () => {
+  const fast = 'https://fast.example.com';
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === '/System/StreamAddresses') {
+      return Promise.resolve(new Response(JSON.stringify({ Addresses: [{ Name: 'Fast', Url: fast }] }), {
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    }
+    const delay = url.origin === fast ? 1 : 40;
+    return new Promise<Response>((resolve) => { setTimeout(() => { resolve(new Response('TJXY Server')); }, delay); });
+  }));
+  catalog.getItem.mockResolvedValue({ Id: 'movie-1', Name: 'Arrival', Type: 'Movie', HasMediaSources: true });
+  playback.getPlaybackInfo.mockResolvedValue({
+    PlaySessionId: 'session-1',
+    MediaSources: [{
+      Id: 'source-1080',
+      Container: 'mp4',
+      IsDefault: true,
+      SupportsDirectPlay: true,
+      DirectStreamUrl: '/Videos/movie-1/stream',
+      MediaStreams: [{ Type: 'Video', Codec: 'h264' }],
+    }],
+  });
+  playback.issuePlaybackTicket.mockResolvedValue({ Id: 'ticket-1080', StreamUrl: '/stream/1080' });
+
+  try {
+    renderPlayer();
+
+    const video = await screen.findByLabelText('Playing Arrival');
+    expect(video).toHaveAttribute('src', `${fast}/stream/1080`);
+    expect(screen.getByRole('button', { name: 'Measure routes again' })).toBeInTheDocument();
+    fireEvent.error(video);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Playing Arrival')).toHaveAttribute('src', 'http://localhost:3000/stream/1080');
+    });
+    expect(screen.queryByText('Source error')).not.toBeInTheDocument();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

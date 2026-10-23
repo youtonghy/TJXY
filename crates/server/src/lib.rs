@@ -47,6 +47,7 @@ mod startup;
 mod storage_admin;
 mod storage_admin_cursor;
 mod stream;
+mod stream_addresses;
 mod subtitle;
 mod system_settings;
 mod task;
@@ -66,7 +67,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, RawQuery, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -201,6 +202,7 @@ pub struct AppState {
     metadata_settings_admin: Option<Arc<metadata_settings_admin::MetadataSettingsAdminService>>,
     local_metadata_admin: Option<Arc<local_metadata_admin::LocalMetadataAdminService>>,
     system_settings: Option<Arc<system_settings::SystemSettingsService>>,
+    cross_origin: Arc<stream_addresses::CrossOriginPolicy>,
     logging_runtime: Option<Arc<LoggingRuntime>>,
     restart: RestartController,
     relink_admin: Option<Arc<relink_admin::RelinkAdminService>>,
@@ -245,6 +247,7 @@ impl AppState {
             metadata_settings_admin: None,
             local_metadata_admin: None,
             system_settings: None,
+            cross_origin: Arc::default(),
             logging_runtime: None,
             restart: RestartController::default(),
             relink_admin: None,
@@ -572,11 +575,14 @@ impl AppState {
 
 #[allow(clippy::too_many_lines)] // Keeps all public route bindings visible in the composition root.
 pub fn build_router(state: AppState) -> Router {
+    let cross_origin =
+        middleware::from_fn_with_state(state.clone(), stream_addresses::cross_origin);
     Router::new()
         .route("/System/Info/Public", get(public_system_info))
         .route("/System/Info", get(system_info))
         .route("/System/Endpoint", get(endpoint_info))
         .route("/System/Ping", get(system_ping))
+        .route("/System/StreamAddresses", get(stream_addresses::list))
         .route(
             "/System/Language",
             get(system_settings::get_public_language).put(system_settings::put_setup),
@@ -774,7 +780,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/Items/{item_id}/Images/{image_type}",
-            get(image::get_original).head(image::head_original),
+            get(image::get_original)
+                .head(image::head_original)
+                .layer(cross_origin),
         )
         .route(
             "/Sessions/Capabilities/Full",
@@ -1380,8 +1388,16 @@ fn endpoint_auth_only_query(raw_query: Option<&str>) -> bool {
     query.is_empty()
 }
 
-async fn system_ping() -> &'static str {
-    "TJXY Server"
+/// Clients time this endpoint on every configured stream address to pick the
+/// fastest one, so any origin may read it and no cache may answer for it.
+async fn system_ping() -> impl IntoResponse {
+    (
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        "TJXY Server",
+    )
 }
 
 async fn branding_configuration() -> Json<BrandingConfiguration> {

@@ -187,6 +187,23 @@ TJXY_PUBLISH_HOST=0.0.0.0 ./tjxy-setup \
 
 Use a TLS reverse proxy before exposing TJXY outside a trusted network.
 
+### Multiple Stream Addresses
+
+When the same server is reachable through several origins (for example a
+CDN, a domestic line, and a LAN address), list them under **System settings →
+Stream addresses**. Each entry is a name plus `scheme://host[:port]` without a
+path; up to 10 are allowed. Signed-in web and desktop clients time
+`/System/Ping` on every address and the address they opened, then load video,
+audio, external-player links, and posters from the fastest one. API requests
+and the sign-in session always stay on the opened address. Users can switch to
+a specific line, or back to automatic, from the player page; in automatic mode
+a failing line falls back to the next one, ending at the opened address.
+
+Every address must proxy to this server without rewriting paths or query
+strings. Posters are fetched cross-origin with the bearer token, so every
+address users may open, including the public URL, must be listed for those
+requests to be allowed; HTTPS pages ignore HTTP addresses.
+
 ### Operations and Upgrades
 
 ```bash

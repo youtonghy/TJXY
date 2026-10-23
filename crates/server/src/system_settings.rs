@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tjxy_db::{
     DEFAULT_SITE_THEME_ID, DEFAULT_SITE_THEME_SCHEMA_VERSION, DEFAULT_SYSTEM_LOCALE,
     SiteThemeSelectionInput, SiteThemeSettingsRecord, SiteThemeSettingsRepository,
-    SiteThemeSettingsRepositoryError, SystemSettingsInput, SystemSettingsRecord,
+    SiteThemeSettingsRepositoryError, StreamAddress, SystemSettingsInput, SystemSettingsRecord,
     SystemSettingsRepository, SystemSettingsRepositoryError,
 };
 use tokio::sync::watch;
@@ -70,6 +70,7 @@ struct AdminSystemSettingsDto {
     port: u16,
     media_browser_roots: Vec<String>,
     invalid_media_browser_root_indexes: Vec<usize>,
+    stream_addresses: Vec<StreamAddressDto>,
     passkey_enabled: bool,
     revision: i64,
     restart_required: bool,
@@ -85,6 +86,13 @@ struct EnvironmentOverridesDto {
     public_url: bool,
     listen_address: bool,
     media_browser_roots: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct StreamAddressDto {
+    name: String,
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -112,6 +120,8 @@ struct UpdateSystemSettingsRequest {
     listen_host: String,
     port: u16,
     media_browser_roots: Option<Vec<String>>,
+    #[serde(default)]
+    stream_addresses: Option<Vec<StreamAddressDto>>,
     passkey_enabled: bool,
     revision: Option<i64>,
 }
@@ -324,6 +334,22 @@ pub(crate) async fn put_admin(
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
+    let stream_addresses = request.stream_addresses.map_or_else(
+        || {
+            previous
+                .as_ref()
+                .map_or_else(Vec::new, |value| value.stream_addresses().to_vec())
+        },
+        |addresses| {
+            addresses
+                .into_iter()
+                .map(|address| StreamAddress {
+                    name: address.name,
+                    url: address.url,
+                })
+                .collect()
+        },
+    );
     let input = SystemSettingsInput {
         locale: request.locale,
         site_title: request.site_title,
@@ -334,9 +360,12 @@ pub(crate) async fn put_admin(
         listen_host: request.listen_host,
         port: request.port,
         media_browser_roots,
+        stream_addresses,
         passkey_enabled: request.passkey_enabled,
     };
-    match service.put(&input, request.revision).await {
+    let result = service.put(&input, request.revision).await;
+    state.cross_origin.invalidate().await;
+    match result {
         Ok(record) => {
             let restart_required = previous.as_ref().is_none_or(|value| {
                 value.listen_host() != record.listen_host()
@@ -683,6 +712,14 @@ fn admin_dto(
         port: record.map_or(fallback.port, SystemSettingsRecord::port),
         media_browser_roots: roots,
         invalid_media_browser_root_indexes,
+        stream_addresses: record
+            .map_or(&[][..], SystemSettingsRecord::stream_addresses)
+            .iter()
+            .map(|address| StreamAddressDto {
+                name: address.name.clone(),
+                url: address.url.clone(),
+            })
+            .collect(),
         passkey_enabled: record.map_or(
             fallback.passkey_enabled,
             SystemSettingsRecord::passkey_enabled,
@@ -708,6 +745,7 @@ fn repository_error(error: &SystemSettingsRepositoryError) -> Response {
         | SystemSettingsRepositoryError::InvalidListenHost
         | SystemSettingsRepositoryError::InvalidPort
         | SystemSettingsRepositoryError::InvalidMediaBrowserRoots
+        | SystemSettingsRepositoryError::InvalidStreamAddresses
         | SystemSettingsRepositoryError::InvalidRevision => StatusCode::BAD_REQUEST.into_response(),
         SystemSettingsRepositoryError::Database(_)
         | SystemSettingsRepositoryError::MissingPersistedSettings

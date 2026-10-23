@@ -14,6 +14,13 @@ export interface PublicSiteThemeSettings {
   revision: number;
 }
 
+export interface StreamAddressSetting {
+  name: string;
+  url: string;
+}
+
+export const MAX_STREAM_ADDRESSES = 10;
+
 export interface SystemSettings {
   locale: SystemLocale;
   siteTitle: string;
@@ -21,6 +28,8 @@ export interface SystemSettings {
   logoUrl: string;
   iconUrl: string;
   publicUrl: string;
+  /** Alternate origins of this server that clients may stream from. */
+  streamAddresses: StreamAddressSetting[];
   listenHost: string;
   port: number;
   passkeyEnabled: boolean;
@@ -61,6 +70,9 @@ export async function saveSystemSettings(settings: SaveSystemSettings): Promise<
       LogoUrl: settings.logoUrl,
       IconUrl: settings.iconUrl,
       PublicUrl: settings.publicUrl.trim() || null,
+      StreamAddresses: settings.streamAddresses
+        .map((address) => ({ Name: address.name.trim(), Url: address.url.trim() }))
+        .filter((address) => address.Name || address.Url),
       ListenHost: settings.listenHost,
       Port: settings.port,
       PasskeyEnabled: settings.passkeyEnabled,
@@ -105,6 +117,7 @@ function parse(value: SettingsResponse, admin: boolean): SystemSettings {
     logoUrl,
     iconUrl,
     publicUrl: typeof value.PublicUrl === 'string' ? value.PublicUrl : '',
+    streamAddresses: admin ? parseStreamAddresses(value.StreamAddresses) : [],
     listenHost: admin ? stringValue(value.ListenHost) ?? '127.0.0.1' : '127.0.0.1',
     port: admin ? numberValue(value.Port) ?? 8096 : 8096,
     passkeyEnabled: value.PasskeyEnabled === true,
@@ -143,6 +156,18 @@ function parseTheme(value: unknown): PublicSiteThemeSettings {
     options: candidate.Options as Record<string, unknown>,
     revision: candidate.Revision,
   };
+}
+
+function parseStreamAddresses(value: unknown): StreamAddressSetting[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Invalid stream addresses response');
+  return value.map((entry: unknown) => {
+    const candidate = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>;
+    if (typeof candidate.Name !== 'string' || typeof candidate.Url !== 'string') {
+      throw new Error('Invalid stream addresses response');
+    }
+    return { name: candidate.Name, url: candidate.Url };
+  });
 }
 
 function defaultTheme(): PublicSiteThemeSettings {

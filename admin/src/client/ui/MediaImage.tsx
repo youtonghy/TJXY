@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { clientBlob, isRetryableClientError } from '../api/clientApi';
+import { isRetryableClientError } from '../api/clientApi';
+import { clientMediaBlob } from '../api/streamRoutes';
 
 /// Poster reads can fail transiently while the server recovers from storage
 /// reconciliation, index rebuilds, or brief database contention. Retrying keeps
@@ -18,7 +19,7 @@ export function MediaImage({ itemId, tag, libraryId, alt, className = '' }: { it
     if (tag) query.set('tag', tag);
     if (libraryId) query.set('libraryId', libraryId);
     const load = (attempt: number) => {
-      void clientBlob(`/Items/${itemId}/Images/Primary?${query.toString()}`, controller.signal)
+      void clientMediaBlob(`/Items/${itemId}/Images/Primary?${query.toString()}`, controller.signal)
         .then((blob) => {
           if (controller.signal.aborted) return;
           objectUrl = URL.createObjectURL(blob);

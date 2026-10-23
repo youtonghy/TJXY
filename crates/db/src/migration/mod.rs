@@ -85,6 +85,7 @@ mod m20260915_000084_maintenance_purge_cadence;
 mod m20261012_000085_reresolve_episode_and_season_art;
 mod m20261013_000086_reresolve_art_for_projected_library_items;
 mod m20261022_000087_client_releases;
+mod m20261023_000088_stream_addresses;
 
 use std::collections::HashSet;
 
@@ -370,6 +371,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261012_000085_reresolve_episode_and_season_art::Migration),
             Box::new(m20261013_000086_reresolve_art_for_projected_library_items::Migration),
             Box::new(m20261022_000087_client_releases::Migration),
+            Box::new(m20261023_000088_stream_addresses::Migration),
         ]
     }
 }

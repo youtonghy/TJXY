@@ -1,5 +1,5 @@
-import { resolveApiUrl } from '../api/apiBase';
 import { issuePlaybackTicket } from '../api/playbackApi';
+import { resolveStreamUrl, streamOriginForPlayback } from '../api/streamRoutes';
 import { takePlaybackInfo } from './playbackInfoCache';
 import { selectNativeSource } from './sourceSelection';
 
@@ -44,10 +44,13 @@ export async function createExternalPlaybackLink(itemId: string): Promise<Extern
   const playback = await takePlaybackInfo(itemId);
   const source = selectNativeSource(playback.MediaSources ?? []);
   if (!source || !playback.PlaySessionId) throw new ExternalPlaybackUnavailableError();
-  const ticket = await issuePlaybackTicket(itemId, source.Id, playback.PlaySessionId);
+  const [ticket, origin] = await Promise.all([
+    issuePlaybackTicket(itemId, source.Id, playback.PlaySessionId),
+    streamOriginForPlayback(),
+  ]);
   return {
     expiresAt: ticket.ExpiresAt,
-    streamUrl: resolveApiUrl(ticket.StreamUrl),
+    streamUrl: resolveStreamUrl(ticket.StreamUrl, origin),
   };
 }
 
