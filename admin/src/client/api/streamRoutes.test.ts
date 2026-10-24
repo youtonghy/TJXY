@@ -30,13 +30,16 @@ function delayed(ms: number, response: () => Response): Promise<Response> {
 }
 
 /** Serves the address list and pings; `delays` maps an origin to its ping time, `null` for unreachable. */
-function stubServer(delays: Record<string, number | null>) {
+function stubServer(
+  delays: Record<string, number | null>,
+  addresses = [{ Name: 'Fast', Url: `${FAST}/` }, { Name: 'Slow', Url: SLOW }],
+) {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = urlOf(input);
     if (url.pathname === '/System/StreamAddresses') {
-      return Promise.resolve(new Response(JSON.stringify({
-        Addresses: [{ Name: 'Fast', Url: `${FAST}/` }, { Name: 'Slow', Url: SLOW }],
-      }), { headers: { 'Content-Type': 'application/json' } }));
+      return Promise.resolve(new Response(JSON.stringify({ Addresses: addresses }), {
+        headers: { 'Content-Type': 'application/json' },
+      }));
     }
     if (url.pathname === '/System/Ping') {
       const delay = delays[url.origin];
@@ -87,10 +90,10 @@ it('measures every route and plays from the fastest one', async () => {
   expect(resolveStreamUrl('/Videos/1/stream?static=true')).toBe(`${FAST}/Videos/1/stream?static=true`);
   expect(resolveStreamUrl('https://iptv.example.com/live.m3u8')).toBe('https://iptv.example.com/live.m3u8');
 
-  // A fresh measurement is reused instead of probing again.
+  // A fresh measurement is reused: the list is checked, nothing is pinged again.
   const fetchMock = stubServer({});
   await expect(ensureStreamRoutes()).resolves.toBe(FAST);
-  expect(fetchMock).not.toHaveBeenCalled();
+  expect(fetchMock.mock.calls.map(([input]) => urlOf(input).pathname)).toEqual(['/System/StreamAddresses']);
 
   markStreamOriginFailed(FAST);
   expect(activeStreamOrigin()).toBe(CURRENT);
@@ -122,4 +125,19 @@ it('loads images from the active route and falls back to the current address', a
   });
   await expect((await clientMediaBlob('/Items/1/Images/Primary')).text()).resolves.toBe(CURRENT);
   expect(activeStreamOrigin()).toBe(CURRENT);
+});
+
+it('picks up addresses added after the last measurement', async () => {
+  stubServer({ [CURRENT]: 40 }, []);
+  await refreshStreamRoutes();
+  expect(activeStreamOrigin()).toBe(CURRENT);
+
+  stubServer({ [CURRENT]: 40, [FAST]: 1 }, [{ Name: 'Fast', Url: FAST }]);
+  await expect(ensureStreamRoutes()).resolves.toBe(FAST);
+
+  // Renaming an address needs no new measurement.
+  const fetchMock = stubServer({}, [{ Name: 'Renamed', Url: FAST }]);
+  await ensureStreamRoutes();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(activeStreamOrigin()).toBe(FAST);
 });

@@ -42,6 +42,8 @@ import { useClientAuth } from '../auth/ClientAuthContext';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
 import { ServerAddressField } from '../ui/ServerAddressField';
 import { ClientUpdateCard } from '../updates/ClientUpdateCard';
+import { StreamRouteSelect } from '../playback/StreamRouteSelect';
+import { ensureStreamRoutes } from '../api/streamRoutes';
 import { PasswordStrength } from '../../ui/passwordStrength';
 import { deletePasskey, listPasskeys, passkeyErrorMessage, registerPasskey, type PasskeySummary } from '../auth/passkeyApi';
 import { useTranslate } from '../../settings/i18n';
@@ -73,6 +75,8 @@ export function ProfilePage() {
   const { locale } = useSystemLocale();
 
   useEffect(() => { void getProfile().then(setProfile); }, []);
+  // Pick up stream addresses an administrator changed since the last check.
+  useEffect(() => { void ensureStreamRoutes().catch(() => undefined); }, []);
   useEffect(() => {
     const controller = new AbortController();
     void listPersonalSessions(controller.signal).then(setSessions).catch(() => undefined).finally(() => {
@@ -158,6 +162,16 @@ export function ProfilePage() {
           </Card.Content>
         </Card>
       )}
+
+      <Card>
+        <Card.Header>
+          <Card.Title>{tr('Stream route', '播放线路')}</Card.Title>
+          <Card.Description>{tr('Video and images load from the fastest server address unless you pick one.', '默认自动使用延迟最低的服务器地址加载视频和图片，也可以手动指定。')}</Card.Description>
+        </Card.Header>
+        <Card.Content>
+          <StreamRouteSelect showSingle />
+        </Card.Content>
+      </Card>
 
       <ClientUpdateCard />
 

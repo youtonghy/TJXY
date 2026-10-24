@@ -196,7 +196,9 @@ path; up to 10 are allowed. Signed-in web and desktop clients time
 `/System/Ping` on every address and the address they opened, then load video,
 audio, external-player links, and posters from the fastest one. API requests
 and the sign-in session always stay on the opened address. Users can switch to
-a specific line, or back to automatic, from the player page; in automatic mode
+a specific line, or back to automatic, from the player page or their profile;
+clients re-read the address list whenever they check routes, so changes appear
+without signing in again. In automatic mode
 a failing line falls back to the next one, ending at the opened address.
 
 Every address must proxy to this server without rewriting paths or query

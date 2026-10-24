@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ProfilePage } from './ProfilePage';
+import { resetStreamRoutesForTests } from '../api/streamRoutes';
 
 const api = vi.hoisted(() => ({
   changePassword: vi.fn(),
@@ -200,4 +201,31 @@ it('keeps the genre radar visible when every genre has zero watch time', async (
 
   expect(await screen.findByRole('img', { name: 'Genre watch time radar chart' })).toBeVisible();
   expect(screen.getByText('Adventure: 0m; Action: 0m; Comedy: 0m')).toBeInTheDocument();
+});
+
+it('offers the stream route choice and explains when only one route exists', async () => {
+  let addresses: { Name: string; Url: string }[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === '/System/StreamAddresses') {
+      return Promise.resolve(new Response(JSON.stringify({ Addresses: addresses }), {
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    }
+    return Promise.resolve(new Response('TJXY Server'));
+  }));
+  try {
+    window.sessionStorage.clear();
+    resetStreamRoutesForTests();
+    const first = render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+    expect(await screen.findByText('The server has no other stream addresses; the current address is used.')).toBeVisible();
+    first.unmount();
+
+    addresses = [{ Name: 'Direct', Url: 'https://direct.example.com' }];
+    render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+    expect(await screen.findByRole('button', { name: /Stream route/ })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Measure routes again' })).toBeVisible();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

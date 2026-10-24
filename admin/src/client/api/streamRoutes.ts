@@ -131,19 +131,53 @@ export function markStreamOriginFailed(origin: string): void {
   emit();
 }
 
-/** Returns the active origin, probing first when no fresh measurement exists. */
+/**
+ * Returns the active origin. The address list is fetched every time so that
+ * administrator changes show up at once; latencies are re-measured only when
+ * the set of routes changed or the last measurement is stale.
+ */
 export async function ensureStreamRoutes(): Promise<string> {
+  if (inFlight) return inFlight;
   const apiBase = getApiBaseUrl();
-  if (routes.length && routesApiBase === apiBase && isFresh(measuredAt)) return activeStreamOrigin();
-  const cached = readProbeCache();
-  if (cached) {
-    routes = cached.routes;
-    routesApiBase = cached.apiBase;
-    measuredAt = cached.measuredAt;
+  if (!routes.length || routesApiBase !== apiBase) {
+    const cached = readProbeCache();
+    if (cached) {
+      routes = cached.routes;
+      routesApiBase = cached.apiBase;
+      measuredAt = cached.measuredAt;
+      emit();
+    }
+  }
+  let configured: { Name: string; Url: string }[];
+  try {
+    configured = await fetchConfiguredAddresses();
+  } catch {
+    // Unreachable API: keep what is known rather than discarding measurements.
+    return routes.length && routesApiBase === apiBase ? activeStreamOrigin() : refreshStreamRoutes();
+  }
+  const candidates = streamRouteCandidates(configured, apiBase);
+  if (routesApiBase === apiBase && isFresh(measuredAt) && sameOrigins(routes, candidates)) {
+    const names = new Map(candidates.map((candidate) => [candidate.origin, candidate.name]));
+    routes = routes.map((route) => ({ ...route, name: names.get(route.origin) }));
+    writeProbeCache();
     emit();
     return activeStreamOrigin();
   }
-  return refreshStreamRoutes();
+  return probe(() => Promise.resolve(candidates));
+}
+
+function sameOrigins(current: readonly StreamRoute[], next: readonly StreamRoute[]): boolean {
+  return current.length === next.length && current.every((route, index) => route.origin === next[index]?.origin);
+}
+
+/** Lists the configured addresses; older servers without the endpoint have none. */
+async function fetchConfiguredAddresses(): Promise<{ Name: string; Url: string }[]> {
+  try {
+    return (await clientRequest<StreamAddressesResponse>('/System/StreamAddresses')).Addresses ?? [];
+  } catch (error) {
+    if (error instanceof ClientApiError && error.status !== 0) return [];
+    throw error;
+  }
 }
 
 /**
@@ -166,23 +200,23 @@ function isFresh(timestamp: number): boolean {
 
 /** Reloads the configured addresses and measures every route again. */
 export function refreshStreamRoutes(): Promise<string> {
-  inFlight ??= probeAll().finally(() => { inFlight = undefined; });
+  return probe(async () => streamRouteCandidates(
+    await fetchConfiguredAddresses().catch(() => []),
+    getApiBaseUrl(),
+  ));
+}
+
+function probe(loadCandidates: () => Promise<StreamRoute[]>): Promise<string> {
+  inFlight ??= probeAll(loadCandidates).finally(() => { inFlight = undefined; });
   return inFlight;
 }
 
-async function probeAll(): Promise<string> {
+async function probeAll(loadCandidates: () => Promise<StreamRoute[]>): Promise<string> {
   const apiBase = getApiBaseUrl();
   probing = true;
   emit();
   try {
-    let configured: { Name: string; Url: string }[] = [];
-    try {
-      configured = (await clientRequest<StreamAddressesResponse>('/System/StreamAddresses')).Addresses ?? [];
-    } catch (error) {
-      // Older servers lack the endpoint; the current address alone still works.
-      if (!(error instanceof ClientApiError)) throw error;
-    }
-    const candidates = streamRouteCandidates(configured, apiBase);
+    const candidates = await loadCandidates();
     routes = candidates;
     routesApiBase = apiBase;
     emit();
