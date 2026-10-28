@@ -24,7 +24,7 @@ const CinemaLoginFrame = lazy(async () => {
   return { default: module.CinemaLoginFrame };
 });
 
-const classicDefaults = { contentWidth: 'standard' } satisfies ThemeOptions;
+const classicDefaults = { contentWidth: 'standard', accent: 'teal' } satisfies ThemeOptions;
 const cinemaDefaults = {
   density: 'comfortable',
   contentWidth: 'wide',
@@ -38,16 +38,26 @@ export const clientThemes: readonly ClientThemeDefinition[] = [
     descriptionKey: 'admin.theme.classicDescription',
     schemaVersion: 1,
     defaultOptions: classicDefaults,
-    optionFields: [{
-      key: 'contentWidth', kind: 'select', labelKey: 'admin.theme.contentWidth',
-      descriptionKey: 'admin.theme.contentWidthDescription', choices: [
-        { value: 'standard', labelKey: 'admin.theme.widthStandard' },
-        { value: 'wide', labelKey: 'admin.theme.widthWide' },
-      ],
-    }],
-    normalizeOptions: (schemaVersion, options) => schemaVersion === 1
-      ? { contentWidth: oneOf(options.contentWidth, ['standard', 'wide'], 'standard') }
-      : { ...classicDefaults },
+    optionFields: [
+      {
+        key: 'contentWidth', kind: 'select', labelKey: 'admin.theme.contentWidth',
+        descriptionKey: 'admin.theme.contentWidthDescription', choices: [
+          { value: 'standard', labelKey: 'admin.theme.widthStandard' },
+          { value: 'wide', labelKey: 'admin.theme.widthWide' },
+        ],
+      },
+      {
+        key: 'accent', kind: 'select', labelKey: 'admin.theme.accent',
+        descriptionKey: 'admin.theme.accentDescription', choices: [
+          { value: 'teal', labelKey: 'admin.theme.accentTeal' },
+          { value: 'emerald', labelKey: 'admin.theme.accentEmerald' },
+        ],
+      },
+    ],
+    normalizeOptions: (schemaVersion, options) => schemaVersion === 1 ? {
+      contentWidth: oneOf(options.contentWidth, ['standard', 'wide'], 'standard'),
+      accent: oneOf(options.accent, ['teal', 'emerald'], 'teal'),
+    } : { ...classicDefaults },
     Shell: ClassicShell,
     LoginFrame: ClassicLoginFrame,
     Preview: ClassicPreview,
@@ -128,7 +138,7 @@ function missingDefaultTheme(): never {
 
 function ClassicPreview({ options }: ThemePreviewProps) {
   const width = options.contentWidth === 'wide' ? '92%' : '76%';
-  return <div className="theme-preview theme-preview--classic"><div className="theme-preview__topbar" /><div className="theme-preview__content" style={{ width }}><span /><span /><span /></div></div>;
+  return <div className={`theme-preview theme-preview--classic theme-preview--${String(options.accent)}`}><div className="theme-preview__topbar" /><div className="theme-preview__content" style={{ width }}><span /><span /><span /></div></div>;
 }
 
 function CinemaPreview({ options }: ThemePreviewProps) {

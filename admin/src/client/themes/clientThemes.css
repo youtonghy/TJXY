@@ -91,6 +91,34 @@ html[data-tjxy-surface='client'][data-client-theme='cinema'][data-client-accent=
   --accent-foreground: oklch(98% 0.004 180);
 }
 
+/*
+ * Classic emerald: brand green with success shifted to 196° so "published" never blurs into the brand.
+ * Neutrals and muted text stay on the classic scale, which already clears AA on every surface.
+ * Light fills all carry light text at >= 4.5:1. Dark mode lifts accent and danger because 18 client
+ * views use text-accent and the light-mode values fall below 4.5:1 on dark surfaces.
+ */
+html[data-tjxy-surface='client'][data-client-theme='classic'][data-client-accent='emerald'] {
+  --accent: oklch(53.86% 0.1399 152);
+  --accent-foreground: oklch(98.5% 0.004 152);
+  --success: oklch(51.82% 0.0875 196);
+  --success-foreground: oklch(98.5% 0.004 196);
+  --warning: oklch(56.1% 0.1166 78.94);
+  --warning-foreground: oklch(98.5% 0.004 79);
+  --danger: oklch(48.23% 0.1938 27.64);
+  --danger-foreground: oklch(98.5% 0.004 25);
+}
+
+html[data-tjxy-surface='client'][data-client-theme='classic'][data-theme='dark'][data-client-accent='emerald'] {
+  --accent: oklch(70% 0.14 152);
+  --accent-foreground: oklch(16% 0.025 152);
+  --success: oklch(76.77% 0.13 196);
+  --success-foreground: oklch(17% 0.035 196);
+  --warning: oklch(82.39% 0.153 74.6);
+  --warning-foreground: oklch(19% 0.04 75);
+  --danger: oklch(66% 0.19 27.64);
+  --danger-foreground: oklch(17% 0.035 27.64);
+}
+
 html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-rail,
 html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-mobile-header {
   background: color-mix(in srgb, var(--background) 96%, var(--surface));
@@ -144,6 +172,8 @@ html[data-tjxy-surface='client'][data-client-theme='cinema'] .cinema-login__scre
 .theme-preview--classic .theme-preview__topbar { height: 18%; background: var(--surface); border-bottom: 1px solid var(--border); }
 .theme-preview--classic .theme-preview__content { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6%; margin: 12% auto 0; }
 .theme-preview--classic .theme-preview__content span { aspect-ratio: 2 / 3; background: var(--surface-secondary); }
+.theme-preview--classic.theme-preview--teal .theme-preview__topbar { box-shadow: inset 0 -3px 0 oklch(53% 0.105 180); }
+.theme-preview--classic.theme-preview--emerald .theme-preview__topbar { box-shadow: inset 0 -3px 0 oklch(53.86% 0.1399 152); }
 .theme-preview--cinema { display: grid; grid-template-columns: 22% 1fr; background: #060606; }
 .theme-preview__rail { background: #181818; border-right: 1px solid #292929; }
 .theme-preview__stage { padding: 7%; }

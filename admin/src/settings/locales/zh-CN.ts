@@ -264,6 +264,7 @@ const zhCN: Record<string, string> = {
   'admin.theme.accent': '强调色',
   'admin.theme.accentCrimson': '绯红',
   'admin.theme.accentDescription': '选择经过对比度校验的主题强调色。',
+  'admin.theme.accentEmerald': '翠绿',
   'admin.theme.accentGold': '金色',
   'admin.theme.accentTeal': '青绿',
   'admin.theme.choose': '选择前台主题',

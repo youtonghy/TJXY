@@ -229,6 +229,7 @@ const enUS: Record<string, string> = {
   'admin.theme.accent': 'Accent palette',
   'admin.theme.accentCrimson': 'Crimson',
   'admin.theme.accentDescription': 'Choose a theme accent preset with reviewed contrast pairs.',
+  'admin.theme.accentEmerald': 'Emerald',
   'admin.theme.accentGold': 'Gold',
   'admin.theme.accentTeal': 'Teal',
   'admin.theme.choose': 'Choose client theme',
