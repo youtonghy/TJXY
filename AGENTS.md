@@ -30,7 +30,23 @@
 - 从仓库根目录执行命令，依赖应与锁文件一致；缺失或不一致时运行 `pnpm --dir admin install --frozen-lockfile`。不要为绕过安装失败擅自更新锁文件。
 - Node.js 与 CI 保持一致，目前为 `22.22.3`；前端声明的最低版本为 `22.12.0`。
 - Rust 与 CI 的 `RUST_VERSION` 保持一致，目前为 `1.88.0`，并安装 `clippy`、`rustfmt`。不得仅用本机更新版本的工具链通过结果代替 CI 版本验证。
-- CI 工具链或检查脚本变化时，同步更新此处的版本和命令。若构建需要 HeroUI Pro 配置，按现有项目流程配置，不能把凭据写入仓库。
+- CI 工具链或检查脚本变化时，同步更新此处的版本和命令。
+
+### HeroUI Pro 授权与产物准备
+
+`@heroui-pro/react` 是许可分发的包：npm registry 上的 tarball 只有 `postinstall`，没有 `dist`。必须有有效的 `HEROUI_KEY` 才能补齐产物，否则 `import "@heroui-pro/react/css"` 和全部组件导入都会失败。
+
+- key 只从 `HEROUI_KEY` 环境变量读取，不写入仓库、`.env`、提交信息或日志。本地需要时向用户索取，或使用 CI 的 `HEROUI_KEY` repository secret。
+- 在 `admin/` 目录执行，`--auto` 跳过交互：
+
+```sh
+cd admin
+HEROUI_KEY="<key>" pnpm dlx hpsetup@latest --auto
+```
+
+- **`pnpm install` 会清空产物**：任何 `pnpm --dir admin install --frozen-lockfile`、`pnpm add` 或依赖变动都会把 `admin/node_modules/@heroui-pro/react/dist` 重置成只剩 `postinstall`，必须紧接着重跑上面的 hpsetup，否则 typecheck / build 会报找不到模块。这不是配置错误，是许可机制。
+- **hpsetup 会把版本升到 latest**：`package.json` 里的 `^1.0.0-beta.9` 会被改成精确的最新版本，同时重写 `pnpm-lock.yaml`。只补产物、不想升依赖时，先临时把版本固定成锁文件里的精确版本，跑完 hpsetup 后再还原 `package.json`，最后确认 `git diff` 里没有意外改动。确实要升级时，把 `package.json` 和 `pnpm-lock.yaml` 的变更一并提交。
+- 验证授权与产物：`hpsetup --dry-run` 应输出 `artifacts already present`；`admin/node_modules/@heroui-pro/react/package.json` 应有 72 个 `exports` 条目且没有 `scripts`。
 
 ### 前端完整检查
 
