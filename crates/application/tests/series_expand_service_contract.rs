@@ -1307,6 +1307,86 @@ async fn flat_episodes_select_their_same_stem_nfo() {
     }
 }
 
+/// Fills the season folder past the 512 NFO candidate limit with other episodes' files.
+async fn add_episode_nfos_beyond_candidate_limit(fixture: &Fixture) {
+    for number in 0..600 {
+        insert_storage_object(
+            &fixture.database,
+            fixture.account,
+            fixture.root,
+            (StorageObjectRecordId::new(), Some(fixture.season)),
+            &format!("Dark.S09E{number:03}.nfo"),
+            "File",
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn flat_episodes_find_their_nfo_in_a_folder_over_the_candidate_limit() {
+    let fixture = fixture(true, false, true).await;
+    add_episode_nfos_beyond_candidate_limit(&fixture).await;
+    expand_series(&fixture).await;
+
+    let sidecars = projected_episode_metadata_sidecars(&fixture).await;
+
+    assert_eq!(sidecars.len(), 2);
+    for nfo in &fixture.episode_nfos {
+        assert!(sidecars.contains(&Some(*nfo)));
+    }
+}
+
+#[tokio::test]
+async fn season_finds_its_nfo_in_a_folder_over_the_candidate_limit() {
+    let fixture = fixture(true, false, true).await;
+    add_episode_nfos_beyond_candidate_limit(&fixture).await;
+    expand_series(&fixture).await;
+    let (season, _) = projected_children(&fixture).await;
+    let target = CatalogQueryRepository::new(&fixture.database)
+        .lazy_work_target(UserId::new(), season)
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = WorkJobRepository::new(&fixture.database);
+    jobs.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ResolveMetadata,
+            WorkScope::CatalogItem(season),
+            target.metadata_revision(),
+            100,
+        )
+        .unwrap()
+        .with_metadata_requirement(MetadataRequirement::Full)
+        .unwrap()
+        .with_input_sync_revision(1)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = jobs
+        .claim_next(
+            &[WorkTaskKind::ResolveMetadata],
+            "season-metadata",
+            chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let snapshot = MetadataWorkRepository::new(&fixture.database)
+        .snapshot(&claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .sidecar()
+            .map(tjxy_db::MetadataSidecarCandidate::record_id),
+        Some(fixture.season_nfo)
+    );
+}
+
 #[tokio::test]
 async fn flat_episode_does_not_borrow_a_sibling_nfo() {
     let fixture = fixture(true, false, true).await;

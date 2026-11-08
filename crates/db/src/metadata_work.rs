@@ -5,13 +5,13 @@ use std::{
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr, TransactionTrait,
-    sea_query::{Alias, Cond, Expr, JoinType, Query},
+    sea_query::{Alias, Cond, Expr, JoinType, LikeExpr, Query, SimpleExpr},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tjxy_common::{
-    CatalogItemId, ImageType, StorageObjectRecordId, StorageRootId, parse_media_name,
+    CatalogItemId, ImageType, SortKey, StorageObjectRecordId, StorageRootId, parse_media_name,
 };
 use tjxy_metadata::{MetadataItemKind, MetadataLookup, MetadataResolution};
 use uuid::Uuid;
@@ -323,14 +323,6 @@ impl<'connection> MetadataWorkRepository<'connection> {
         } else {
             None
         };
-        let candidates = collect_nfo_candidates(
-            self.database,
-            item_id,
-            scope,
-            input_revision,
-            flat_file_stem.as_deref(),
-        )
-        .await?;
         let video_names = if reads_folder_videos(kind) {
             folder_video_names(self.database, item_id, scope, input_revision).await?
         } else if kind == MetadataItemKind::Episode {
@@ -344,6 +336,15 @@ impl<'connection> MetadataWorkRepository<'connection> {
         } else {
             Vec::new()
         };
+        let candidates = collect_nfo_candidates(
+            self.database,
+            item_id,
+            scope,
+            input_revision,
+            flat_file_stem.as_deref(),
+            &overflow_nfo_stems(kind, flat_file_stem.as_deref(), &video_names),
+        )
+        .await?;
         let (sidecars, selection, fingerprint) = select_for_item(
             self.database,
             item_id,
@@ -1002,14 +1003,6 @@ async fn revalidate_metadata_snapshot(
     } else {
         None
     };
-    let candidates = collect_nfo_candidates(
-        transaction,
-        item_id,
-        scope,
-        input_revision,
-        flat_file_stem.as_deref(),
-    )
-    .await?;
     let video_names = if reads_folder_videos(snapshot.lookup.kind()) {
         folder_video_names(transaction, item_id, scope, input_revision).await?
     } else if snapshot.lookup.kind() == MetadataItemKind::Episode {
@@ -1023,6 +1016,19 @@ async fn revalidate_metadata_snapshot(
     } else {
         Vec::new()
     };
+    let candidates = collect_nfo_candidates(
+        transaction,
+        item_id,
+        scope,
+        input_revision,
+        flat_file_stem.as_deref(),
+        &overflow_nfo_stems(
+            snapshot.lookup.kind(),
+            flat_file_stem.as_deref(),
+            &video_names,
+        ),
+    )
+    .await?;
     let (sidecars, selection, fingerprint) = select_for_item(
         transaction,
         item_id,
@@ -1308,6 +1314,7 @@ pub(crate) async fn nfo_fingerprint_at(
         scope,
         input_revision,
         flat_file_stem.as_deref(),
+        &[],
     )
     .await
     {
@@ -1369,7 +1376,7 @@ fn sibling_file_query(
     item_id: CatalogItemId,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
     input_revision: i64,
-    file_kind: SiblingFileKind,
+    file_kind: SiblingFileKind<'_>,
 ) -> sea_orm::sea_query::SelectStatement {
     let item = Alias::new("nfo_item");
     let parent = Alias::new("nfo_parent");
@@ -1519,9 +1526,7 @@ fn sibling_file_query(
         .and_where(Expr::col((object.clone(), Alias::new("object_type"))).eq("File"))
         .and_where(Expr::col((object.clone(), Alias::new("presence_state"))).eq("Present"))
         .and_where(match file_kind {
-            SiblingFileKind::Nfo => {
-                Expr::col((object.clone(), Alias::new("normalized_name"))).like("%.nfo")
-            }
+            SiblingFileKind::Nfo(stems) => nfo_name_filter(&object, stems),
             SiblingFileKind::Video => {
                 let mut filter = Cond::any();
                 for extension in [
@@ -1547,15 +1552,35 @@ fn sibling_file_query(
         .and_where(Expr::col((root, Alias::new("reconciled_sync_revision"))).gte(input_revision))
         .and_where(Expr::col((library.clone(), Alias::new("is_enabled"))).eq(true))
         .limit(match file_kind {
-            SiblingFileKind::Nfo | SiblingFileKind::Video => MAX_NFO_CANDIDATES + 1,
+            SiblingFileKind::Nfo(_) | SiblingFileKind::Video => MAX_NFO_CANDIDATES + 1,
             SiblingFileKind::Image => MAX_IMAGE_CANDIDATES + 1,
         })
         .to_owned()
 }
 
+/// Matches every NFO, or only those named after one of the given lowercase file stems.
+fn nfo_name_filter(object: &Alias, stems: &[String]) -> SimpleExpr {
+    let name = || Expr::col((object.clone(), Alias::new("normalized_name")));
+    if stems.is_empty() {
+        return name().like("%.nfo");
+    }
+    let mut filter = Cond::any();
+    for stem in stems {
+        let key = String::from_utf8_lossy(SortKey::from_text(stem).as_bytes())
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        filter = filter
+            .add(name().like(LikeExpr::new(format!("{key}.nfo")).escape('\\')))
+            .add(name().like(LikeExpr::new(format!("{key}-%.nfo")).escape('\\')));
+    }
+    filter.into()
+}
+
 #[derive(Clone, Copy)]
-enum SiblingFileKind {
-    Nfo,
+enum SiblingFileKind<'stems> {
+    /// NFO files, limited to these stems when any are given.
+    Nfo(&'stems [String]),
     Video,
     Image,
 }
@@ -2004,21 +2029,53 @@ fn parse_kind(value: &str) -> Result<MetadataItemKind, MetadataWorkError> {
     }
 }
 
+/// The NFO stems an item can own when its folder holds more NFOs than the candidate limit.
+///
+/// One season folder can legitimately keep over a thousand episode NFOs. None of those items
+/// reads the others' files, so the limit applies to what the item can own, not the folder.
+fn overflow_nfo_stems(
+    kind: MetadataItemKind,
+    flat_file_stem: Option<&str>,
+    video_names: &[String],
+) -> Vec<String> {
+    if let Some(stem) = flat_file_stem {
+        return vec![stem.to_owned()];
+    }
+    match kind {
+        MetadataItemKind::Episode => {
+            let mut stems = file_stems(video_names).into_iter().collect::<Vec<_>>();
+            stems.sort_unstable();
+            stems
+        }
+        MetadataItemKind::Season => vec!["season".to_owned()],
+        MetadataItemKind::Audio | MetadataItemKind::Movie | MetadataItemKind::Series => Vec::new(),
+    }
+}
+
 async fn collect_nfo_candidates(
     connection: &impl ConnectionTrait,
     item: CatalogItemId,
     scope: crate::catalog_storage_scope::CatalogStorageScope,
     input_revision: i64,
     flat_file_stem: Option<&str>,
+    overflow_stems: &[String],
 ) -> Result<Vec<MetadataSidecarCandidate>, MetadataWorkError> {
-    let rows = connection
-        .query_all(connection.get_database_backend().build(&sibling_file_query(
+    let backend = connection.get_database_backend();
+    let nfo_rows = |stems| {
+        connection.query_all(backend.build(&sibling_file_query(
             item,
             scope,
             input_revision,
-            SiblingFileKind::Nfo,
+            SiblingFileKind::Nfo(stems),
         )))
-        .await?;
+    };
+    let mut rows = nfo_rows(&[]).await?;
+    // The folder-wide read stops one row past the limit, so it cannot be filtered afterwards.
+    if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_NFO_CANDIDATES
+        && !overflow_stems.is_empty()
+    {
+        rows = nfo_rows(overflow_stems).await?;
+    }
     let mut candidates = rows
         .iter()
         .map(sidecar_from_row)
