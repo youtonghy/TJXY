@@ -2767,6 +2767,14 @@ async fn claim_next(
     lease_expires_at: DateTime<Utc>,
 ) -> Result<Option<ClaimedWorkJob>, WorkJobRepositoryError> {
     let backend = transaction.get_database_backend();
+    if backend == sea_orm::DbBackend::Postgres {
+        // Every claim statement carries the dependency join, which takes 2-30 ms to plan and well
+        // under 1 ms to run. The custom plans PostgreSQL otherwise keeps choosing are replanned on
+        // every wakeup of every worker; the cached generic plan uses the same claim index.
+        transaction
+            .execute_unprepared("SET LOCAL plan_cache_mode = force_generic_plan")
+            .await?;
+    }
     let now = mysql_compatible_timestamp(backend, now);
     let lease_expires_at = mysql_compatible_timestamp(backend, lease_expires_at);
     for _ in 0..8 {
