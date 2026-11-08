@@ -83,7 +83,20 @@ jobs:
             echo 'Repository secret HEROUI_KEY is required for release builds.' >&2
             exit 1
           fi
+          # hpsetup installs the newest release unless the version is pinned, and newer releases
+          # can require a newer @heroui/react than the lockfile holds.
+          locked="$(sed -n "s#^  '@heroui-pro/react@\([^']*\)':\$#\1#p" pnpm-lock.yaml | head -n 1)"
+          if [ -z "$locked" ]; then
+            echo 'Could not read the locked @heroui-pro/react version.' >&2
+            exit 1
+          fi
+          sed -i -E "s#(\"@heroui-pro/react\": \")[^\"]+#\1$locked#" package.json
           pnpm dlx hpsetup@latest --auto
+          installed="$(node -p "require('./node_modules/@heroui-pro/react/package.json').version")"
+          if [ "$installed" != "$locked" ]; then
+            echo "hpsetup installed @heroui-pro/react $installed instead of $locked." >&2
+            exit 1
+          fi
       - name: Verify and build frontend
         run: |
           pnpm --dir admin run typecheck
