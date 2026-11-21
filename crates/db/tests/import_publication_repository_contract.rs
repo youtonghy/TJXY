@@ -193,6 +193,57 @@ async fn publication_failure_rolls_back_every_catalog_side_effect() {
     );
 }
 
+/// Earlier importers staged omitted Emby collections as `null`; a generation
+/// sealed that way must still publish.
+#[tokio::test]
+async fn staged_null_collections_publish_as_empty() {
+    let database = database().await;
+    let (library, user) = seed_target(&database).await;
+    let repository = ImportJobRepository::new(&database);
+    let job = repository
+        .create("EmbyApi", "legacy-server", false)
+        .await
+        .unwrap();
+    let claimed = repository
+        .claim_next("EmbyApi", "publisher-test", Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    repository
+        .stage_item(
+            &claimed,
+            &ImportStagingItem::new(
+                "Movie",
+                "movie-1",
+                None,
+                json!({
+                    "version":1,"name":"Arrival","production_year":null,"overview":null,
+                    "provider_ids":{"Imdb":"tt2543164","Tmdb":null},"genres":null,
+                    "people":[{"Name":"Director One","Type":"Director","Role":null}],
+                    "studios":null,"user_data":null
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .seal_for_publication(&claimed, json!({"items":1,"conflicts":0,"errors":0}))
+        .await
+        .unwrap();
+
+    let report = ImportPublicationRepository::new(&database)
+        .publish(job.id(), ImportPublicationTarget::new(library, user))
+        .await
+        .unwrap();
+
+    assert_eq!(report.items(), 1);
+    assert_eq!(count(&database, "provider_ids").await, 1);
+    assert_eq!(count(&database, "item_genres").await, 0);
+    assert_eq!(count(&database, "item_people").await, 1);
+    assert_eq!(count(&database, "item_studios").await, 0);
+}
+
 async fn count(database: &DatabaseConnection, table: &str) -> i64 {
     let backend = database.get_database_backend();
     database

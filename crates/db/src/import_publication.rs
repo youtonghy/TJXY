@@ -5,7 +5,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, TransactionTrait,
     sea_query::{Alias, Expr, OnConflict, Query},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
@@ -93,6 +93,9 @@ pub enum ImportPublicationError {
     RollbackFailed { original: String, rollback: DbErr },
 }
 
+// Emby omits optional collections or sends them as `null`, and earlier imports staged that
+// `null` as-is. `#[serde(default)]` only covers a missing key, so these fields also accept
+// `null` as their empty value.
 #[derive(Deserialize)]
 struct StagedPayload {
     version: u8,
@@ -101,15 +104,15 @@ struct StagedPayload {
     production_year: Option<i32>,
     #[serde(default)]
     overview: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "provider_ids_or_empty")]
     provider_ids: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     genres: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     people: Vec<StagedPerson>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     studios: Vec<StagedStudio>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     user_data: StagedUserData,
 }
 
@@ -119,7 +122,7 @@ struct StagedPerson {
     name: String,
     #[serde(rename = "Type")]
     person_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     role: String,
 }
 
@@ -139,6 +142,28 @@ struct StagedUserData {
     play_count: u64,
     #[serde(default)]
     is_favorite: bool,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Drops provider IDs whose value is `null`; there is nothing to link for them.
+fn provider_ids_or_empty<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<HashMap<String, Option<String>>>::deserialize(deserializer)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(provider, id)| id.map(|id| (provider, id)))
+            .collect(),
+    )
 }
 
 struct StagedRow {

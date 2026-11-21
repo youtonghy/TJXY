@@ -441,10 +441,10 @@ impl EmbyItem {
             "production_year": self.production_year,
             "overview": self.overview,
             "legacy_path": self.path,
-            "provider_ids": self.provider_ids,
-            "genres": self.genres,
-            "people": self.people,
-            "studios": self.studios,
+            "provider_ids": object_or_empty(self.provider_ids),
+            "genres": array_or_empty(self.genres),
+            "people": array_or_empty(self.people),
+            "studios": array_or_empty(self.studios),
             "series_legacy_id": self.series_id,
             "season_legacy_id": self.season_id,
             "index_number": self.index_number,
@@ -464,6 +464,15 @@ impl EmbyItem {
             payload,
         )?)
     }
+}
+
+/// Emby omits optional collections or sends `null`; staging stores the empty collection.
+fn array_or_empty(value: Value) -> Value {
+    if value.is_null() { json!([]) } else { value }
+}
+
+fn object_or_empty(value: Value) -> Value {
+    if value.is_null() { json!({}) } else { value }
 }
 
 #[derive(Default, Deserialize)]

@@ -105,6 +105,12 @@ async fn dry_run_pages_into_replay_safe_staging_and_completes_without_catalog_pu
         staged[0].try_get::<String>("", "entity_kind").unwrap(),
         "Episode"
     );
+    // Collections Emby omitted are staged empty, never as `null`.
+    let episode: Value = staged[0].try_get("", "payload").unwrap();
+    assert_eq!(episode["provider_ids"], json!({}));
+    assert_eq!(episode["genres"], json!([]));
+    assert_eq!(episode["people"], json!([]));
+    assert_eq!(episode["studios"], json!([]));
     let movie: Value = staged[1].try_get("", "payload").unwrap();
     assert_eq!(movie["user_data"]["is_favorite"], true);
     assert_eq!(movie["provider_ids"]["Imdb"], "tt2543164");
