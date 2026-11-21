@@ -648,8 +648,8 @@ impl FilesystemBackend {
             Arc::clone(&self.open_permits).acquire_owned(),
         )
         .await
-        .map_err(|_| BackendError::TemporarilyUnavailable {
-            message: "filesystem open concurrency limit timed out".to_owned(),
+        .map_err(|_| BackendError::LocallyOverloaded {
+            retry_after: FILESYSTEM_OPEN_TIMEOUT,
         })?
         .map_err(|_| BackendError::TemporarilyUnavailable {
             message: "filesystem open concurrency limiter closed".to_owned(),

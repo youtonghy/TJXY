@@ -32,6 +32,10 @@ pub enum BackendError {
     FilesystemIndexFailed,
     #[error("storage backend rate limit was exceeded")]
     RateLimited { retry_after: Option<Duration> },
+    /// This server's own storage request queue is full; the backend was never called. Unlike
+    /// [`Self::RateLimited`], it says nothing about the object or the provider.
+    #[error("this server is busy; the storage request queue is full")]
+    LocallyOverloaded { retry_after: Duration },
     #[error("storage change cursor is no longer valid")]
     ChangeCursorInvalid,
 }

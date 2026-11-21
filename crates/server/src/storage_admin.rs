@@ -1372,6 +1372,7 @@ fn binding_response(result: &Result<CreatedStorageBinding, StorageAdminError>) -
             | BackendError::FilesystemIndexRebuilding
             | BackendError::FilesystemIndexFailed
             | BackendError::RateLimited { .. }
+            | BackendError::LocallyOverloaded { .. }
             | BackendError::ChangeCursorInvalid,
         )) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(StorageAdminError::Repository(_) | StorageAdminError::Conflict) => {
@@ -1405,6 +1406,7 @@ fn oauth_response(error: &StorageAdminError) -> Response {
             | BackendError::FilesystemIndexRebuilding
             | BackendError::FilesystemIndexFailed
             | BackendError::RateLimited { .. }
+            | BackendError::LocallyOverloaded { .. }
             | BackendError::ChangeCursorInvalid,
         ) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         StorageAdminError::Cipher(_)

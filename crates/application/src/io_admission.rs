@@ -48,8 +48,8 @@ impl Admission {
         }
         tokio::time::timeout(self.foreground_wait, self.acquire(false))
             .await
-            .map_err(|_| BackendError::RateLimited {
-                retry_after: Some(self.foreground_wait),
+            .map_err(|_| BackendError::LocallyOverloaded {
+                retry_after: self.foreground_wait,
             })
     }
     async fn acquire(&self, background: bool) -> Permit {
@@ -268,7 +268,7 @@ mod tests {
         let error = backend.get_object(&id).await.unwrap_err();
         assert!(matches!(
             error,
-            BackendError::RateLimited { retry_after: Some(hint) } if hint == wait
+            BackendError::LocallyOverloaded { retry_after: hint } if hint == wait
         ));
     }
 }

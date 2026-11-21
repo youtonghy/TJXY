@@ -262,7 +262,10 @@ const fn failure_reason(error: &BackendError) -> Option<TemporaryAvailabilityRea
         | BackendError::FilesystemIndexRebuilding
         | BackendError::FilesystemIndexFailed
         | BackendError::RangeNotSatisfiable { .. }
-        | BackendError::ChangeCursorInvalid => None,
+        | BackendError::ChangeCursorInvalid
+        // Local queueing says nothing about the object; persisting it would turn load into
+        // availability churn.
+        | BackendError::LocallyOverloaded { .. } => None,
     }
 }
 
@@ -291,6 +294,19 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    /// A full local queue never reached the backend, so it must not mark a healthy object
+    /// unavailable; a provider rate limit still does.
+    #[test]
+    fn local_overload_does_not_mutate_object_availability() {
+        assert!(
+            failure_reason(&BackendError::LocallyOverloaded {
+                retry_after: std::time::Duration::from_secs(5),
+            })
+            .is_none()
+        );
+        assert!(failure_reason(&BackendError::RateLimited { retry_after: None }).is_some());
     }
 
     #[test]
