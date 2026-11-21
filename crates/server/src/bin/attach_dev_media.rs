@@ -579,7 +579,7 @@ async fn publish_item_sources(
     let manifest =
         SourcePublicationManifest::from_rows(&source_rows, &location_rows, &subtitle_rows)?;
     let publications = CatalogPublicationRepository::new(database);
-    let publication = publications.begin_sources(&claimed, &manifest).await?;
+    let publication = publications.begin_sources(&claimed, &manifest).await?.id();
     publications
         .stage_source_batch(
             &claimed,

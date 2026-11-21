@@ -165,6 +165,36 @@ impl StructurePublicationManifest {
     }
 }
 
+/// The publication a job resumes, and whether an earlier attempt already sealed it.
+///
+/// A sealed publication is published directly: its staged rows are frozen and
+/// match the manifest, so staging or sealing again is neither needed nor allowed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationStart {
+    id: PublicationId,
+    sealed: bool,
+}
+
+impl PublicationStart {
+    #[must_use]
+    pub const fn id(self) -> PublicationId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn is_sealed(self) -> bool {
+        self.sealed
+    }
+}
+
+/// The manifest columns a resumed publication must match to keep its staged rows.
+pub(crate) struct ManifestColumns<'manifest> {
+    pub(crate) sha256: &'manifest str,
+    pub(crate) row_count: i64,
+    pub(crate) source_sha256: Option<&'manifest str>,
+    pub(crate) source_row_count: Option<i64>,
+}
+
 pub struct CatalogPublicationRepository<'connection> {
     pub(crate) database: &'connection DatabaseConnection,
 }
@@ -177,6 +207,10 @@ impl<'connection> CatalogPublicationRepository<'connection> {
 
     /// Creates or resumes the structure publication owned by a live `ExpandItem` job.
     ///
+    /// A retry that rebuilt a different manifest discards the earlier attempt's
+    /// staged rows and starts staging again; a retry with the same manifest keeps
+    /// them, reporting whether they are already sealed.
+    ///
     /// # Errors
     ///
     /// Returns [`CatalogPublicationError`] for incompatible work, stale state, or SQL errors.
@@ -184,7 +218,7 @@ impl<'connection> CatalogPublicationRepository<'connection> {
         &self,
         claimed: &ClaimedWorkJob,
         manifest: &StructurePublicationManifest,
-    ) -> Result<PublicationId, CatalogPublicationError> {
+    ) -> Result<PublicationStart, CatalogPublicationError> {
         let owner = structure_owner(claimed)?;
         let transaction = self.database.begin().await?;
         let result = begin_structure(&transaction, claimed, owner, manifest, Utc::now()).await;
@@ -327,7 +361,7 @@ async fn begin_structure(
     owner: CatalogItemId,
     manifest: &StructurePublicationManifest,
     now: DateTime<Utc>,
-) -> Result<PublicationId, CatalogPublicationError> {
+) -> Result<PublicationStart, CatalogPublicationError> {
     ensure_live_claim(transaction, claimed, now).await?;
     let publication_id = PublicationId::new();
     let backend = transaction.get_database_backend();
@@ -387,42 +421,119 @@ async fn begin_structure(
         .query_one(backend.build(&publication_for_job(claimed.id().as_uuid())))
         .await?
         .ok_or(CatalogPublicationError::InvalidPublication)?;
-    validate_publication_row(&row, claimed, owner, manifest)
+    resume_publication(
+        transaction,
+        &row,
+        claimed,
+        owner,
+        "Structure",
+        &ManifestColumns {
+            sha256: &manifest.sha256,
+            row_count: manifest.expected_row_count,
+            source_sha256: manifest
+                .source
+                .as_ref()
+                .map(SourcePublicationManifest::sha256),
+            source_row_count: manifest
+                .source
+                .as_ref()
+                .map(SourcePublicationManifest::expected_row_count),
+        },
+    )
+    .await
 }
 
-fn validate_publication_row(
+/// Resumes the publication a job already owns.
+///
+/// Ownership, revision, and parser version must still match: a mismatch there
+/// means the job is no longer the right one to publish. The manifest may
+/// legitimately differ on a retry, because storage changed or because new
+/// files received fresh identities, so an unpublished projection is reset to
+/// `Building` and restaged instead of failing the job.
+pub(crate) async fn resume_publication(
+    transaction: &DatabaseTransaction,
     row: &QueryResult,
     claimed: &ClaimedWorkJob,
     owner: CatalogItemId,
-    manifest: &StructurePublicationManifest,
-) -> Result<PublicationId, CatalogPublicationError> {
+    kind: &str,
+    manifest: &ManifestColumns<'_>,
+) -> Result<PublicationStart, CatalogPublicationError> {
+    let state = row.try_get::<String>("", "state")?;
     if row.try_get::<Uuid>("", "job_id")? != claimed.id().as_uuid()
         || row.try_get::<Uuid>("", "owner_catalog_item_id")? != owner.as_uuid()
-        || row.try_get::<String>("", "publication_kind")? != "Structure"
+        || row.try_get::<String>("", "publication_kind")? != kind
         || row.try_get::<i64>("", "expected_revision")? != claimed.job().expected_revision()
         || row.try_get::<Option<i64>>("", "input_sync_revision")?
             != claimed.job().input_sync_revision()
-        || !matches!(
-            row.try_get::<String>("", "state")?.as_str(),
-            STATE_BUILDING | STATE_READY
-        )
-        || row.try_get::<String>("", "manifest_sha256")? != manifest.sha256
-        || row.try_get::<i64>("", "expected_row_count")? != manifest.expected_row_count
         || row.try_get::<i32>("", "naming_parser_version")? != MEDIA_NAME_PARSER_VERSION
-        || row.try_get::<Option<String>>("", "source_manifest_sha256")?
-            != manifest
-                .source
-                .as_ref()
-                .map(|source| source.sha256().to_owned())
-        || row.try_get::<Option<i64>>("", "expected_source_row_count")?
-            != manifest
-                .source
-                .as_ref()
-                .map(SourcePublicationManifest::expected_row_count)
+        || !matches!(state.as_str(), STATE_BUILDING | STATE_READY)
     {
         return Err(CatalogPublicationError::InvalidPublication);
     }
-    Ok(PublicationId::from_uuid(row.try_get("", "id")?))
+    let id = PublicationId::from_uuid(row.try_get("", "id")?);
+    let unchanged = row.try_get::<String>("", "manifest_sha256")? == manifest.sha256
+        && row.try_get::<i64>("", "expected_row_count")? == manifest.row_count
+        && row
+            .try_get::<Option<String>>("", "source_manifest_sha256")?
+            .as_deref()
+            == manifest.source_sha256
+        && row.try_get::<Option<i64>>("", "expected_source_row_count")?
+            == manifest.source_row_count;
+    if unchanged {
+        return Ok(PublicationStart {
+            id,
+            sealed: state == STATE_READY,
+        });
+    }
+    restart_publication(transaction, id, manifest).await?;
+    Ok(PublicationStart { id, sealed: false })
+}
+
+/// Discards an unpublished projection and records the manifest it will be rebuilt to.
+async fn restart_publication(
+    transaction: &DatabaseTransaction,
+    publication_id: PublicationId,
+    manifest: &ManifestColumns<'_>,
+) -> Result<(), CatalogPublicationError> {
+    let backend = transaction.get_database_backend();
+    // Staged rows only: the change outbox is written when a publication activates.
+    for table in [
+        "publication_catalog_items",
+        "publication_media_sources",
+        "publication_media_locations",
+        "publication_subtitles",
+    ] {
+        transaction
+            .execute(backend.build(
+                Query::delete().from_table(Alias::new(table)).and_where(
+                    Expr::col(Alias::new("publication_id")).eq(publication_id.as_uuid()),
+                ),
+            ))
+            .await?;
+    }
+    let update = Query::update()
+        .table(Alias::new("catalog_publications"))
+        .value(Alias::new("state"), STATE_BUILDING)
+        .value(Alias::new("sealed_at"), Option::<DateTime<Utc>>::None)
+        .value(Alias::new("manifest_sha256"), manifest.sha256)
+        .value(Alias::new("expected_row_count"), manifest.row_count)
+        .value(Alias::new("source_manifest_sha256"), manifest.source_sha256)
+        .value(
+            Alias::new("expected_source_row_count"),
+            manifest.source_row_count,
+        )
+        .and_where(Expr::col(Alias::new("id")).eq(publication_id.as_uuid()))
+        .and_where(Expr::col(Alias::new("state")).is_in([STATE_BUILDING, STATE_READY]))
+        .to_owned();
+    if transaction
+        .execute(backend.build(&update))
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(CatalogPublicationError::InvalidPublication);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)] // Stages one fenced structure batch in a single transaction.

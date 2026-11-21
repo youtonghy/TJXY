@@ -69,18 +69,22 @@ impl SeriesExpandService {
         )?;
         let manifest = StructurePublicationManifest::from_series(&graph.rows, &graph.sources)?;
         let publications = CatalogPublicationRepository::new(&self.database);
-        let publication = publications.begin_structure(claimed, &manifest).await?;
-        for rows in graph.rows.chunks(5_000) {
-            publications
-                .stage_structure_batch(claimed, publication, rows)
-                .await?;
+        let start = publications.begin_structure(claimed, &manifest).await?;
+        let publication = start.id();
+        // A retry after the seal committed but the publish did not resumes at the publish.
+        if !start.is_sealed() {
+            for rows in graph.rows.chunks(5_000) {
+                publications
+                    .stage_structure_batch(claimed, publication, rows)
+                    .await?;
+            }
+            for groups in graph.sources.chunks(500) {
+                publications
+                    .stage_structure_source_batch(claimed, publication, groups)
+                    .await?;
+            }
+            publications.seal_structure(claimed, publication).await?;
         }
-        for groups in graph.sources.chunks(500) {
-            publications
-                .stage_structure_source_batch(claimed, publication, groups)
-                .await?;
-        }
-        publications.seal_structure(claimed, publication).await?;
         publications
             .publish_structure_with_warnings(
                 &WorkJobRepository::new(&self.database),

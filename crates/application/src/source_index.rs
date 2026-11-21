@@ -49,17 +49,21 @@ impl SourceIndexService {
         {
             return Ok(generation);
         }
-        let publication = publications.begin_sources(claimed, &manifest).await?;
-        publications
-            .stage_source_batch(
-                claimed,
-                publication,
-                &graph.sources,
-                &graph.locations,
-                &graph.subtitles,
-            )
-            .await?;
-        publications.seal_sources(claimed, publication).await?;
+        let start = publications.begin_sources(claimed, &manifest).await?;
+        let publication = start.id();
+        // A retry after the seal committed but the publish did not resumes at the publish.
+        if !start.is_sealed() {
+            publications
+                .stage_source_batch(
+                    claimed,
+                    publication,
+                    &graph.sources,
+                    &graph.locations,
+                    &graph.subtitles,
+                )
+                .await?;
+            publications.seal_sources(claimed, publication).await?;
+        }
         publications
             .publish_sources(&jobs, claimed, publication)
             .await

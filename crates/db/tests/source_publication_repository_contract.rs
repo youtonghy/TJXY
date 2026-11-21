@@ -469,7 +469,8 @@ async fn publish_source_fixture(
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -675,7 +676,8 @@ async fn playback_fails_closed_when_the_publication_root_ancestor_is_unavailable
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -1160,7 +1162,8 @@ async fn source_projection_becomes_visible_only_after_atomic_publish() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -1431,7 +1434,8 @@ async fn source_seal_rejects_a_location_for_an_unpublished_source() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(&claimed, publication, &[], &[orphan], &[])
         .await
@@ -1468,7 +1472,8 @@ async fn stale_source_revision_rolls_back_pointer_generation_and_completion() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -1582,7 +1587,8 @@ async fn reindex_preserves_stable_source_key_and_existing_probe_state() {
     let first = publications
         .begin_sources(&first_claim, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &first_claim,
@@ -1632,7 +1638,8 @@ async fn reindex_preserves_stable_source_key_and_existing_probe_state() {
     let second = publications
         .begin_sources(&second_claim, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &second_claim,
@@ -1710,7 +1717,8 @@ async fn source_seal_rejects_storage_outside_the_owners_libraries() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(&claimed, publication, &[source], &[location], &[])
         .await
@@ -1750,7 +1758,8 @@ async fn source_publish_rechecks_authorization_after_seal() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -1812,7 +1821,8 @@ async fn source_publish_rechecks_storage_facts_after_seal() {
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -1879,6 +1889,89 @@ async fn source_publish_rechecks_storage_facts_after_seal() {
     );
 }
 
+/// Files without a stable identity get fresh IDs on every attempt, so a source
+/// index retry always rebuilds a different manifest. A sealed publication from
+/// the failed attempt must be restaged, not rejected.
+#[tokio::test]
+async fn a_source_retry_with_fresh_identities_restages_a_sealed_publication() {
+    let database = database().await;
+    let owner = seed_movie(&database, 1).await;
+    let video = seed_storage_object(&database, "retry-video").await;
+    let subtitle = seed_storage_object(&database, "retry-subtitle").await;
+    authorize_storage_object(&database, owner, video).await;
+    authorize_storage_object(&database, owner, subtitle).await;
+    let (jobs, claimed) = claimed_source_index(&database, owner, 1).await;
+    let publications = CatalogPublicationRepository::new(&database);
+    let first_fixture = source_fixture(video, subtitle);
+    let first_manifest = SourcePublicationManifest::from_rows(
+        &first_fixture.sources,
+        &first_fixture.locations,
+        &first_fixture.subtitles,
+    )
+    .unwrap();
+    let first = publications
+        .begin_sources(&claimed, &first_manifest)
+        .await
+        .unwrap();
+    publications
+        .stage_source_batch(
+            &claimed,
+            first.id(),
+            &first_fixture.sources,
+            &first_fixture.locations,
+            &first_fixture.subtitles,
+        )
+        .await
+        .unwrap();
+    publications
+        .seal_sources(&claimed, first.id())
+        .await
+        .unwrap();
+    let same = publications
+        .begin_sources(&claimed, &first_manifest)
+        .await
+        .unwrap();
+    assert!(same.is_sealed());
+
+    let retry_fixture = source_fixture(video, subtitle);
+    let retry_manifest = SourcePublicationManifest::from_rows(
+        &retry_fixture.sources,
+        &retry_fixture.locations,
+        &retry_fixture.subtitles,
+    )
+    .unwrap();
+    let retry = publications
+        .begin_sources(&claimed, &retry_manifest)
+        .await
+        .unwrap();
+
+    assert_eq!(retry.id(), first.id());
+    assert!(!retry.is_sealed());
+    publications
+        .stage_source_batch(
+            &claimed,
+            retry.id(),
+            &retry_fixture.sources,
+            &retry_fixture.locations,
+            &retry_fixture.subtitles,
+        )
+        .await
+        .unwrap();
+    publications
+        .seal_sources(&claimed, retry.id())
+        .await
+        .unwrap();
+    publications
+        .publish_sources(&jobs, &claimed, retry.id())
+        .await
+        .unwrap();
+    assert_eq!(publications.active_sources(owner).await.unwrap().len(), 1);
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Completed
+    );
+}
+
 #[tokio::test]
 async fn source_publish_requires_authorization_and_reconciliation_on_the_same_root() {
     let database = database().await;
@@ -1901,7 +1994,8 @@ async fn source_publish_requires_authorization_and_reconciliation_on_the_same_ro
     let publication = publications
         .begin_sources(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &claimed,
@@ -2063,7 +2157,8 @@ async fn series_structure_pointer_atomically_publishes_episode_sources() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows)
         .await
@@ -2156,7 +2251,8 @@ async fn series_structure_pointer_atomically_publishes_episode_sources() {
     let older_publication = publications
         .begin_sources(&source_claim, &older_manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_source_batch(
             &source_claim,

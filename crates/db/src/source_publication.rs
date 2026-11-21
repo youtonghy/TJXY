@@ -17,9 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     catalog_publication::{
-        CatalogPublicationError, CatalogPublicationRepository, STATE_ACTIVE, STATE_BUILDING,
-        STATE_READY, activate_publication, advance_generation, finish, finish_staging,
-        insert_change_event,
+        CatalogPublicationError, CatalogPublicationRepository, ManifestColumns, PublicationStart,
+        STATE_ACTIVE, STATE_BUILDING, STATE_READY, activate_publication, advance_generation,
+        finish, finish_staging, insert_change_event, resume_publication,
     },
     catalog_visibility::projected_enabled_membership,
     work_job::{
@@ -808,6 +808,9 @@ impl CatalogPublicationRepository<'_> {
 
     /// Creates or resumes a Source publication owned by a live Index job.
     ///
+    /// A retry whose rebuilt manifest differs (new files receive fresh identities
+    /// on every attempt) discards the earlier attempt's staged rows and restages.
+    ///
     /// # Errors
     ///
     /// Returns [`CatalogPublicationError`] for incompatible work, manifest, or SQL state.
@@ -815,7 +818,7 @@ impl CatalogPublicationRepository<'_> {
         &self,
         claimed: &ClaimedWorkJob,
         manifest: &SourcePublicationManifest,
-    ) -> Result<PublicationId, CatalogPublicationError> {
+    ) -> Result<PublicationStart, CatalogPublicationError> {
         let owner = source_owner(claimed)?;
         let transaction = self.database.begin().await?;
         let result = begin_sources(&transaction, claimed, owner, manifest, Utc::now()).await;
@@ -1444,7 +1447,7 @@ async fn begin_sources(
     owner: CatalogItemId,
     manifest: &SourcePublicationManifest,
     now: DateTime<Utc>,
-) -> Result<PublicationId, CatalogPublicationError> {
+) -> Result<PublicationStart, CatalogPublicationError> {
     ensure_live_claim(transaction, claimed, now).await?;
     let publication_id = PublicationId::new();
     let backend = transaction.get_database_backend();
@@ -1483,32 +1486,20 @@ async fn begin_sources(
         .query_one(backend.build(&publication_for_job(claimed.id().as_uuid())))
         .await?
         .ok_or(CatalogPublicationError::InvalidPublication)?;
-    validate_source_publication(&row, claimed, owner, manifest)
-}
-
-fn validate_source_publication(
-    row: &QueryResult,
-    claimed: &ClaimedWorkJob,
-    owner: CatalogItemId,
-    manifest: &SourcePublicationManifest,
-) -> Result<PublicationId, CatalogPublicationError> {
-    if row.try_get::<Uuid>("", "job_id")? != claimed.id().as_uuid()
-        || row.try_get::<Uuid>("", "owner_catalog_item_id")? != owner.as_uuid()
-        || row.try_get::<String>("", "publication_kind")? != PUBLICATION_KIND
-        || row.try_get::<i64>("", "expected_revision")? != claimed.job().expected_revision()
-        || row.try_get::<Option<i64>>("", "input_sync_revision")?
-            != claimed.job().input_sync_revision()
-        || !matches!(
-            row.try_get::<String>("", "state")?.as_str(),
-            STATE_BUILDING | STATE_READY
-        )
-        || row.try_get::<String>("", "manifest_sha256")? != manifest.sha256
-        || row.try_get::<i64>("", "expected_row_count")? != manifest.expected_row_count
-        || row.try_get::<i32>("", "naming_parser_version")? != MEDIA_NAME_PARSER_VERSION
-    {
-        return Err(CatalogPublicationError::InvalidPublication);
-    }
-    Ok(PublicationId::from_uuid(row.try_get("", "id")?))
+    resume_publication(
+        transaction,
+        &row,
+        claimed,
+        owner,
+        PUBLICATION_KIND,
+        &ManifestColumns {
+            sha256: &manifest.sha256,
+            row_count: manifest.expected_row_count,
+            source_sha256: None,
+            source_row_count: None,
+        },
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4282,6 +4273,8 @@ fn publication_for_job(job_id: Uuid) -> sea_orm::sea_query::SelectStatement {
             Alias::new("state"),
             Alias::new("manifest_sha256"),
             Alias::new("expected_row_count"),
+            Alias::new("source_manifest_sha256"),
+            Alias::new("expected_source_row_count"),
             Alias::new("naming_parser_version"),
         ])
         .from(Alias::new("catalog_publications"))

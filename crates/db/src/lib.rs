@@ -104,8 +104,8 @@ pub use cache_invalidation::{
     CacheInvalidationSystemClock, ClaimedCacheInvalidation, advance_catalog_generation,
 };
 pub use catalog_publication::{
-    CatalogPublicationError, CatalogPublicationRepository, StructurePublicationManifest,
-    StructurePublicationRow,
+    CatalogPublicationError, CatalogPublicationRepository, PublicationStart,
+    StructurePublicationManifest, StructurePublicationRow,
 };
 pub use catalog_query::{
     AssetRecord, BrowseParent, CacheRevisions, CatalogCreditRecord, CatalogFilterFacets,

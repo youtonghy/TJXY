@@ -440,7 +440,8 @@ async fn structure_publication_is_invisible_until_one_atomic_pointer_switch() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows[..1])
         .await
@@ -601,7 +602,8 @@ async fn stale_revision_rejects_the_whole_publish_transaction() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows)
         .await
@@ -666,7 +668,8 @@ async fn pending_structure_scope_rejects_the_whole_publish_transaction() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows)
         .await
@@ -744,6 +747,146 @@ async fn pending_structure_scope_rejects_the_whole_publish_transaction() {
     );
 }
 
+/// A retry after the seal committed but the publish failed must resume at the
+/// publish. Staging a sealed publication is rejected, so a retry that starts
+/// over would fail the job terminally.
+#[tokio::test]
+async fn a_retry_after_the_seal_resumes_at_the_publish() {
+    let database = database().await;
+    let owner = seed_series(&database, 1).await;
+    let (jobs, claimed) = claimed_expand(&database, owner, 1).await;
+    let rows = structure_rows(&database, owner).await;
+    let manifest = StructurePublicationManifest::from_rows(&rows).unwrap();
+    let publications = CatalogPublicationRepository::new(&database);
+    let first = publications
+        .begin_structure(&claimed, &manifest)
+        .await
+        .unwrap();
+    assert!(!first.is_sealed());
+    publications
+        .stage_structure_batch(&claimed, first.id(), &rows)
+        .await
+        .unwrap();
+    publications
+        .seal_structure(&claimed, first.id())
+        .await
+        .unwrap();
+
+    let retry = publications
+        .begin_structure(&claimed, &manifest)
+        .await
+        .unwrap();
+
+    assert_eq!(retry.id(), first.id());
+    assert!(retry.is_sealed());
+    let generation = publications
+        .publish_structure(&jobs, &claimed, retry.id())
+        .await
+        .unwrap();
+    assert_eq!(generation, 1);
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Completed
+    );
+}
+
+/// Storage can change between attempts, so a retry may rebuild a different
+/// manifest. The earlier attempt's sealed rows are discarded and restaged.
+#[tokio::test]
+async fn a_retry_with_a_changed_manifest_restages_a_sealed_publication() {
+    let database = database().await;
+    let owner = seed_series(&database, 1).await;
+    let (jobs, claimed) = claimed_expand(&database, owner, 1).await;
+    let rows = structure_rows(&database, owner).await;
+    let manifest = StructurePublicationManifest::from_rows(&rows).unwrap();
+    let publications = CatalogPublicationRepository::new(&database);
+    let first = publications
+        .begin_structure(&claimed, &manifest)
+        .await
+        .unwrap();
+    publications
+        .stage_structure_batch(&claimed, first.id(), &rows)
+        .await
+        .unwrap();
+    publications
+        .seal_structure(&claimed, first.id())
+        .await
+        .unwrap();
+    let changed = rows
+        .iter()
+        .cloned()
+        .map(|row| row.with_index_number(Some(1)).unwrap())
+        .collect::<Vec<_>>();
+    let changed_manifest = StructurePublicationManifest::from_rows(&changed).unwrap();
+    assert_ne!(changed_manifest, manifest);
+
+    let retry = publications
+        .begin_structure(&claimed, &changed_manifest)
+        .await
+        .unwrap();
+
+    assert_eq!(retry.id(), first.id());
+    assert!(!retry.is_sealed());
+    publications
+        .stage_structure_batch(&claimed, retry.id(), &changed)
+        .await
+        .unwrap();
+    publications
+        .seal_structure(&claimed, retry.id())
+        .await
+        .unwrap();
+    publications
+        .publish_structure(&jobs, &claimed, retry.id())
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Completed
+    );
+}
+
+/// Ownership is not part of a retry's leeway: a publication owned by another
+/// job's revision still fails instead of being reset.
+#[tokio::test]
+async fn a_resumed_publication_still_rejects_a_stale_job_revision() {
+    let database = database().await;
+    let owner = seed_series(&database, 1).await;
+    let (jobs, claimed) = claimed_expand(&database, owner, 1).await;
+    let rows = structure_rows(&database, owner).await;
+    let manifest = StructurePublicationManifest::from_rows(&rows).unwrap();
+    let publications = CatalogPublicationRepository::new(&database);
+    publications
+        .begin_structure(&claimed, &manifest)
+        .await
+        .unwrap();
+    let backend = database.get_database_backend();
+    database
+        .execute(
+            backend.build(
+                Query::update()
+                    .table(Alias::new("catalog_publications"))
+                    .value(Alias::new("expected_revision"), 7_i64)
+                    .and_where(Expr::col(Alias::new("job_id")).eq(claimed.id().as_uuid())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let error = publications
+        .begin_structure(&claimed, &manifest)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, CatalogPublicationError::InvalidPublication),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        jobs.get(claimed.id()).await.unwrap().unwrap().state(),
+        WorkJobState::Running
+    );
+}
+
 #[tokio::test]
 async fn absent_structure_scope_is_rejected_before_the_pointer_switch() {
     let database = database().await;
@@ -755,7 +898,8 @@ async fn absent_structure_scope_is_rejected_before_the_pointer_switch() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows)
         .await
@@ -821,7 +965,8 @@ async fn incomplete_manifest_cannot_be_published() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows[..1])
         .await
@@ -853,7 +998,8 @@ async fn structure_staging_rejects_reparenting_an_item_from_another_series() {
     let first_publication = publications
         .begin_structure(&first_claim, &first_manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&first_claim, first_publication, &first_rows)
         .await
@@ -876,7 +1022,8 @@ async fn structure_staging_rejects_reparenting_an_item_from_another_series() {
     let second_publication = publications
         .begin_structure(&second_claim, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
 
     let error = publications
         .stage_structure_batch(&second_claim, second_publication, &[stolen])
@@ -912,7 +1059,8 @@ async fn structure_publication_rejects_a_scope_outside_the_owner_roots() {
     let publication = publications
         .begin_structure(&claimed, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&claimed, publication, &rows)
         .await
@@ -945,7 +1093,8 @@ async fn replacing_a_compacted_publication_requeues_its_original_terminal_time()
     let first = publications
         .begin_structure(&first_claim, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&first_claim, first, &rows)
         .await
@@ -1008,7 +1157,8 @@ async fn replacing_a_compacted_publication_requeues_its_original_terminal_time()
     let second = publications
         .begin_structure(&second_claim, &manifest)
         .await
-        .unwrap();
+        .unwrap()
+        .id();
     publications
         .stage_structure_batch(&second_claim, second, &rows)
         .await
