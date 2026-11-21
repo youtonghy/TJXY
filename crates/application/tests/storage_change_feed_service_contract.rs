@@ -13,7 +13,7 @@ use tjxy_common::{SortKey, StorageObjectRecordId, StorageRootId};
 use tjxy_db::{WorkJobRepository, WorkJobSpec, WorkJobState, WorkScope, WorkTaskKind};
 use tjxy_storage::{
     BackendError, ByteRange, ByteStream, ChangeCursor, ChangePage, ObjectPage, PageToken,
-    StorageBackend, StorageCapabilities, StorageObject, StorageObjectId,
+    StorageBackend, StorageCapabilities, StorageChange, StorageObject, StorageObjectId,
 };
 use tjxy_test_support::test_database;
 use uuid::Uuid;
@@ -679,4 +679,351 @@ async fn service_consumes_all_pages_and_durably_reconciles_terminal_cursor() {
             .unwrap(),
         resumed_job.as_uuid()
     );
+}
+
+/// Answers each Changes cursor from a fixed table; any other cursor fails.
+struct CursorBackend {
+    pages: Mutex<Vec<(String, ChangePage)>>,
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for CursorBackend {
+    async fn get_object(&self, _id: &StorageObjectId) -> Result<StorageObject, BackendError> {
+        Err(BackendError::NotFound)
+    }
+
+    async fn list_children(
+        &self,
+        _parent: &StorageObjectId,
+        _page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        Err(BackendError::unsupported_capability("listing"))
+    }
+
+    async fn list_changes(&self, cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
+        let mut pages = self.pages.lock().unwrap();
+        let index = pages
+            .iter()
+            .position(|(known, _)| known == cursor.as_str())
+            .ok_or_else(|| BackendError::TemporarilyUnavailable {
+                message: format!("cursor {} is poisoned", cursor.as_str()),
+            })?;
+        Ok(pages.remove(index).1)
+    }
+
+    async fn open_range(
+        &self,
+        _id: &StorageObjectId,
+        _range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        Err(BackendError::unsupported_capability("range"))
+    }
+
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::new().with_changes(true)
+    }
+
+    async fn latest_change_cursor(&self) -> Result<ChangeCursor, BackendError> {
+        Err(BackendError::unsupported_capability("fresh cursor"))
+    }
+}
+
+async fn insert(
+    database: &sea_orm::DatabaseConnection,
+    statement: sea_orm::sea_query::InsertStatement,
+) {
+    let backend = database.get_database_backend();
+    database.execute(backend.build(&statement)).await.unwrap();
+}
+
+/// Seeds a Google Drive account with one enabled library on drive `my-drive`.
+async fn seed_drive(database: &sea_orm::DatabaseConnection) -> (Uuid, Uuid) {
+    let account_id = Uuid::new_v4();
+    let library_id = Uuid::new_v4();
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("storage_accounts"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("provider"),
+                Alias::new("display_name"),
+                Alias::new("account_identity"),
+                Alias::new("credential_ref"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                account_id.into(),
+                "google-drive".into(),
+                "Drive".into(),
+                "account".into(),
+                "credential".into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("libraries"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("name"),
+                Alias::new("scan_profile"),
+                Alias::new("object_selection_scope"),
+                Alias::new("metadata_policy"),
+                Alias::new("expansion_policy"),
+                Alias::new("probe_policy"),
+                Alias::new("profile_version"),
+                Alias::new("collection_type"),
+                Alias::new("sort_key"),
+                Alias::new("is_enabled"),
+            ])
+            .values_panic([
+                library_id.into(),
+                "Fixture".into(),
+                "Lazy".into(),
+                "title_layer".into(),
+                "basic".into(),
+                "on_browse".into(),
+                "on_playback".into(),
+                1.into(),
+                "movies".into(),
+                SortKey::from_text("Fixture").into_bytes().into(),
+                true.into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    (account_id, library_id)
+}
+
+/// Seeds one bound root whose own relation has no parent, with an active Changes cursor.
+#[allow(clippy::too_many_lines)] // One row per table a bound Changes root needs.
+async fn seed_root(
+    database: &sea_orm::DatabaseConnection,
+    account_id: Uuid,
+    library_id: Uuid,
+    provider_root_id: &str,
+    cursor: &str,
+) -> (StorageRootId, StorageObjectRecordId) {
+    let root_id = StorageRootId::new();
+    let root_object_id = StorageObjectRecordId::new();
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_root_id"),
+                Alias::new("sync_revision"),
+                Alias::new("reconciled_sync_revision"),
+            ])
+            .values_panic([
+                root_id.as_uuid().into(),
+                account_id.into(),
+                provider_root_id.into(),
+                0_i64.into(),
+                0_i64.into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("library_storage_roots"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("library_id"),
+                Alias::new("storage_root_id"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                library_id.into(),
+                root_id.as_uuid().into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("storage_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_account_id"),
+                Alias::new("provider_drive_id"),
+                Alias::new("provider_object_id"),
+                Alias::new("name"),
+                Alias::new("normalized_name"),
+                Alias::new("object_type"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("identity_quality"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                root_object_id.as_uuid().into(),
+                account_id.into(),
+                "my-drive".into(),
+                provider_root_id.into(),
+                "Root".into(),
+                "root".into(),
+                "Directory".into(),
+                0_i64.into(),
+                true.into(),
+                0_i64.into(),
+                "ProviderStableId".into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("storage_root_objects"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_root_id"),
+                Alias::new("storage_object_id"),
+                Alias::new("observed_sync_revision"),
+                Alias::new("children_indexed"),
+                Alias::new("children_index_revision"),
+                Alias::new("presence_state"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                root_id.as_uuid().into(),
+                root_object_id.as_uuid().into(),
+                0_i64.into(),
+                true.into(),
+                0_i64.into(),
+                "Present".into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    insert(
+        database,
+        Query::insert()
+            .into_table(Alias::new("storage_sync_cursors"))
+            .columns([
+                Alias::new("id"),
+                Alias::new("storage_root_id"),
+                Alias::new("cursor_type"),
+                Alias::new("cursor_value"),
+                Alias::new("status"),
+            ])
+            .values_panic([
+                Uuid::new_v4().into(),
+                root_id.as_uuid().into(),
+                "Changes".into(),
+                cursor.into(),
+                "Active".into(),
+            ])
+            .to_owned(),
+    )
+    .await;
+    (root_id, root_object_id)
+}
+
+async fn cursor_of(database: &sea_orm::DatabaseConnection, root_id: StorageRootId) -> String {
+    let backend = database.get_database_backend();
+    database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("cursor_value"))
+                    .from(Alias::new("storage_sync_cursors"))
+                    .and_where(Expr::col(Alias::new("storage_root_id")).eq(root_id.as_uuid())),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "cursor_value")
+        .unwrap()
+}
+
+/// The bound root's own relation has no parent. A rename or removal of the
+/// root itself used to fail decoding, roll back the page, and reread the same
+/// cursor forever.
+#[tokio::test]
+async fn changes_to_the_bound_root_object_do_not_stall_its_cursor() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let (account_id, library_id) = seed_drive(&database).await;
+    let (root_id, root_object_id) =
+        seed_root(&database, account_id, library_id, "root", "cursor-one").await;
+    let root = StorageObjectId::new("google-drive", "root").unwrap();
+    let provider = Arc::new(CursorBackend {
+        pages: Mutex::new(vec![(
+            "cursor-one".to_owned(),
+            ChangePage::new(
+                vec![
+                    StorageChange::Upsert(StorageObject::directory(root.clone(), "Renamed Root")),
+                    StorageChange::Removed(root),
+                ],
+                ChangeCursor::new("cursor-two").unwrap(),
+            ),
+        )]),
+    });
+
+    StorageChangeFeedService::new(database.clone(), provider)
+        .run_active_roots(account_id, "my-drive")
+        .await
+        .unwrap();
+
+    assert_eq!(cursor_of(&database, root_id).await, "cursor-two");
+    let backend = database.get_database_backend();
+    let presence: String = database
+        .query_one(
+            backend.build(
+                Query::select()
+                    .column(Alias::new("presence_state"))
+                    .from(Alias::new("storage_root_objects"))
+                    .and_where(
+                        Expr::col(Alias::new("storage_object_id")).eq(root_object_id.as_uuid()),
+                    ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "presence_state")
+        .unwrap();
+    assert_eq!(presence, "Present");
+}
+
+/// Every root on a drive gets its turn even when another root fails first.
+#[tokio::test]
+async fn one_failing_root_does_not_stall_the_drives_other_roots() {
+    let database = test_database().await.unwrap();
+    tjxy_db::Migrator::up(&database, None).await.unwrap();
+    let (account_id, library_id) = seed_drive(&database).await;
+    let (poisoned, _) = seed_root(&database, account_id, library_id, "root-a", "poison").await;
+    let (healthy, _) = seed_root(&database, account_id, library_id, "root-b", "healthy-one").await;
+    let provider = Arc::new(CursorBackend {
+        pages: Mutex::new(vec![(
+            "healthy-one".to_owned(),
+            ChangePage::new(Vec::new(), ChangeCursor::new("healthy-two").unwrap()),
+        )]),
+    });
+
+    let error = StorageChangeFeedService::new(database.clone(), provider)
+        .run_active_roots(account_id, "my-drive")
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("poison"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(cursor_of(&database, poisoned).await, "poison");
+    assert_eq!(cursor_of(&database, healthy).await, "healthy-two");
 }

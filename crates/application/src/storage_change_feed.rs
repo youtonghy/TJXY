@@ -103,8 +103,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns the first root failure; pages already committed for earlier roots
-    /// remain durable and replay-safe.
+    /// Returns the first root failure after every root has had its turn, so one
+    /// failing root does not stall the others on the drive. Pages committed for
+    /// any root remain durable and replay-safe. A provider rate limit stops the
+    /// pass at once: every root on the drive shares that quota.
     pub async fn run_active_roots(
         &self,
         account_id: Uuid,
@@ -114,13 +116,27 @@ where
             .active_roots(account_id, provider_drive_id)
             .await?;
         let mut results = Vec::with_capacity(roots.len());
+        let mut first_failure = None;
         for root_id in roots {
-            let result = self
-                .run_root(root_id, account_id, provider_drive_id)
-                .await?;
-            results.push((root_id, result));
+            match self.run_root(root_id, account_id, provider_drive_id).await {
+                Ok(result) => results.push((root_id, result)),
+                Err(error @ StorageChangeFeedError::Backend(BackendError::RateLimited { .. })) => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        storage_root_id = %root_id.as_uuid(),
+                        %error,
+                        "storage root changes failed; continuing with the drive's other roots"
+                    );
+                    first_failure.get_or_insert(error);
+                }
+            }
         }
-        Ok(results)
+        match first_failure {
+            Some(error) => Err(error),
+            None => Ok(results),
+        }
     }
 
     /// Resumes a terminally failed cursor recovery after operational review.

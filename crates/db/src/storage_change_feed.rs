@@ -645,21 +645,50 @@ impl ChangeCommitContext<'_> {
             object.id(),
         )
         .await?;
-        let Some(parent) = self.resolve_parent(object, existing.as_ref()).await? else {
-            return match existing.as_ref() {
-                Some(existing) => {
-                    self.apply_move_out_of_materialized_scope(object, existing)
-                        .await
-                }
-                None => Ok(false),
-            };
+        let Some(existing) = existing else {
+            return self.apply_new_object(object).await;
         };
-        if let Some(existing) = existing.as_ref()
-            && existing.parent_record_id != parent.record_id
-        {
-            self.emit_moved_out(object, existing, "moved-to-materialized-parent")
-                .await?;
+        let Some(existing_parent) = existing.parent.as_ref() else {
+            // The bound root itself changed (renamed, moved, or its metadata). The binding, not
+            // the root's name or location, defines the library, so there is nothing to project.
+            tracing::info!(
+                storage_root_id = %self.root_id.as_uuid(),
+                "storage change for the bound root object ignored"
+            );
+            return Ok(false);
+        };
+        let Some(parent) = self.resolve_parent(object, Some(existing_parent)).await? else {
+            return self
+                .apply_move_out_of_materialized_scope(object, &existing, existing_parent)
+                .await;
+        };
+        if existing_parent.record_id != parent.record_id {
+            self.emit_moved_out(
+                object,
+                &existing,
+                existing_parent,
+                "moved-to-materialized-parent",
+            )
+            .await?;
         }
+        self.store_upsert(object, &parent).await
+    }
+
+    async fn apply_new_object(
+        &self,
+        object: &tjxy_storage::StorageObject,
+    ) -> Result<bool, StorageChangeFeedRepositoryError> {
+        match self.resolve_parent(object, None).await? {
+            Some(parent) => self.store_upsert(object, &parent).await,
+            None => Ok(false),
+        }
+    }
+
+    async fn store_upsert(
+        &self,
+        object: &tjxy_storage::StorageObject,
+        parent: &ParentRelation,
+    ) -> Result<bool, StorageChangeFeedRepositoryError> {
         let stored = upsert_object(
             self.transaction,
             self.root_id,
@@ -712,6 +741,7 @@ impl ChangeCommitContext<'_> {
         &self,
         object: &tjxy_storage::StorageObject,
         existing: &ExistingRelation,
+        existing_parent: &ParentRelation,
         reason: &str,
     ) -> Result<(), StorageChangeFeedRepositoryError> {
         insert_outbox_event(
@@ -729,7 +759,7 @@ impl ChangeCommitContext<'_> {
                     "relation": {
                         "storage_root_id": self.root_id,
                         "storage_object_id": existing.object_id,
-                        "parent_storage_object_id": existing.parent_record_id,
+                        "parent_storage_object_id": existing_parent.record_id,
                     },
                     "before": {"remote_revision": existing.remote_revision},
                     "after": {
@@ -748,6 +778,7 @@ impl ChangeCommitContext<'_> {
         &self,
         object: &tjxy_storage::StorageObject,
         existing: &ExistingRelation,
+        existing_parent: &ParentRelation,
     ) -> Result<bool, StorageChangeFeedRepositoryError> {
         let Some(parent_provider_id) = object
             .parents()
@@ -785,21 +816,23 @@ impl ChangeCommitContext<'_> {
             DescendantLoss::MovedOut,
         )
         .await?;
-        self.emit_moved_out(object, existing, "moved-to-unmaterialized-parent")
-            .await?;
+        self.emit_moved_out(
+            object,
+            existing,
+            existing_parent,
+            "moved-to-unmaterialized-parent",
+        )
+        .await?;
         Ok(true)
     }
 
     async fn resolve_parent(
         &self,
         object: &tjxy_storage::StorageObject,
-        existing: Option<&ExistingRelation>,
+        existing_parent: Option<&ParentRelation>,
     ) -> Result<Option<ParentRelation>, DbErr> {
         if object.parents().is_empty() {
-            return Ok(existing.map(|existing| ParentRelation {
-                record_id: existing.parent_record_id,
-                provider_id: existing.parent_provider_id.clone(),
-            }));
+            return Ok(existing_parent.cloned());
         }
         // Strict Lazy never expands an unmaterialized branch from a change feed.
         resolve_parent_relation(
@@ -825,6 +858,16 @@ impl ChangeCommitContext<'_> {
         )
         .await?
         else {
+            return Ok(false);
+        };
+        let Some(existing_parent) = existing.parent.as_ref() else {
+            // Removing the bound root must not erase the library: the change feed cannot tell a
+            // deleted root from one that left this account's view. Leave its contents in place
+            // and let root validation decide, instead of rolling back the whole page forever.
+            tracing::warn!(
+                storage_root_id = %self.root_id.as_uuid(),
+                "storage change removed the bound root object; contents left for root validation"
+            );
             return Ok(false);
         };
         mark_removed(
@@ -859,7 +902,7 @@ impl ChangeCommitContext<'_> {
                     "relation": {
                         "storage_root_id": self.root_id,
                         "storage_object_id": existing.object_id,
-                        "parent_storage_object_id": existing.parent_record_id,
+                        "parent_storage_object_id": existing_parent.record_id,
                     },
                     "before": {"remote_revision": existing.remote_revision},
                     "after": {"presence_state": "ConfirmedAbsent"},
@@ -1027,6 +1070,7 @@ async fn descendant_relations(
     Ok(descendants)
 }
 
+#[derive(Clone)]
 struct ParentRelation {
     record_id: StorageObjectRecordId,
     provider_id: String,
@@ -1089,8 +1133,8 @@ async fn resolve_parent_relation(
 
 struct ExistingRelation {
     object_id: StorageObjectRecordId,
-    parent_record_id: StorageObjectRecordId,
-    parent_provider_id: String,
+    /// `None` only for the bound root object's own relation.
+    parent: Option<ParentRelation>,
     remote_revision: Option<String>,
 }
 
@@ -1146,12 +1190,17 @@ async fn existing_relation(
         .await?
         .as_ref()
         .map(|row| {
+            let parent_record_id: Option<Uuid> = row.try_get("", "parent_record_id")?;
+            let parent = match parent_record_id {
+                Some(record_id) => Some(ParentRelation {
+                    record_id: StorageObjectRecordId::from_uuid(record_id),
+                    provider_id: row.try_get("", "parent_provider_id")?,
+                }),
+                None => None,
+            };
             Ok(ExistingRelation {
                 object_id: StorageObjectRecordId::from_uuid(row.try_get("", "object_id")?),
-                parent_record_id: StorageObjectRecordId::from_uuid(
-                    row.try_get("", "parent_record_id")?,
-                ),
-                parent_provider_id: row.try_get("", "parent_provider_id")?,
+                parent,
                 remote_revision: row.try_get("", "remote_revision")?,
             })
         })
