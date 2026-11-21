@@ -1399,6 +1399,7 @@ async fn validation_pages_defer_absence_until_the_whole_tree_succeeds() {
             fixture.root_id,
             fixture.parent_id,
             page.sync_revision(),
+            &[],
         )
         .await
         .unwrap();
@@ -3158,6 +3159,7 @@ async fn expired_validation_claim_cannot_commit_its_sweep() {
             fixture.root_id,
             fixture.parent_id,
             page.sync_revision(),
+            &[],
         )
         .await
         .unwrap_err();

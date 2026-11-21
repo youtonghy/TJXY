@@ -857,7 +857,11 @@ impl StorageBackend for OneDriveBackend {
                 PageToken::new(link)
             })
             .transpose()?;
-        Ok(ObjectPage { objects, next_page })
+        Ok(ObjectPage {
+            objects,
+            next_page,
+            incomplete: false,
+        })
     }
 
     async fn list_changes(&self, cursor: ChangeCursor) -> Result<ChangePage, BackendError> {

@@ -332,6 +332,12 @@ fn valid_opaque_value(value: &str, max_chars: usize) -> bool {
 pub struct ObjectPage {
     pub objects: Vec<StorageObject>,
     pub next_page: Option<PageToken>,
+    /// The backend could not read every entry of this page (an unreadable
+    /// file, or a provider reporting a partial search). The objects it did read
+    /// are valid, but anything missing from the page may still exist, so the
+    /// listing cannot confirm an absence.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 impl ObjectPage {
@@ -340,7 +346,15 @@ impl ObjectPage {
         Self {
             objects,
             next_page: None,
+            incomplete: false,
         }
+    }
+
+    /// Marks this page as missing entries the backend could not read.
+    #[must_use]
+    pub const fn with_incomplete_listing(mut self) -> Self {
+        self.incomplete = true;
+        self
     }
 }
 

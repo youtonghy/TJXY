@@ -30,6 +30,9 @@ pub struct StorageSyncPage {
     page_identity: String,
     objects: Vec<StorageObject>,
     scope_completed: bool,
+    /// Whether a completed listing proves that unlisted children are gone. False when the
+    /// backend could not read every entry: those entries may still exist.
+    confirms_absence: bool,
     payload_sha256: String,
 }
 
@@ -138,8 +141,17 @@ impl StorageSyncPage {
             page_identity,
             objects,
             scope_completed,
+            confirms_absence: true,
             payload_sha256,
         })
+    }
+
+    /// Marks a scope listing the backend could not read completely. Its objects are kept,
+    /// and the scope still completes, but children missing from it are not marked absent.
+    #[must_use]
+    pub const fn with_incomplete_listing(mut self) -> Self {
+        self.confirms_absence = false;
+        self
     }
 }
 
@@ -838,6 +850,9 @@ where
 
     /// Commits the final unreachable-subtree sweep for a full root validation.
     ///
+    /// Children missing from a directory in `incomplete_directories`, and everything below
+    /// them, are kept: that directory's listing could not prove them gone.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageSyncRepositoryError`] for an invalid claim, revision conflict, lost lease,
@@ -848,6 +863,7 @@ where
         root_id: StorageRootId,
         root_object_id: StorageObjectRecordId,
         first_validation_revision: i64,
+        incomplete_directories: &[StorageObjectRecordId],
     ) -> Result<CommittedStoragePage, StorageSyncRepositoryError> {
         let transaction = self.database.begin().await?;
         let result = commit_validation_sweep(
@@ -856,6 +872,7 @@ where
             root_id,
             root_object_id,
             first_validation_revision,
+            incomplete_directories,
             self.clock.now(),
         )
         .await;
@@ -1360,6 +1377,7 @@ async fn commit_validation_sweep(
     root_id: StorageRootId,
     root_object_id: StorageObjectRecordId,
     first_validation_revision: i64,
+    incomplete_directories: &[StorageObjectRecordId],
     now: DateTime<Utc>,
 ) -> Result<CommittedStoragePage, StorageSyncRepositoryError> {
     if claimed.job().task_kind() != WorkTaskKind::ValidateStorageRoot
@@ -1383,7 +1401,13 @@ async fn commit_validation_sweep(
         .sync_revision
         .checked_add(1)
         .ok_or(StorageSyncRepositoryError::InvalidRevision)?;
-    let targets = validation_sweep_targets(transaction, root_id, first_validation_revision).await?;
+    let targets = validation_sweep_targets(
+        transaction,
+        root_id,
+        first_validation_revision,
+        incomplete_directories,
+    )
+    .await?;
     let backend = transaction.get_database_backend();
     for target in targets {
         let update = Query::update()
@@ -1493,6 +1517,7 @@ async fn validation_sweep_targets(
     transaction: &DatabaseTransaction,
     root_id: StorageRootId,
     first_validation_revision: i64,
+    incomplete_directories: &[StorageObjectRecordId],
 ) -> Result<Vec<ValidationSweepRelation>, StorageSyncRepositoryError> {
     let relation = Alias::new("validation_sweep_relation");
     let object = Alias::new("validation_sweep_object");
@@ -1552,15 +1577,56 @@ async fn validation_sweep_targets(
             })
         })
         .collect::<Result<Vec<_>, StorageSyncRepositoryError>>()?;
+    let absent = unobserved_subtrees(
+        &relations,
+        first_validation_revision,
+        incomplete_directories,
+    );
+    Ok(relations
+        .into_iter()
+        .filter(|relation| absent.contains(&relation.object_id))
+        .collect())
+}
+
+/// Selects relations a full validation proved gone: every relation not observed since
+/// `first_validation_revision`, with its whole subtree. Children missing from an
+/// incompletely listed directory, and their subtrees, are kept instead.
+fn unobserved_subtrees(
+    relations: &[ValidationSweepRelation],
+    first_validation_revision: i64,
+    incomplete_directories: &[StorageObjectRecordId],
+) -> HashSet<StorageObjectRecordId> {
     let mut children = HashMap::<StorageObjectRecordId, Vec<StorageObjectRecordId>>::new();
-    let mut absent = HashSet::new();
-    let mut pending = VecDeque::new();
-    for relation in &relations {
+    for relation in relations {
         children
             .entry(relation.parent_id)
             .or_default()
             .push(relation.object_id);
+    }
+    // An unobserved child of an incompletely listed directory may still exist, and the
+    // traversal never descended into it, so it and its whole subtree are kept.
+    let incomplete = incomplete_directories
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut kept = HashSet::new();
+    let mut pending = relations
+        .iter()
+        .filter(|relation| {
+            relation.observed_revision < first_validation_revision
+                && incomplete.contains(&relation.parent_id)
+        })
+        .map(|relation| relation.object_id)
+        .collect::<VecDeque<_>>();
+    while let Some(object_id) = pending.pop_front() {
+        if kept.insert(object_id) {
+            pending.extend(children.get(&object_id).into_iter().flatten().copied());
+        }
+    }
+    let mut absent = HashSet::new();
+    for relation in relations {
         if relation.observed_revision < first_validation_revision
+            && !kept.contains(&relation.object_id)
             && absent.insert(relation.object_id)
         {
             pending.push_back(relation.object_id);
@@ -1568,15 +1634,12 @@ async fn validation_sweep_targets(
     }
     while let Some(parent_id) = pending.pop_front() {
         for child_id in children.get(&parent_id).into_iter().flatten() {
-            if absent.insert(*child_id) {
+            if !kept.contains(child_id) && absent.insert(*child_id) {
                 pending.push_back(*child_id);
             }
         }
     }
-    Ok(relations
-        .into_iter()
-        .filter(|relation| absent.contains(&relation.object_id))
-        .collect())
+    absent
 }
 
 async fn persist_page_contents(
@@ -1919,7 +1982,9 @@ async fn complete_inventory_scope(
         )
         .await;
     }
-    if let AbsencePolicy::Immediate { first_job_revision } = absence_policy {
+    if let AbsencePolicy::Immediate { first_job_revision } = absence_policy
+        && page.confirms_absence
+    {
         mark_unobserved_children_absent(transaction, page, first_job_revision, sync_revision, now)
             .await?;
         insert_path_weak_relink_candidates(transaction, page.storage_root_id, sync_revision, now)

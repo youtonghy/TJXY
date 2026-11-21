@@ -190,6 +190,43 @@ async fn shared_drive_children_use_exact_scope_pagination_and_fields() {
     assert!(query["fields"].contains("nextPageToken"));
 }
 
+/// Drive may answer a search without covering every corpus; such a page must
+/// not be used to conclude that an unlisted file is gone.
+#[tokio::test]
+async fn an_incomplete_drive_search_marks_the_page_incomplete() {
+    let partial = Arc::new(Captured::new(json!({
+        "incompleteSearch": true,
+        "files": [{"id":"video-1","name":"Episode.mkv","mimeType":"video/x-matroska","size":"8","version":"9","modifiedTime":"2026-07-17T02:03:04Z"}]
+    })));
+    let complete = Arc::new(Captured::new(json!({"files": []})));
+    let parent = StorageObjectId::new("google-drive", "parent-id").unwrap();
+
+    let partial_page = GoogleDriveBackend::new(Token, GoogleDriveScope::MyDrive)
+        .unwrap()
+        .with_transport(partial.clone())
+        .list_children(&parent, None)
+        .await
+        .unwrap();
+    let complete_page = GoogleDriveBackend::new(Token, GoogleDriveScope::MyDrive)
+        .unwrap()
+        .with_transport(complete)
+        .list_children(&parent, None)
+        .await
+        .unwrap();
+
+    assert!(partial_page.incomplete);
+    assert_eq!(partial_page.objects.len(), 1);
+    assert!(!complete_page.incomplete);
+    let requests = partial.requests.lock().unwrap();
+    assert!(
+        requests[0]
+            .query
+            .iter()
+            .any(|(name, value)| name == "fields"
+                && value.split(',').any(|field| field == "incompleteSearch"))
+    );
+}
+
 #[tokio::test]
 async fn shared_drive_listing_preserves_identity_and_pagination() {
     let captured = Arc::new(Captured::new(json!({

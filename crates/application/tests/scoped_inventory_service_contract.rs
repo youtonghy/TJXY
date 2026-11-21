@@ -48,6 +48,7 @@ impl StorageBackend for TwoPageBackend {
                     self.first_name,
                 )],
                 next_page: Some(PageToken::new("page-2").unwrap()),
+                incomplete: false,
             }),
             Some(token) if token.as_str() == "page-2" && self.fail_second_page => {
                 Err(BackendError::TemporarilyUnavailable {
@@ -1683,4 +1684,196 @@ async fn validation_passes_reconcile_fully_without_page_bookkeeping() {
         1,
         "a file added between passes is still inventoried"
     );
+}
+
+/// Returns queued pages in order, whatever directory is listed.
+struct QueuedPagesBackend {
+    pages: Mutex<VecDeque<ObjectPage>>,
+}
+
+impl QueuedPagesBackend {
+    fn new(pages: impl IntoIterator<Item = ObjectPage>) -> Arc<Self> {
+        Arc::new(Self {
+            pages: Mutex::new(pages.into_iter().collect()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for QueuedPagesBackend {
+    async fn get_object(&self, _id: &StorageObjectId) -> Result<StorageObject, BackendError> {
+        Err(BackendError::NotFound)
+    }
+
+    async fn list_children(
+        &self,
+        _parent: &StorageObjectId,
+        _page: Option<PageToken>,
+    ) -> Result<ObjectPage, BackendError> {
+        Ok(self
+            .pages
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("a queued page for every listing"))
+    }
+
+    async fn list_changes(&self, _cursor: ChangeCursor) -> Result<ChangePage, BackendError> {
+        Err(BackendError::unsupported_capability("changes"))
+    }
+
+    async fn open_range(
+        &self,
+        _id: &StorageObjectId,
+        _range: ByteRange,
+    ) -> Result<ByteStream, BackendError> {
+        Err(BackendError::unsupported_capability("range reads"))
+    }
+
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::new()
+    }
+}
+
+fn movie(provider_id: &str) -> StorageObject {
+    StorageObject::file(
+        StorageObjectId::new("filesystem", provider_id).unwrap(),
+        format!("{provider_id}.mkv"),
+        8,
+    )
+}
+
+async fn run_scoped_sync(fixture: &Fixture, page: ObjectPage) {
+    let work = WorkJobRepository::new(&fixture.database);
+    work.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ScopedStorageSync,
+            WorkScope::StorageObject(fixture.parent_record_id),
+            0,
+            100,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = work
+        .claim_next(
+            &[WorkTaskKind::ScopedStorageSync],
+            "inventory-worker",
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    ScopedInventoryService::new(fixture.database.clone(), QueuedPagesBackend::new([page]))
+        .run_claimed(&claimed, fixture.account_id)
+        .await
+        .unwrap();
+}
+
+async fn run_validation(fixture: &Fixture, pages: Vec<ObjectPage>) {
+    let work = WorkJobRepository::new(&fixture.database);
+    work.enqueue_or_join(
+        &WorkJobSpec::new(
+            WorkTaskKind::ValidateStorageRoot,
+            WorkScope::StorageRoot(fixture.root_id),
+            0,
+            10,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let claimed = work
+        .claim_next(
+            &[WorkTaskKind::ValidateStorageRoot],
+            "validate-worker",
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    FullValidateStorageService::new(fixture.database.clone(), QueuedPagesBackend::new(pages))
+        .run_claimed(&claimed, fixture.account_id)
+        .await
+        .unwrap();
+}
+
+async fn presence_of(fixture: &Fixture, provider_id: &str) -> String {
+    fixture
+        .database
+        .query_one(Statement::from_string(
+            fixture.database.get_database_backend(),
+            format!(
+                "SELECT ro.presence_state FROM storage_root_objects ro \
+                 JOIN storage_objects o ON o.id = ro.storage_object_id \
+                 WHERE o.provider_object_id = '{provider_id}'"
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "presence_state")
+        .unwrap()
+}
+
+/// An entry the backend could not read is missing from the listing but may
+/// still exist; only a complete listing removes it.
+#[tokio::test]
+async fn an_incomplete_listing_does_not_remove_unlisted_children() {
+    let fixture = fixture().await;
+    run_scoped_sync(
+        &fixture,
+        ObjectPage::complete(vec![movie("kept"), movie("hidden")]),
+    )
+    .await;
+
+    run_scoped_sync(
+        &fixture,
+        ObjectPage::complete(vec![movie("kept")]).with_incomplete_listing(),
+    )
+    .await;
+    assert_eq!(presence_of(&fixture, "kept").await, "Present");
+    assert_eq!(presence_of(&fixture, "hidden").await, "Present");
+
+    run_scoped_sync(&fixture, ObjectPage::complete(vec![movie("kept")])).await;
+    assert_eq!(presence_of(&fixture, "hidden").await, "ConfirmedAbsent");
+}
+
+/// A full validation keeps everything an incompletely listed directory may
+/// hide, including the subtree it never descended into.
+#[tokio::test]
+async fn validation_keeps_subtrees_hidden_by_an_incomplete_listing() {
+    let fixture = fixture().await;
+    let series = StorageObject::directory(
+        StorageObjectId::new("filesystem", "series").unwrap(),
+        "Series",
+    );
+    run_validation(
+        &fixture,
+        vec![
+            ObjectPage::complete(vec![series, movie("loose")]),
+            ObjectPage::complete(vec![movie("episode")]),
+        ],
+    )
+    .await;
+    assert_eq!(presence_of(&fixture, "episode").await, "Present");
+
+    run_validation(
+        &fixture,
+        vec![ObjectPage::complete(Vec::new()).with_incomplete_listing()],
+    )
+    .await;
+    for kept in ["series", "episode", "loose"] {
+        assert_eq!(presence_of(&fixture, kept).await, "Present", "{kept}");
+    }
+
+    run_validation(&fixture, vec![ObjectPage::complete(Vec::new())]).await;
+    for removed in ["series", "episode", "loose"] {
+        assert_eq!(
+            presence_of(&fixture, removed).await,
+            "ConfirmedAbsent",
+            "{removed}"
+        );
+    }
 }

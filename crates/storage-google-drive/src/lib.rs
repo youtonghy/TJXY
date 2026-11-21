@@ -737,7 +737,7 @@ impl StorageBackend for GoogleDriveBackend {
             ("pageSize".to_owned(), "1000".to_owned()),
             ("supportsAllDrives".to_owned(), "true".to_owned()),
             ("includeItemsFromAllDrives".to_owned(), "true".to_owned()),
-            ("fields".to_owned(), "nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime,version,trashed)".to_owned()),
+            ("fields".to_owned(), "nextPageToken,incompleteSearch,files(id,name,mimeType,size,md5Checksum,modifiedTime,version,trashed)".to_owned()),
         ];
         if let Some(page) = page {
             query.push(("pageToken".to_owned(), page.as_str().to_owned()));
@@ -764,6 +764,7 @@ impl StorageBackend for GoogleDriveBackend {
         Ok(ObjectPage {
             objects,
             next_page: page.next_page_token.map(PageToken::new).transpose()?,
+            incomplete: page.incomplete_search,
         })
     }
 
@@ -840,6 +841,9 @@ impl StorageBackend for GoogleDriveBackend {
 struct FileList {
     files: Vec<DriveFile>,
     next_page_token: Option<String>,
+    /// Drive did not search every corpus for this request.
+    #[serde(default)]
+    incomplete_search: bool,
 }
 
 #[derive(Deserialize)]

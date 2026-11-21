@@ -481,6 +481,7 @@ impl FilesystemBackend {
         let mut directory = fs::read_dir(&parent_path).await.map_err(map_io_error)?;
         let mut objects = Vec::new();
         let mut indexed_paths = Vec::new();
+        let mut incomplete = false;
         while let Some(entry) = directory.next_entry().await.map_err(map_io_error)? {
             if objects.len() >= MAX_DIRECTORY_ENTRIES {
                 return Err(BackendError::unsupported_capability(
@@ -495,17 +496,30 @@ impl FilesystemBackend {
                     objects.push(object);
                 }
                 Ok(None) => {}
-                Err(error) => tracing::error!(
-                    directory = %parent_path.display(),
-                    entry = %entry.file_name().to_string_lossy(),
-                    %error,
-                    "filesystem entry skipped"
-                ),
+                Err(error) => {
+                    // A vanished entry is truly gone and an unrepresentable one was never
+                    // inventoried, but an I/O failure hides an entry that may still exist.
+                    incomplete |= !matches!(
+                        error,
+                        BackendError::NotFound | BackendError::InvalidValue { .. }
+                    );
+                    tracing::error!(
+                        directory = %parent_path.display(),
+                        entry = %entry.file_name().to_string_lossy(),
+                        %error,
+                        "filesystem entry skipped"
+                    );
+                }
             }
         }
         objects.sort_by(|left, right| left.name().cmp(right.name()));
         self.index_paths(indexed_paths).await;
-        Ok(ObjectPage::complete(objects))
+        let page = ObjectPage::complete(objects);
+        Ok(if incomplete {
+            page.with_incomplete_listing()
+        } else {
+            page
+        })
     }
 
     /// Reads one directory entry; `None` for entries the inventory never exposes (symlinks and

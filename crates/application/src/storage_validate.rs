@@ -61,7 +61,13 @@ where
         let root_object_id = root.parent_record_id();
         let traversal = self.inventory_tree(claimed, &repository, root).await?;
         let committed = repository
-            .commit_validation_sweep(claimed, root_id, root_object_id, traversal.first_revision)
+            .commit_validation_sweep(
+                claimed,
+                root_id,
+                root_object_id,
+                traversal.first_revision,
+                &traversal.incomplete_directories,
+            )
             .await?;
         StorageChangeProjector::new(self.database.clone())
             .drain_root(root_id, committed.sync_revision())
@@ -162,6 +168,7 @@ where
         let mut directory_count = 0_u64;
         let mut object_count = 0_u64;
         let mut first_validation_revision = None;
+        let mut incomplete_directories = Vec::new();
         while let Some(directory) = directories.pop_front() {
             if !visited.insert(directory.parent_record_id()) {
                 continue;
@@ -187,6 +194,11 @@ where
                     .list_validation_page(claimed, repository, root_id, &directory, token.clone())
                     .await?;
                 let next_page = page.next_page;
+                if page.incomplete
+                    && incomplete_directories.last() != Some(&directory.parent_record_id())
+                {
+                    incomplete_directories.push(directory.parent_record_id());
+                }
                 if next_page.as_ref().is_some_and(|next| {
                     pages.contains(&validation_page_identity(
                         claimed.attempt_count(),
@@ -237,6 +249,7 @@ where
                 .ok_or(FullValidateStorageError::MissingValidationRevision)?,
             directory_count,
             object_count,
+            incomplete_directories,
         })
     }
 }
@@ -245,6 +258,8 @@ struct ValidationTraversal {
     first_revision: i64,
     directory_count: u64,
     object_count: u64,
+    /// Directories the backend could not list completely; the sweep keeps what they hide.
+    incomplete_directories: Vec<StorageObjectRecordId>,
 }
 
 fn validation_page_identity(

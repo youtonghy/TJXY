@@ -1009,7 +1009,9 @@ pub(crate) async fn onedrive_directories(
         .await
     {
         Ok(page) => {
-            let tjxy_storage::ObjectPage { objects, next_page } = page;
+            let tjxy_storage::ObjectPage {
+                objects, next_page, ..
+            } = page;
             let next_page_token = match oauth
                 .register_directory_page(oauth_state, session_id, prepared.context, next_page)
                 .await
@@ -1196,7 +1198,9 @@ pub(crate) async fn google_drive_directories(
     };
     match backend.list_children(&parent, provider_page).await {
         Ok(page) => {
-            let tjxy_storage::ObjectPage { objects, next_page } = page;
+            let tjxy_storage::ObjectPage {
+                objects, next_page, ..
+            } = page;
             let next_page_token = match oauth
                 .register_directory_page(oauth_state, session_id, context, next_page)
                 .await

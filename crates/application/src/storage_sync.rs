@@ -79,6 +79,8 @@ where
         let mut token = None;
         let mut seen_pages = HashSet::new();
         let mut object_count = 0_u64;
+        // Pagination restarts on every run, so one run sees the whole listing.
+        let mut listing_complete = true;
         let final_revision = loop {
             if !repository
                 .inventory_scope_authorized(claimed, root_id, parent_record_id)
@@ -116,6 +118,7 @@ where
                 }
             };
             let next_page = page.next_page;
+            listing_complete &= !page.incomplete;
             if next_page.as_ref().is_some_and(|next| {
                 seen_pages.contains(&page_identity(claimed.attempt_count(), Some(next)))
             }) {
@@ -124,19 +127,18 @@ where
             object_count = object_count
                 .checked_add(u64::try_from(page.objects.len()).unwrap_or(u64::MAX))
                 .ok_or(ScopedInventoryError::ObjectCountOverflow)?;
-            let committed = repository
-                .commit_inventory_page(
-                    claimed,
-                    StorageSyncPage::new(
-                        root_id,
-                        parent_record_id,
-                        provider_drive_id,
-                        current_page_identity,
-                        page.objects,
-                        next_page.is_none(),
-                    )?,
-                )
-                .await?;
+            let mut sync_page = StorageSyncPage::new(
+                root_id,
+                parent_record_id,
+                provider_drive_id,
+                current_page_identity,
+                page.objects,
+                next_page.is_none(),
+            )?;
+            if !listing_complete {
+                sync_page = sync_page.with_incomplete_listing();
+            }
+            let committed = repository.commit_inventory_page(claimed, sync_page).await?;
             let Some(next_page) = next_page else {
                 break committed.sync_revision();
             };
