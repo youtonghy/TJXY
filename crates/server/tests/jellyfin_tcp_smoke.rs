@@ -608,14 +608,19 @@ async fn tcp_api_key_lifecycle_is_durable() {
         "authenticate with historical API key after restart",
     )
     .await;
-    let restarted_key =
-        listed_api_key(&client, &second, &raw_key, "list API keys after restart").await;
+    let restarted_key = listed_api_key(
+        &client,
+        &second,
+        &session_token,
+        "list API keys after restart",
+    )
+    .await;
     assert_eq!(restarted_key, raw_key);
 
     let encoded_key = format!("%{:02X}{}", raw_key.as_bytes()[0], &raw_key[1..]);
     let delete_request = client
         .delete(format!("{}/Auth/Keys/{encoded_key}", second.base_url))
-        .header("Authorization", token_header(&raw_key))
+        .header("Authorization", token_header(&session_token))
         .build()
         .expect("build encoded API key delete request");
     assert!(delete_request.url().as_str().contains("/Auth/Keys/%"));

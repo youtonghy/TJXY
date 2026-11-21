@@ -398,7 +398,6 @@ async fn api_key_principal_uses_aliases_but_session_only_operations_stay_forbidd
     for uri in [
         format!("/Users/Me?ApiKey={raw_key}"),
         format!("/Users/Me?api_key={raw_key}"),
-        format!("/Auth/Keys?ApiKey={raw_key}"),
     ] {
         let response = request(fixture.app.clone(), Method::GET, uri, None).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -422,15 +421,26 @@ async fn api_key_principal_uses_aliases_but_session_only_operations_stay_forbidd
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
     }
 
-    let self_deleted = request(
+    // A leaked integration key must not reveal, mint, or revoke other keys.
+    for (method, uri) in [
+        (Method::GET, "/Auth/Keys".to_owned()),
+        (Method::POST, "/Auth/Keys?app=Escalation".to_owned()),
+        (Method::DELETE, format!("/Auth/Keys/{raw_key}")),
+    ] {
+        let response = request(fixture.app.clone(), method, uri.clone(), Some(raw_key)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        assert_no_store(&response);
+    }
+
+    let deleted = request(
         fixture.app.clone(),
         Method::DELETE,
         format!("/Auth/Keys/{raw_key}"),
-        Some(raw_key),
+        Some(&fixture.admin_token),
     )
     .await;
-    assert_eq!(self_deleted.status(), StatusCode::NO_CONTENT);
-    assert_no_store(&self_deleted);
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_no_store(&deleted);
 
     let revoked = request(fixture.app, Method::GET, "/Users/Me", Some(raw_key)).await;
     assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
@@ -457,6 +467,8 @@ async fn disabling_legacy_auth_keeps_canonical_api_key_query_authentication() {
     let body = json_response(listed).await;
     let raw_key = body["Items"][0]["AccessToken"].as_str().unwrap();
 
+    // Forbidden, not unauthorized: the canonical query parameter still authenticates the key,
+    // which is then refused because API keys cannot manage keys.
     let canonical = request(
         fixture.app.clone(),
         Method::GET,
@@ -464,7 +476,7 @@ async fn disabling_legacy_auth_keeps_canonical_api_key_query_authentication() {
         None,
     )
     .await;
-    assert_eq!(canonical.status(), StatusCode::OK);
+    assert_eq!(canonical.status(), StatusCode::FORBIDDEN);
     assert_no_store(&canonical);
 
     let legacy = request(

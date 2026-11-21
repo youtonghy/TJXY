@@ -16,11 +16,10 @@ pub(crate) async fn list(
     if validate_query(raw_query.as_deref(), false).is_err() {
         return no_store(StatusCode::BAD_REQUEST.into_response());
     }
-    let principal =
-        match auth::authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
-            Ok(principal) => principal,
-            Err(response) => return no_store(response),
-        };
+    let principal = match key_manager(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return no_store(response),
+    };
     let Some(service) = state.auth.as_ref() else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
@@ -44,11 +43,10 @@ pub(crate) async fn create(
     let Ok(Some(app_name)) = validate_query(raw_query.as_deref(), true) else {
         return no_store(StatusCode::BAD_REQUEST.into_response());
     };
-    let principal =
-        match auth::authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
-            Ok(principal) => principal,
-            Err(response) => return no_store(response),
-        };
+    let principal = match key_manager(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return no_store(response),
+    };
     let Some(service) = state.auth.as_ref() else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
@@ -77,11 +75,10 @@ pub(crate) async fn delete(
     if validate_query(raw_query.as_deref(), false).is_err() {
         return no_store(StatusCode::BAD_REQUEST.into_response());
     }
-    let principal =
-        match auth::authenticated_administrator(&state, &headers, raw_query.as_deref()).await {
-            Ok(principal) => principal,
-            Err(response) => return no_store(response),
-        };
+    let principal = match key_manager(&state, &headers, raw_query.as_deref()).await {
+        Ok(principal) => principal,
+        Err(response) => return no_store(response),
+    };
     let Some(service) = state.auth.as_ref() else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
@@ -95,6 +92,19 @@ pub(crate) async fn delete(
         }
         Err(error) => no_store(auth::authentication_error_response(error)),
     }
+}
+
+/// API keys are managed only from an interactive administrator session. An API
+/// key may not list, create, or delete keys: otherwise one leaked integration key
+/// would expose every other integration's key.
+async fn key_manager(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<tjxy_application::AuthenticatedPrincipal, Response> {
+    let principal = auth::authenticated_administrator(state, headers, query).await?;
+    auth::authenticated_session_id(&principal)?;
+    Ok(principal)
 }
 
 pub(crate) async fn method_not_allowed() -> Response {
