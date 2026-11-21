@@ -2628,6 +2628,59 @@ async fn user_data_commit_notifies_the_authenticated_users_socket() {
     assert_eq!(event["Data"]["UserRevision"], 1);
 }
 
+/// A socket keeps the credential it connected with; once that session is
+/// signed out, the account's later changes must not reach it.
+#[tokio::test]
+async fn a_signed_out_session_stops_receiving_socket_events() {
+    let app = test_app().await;
+    let library = seed_library(&app.database, "Library", true).await;
+    let item = seed_item(&app.database, library, "Arrival", "Movie").await;
+    let (_, _, revoked_token) = login(&app.router).await;
+    let router = app.router.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/socket?api_key={revoked_token}"))
+            .await
+            .unwrap();
+    let client = reqwest::Client::new();
+    let logout = client
+        .post(format!("http://{address}/Sessions/Logout"))
+        .header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{revoked_token}""#),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(logout.status().is_success());
+    let (_, _, active_token) = login(&app.router).await;
+    // Past the per-event revalidation window, so the next event re-checks the credential.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let response = client
+        .post(format!("http://{address}/UserItems/{item}/UserData"))
+        .header(
+            header::AUTHORIZATION,
+            format!(r#"MediaBrowser Token="{active_token}""#),
+        )
+        .json(&json!({"IsFavorite": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+    server.abort();
+    match received.expect("the socket must be closed, not left waiting") {
+        None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_)) => {}
+        Some(Ok(message)) => panic!("signed-out socket received {message:?}"),
+    }
+}
+
 #[tokio::test]
 async fn playback_commits_notify_the_authenticated_users_socket() {
     let app = test_app().await;

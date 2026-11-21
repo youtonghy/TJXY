@@ -8,11 +8,15 @@ use axum::{
 };
 use serde::Serialize;
 use tjxy_common::UserId;
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::Instant};
 
 use crate::{AppState, auth};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
+/// How often an idle socket re-checks the credential it connected with.
+const REVALIDATE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// An event is only delivered on a credential checked at most this long ago.
+const EVENT_REVALIDATE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone)]
 pub(crate) struct RealtimeEvents {
@@ -65,30 +69,68 @@ pub(crate) async fn connect(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let receiver = state.realtime_events().subscribe();
-    let user_id = principal.user().id();
+    let credential = SocketCredential {
+        user_id: principal.user().id(),
+        state: state.clone(),
+        headers,
+        raw_query,
+    };
     websocket.on_upgrade(move |socket| async move {
-        serve(socket, user_id, receiver).await;
+        serve(socket, credential, receiver).await;
     })
+}
+
+/// The credential a socket connected with, re-checked while the socket lives so a
+/// logout, revoked session or device, password change, disabled user, or deleted API key
+/// also ends the event stream.
+struct SocketCredential {
+    user_id: UserId,
+    state: AppState,
+    headers: HeaderMap,
+    raw_query: Option<String>,
+}
+
+impl SocketCredential {
+    async fn still_valid(&self) -> bool {
+        auth::authenticated_principal(&self.state, &self.headers, self.raw_query.as_deref())
+            .await
+            .is_ok_and(|principal| principal.user().id() == self.user_id)
+    }
 }
 
 async fn serve(
     mut socket: WebSocket,
-    user_id: UserId,
+    credential: SocketCredential,
     mut receiver: broadcast::Receiver<RealtimeEvent>,
 ) {
+    let mut validated_at = Instant::now();
+    let mut revalidation =
+        tokio::time::interval_at(validated_at + REVALIDATE_EVERY, REVALIDATE_EVERY);
     loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return,
                 Some(Ok(_)) => {}
             },
+            _ = revalidation.tick() => {
+                if !credential.still_valid().await {
+                    break;
+                }
+                validated_at = Instant::now();
+            }
             event = receiver.recv() => match event {
                 Ok(event) => {
-                    let Some(payload) = event.payload_for(user_id) else {
+                    let Some(payload) = event.payload_for(credential.user_id) else {
                         continue;
                     };
+                    if validated_at.elapsed() >= EVENT_REVALIDATE_AFTER {
+                        if !credential.still_valid().await {
+                            break;
+                        }
+                        validated_at = Instant::now();
+                    }
                     if socket.send(Message::Text(payload.into())).await.is_err() {
-                        break;
+                        return;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -96,6 +138,7 @@ async fn serve(
             },
         }
     }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 impl RealtimeEvent {
