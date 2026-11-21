@@ -84,7 +84,12 @@ export function ProfilePage() {
     });
     return () => { controller.abort(); };
   }, []);
-  useEffect(() => { void getUserInsights(range).then(setInsights); }, [range]);
+  useEffect(() => {
+    let current = true;
+    // A slower response for an earlier range must not replace the selected range's figures.
+    void getUserInsights(range).then((next) => { if (current) setInsights(next); });
+    return () => { current = false; };
+  }, [range]);
 
   if (!profile) return <div aria-label={tr('Loading profile', '正在加载个人资料')} className="h-52 animate-pulse rounded-2xl bg-default" role="status" />;
   return (

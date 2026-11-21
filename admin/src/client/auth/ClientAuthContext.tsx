@@ -4,6 +4,7 @@ import { CLIENT_AUTH_INVALIDATED_EVENT, ClientApiError, clientRequest } from '..
 import { clearClientToken, setClientToken } from './clientSession';
 import type { QrAuthentication } from './qrLoginApi';
 import { authenticateWithPasskey } from './passkeyApi';
+import { clearPlaybackInfoCache } from '../playback/playbackInfoCache';
 
 export interface ClientUser { Id: string; Name: string; Policy?: { IsDisabled?: boolean; IsAdministrator?: boolean }; }
 interface ClientAuthValue { user: ClientUser | null; isLoading: boolean; signIn: (username: string, password: string, rememberMe?: boolean) => Promise<void>; signInWithPasskey: (username?: string) => Promise<void>; adoptAuthentication: (authentication: QrAuthentication) => Promise<void>; signOut: () => Promise<void>; }
@@ -21,7 +22,11 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
     const validate = () => {
       if (disposed || document.visibilityState === 'hidden') return;
       void clientRequest<ClientUser>('/Users/Me').then((current) => {
-        if (!disposed) setUser(current);
+        if (disposed) return;
+        // A shared browser's cookie can switch this tab to another account; nothing cached
+        // for the previous account may carry over.
+        if (current.Id !== user.Id) clearPlaybackInfoCache();
+        setUser(current);
       }).catch((error: unknown) => {
         if (!disposed && error instanceof ClientApiError && error.kind === 'authentication') {
           clearClientToken();
@@ -74,7 +79,7 @@ export function ClientAuthProvider({ children }: { children: ReactNode }) {
       return Promise.resolve();
     },
     async signOut() {
-      try { await clientRequest('/Sessions/Logout', { method: 'POST' }); } finally { clearClientToken(); setUser(null); }
+      try { await clientRequest('/Sessions/Logout', { method: 'POST' }); } finally { clearClientToken(); clearPlaybackInfoCache(); setUser(null); }
     },
   }), [isLoading, user]);
   return <ClientAuthContext.Provider value={value}>{children}</ClientAuthContext.Provider>;
