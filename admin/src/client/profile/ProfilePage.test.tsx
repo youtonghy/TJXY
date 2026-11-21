@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ProfilePage } from './ProfilePage';
+import { getApiBaseUrl, setApiBaseUrl } from '../api/apiBase';
 import { resetStreamRoutesForTests } from '../api/streamRoutes';
 
 const api = vi.hoisted(() => ({
@@ -32,13 +33,16 @@ const sessions = Array.from({ length: 6 }, (_, index) => ({
 }));
 
 vi.mock('../api/portalApi', () => api);
-vi.mock('../auth/ClientAuthContext', () => ({ useClientAuth: () => ({ signOut: vi.fn() }) }));
+const auth = vi.hoisted(() => ({ signOut: vi.fn() }));
+vi.mock('../auth/ClientAuthContext', () => ({ useClientAuth: () => auth }));
 vi.mock('../auth/passkeyApi', () => passkeyApi);
 vi.mock('../../settings/SystemLocaleProvider', () => ({
   useSystemLocale: () => ({ locale: 'en-US', passkeyEnabled: systemSettings.passkeyEnabled }),
 }));
 
 beforeEach(() => {
+  auth.signOut.mockReset();
+  auth.signOut.mockResolvedValue(undefined);
   systemSettings.passkeyEnabled = false;
   passkeyApi.listPasskeys.mockResolvedValue([]);
   passkeyApi.deletePasskey.mockResolvedValue(undefined);
@@ -228,4 +232,58 @@ it('offers the stream route choice and explains when only one route exists', asy
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+describe('desktop server switching', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_TJXY_SHELL', 'desktop');
+    setApiBaseUrl('http://old.example:8096');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.unstubAllEnvs();
+  });
+
+  async function useServer(address: string) {
+    const user = userEvent.setup();
+    render(<MemoryRouter><ProfilePage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Admin' });
+    await user.click(screen.getByRole('button', { name: 'Add server' }));
+    const field = screen.getByRole('textbox', { name: /Server address/ });
+    await user.clear(field);
+    await user.type(field, address);
+    await user.click(screen.getByRole('button', { name: 'Use server' }));
+  }
+
+  it('signs out at the old server before switching to the new one', async () => {
+    const signedOutAt: string[] = [];
+    auth.signOut.mockImplementation(() => {
+      signedOutAt.push(getApiBaseUrl());
+      return Promise.resolve();
+    });
+
+    await useServer('http://new.example:8096');
+
+    await vi.waitFor(() => { expect(getApiBaseUrl()).toBe('http://new.example:8096'); });
+    expect(signedOutAt).toEqual(['http://old.example:8096']);
+    expect(screen.queryByText('Could not reach that server.')).not.toBeInTheDocument();
+  });
+
+  it('switches even when the old server cannot sign out', async () => {
+    auth.signOut.mockRejectedValue(new Error('offline'));
+
+    await useServer('http://new.example:8096');
+
+    await vi.waitFor(() => { expect(getApiBaseUrl()).toBe('http://new.example:8096'); });
+    expect(screen.queryByText('Could not reach that server.')).not.toBeInTheDocument();
+  });
+
+  it('keeps the session when the same server is saved again', async () => {
+    await useServer('http://old.example:8096');
+
+    expect(await screen.findByText('Server is reachable.')).toBeVisible();
+    expect(auth.signOut).not.toHaveBeenCalled();
+  });
 });

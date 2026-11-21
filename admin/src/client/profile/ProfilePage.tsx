@@ -146,10 +146,13 @@ export function ProfilePage() {
                 setServerError(undefined);
                 return probeServer(server)
                   .then(async (origin) => {
-                    setApiBaseUrl(origin);
                     setServer(origin);
                     setServerOk(true);
-                    await signOut();
+                    if (origin === getStoredApiBaseUrl()) return;
+                    // Sign out at the server that issued the token, before the API base moves;
+                    // an unreachable old server must not block the switch.
+                    await signOut().catch(() => undefined);
+                    setApiBaseUrl(origin);
                     void navigate('/login', { replace: true });
                   })
                   .catch(() => {

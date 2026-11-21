@@ -11,6 +11,7 @@ import { useClientAuth } from './ClientAuthContext';
 import { safeClientDestination } from './clientDestination';
 import { getStoredApiBaseUrl, isDesktopShell, probeServer, setApiBaseUrl } from '../api/apiBase';
 import { loadSavedCredentials, persistRememberPreference } from './savedCredentials';
+import { clearClientToken } from './clientSession';
 import { ServerAddressField } from '../ui/ServerAddressField';
 import { QrLoginPanel } from './QrLoginPanel';
 
@@ -42,6 +43,8 @@ export function ClientLoginPage() {
     setServerError(undefined);
     try {
       const origin = await probeServer(server);
+      // No credential crosses servers: a token issued by the previous server is dropped.
+      if (origin !== getStoredApiBaseUrl()) clearClientToken();
       setApiBaseUrl(origin);
       setServer(origin);
       setServerOk(true);
