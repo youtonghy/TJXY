@@ -464,3 +464,46 @@ function renderItem(id: string) {
     </MemoryRouter>,
   );
 }
+
+it('links a movie to its external metadata pages in a new tab', async () => {
+  api.getItem.mockResolvedValueOnce({
+    Id: 'movie-1',
+    Name: 'The Matrix',
+    Type: 'Movie',
+    IsFolder: false,
+    ProviderIds: { tmdb: '603', imdb: 'tt0133093' },
+  });
+  renderItem('movie-1');
+
+  const links = await screen.findByRole('navigation', { name: 'External links' });
+  const tmdb = within(links).getByRole('link', { name: 'Open The Matrix on TMDB' });
+  expect(tmdb).toHaveAttribute('href', 'https://www.themoviedb.org/movie/603');
+  expect(tmdb).toHaveAttribute('target', '_blank');
+  expect(tmdb).toHaveAttribute('rel', 'noreferrer noopener');
+  expect(within(links).getByRole('link', { name: 'Open The Matrix on IMDb' })).toHaveAttribute('href', 'https://www.imdb.com/title/tt0133093/');
+  expect(within(links).queryByRole('link', { name: /TVDB/ })).not.toBeInTheDocument();
+});
+
+it('derives an episode TMDB link from its series once ancestors load', async () => {
+  const episode = { Id: 'episode-1', Name: '1:23:45', Type: 'Episode', IsFolder: false, IndexNumber: 1, ParentId: 'season-1', ProviderIds: { tvdb: '7121401' } };
+  const season = { Id: 'season-1', Name: 'Season 1', Type: 'Season', IsFolder: true, IndexNumber: 1, ParentId: 'series-1' };
+  api.getItem.mockImplementation((itemId: string) => Promise.resolve({
+    'episode-1': episode,
+    'season-1': season,
+    'series-1': { ...series, ParentId: 'library-tv', ProviderIds: { tmdb: '87108' } },
+  }[itemId]));
+  renderItem('episode-1');
+
+  const links = await screen.findByRole('navigation', { name: 'External links' });
+  expect(await within(links).findByRole('link', { name: 'Open 1:23:45 on TMDB' }))
+    .toHaveAttribute('href', 'https://www.themoviedb.org/tv/87108/season/1/episode/1');
+  expect(within(links).getByRole('link', { name: 'Open 1:23:45 on TVDB' })).toHaveAttribute('href', 'https://thetvdb.com/dereferrer/episode/7121401');
+});
+
+it('omits the external links row when no usable provider IDs exist', async () => {
+  api.getItem.mockResolvedValueOnce({ Id: 'movie-1', Name: 'Home Video', Type: 'Movie', IsFolder: false, ProviderIds: { tmdb: 'not-a-number' } });
+  renderItem('movie-1');
+
+  expect(await screen.findByRole('heading', { name: 'Home Video' })).toBeInTheDocument();
+  expect(screen.queryByRole('navigation', { name: 'External links' })).not.toBeInTheDocument();
+});

@@ -2,7 +2,7 @@
 import { Alert, Avatar, Breadcrumbs, Button, Card, Chip, Skeleton, ToggleButton, ToggleButtonGroup } from '@heroui/react';
 import { Rating } from '@heroui-pro/react/rating';
 import { Carousel } from '@heroui-pro/react/carousel';
-import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, Heart, Info, LoaderCircle, RefreshCw } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, ChevronUp, Clock3, ExternalLink, Heart, Info, LoaderCircle, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useSystemLocale } from '../../settings/SystemLocaleProvider';
@@ -13,6 +13,7 @@ import { getChildren, getItem, getLibraries, getSimilarItems, toggleFavorite, to
 import { ExternalPlayButton } from '../playback/ExternalPlayButton';
 import { MediaImage } from '../ui/MediaImage';
 import { MediaTile } from '../ui/MediaTile';
+import { buildExternalLinks } from './externalLinks';
 
 interface ItemBreadcrumbContext {
   ancestors: MediaItem[];
@@ -170,6 +171,7 @@ export function ItemPage() {
   const hasPlayableAction = item.Type !== 'Series' && item.Type !== 'Season';
   const artworkRatio = item.Type === 'Audio' ? 'aspect-square' : 'aspect-[2/3]';
   const activeRecommendationResult = recommendationResult?.itemId === item.Id ? recommendationResult : undefined;
+  const externalLinks = buildExternalLinks(item, breadcrumbContext.itemId === item.Id ? breadcrumbContext.ancestors : []);
 
   return (
     <article className="space-y-8">
@@ -282,6 +284,23 @@ export function ItemPage() {
               {played ? tr('Mark unplayed', '标记为未看') : tr('Mark played', '标记为已看')}
             </Button>
           </div>
+          {externalLinks.length ? (
+            <nav aria-label={tr('External links', '外部链接')} className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
+              {externalLinks.map((link) => (
+                <a
+                  aria-label={tr(`Open ${item.Name} on ${link.label}`, `在 ${link.label} 打开 ${item.Name}`)}
+                  className="inline-flex items-center gap-1.5 text-sm font-medium text-muted transition-colors hover:text-accent"
+                  href={link.url}
+                  key={link.provider}
+                  rel="noreferrer noopener"
+                  target="_blank"
+                >
+                  {link.label}
+                  <ExternalLink aria-hidden="true" className="size-3.5" />
+                </a>
+              ))}
+            </nav>
+          ) : null}
         </div>
       </div>
 
